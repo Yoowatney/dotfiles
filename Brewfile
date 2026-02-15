@@ -62,6 +62,7 @@ brew "protobuf"
 brew "ripgrep"
 brew "terminal-notifier"
 brew "tmux"
+brew "watch"
 brew "yarn", link: false
 brew "zoxide"
 brew "zsh"

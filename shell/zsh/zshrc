@@ -40,7 +40,7 @@ source $ZSH/oh-my-zsh.sh
 # ============================================
 export LANG=en_US.UTF-8
 export EDITOR=/opt/homebrew/bin/nvim
-export FZF_DEFAULT_OPTS="--extended"
+export FZF_DEFAULT_OPTS="--extended --preview 'head -100 {}' --preview-window=right:50%:wrap"
 # NVM_DIR removed — mise manages node runtime
 
 # ============================================
@@ -62,8 +62,8 @@ rm() {
   done
   trash "${args[@]}"
 }
-alias ls="lsd"
-alias lt="lsd --tree -I node_modules"
+alias ls="lsd --hyperlink=auto"
+alias lt="lsd --tree --hyperlink=auto -I node_modules"
 alias diff="delta"
 alias tree="broot"
 
@@ -99,10 +99,6 @@ mdc() { open -a "Google Chrome" "$@" }
 
 killport() {
     lsof -i TCP:$1 | grep LISTEN | awk '{print $2}' | xargs kill -9
-}
-
-watch() {
-    while true; do clear; date; sleep 1; done
 }
 
 memcheck() {
@@ -204,6 +200,7 @@ eval "$(mise activate zsh)"
 
 # zoxide
 eval "$(zoxide init zsh)"
+alias cd="z"
 
 # direnv
 eval "$(direnv hook zsh)"
@@ -223,6 +220,8 @@ command -v kubectl &>/dev/null && source <(kubectl completion zsh)
 # ============================================
 # 9. History 설정
 # ============================================
+HISTSIZE=50000
+SAVEHIST=50000
 setopt APPEND_HISTORY
 setopt SHARE_HISTORY
 setopt HIST_IGNORE_ALL_DUPS
@@ -233,4 +232,4 @@ setopt NO_BEEP
 # ============================================
 unset CPPFLAGS
 unset LDFLAGS
-export TERM=xterm-256color
+[[ -z "$TMUX" ]] && export TERM=xterm-256color
