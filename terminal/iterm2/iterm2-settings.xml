@@ -806,7 +806,7 @@
 			<key>Screen</key>
 			<integer>-1</integer>
 			<key>Scrollback Lines</key>
-			<integer>0</integer>
+			<integer>10000</integer>
 			<key>Scrollback With Status Bar</key>
 			<true/>
 			<key>Scrollback in Alternate Screen</key>
@@ -1040,7 +1040,7 @@
 			<key>Unicode Version</key>
 			<integer>9</integer>
 			<key>Unlimited Scrollback</key>
-			<true/>
+			<false/>
 			<key>Use Bold Font</key>
 			<true/>
 			<key>Use Bright Bold</key>
@@ -1835,7 +1835,7 @@
 			<key>Screen</key>
 			<integer>-1</integer>
 			<key>Scrollback Lines</key>
-			<integer>0</integer>
+			<integer>10000</integer>
 			<key>Selected Text Color</key>
 			<dict>
 				<key>Blue Component</key>
@@ -2007,7 +2007,7 @@
 			<key>Unicode Version</key>
 			<integer>9</integer>
 			<key>Unlimited Scrollback</key>
-			<true/>
+			<false/>
 			<key>Use Bold Font</key>
 			<true/>
 			<key>Use Bright Bold</key>
@@ -4021,7 +4021,7 @@
 											<key>Screen</key>
 											<integer>-1</integer>
 											<key>Scrollback Lines</key>
-											<integer>0</integer>
+											<integer>10000</integer>
 											<key>Scrollback With Status Bar</key>
 											<true/>
 											<key>Scrollback in Alternate Screen</key>
@@ -4270,7 +4270,7 @@
 											<key>Unicode Version</key>
 											<integer>9</integer>
 											<key>Unlimited Scrollback</key>
-											<true/>
+											<false/>
 											<key>Use Bold Font</key>
 											<true/>
 											<key>Use Bright Bold</key>
@@ -5453,7 +5453,7 @@
 											<key>Screen</key>
 											<integer>-1</integer>
 											<key>Scrollback Lines</key>
-											<integer>0</integer>
+											<integer>10000</integer>
 											<key>Scrollback With Status Bar</key>
 											<true/>
 											<key>Scrollback in Alternate Screen</key>
@@ -5702,7 +5702,7 @@
 											<key>Unicode Version</key>
 											<integer>9</integer>
 											<key>Unlimited Scrollback</key>
-											<true/>
+											<false/>
 											<key>Use Bold Font</key>
 											<true/>
 											<key>Use Bright Bold</key>
@@ -6754,7 +6754,7 @@
 											<key>Screen</key>
 											<integer>-1</integer>
 											<key>Scrollback Lines</key>
-											<integer>0</integer>
+											<integer>10000</integer>
 											<key>Scrollback With Status Bar</key>
 											<true/>
 											<key>Scrollback in Alternate Screen</key>
@@ -7003,7 +7003,7 @@
 											<key>Unicode Version</key>
 											<integer>9</integer>
 											<key>Unlimited Scrollback</key>
-											<true/>
+											<false/>
 											<key>Use Bold Font</key>
 											<true/>
 											<key>Use Bright Bold</key>
@@ -7950,7 +7950,7 @@
 											<key>Screen</key>
 											<integer>-1</integer>
 											<key>Scrollback Lines</key>
-											<integer>0</integer>
+											<integer>10000</integer>
 											<key>Scrollback With Status Bar</key>
 											<true/>
 											<key>Scrollback in Alternate Screen</key>
@@ -8199,7 +8199,7 @@
 											<key>Unicode Version</key>
 											<integer>9</integer>
 											<key>Unlimited Scrollback</key>
-											<true/>
+											<false/>
 											<key>Use Bold Font</key>
 											<true/>
 											<key>Use Bright Bold</key>
@@ -9299,7 +9299,7 @@
 											<key>Screen</key>
 											<integer>-1</integer>
 											<key>Scrollback Lines</key>
-											<integer>0</integer>
+											<integer>10000</integer>
 											<key>Scrollback With Status Bar</key>
 											<true/>
 											<key>Scrollback in Alternate Screen</key>
@@ -9548,7 +9548,7 @@
 											<key>Unicode Version</key>
 											<integer>9</integer>
 											<key>Unlimited Scrollback</key>
-											<true/>
+											<false/>
 											<key>Use Bold Font</key>
 											<true/>
 											<key>Use Bright Bold</key>
@@ -10626,7 +10626,7 @@
 											<key>Screen</key>
 											<integer>-1</integer>
 											<key>Scrollback Lines</key>
-											<integer>0</integer>
+											<integer>10000</integer>
 											<key>Scrollback With Status Bar</key>
 											<true/>
 											<key>Scrollback in Alternate Screen</key>
@@ -10862,7 +10862,7 @@
 											<key>Unicode Version</key>
 											<integer>9</integer>
 											<key>Unlimited Scrollback</key>
-											<true/>
+											<false/>
 											<key>Use Bold Font</key>
 											<true/>
 											<key>Use Bright Bold</key>
@@ -11881,7 +11881,7 @@
 											<key>Screen</key>
 											<integer>-1</integer>
 											<key>Scrollback Lines</key>
-											<integer>0</integer>
+											<integer>10000</integer>
 											<key>Scrollback With Status Bar</key>
 											<true/>
 											<key>Scrollback in Alternate Screen</key>
@@ -12115,7 +12115,7 @@
 											<key>Unicode Version</key>
 											<integer>9</integer>
 											<key>Unlimited Scrollback</key>
-											<true/>
+											<false/>
 											<key>Use Bold Font</key>
 											<true/>
 											<key>Use Bright Bold</key>
@@ -13332,7 +13332,7 @@
 											<key>Screen</key>
 											<integer>-1</integer>
 											<key>Scrollback Lines</key>
-											<integer>0</integer>
+											<integer>10000</integer>
 											<key>Scrollback With Status Bar</key>
 											<true/>
 											<key>Scrollback in Alternate Screen</key>
@@ -13566,7 +13566,7 @@
 											<key>Unicode Version</key>
 											<integer>9</integer>
 											<key>Unlimited Scrollback</key>
-											<true/>
+											<false/>
 											<key>Use Bold Font</key>
 											<true/>
 											<key>Use Bright Bold</key>
@@ -14605,7 +14605,7 @@
 											<key>Screen</key>
 											<integer>-1</integer>
 											<key>Scrollback Lines</key>
-											<integer>0</integer>
+											<integer>10000</integer>
 											<key>Scrollback With Status Bar</key>
 											<true/>
 											<key>Scrollback in Alternate Screen</key>
@@ -14839,7 +14839,7 @@
 											<key>Unicode Version</key>
 											<integer>9</integer>
 											<key>Unlimited Scrollback</key>
-											<true/>
+											<false/>
 											<key>Use Bold Font</key>
 											<true/>
 											<key>Use Bright Bold</key>
