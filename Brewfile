@@ -67,7 +67,7 @@ brew "yarn", link: false
 brew "zoxide"
 brew "zsh"
 brew "zsh-completions"
-brew "usql"
+brew "xo/xo/usql"
 brew "uv"
 brew "hashicorp/tap/terraform-ls"
 brew "mongodb/brew/mongodb-community"
