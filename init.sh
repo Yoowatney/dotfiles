@@ -87,7 +87,15 @@ install_homebrew() {
 install_packages() {
     step "2/15 Homebrew Packages (brew & cask)"
     if [[ -f "$DOTFILES/Brewfile" ]]; then
-        # mas 제외하고 설치 (brew, cask, tap만)
+        # .pkg cask는 sudo installer를 사용하므로 sudo 캐시가 fresh한 지금 먼저 설치
+        info "Installing .pkg casks first (requires sudo)..."
+        for pkg_cask in karabiner-elements gureumkim; do
+            if ! brew list --cask "$pkg_cask" &>/dev/null; then
+                brew install --cask "$pkg_cask" || warn "$pkg_cask failed to install"
+            fi
+        done
+
+        # mas 제외하고 나머지 설치 (brew, cask, tap)
         grep -v "^mas " "$DOTFILES/Brewfile" | brew bundle --file=- || {
             warn "Some packages failed to install"
         }
