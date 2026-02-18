@@ -485,29 +485,31 @@ post_install() {
     echo -e "${YELLOW}  ⚠️  권한 요청이 뜨면 '허용'을 눌러주세요!${NC}"
     echo ""
 
-    # cask 앱 이름 → 실제 앱 이름 매핑
-    declare -A cask_to_app=(
-        ["iterm2"]="iTerm"
-        ["rectangle"]="Rectangle"
-        ["appcleaner"]="AppCleaner"
-        ["dbeaver-community"]="DBeaver"
-        ["discord"]="Discord"
-        ["easydict"]="Easydict"
-        ["firefox"]="Firefox"
-        ["google-chrome"]="Google Chrome"
-        ["hammerspoon"]="Hammerspoon"
-        ["mongodb-compass"]="MongoDB Compass"
-        ["mysqlworkbench"]="MySQLWorkbench"
-        ["ngrok"]="ngrok"
-        ["notion"]="Notion"
-        ["postman"]="Postman"
-        ["todoist-app"]="Todoist"
-        ["karabiner-elements"]="Karabiner-Elements"
-        ["clipy"]="Clipy"
-    )
+    # cask 앱 이름 → 실제 앱 이름 매핑 (bash 3.2 compatible)
+    local cask_apps="
+        iterm2|iTerm
+        rectangle|Rectangle
+        appcleaner|AppCleaner
+        dbeaver-community|DBeaver
+        discord|Discord
+        easydict|Easydict
+        firefox|Firefox
+        google-chrome|Google Chrome
+        hammerspoon|Hammerspoon
+        mongodb-compass|MongoDB Compass
+        mysqlworkbench|MySQLWorkbench
+        ngrok|ngrok
+        notion|Notion
+        postman|Postman
+        todoist-app|Todoist
+        karabiner-elements|Karabiner-Elements
+        clipy|Clipy
+    "
 
-    for cask in "${!cask_to_app[@]}"; do
-        app="${cask_to_app[$cask]}"
+    echo "$cask_apps" | while IFS='|' read -r cask app; do
+        [[ -z "$cask" ]] && continue
+        cask=$(echo "$cask" | xargs)
+        app=$(echo "$app" | xargs)
         if [[ -d "/Applications/${app}.app" ]]; then
             open -a "$app" 2>/dev/null && info "$app 실행됨"
             sleep 0.5
