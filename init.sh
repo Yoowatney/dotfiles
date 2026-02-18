@@ -87,11 +87,11 @@ install_homebrew() {
 install_packages() {
     step "2/15 Homebrew Packages (brew & cask)"
     if [[ -f "$DOTFILES/Brewfile" ]]; then
-        # .pkg cask는 sudo installer를 사용하므로 sudo 캐시가 fresh한 지금 먼저 설치
-        info "Installing .pkg casks first (requires sudo)..."
+        # .pkg cask는 sudo installer를 사용 — SUDO_ASKPASS로 비밀번호 자동 전달
+        info "Installing .pkg casks (requires sudo)..."
         for pkg_cask in karabiner-elements gureumkim; do
             if ! brew list --cask "$pkg_cask" &>/dev/null; then
-                brew install --cask "$pkg_cask" || warn "$pkg_cask failed to install"
+                echo "$SUDO_PASS" | sudo -S brew install --cask "$pkg_cask" 2>/dev/null || warn "$pkg_cask failed to install"
             fi
         done
 
@@ -617,13 +617,17 @@ main() {
 
     # sudo 권한 캐시 (Homebrew 설치에 필요)
     info "Caching sudo credentials..."
-    sudo -v
+    echo -n "Password: "
+    read -rs SUDO_PASS
+    echo ""
+    echo "$SUDO_PASS" | sudo -S -v 2>/dev/null
+    export SUDO_ASKPASS="$DOTFILES/scripts/askpass.sh"
 
     # 디스플레이 슬립 끄기 (설치 중 화면 꺼짐 방지)
     sudo pmset -a displaysleep 0
 
-    # SSH 원격 로그인 끄기 (설치 완료 후 보안)
-    trap "sudo systemsetup -setremotelogin off 2>/dev/null; sudo launchctl unload -w /System/Library/LaunchDaemons/ssh.plist 2>/dev/null" EXIT
+    # SSH 원격 로그인 끄기 + 비밀번호 변수 정리
+    trap "unset SUDO_PASS; sudo systemsetup -setremotelogin off 2>/dev/null; sudo launchctl unload -w /System/Library/LaunchDaemons/ssh.plist 2>/dev/null" EXIT
 
     # sudo 캐시 유지 (백그라운드)
     while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
