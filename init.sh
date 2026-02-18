@@ -7,7 +7,7 @@
 
 set -e
 
-DOTFILES="$HOME/.dotfiles"
+DOTFILES="$(cd "$(dirname "$0")" && pwd)"
 CONFIG="$HOME/.config"
 PREFS="$HOME/Library/Preferences"
 
