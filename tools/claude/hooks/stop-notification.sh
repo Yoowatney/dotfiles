@@ -20,7 +20,8 @@ if [ -n "$TMUX" ]; then
     else
         WINDOW=$(tmux display-message -p '#I')
     fi
-    echo "TMUX CONTEXT: ${SESSION}:${WINDOW} (PANE=${TMUX_PANE})" >> "$LOG_FILE"
+    PANE="$TMUX_PANE"
+    echo "TMUX CONTEXT: ${SESSION}:${WINDOW} (PANE=${PANE})" >> "$LOG_FILE"
 fi
 
 # transcript_path 추출
@@ -58,6 +59,6 @@ echo "" >> "$LOG_FILE"
 # Hammerspoon으로 알림 (클릭 시 tmux 세션 이동)
 # 메시지에서 작은따옴표 이스케이프
 ESCAPED_MESSAGE=$(echo "$MESSAGE" | sed "s/'/\\\\'/g")
-/opt/homebrew/bin/hs -c "claudeNotifyDone('$ESCAPED_MESSAGE', '$SESSION', '$WINDOW')" &
+/opt/homebrew/bin/hs -c "claudeNotifyDone('$ESCAPED_MESSAGE', '$SESSION', '$WINDOW', '$PANE')" &
 
 exit 0
