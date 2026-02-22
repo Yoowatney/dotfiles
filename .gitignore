@@ -1,10 +1,14 @@
 # Claude Code
 CLAUDE.md
-.claude
+# .claude/*
+!.claude/settings.json
 
 # Logs
 *.log
 firebase-debug.log
+
+# Secrets
+.env*
 
 # OS
 .DS_Store

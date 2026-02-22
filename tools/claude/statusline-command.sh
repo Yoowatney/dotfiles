@@ -1,23 +1,18 @@
 #!/bin/bash
-# Claude Code Statusline with API Quota
-# Shows: user@host:dir (branch) [model | 5h:X% 7d:Y%]
+# Claude Code Statusline with Firebase/gcloud env check and API Quota
+# Shows: 🔥 firebase-project ☁️ gcloud-project 👤 user@email.com [Model | quota]
 
 # Read input from stdin
 input=$(cat)
-
-# Debug: Save input to file
-echo "$input" >/tmp/statusline-debug.json
 
 # Extract basic info
 current_dir="$(echo "$input" | jq -r '.workspace.current_dir // .cwd')"
 model="$(echo "$input" | jq -r '.model.display_name')"
 
 # Get git branch
-git_branch="$(cd "$current_dir" 2>/dev/null && git branch --show-current 2>/dev/null || echo '')"
+git_branch="$(cd "$current_dir" 2>/dev/null && git -c gc.auto=0 branch --show-current 2>/dev/null || echo '')"
 
 # Build prompt parts
-username="$(whoami)"
-hostname="$(hostname -s)"
 dir_name="$(basename "$current_dir")"
 
 if [ -n "$git_branch" ]; then
@@ -26,15 +21,30 @@ else
 	git_info=""
 fi
 
-# Firebase 환경 확인 (.firebaserc를 현재 및 하위 디렉토리에서 찾기)
+# Firebase 로그인 이메일 확인 (캐시: 5분)
+FIREBASE_CACHE="/tmp/claude-firebase-login-cache"
+FIREBASE_CACHE_MAX_AGE=300
+
+firebase_email=""
+if [ -f "$FIREBASE_CACHE" ]; then
+	cache_age=$(($(date +%s) - $(stat -f %m "$FIREBASE_CACHE" 2>/dev/null || echo 0)))
+	if [ "$cache_age" -lt "$FIREBASE_CACHE_MAX_AGE" ]; then
+		firebase_email=$(cat "$FIREBASE_CACHE")
+	fi
+fi
+
+if [ -z "$firebase_email" ]; then
+	firebase_email=$(firebase login:list 2>/dev/null | grep -o '[^ ]*@[^ ]*' | head -1)
+	echo "${firebase_email:--}" >"$FIREBASE_CACHE"
+fi
+
+# Firebase 프로젝트 확인 (.firebaserc를 현재 및 하위 디렉토리에서 찾기)
 firebase_dir=""
 search_dir="$current_dir"
 
-# 현재 디렉토리에 .firebaserc 있는지 확인
 if [ -f "${search_dir}/.firebaserc" ]; then
 	firebase_dir="$search_dir"
 else
-	# 하위 디렉토리에서 .firebaserc 찾기 (depth 1)
 	for subdir in "$search_dir"/*/; do
 		if [ -f "${subdir}.firebaserc" ]; then
 			firebase_dir="${subdir%/}"
@@ -44,25 +54,39 @@ else
 fi
 
 if [ -n "$firebase_dir" ]; then
-	firebase_env=$(cd "$firebase_dir" 2>/dev/null && firebase use 2>/dev/null | head -1)
-	[ -z "$firebase_env" ] && firebase_env="-"
+	firebase_project=$(cd "$firebase_dir" 2>/dev/null && firebase use 2>/dev/null | head -1)
+	[ -z "$firebase_project" ] && firebase_project="-"
 else
-	firebase_env="-"
+	firebase_project="-"
 fi
 
-# gcloud 환경 확인
-gcloud_env=$(gcloud config get-value project 2>/dev/null)
-[ -z "$gcloud_env" ] && gcloud_env="?"
+# gcloud 프로젝트 확인
+gcloud_project=$(gcloud config get-value project 2>/dev/null)
+[ -z "$gcloud_project" ] && gcloud_project="?"
 
-# gcloud account
-gcloud_account=$(gcloud config get-value account 2>/dev/null | cut -d'@' -f1)
+# Firebase 로그인 표시
+if [ -z "$firebase_email" ] || [ "$firebase_email" = "-" ]; then
+	firebase_info=" ⚠️ Firebase:로그인필요"
+else
+	firebase_info=" 🔥 ${firebase_project}"
+fi
 
-# 환경 표시
-firebase_info=" 🔥 ${firebase_env}"
+# gcloud 프로젝트 표시 (production 경고: f06c6 포함 시)
+if [ "$gcloud_project" = "?" ]; then
+	gcloud_info=" ⚠️ gcloud:미설정"
+elif echo "$gcloud_project" | grep -q "f06c6"; then
+	gcloud_info=" ⚠️ PROD:${gcloud_project}"
+else
+	gcloud_info=" ☁️  ${gcloud_project}"
+fi
 
-gcloud_info=" ☁️  ${gcloud_env}"
-
-account_info=" 👤 ${gcloud_account}"
+# 계정 표시 (gcloud account 또는 firebase email)
+if [ -n "$firebase_email" ] && [ "$firebase_email" != "-" ]; then
+	account_info=" 👤 ${firebase_email}"
+else
+	gcloud_account=$(gcloud config get-value account 2>/dev/null)
+	account_info=" 👤 ${gcloud_account:-?}"
+fi
 
 # Function to get API quota from Anthropic OAuth API
 get_api_quota() {
@@ -159,5 +183,5 @@ else
 fi
 
 # Output statusline
-printf "%s@%s:%s%s%s%s%s [%s]" \
-	"$username" "$hostname" "$dir_name" "$git_info" "$firebase_info" "$gcloud_info" "$account_info" "$status_info"
+printf "%s:%s%s%s%s%s [%s]" \
+	"$dir_name" "" "$git_info" "$firebase_info" "$gcloud_info" "$account_info" "$status_info"
