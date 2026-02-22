@@ -2,20 +2,25 @@
 # Claude Code Stop Hook - 작업 완료 알림 (Hammerspoon)
 
 LOG_FILE="$HOME/.claude/hooks/stop-hook-debug.log"
-CONTEXT_FILE="/tmp/claude-code-tmux-context"
 
 # stdin에서 hook input 읽기
 HOOK_INPUT=$(cat)
 
 echo "=== $(date) ===" >> "$LOG_FILE"
 
-# tmux 컨텍스트 저장 (세션:윈도우:타임스탬프)
+# tmux 세션/윈도우 정보 (알림에 직접 전달)
+SESSION=""
+WINDOW=""
 if [ -n "$TMUX" ]; then
     SESSION=$(tmux display-message -p '#S')
-    WINDOW=$(tmux display-message -p '#I')
-    TIMESTAMP=$(date +%s)
-    echo "${SESSION}:${WINDOW}:${TIMESTAMP}" > "$CONTEXT_FILE"
-    echo "TMUX CONTEXT: ${SESSION}:${WINDOW}" >> "$LOG_FILE"
+    # TMUX_PANE으로 실제 프로세스가 돌고 있는 윈도우를 찾음
+    # (display-message -p '#I'는 현재 보고 있는 윈도우를 반환하므로 부정확)
+    if [ -n "$TMUX_PANE" ]; then
+        WINDOW=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}')
+    else
+        WINDOW=$(tmux display-message -p '#I')
+    fi
+    echo "TMUX CONTEXT: ${SESSION}:${WINDOW} (PANE=${TMUX_PANE})" >> "$LOG_FILE"
 fi
 
 # transcript_path 추출
@@ -53,6 +58,6 @@ echo "" >> "$LOG_FILE"
 # Hammerspoon으로 알림 (클릭 시 tmux 세션 이동)
 # 메시지에서 작은따옴표 이스케이프
 ESCAPED_MESSAGE=$(echo "$MESSAGE" | sed "s/'/\\\\'/g")
-/opt/homebrew/bin/hs -c "claudeNotifyDone('$ESCAPED_MESSAGE')" &
+/opt/homebrew/bin/hs -c "claudeNotifyDone('$ESCAPED_MESSAGE', '$SESSION', '$WINDOW')" &
 
 exit 0

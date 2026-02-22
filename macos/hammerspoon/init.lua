@@ -5,11 +5,13 @@
 require("hs.ipc")
 
 -- Claude Code 알림 함수
-function claudeNotify(title, message)
+-- session, window: 알림 클릭 시 이동할 tmux 세션/윈도우
+function claudeNotify(title, message, session, window)
     local n = hs.notify.new(function(notification)
-        -- 알림 클릭 시 실행
+        -- 알림 클릭 시 해당 tmux 세션/윈도우로 이동
         local script = os.getenv("HOME") .. "/.dotfiles/macos/claude-notification/switch-tmux.sh"
-        hs.execute(script)
+        local cmd = script .. " " .. (session or "") .. " " .. (window or "")
+        hs.execute(cmd)
     end, {
         title = title or "Claude Code",
         informativeText = message or "작업이 완료되었습니다",
@@ -21,15 +23,15 @@ function claudeNotify(title, message)
 end
 
 -- 입력 필요 알림 (다른 사운드)
-function claudeNotifyInput(message)
+function claudeNotifyInput(message, session, window)
     hs.sound.getByFile("/System/Library/Sounds/Blow.aiff"):play()
-    claudeNotify("Claude Code - 입력 필요", message or "입력이 필요합니다")
+    claudeNotify("Claude Code - 입력 필요", message or "입력이 필요합니다", session, window)
 end
 
 -- 작업 완료 알림
-function claudeNotifyDone(message)
+function claudeNotifyDone(message, session, window)
     hs.sound.getByFile("/System/Library/Sounds/Glass.aiff"):play()
-    claudeNotify("Claude Code", message or "작업이 완료되었습니다")
+    claudeNotify("Claude Code", message or "작업이 완료되었습니다", session, window)
 end
 
 -- CLI에서 호출 가능하도록 전역 등록
