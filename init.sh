@@ -243,6 +243,9 @@ create_symlinks() {
     mkdir -p "$CONFIG/mise"
     create_symlink "$DOTFILES/tools/mise/config.toml" "$CONFIG/mise/config.toml" "mise config"
 
+    # Gemini
+    create_symlink "$DOTFILES/tools/gemini" "$CONFIG/gemini" "gemini"
+
     # Karabiner
     create_symlink "$DOTFILES/macos/karabiner" "$CONFIG/karabiner" "karabiner"
 
