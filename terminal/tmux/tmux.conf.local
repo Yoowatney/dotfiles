@@ -236,6 +236,13 @@ bind j select-pane -D
 bind k select-pane -U
 bind l select-pane -R
 
+# override C-h/C-l window navigation from base config
+# (easy to accidentally press Ctrl+H instead of just H after prefix)
+bind C-h select-pane -L
+bind C-j select-pane -D
+bind C-k select-pane -U
+bind C-l select-pane -R
+
 # pane swap
 bind -r > swap-pane -D
 bind -r < swap-pane -U

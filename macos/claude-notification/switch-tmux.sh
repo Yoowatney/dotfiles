@@ -1,36 +1,64 @@
-#\!/bin/bash
+#!/bin/bash
+# 알림 클릭 시 해당 tmux 세션/윈도우/페인으로 이동
+# Usage: switch-tmux.sh [session] [window] [pane]
+
 LOG="/tmp/switch-tmux.log"
 echo "=== $(date) ===" >> "$LOG"
-echo "실행됨" >> "$LOG"
 
-CONTEXT_FILE="/tmp/claude-code-tmux-context"
+SESSION="$1"
+WINDOW="$2"
+PANE="$3"
 
-osascript -e 'tell application "iTerm" to activate'
+echo "SESSION=$SESSION, WINDOW=$WINDOW, PANE=$PANE" >> "$LOG"
 
-if [ \! -f "$CONTEXT_FILE" ]; then
-    echo "컨텍스트 파일 없음" >> "$LOG"
+if [ -z "$SESSION" ]; then
+    osascript -e 'tell application "iTerm" to activate'
+    echo "세션 정보 없음, iTerm만 활성화" >> "$LOG"
     exit 0
 fi
 
-CONTEXT=$(cat "$CONTEXT_FILE")
-SESSION=$(echo "$CONTEXT" | cut -d: -f1)
-WINDOW=$(echo "$CONTEXT" | cut -d: -f2)
-TIMESTAMP=$(echo "$CONTEXT" | cut -d: -f3)
+TMUX=/opt/homebrew/bin/tmux
 
-echo "SESSION=$SESSION, WINDOW=$WINDOW" >> "$LOG"
+# 해당 세션에 붙어있는 tmux 클라이언트의 TTY 찾기
+TTY=$($TMUX list-clients -t "$SESSION" -F '#{client_tty}' 2>/dev/null | head -1)
+echo "TTY=$TTY" >> "$LOG"
 
-NOW=$(date +%s)
-AGE=$((NOW - TIMESTAMP))
-if [ "$AGE" -gt 300 ]; then
-    echo "컨텍스트 오래됨: ${AGE}초" >> "$LOG"
-    exit 0
+# tmux 윈도우 선택
+if [ -n "$WINDOW" ]; then
+    $TMUX select-window -t "$SESSION:$WINDOW" 2>/dev/null
 fi
 
-if [ -n "$SESSION" ]; then
-    tmux switch-client -t "$SESSION" 2>/dev/null
-    if [ -n "$WINDOW" ]; then
-        tmux select-window -t "$WINDOW" 2>/dev/null
+# pane 선택 + zoom
+if [ -n "$PANE" ]; then
+    # 다른 pane이 zoom 되어있으면 먼저 해제
+    IS_ZOOMED=$($TMUX display-message -p -t "$SESSION:$WINDOW" '#{window_zoomed_flag}' 2>/dev/null)
+    if [ "$IS_ZOOMED" = "1" ]; then
+        $TMUX resize-pane -Z -t "$SESSION:$WINDOW" 2>/dev/null
     fi
-    echo "tmux 전환 완료" >> "$LOG"
+    # 해당 pane 선택 후 zoom
+    $TMUX select-pane -t "$PANE" 2>/dev/null
+    $TMUX resize-pane -Z -t "$PANE" 2>/dev/null
+    echo "pane 선택 + zoom: $PANE" >> "$LOG"
 fi
 
+if [ -n "$TTY" ]; then
+    osascript <<APPLESCRIPT
+tell application "iTerm"
+    activate
+    repeat with w in windows
+        repeat with t in tabs of w
+            repeat with s in sessions of t
+                if tty of s is "$TTY" then
+                    select w
+                    return
+                end if
+            end repeat
+        end repeat
+    end repeat
+end tell
+APPLESCRIPT
+    echo "iTerm 윈도우 전환 완료 (TTY: $TTY)" >> "$LOG"
+else
+    osascript -e 'tell application "iTerm" to activate'
+    echo "클라이언트 없음, iTerm만 활성화" >> "$LOG"
+fi

@@ -233,3 +233,4 @@ setopt NO_BEEP
 unset CPPFLAGS
 unset LDFLAGS
 [[ -z "$TMUX" ]] && export TERM=xterm-256color
+export FIREBASE_DEBUG_LOG=/dev/null
