@@ -193,6 +193,7 @@ set -g @plugin 'wfxr/tmux-power'
 set -g @plugin 'tmux-plugins/tmux-prefix-highlight'
 set -g @plugin 'wfxr/tmux-net-speed'
 set -g @plugin 'tmux-plugins/tmux-resurrect'
+set -g @plugin 'tmux-plugins/tmux-continuum'
 set -g @plugin 'christoomey/vim-tmux-navigator'
 set -g @plugin 'schasse/tmux-jump'
 
@@ -203,6 +204,13 @@ set -g @tmux_power_show_upload_speed true
 set -g @tmux_power_show_download_speed true
 set -g @tmux_power_time_icon '🕘'
 set -g @tmux_power_prefix_highlight_pos 'L'
+
+# tmux-resurrect
+set -g @resurrect-hook-post-save-all '~/.dotfiles/terminal/tmux/scripts/resurrect-cleanup.sh'
+
+# tmux-continuum
+set -g @continuum-restore 'on'
+set -g @continuum-save-interval '15'
 
 
 # -- Custom Settings ----------------------------------------------------------
@@ -274,6 +282,9 @@ bind s choose-tree -s -O name
 
 # fast reload (.local only)
 bind r source-file ~/.tmux.conf.local \; display "Reloaded!"
+
+# copy-mode: strip trailing newline when copying to clipboard
+bind -T copy-mode-vi y send -X copy-pipe-and-cancel "perl -pe 'chomp if eof' | pbcopy"
 
 # disable C-l clear (conflicts with vim-tmux-navigator)
 bind -n C-l run 'true'
