@@ -206,7 +206,10 @@ set -g @tmux_power_time_icon '🕘'
 set -g @tmux_power_prefix_highlight_pos 'L'
 
 # tmux-resurrect
-set -g @resurrect-hook-post-save-all '~/.dotfiles/terminal/tmux/scripts/resurrect-cleanup.sh'
+# "~claude" adds claude to the default restore whitelist; saved full command
+# (incl. --resume <id> injected by resurrect-claude-resume.sh) is re-run on restore
+set -g @resurrect-processes '"~claude"'
+set -g @resurrect-hook-post-save-all '~/.dotfiles/terminal/tmux/scripts/resurrect-cleanup.sh; ~/.dotfiles/terminal/tmux/scripts/resurrect-claude-resume.sh'
 
 # tmux-continuum
 set -g @continuum-restore 'on'
