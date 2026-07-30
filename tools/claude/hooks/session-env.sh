@@ -6,13 +6,21 @@
 LOG_FILE="$HOME/.claude/hooks/session-env.log"
 echo "[$(date)] Hook started, CLAUDE_ENV_FILE=$CLAUDE_ENV_FILE" >> "$LOG_FILE"
 
-# tmux-resurrect integration: tag this pane with the Claude session id so
-# resurrect-claude-resume.sh can rewrite saved commands to `claude --resume <id>`
+# tmux-resurrect integration: tag this pane with the Claude session id, its
+# transcript path and its startup cwd, so resurrect-claude-resume.sh can rewrite
+# saved commands to `claude --resume <id>` *and* restore the pane in the cwd that
+# `--resume` needs (session lookup is scoped to ~/.claude/projects/<mangled cwd>).
 if [ -n "$TMUX_PANE" ]; then
   command -v jq >/dev/null || PATH="/opt/homebrew/bin:$PATH"
-  SESSION_ID=$(jq -r '.session_id // empty' 2>/dev/null)
+  PAYLOAD=$(cat)  # stdin is readable once — parse everything from this copy
+  SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty' 2>/dev/null)
+  TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r '.transcript_path // empty' 2>/dev/null)
+  SESSION_CWD=$(printf '%s' "$PAYLOAD" | jq -r '.cwd // empty' 2>/dev/null)
+  echo "  tags: id=${SESSION_ID:-none} transcript=${TRANSCRIPT:-none} cwd=${SESSION_CWD:-none}" >> "$LOG_FILE"
   if [ -n "$SESSION_ID" ]; then
     tmux set-option -pt "$TMUX_PANE" @claude_session_id "$SESSION_ID" 2>/dev/null
+    tmux set-option -pt "$TMUX_PANE" @claude_transcript "$TRANSCRIPT" 2>/dev/null
+    tmux set-option -pt "$TMUX_PANE" @claude_cwd "$SESSION_CWD" 2>/dev/null
   fi
 fi
 
