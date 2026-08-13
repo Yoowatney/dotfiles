@@ -1,0 +1,44 @@
+# herdr configuration
+# Only overrides live here — everything else falls through to built-in defaults,
+# so new defaults keep applying across upgrades. `herdr --default-config` prints
+# the full annotated set.
+#
+# Key names: spelled-out punctuation like "bracketleft" is rejected; write the
+# character itself ("prefix+["). `herdr config check` catches either way.
+#
+# Note: copy mode lives at prefix+[ but is NOT listed in [keys], so it is easy
+# to shadow it by accident. Leave that key alone.
+
+[keys]
+# GNU-Screen style, matching the tmux prefix2 this machine used before.
+prefix = "ctrl+a"
+
+# Prefix-less pane movement, replacing what vim-tmux-navigator used to provide.
+# This deliberately takes ctrl+h/j/k/l away from the shell — the same trade the
+# tmux setup already made, so readline's kill-line (ctrl+k) and clear (ctrl+l)
+# were already gone before herdr. vim's own split navigation is given up here;
+# splits live at the pane layer instead.
+# Fallback if a terminal swallows one of these: prefix+g, then h/j/k/l.
+focus_pane_down = "ctrl+j"
+focus_pane_up = "ctrl+k"
+
+# Horizontal movement is cycle, not direction, because focus_pane_* stops dead at
+# the edge and tmux's select-pane -L/-R wraps. Every tab here is a plain two-pane
+# split, where cycling and direction are the same thing — and the wrap is the half
+# that the fingers actually remember. Directional right/left is still reachable
+# through navigate mode: prefix+g, then h/l.
+cycle_pane_previous = "ctrl+h"
+cycle_pane_next = "ctrl+l"
+
+# Split down moves off prefix+minus onto prefix+V, beside the default prefix+v
+# for a right split — the same shift-pairing tmux uses here.
+split_horizontal = "prefix+shift+v"
+
+# Unbound by default, so there was no way to reach the next workspace without
+# opening the picker every time.
+previous_workspace = "prefix+left"
+next_workspace = "prefix+right"
+
+# Resize stays on the built-in prefix+r mode. tmux's H/J/K/L were tried as
+# [[keys.command]] shellouts and dropped: custom commands have no `bind -r`
+# repeat, so every press needed the prefix again. The mode holds until esc.

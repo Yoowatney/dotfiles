@@ -243,6 +243,11 @@ create_symlinks() {
     mkdir -p "$CONFIG/mise"
     create_symlink "$DOTFILES/tools/mise/config.toml" "$CONFIG/mise/config.toml" "mise config"
 
+    # Herdr — link the file, not the directory: sockets, logs, and session.json
+    # live in that same dir and must stay machine-local.
+    mkdir -p "$CONFIG/herdr"
+    create_symlink "$DOTFILES/terminal/herdr/config.toml" "$CONFIG/herdr/config.toml" "herdr config"
+
     # Gemini
     create_symlink "$DOTFILES/tools/gemini" "$CONFIG/gemini" "gemini"
 
