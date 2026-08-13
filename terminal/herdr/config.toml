@@ -39,6 +39,18 @@ split_horizontal = "prefix+shift+v"
 previous_workspace = "prefix+left"
 next_workspace = "prefix+right"
 
+# Swapped with each other: prefix+s is where tmux's session list lived, and that
+# is what the navigator does here. Settings takes over the freed prefix+g.
+goto = "prefix+s"
+settings = "prefix+g"
+
+# Workspace rows default to arrows only, which is the one list tmux's prefix+s
+# let you walk with j/k. Pane movement in this mode gives up j/k for it — no
+# loss, since panes are reached with ctrl+j/k outside the mode anyway. h/l still
+# move panes here.
+navigate_workspace_up = "k"
+navigate_workspace_down = "j"
+
 # Resize stays on the built-in prefix+r mode. tmux's H/J/K/L were tried as
 # [[keys.command]] shellouts and dropped: custom commands have no `bind -r`
 # repeat, so every press needed the prefix again. The mode holds until esc.
