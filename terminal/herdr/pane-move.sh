@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# tmux's break-pane / join-pane, which herdr ships as `herdr pane move` but binds
-# to no key. Everything below is just argument plumbing for that one command.
+# Moves a pane between tabs, which herdr can already do (`herdr pane move`) but
+# binds to no key. Everything below is argument plumbing for that one command.
+#
+# Two directions, not three: tmux splits this into break-pane and join-pane, but
+# "break" is only a send whose destination does not exist yet, so it lives in the
+# out picker as the first row instead of owning a key of its own.
 #
 # ponytail: no state of its own; the server is the source of truth for what is
-# focused. Every run appends to the log so a silent detached `type = "shell"`
-# binding is still debuggable.
+# focused. Every run appends to the log, so a failure inside a popup that closes
+# on exit is still readable afterwards.
 set -euo pipefail
 
 LOG=/tmp/herdr-pane-move.log
 log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" >>"$LOG"; }
+
+pick() { fzf --delimiter='\t' --with-nth=2 --height=100% --prompt="$1"; }
 
 cur=$(herdr pane current)
 pane=$(jq -r .result.pane.pane_id <<<"$cur")
@@ -17,38 +23,37 @@ ws=$(jq -r .result.pane.workspace_id <<<"$cur")
 log "mode=${1:-none} resolved pane=$pane tab=$tab ws=$ws"
 
 case "${1:-}" in
-break)
-  # Pane leaves the split and becomes its own tab.
-  herdr pane move "$pane" --new-tab --focus >>"$LOG" 2>&1
-  ;;
-send)
-  # Same move as break, except the destination is a tab that already exists.
-  dst=$(herdr tab list |
-    jq -r --arg ws "$ws" --arg tab "$tab" '
+out)
+  # This pane leaves for another tab — a fresh one, or one that already exists.
+  dst=$({
+    echo -e "__new__\t+ new tab"
+    herdr tab list | jq -r --arg ws "$ws" --arg tab "$tab" '
       .result.tabs[]
       | select(.workspace_id == $ws and .tab_id != $tab)
-      | "\(.tab_id)\t\(.number). \(.label)"' |
-    fzf --delimiter='\t' --with-nth=2 --prompt='send pane to > ' --height=100% |
-    cut -f1) || exit 0
+      | "\(.tab_id)\t\(.number). \(.label)"'
+  } | pick 'move this pane to > ' | cut -f1) || exit 0
   [ -n "$dst" ] || exit 0
-  log "send pane=$pane -> tab=$dst"
-  herdr pane move "$pane" --tab "$dst" --split right --focus >>"$LOG" 2>&1
+  log "out pane=$pane -> $dst"
+  if [ "$dst" = "__new__" ]; then
+    herdr pane move "$pane" --new-tab --focus >>"$LOG" 2>&1
+  else
+    herdr pane move "$pane" --tab "$dst" --split right --focus >>"$LOG" 2>&1
+  fi
   ;;
-join)
-  # Pick a pane living in another tab of this workspace and pull it in here.
+in)
+  # A pane living in another tab of this workspace comes here as a split.
   src=$(herdr pane list |
     jq -r --arg ws "$ws" --arg tab "$tab" '
       .result.panes[]
       | select(.workspace_id == $ws and .tab_id != $tab)
       | "\(.pane_id)\t\(.tab_id)  \(.terminal_title_stripped)"' |
-    fzf --delimiter='\t' --with-nth=2 --prompt='join pane > ' --height=100% |
-    cut -f1) || exit 0
+    pick 'bring which pane here > ' | cut -f1) || exit 0
   [ -n "$src" ] || exit 0
-  log "join src=$src -> tab=$tab"
+  log "in src=$src -> tab=$tab"
   herdr pane move "$src" --tab "$tab" --split right --focus >>"$LOG" 2>&1
   ;;
 *)
-  echo "usage: ${0##*/} break|send|join" >&2
+  echo "usage: ${0##*/} out|in" >&2
   exit 2
   ;;
 esac

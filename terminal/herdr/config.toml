@@ -55,28 +55,24 @@ navigate_workspace_down = "j"
 # [[keys.command]] shellouts and dropped: custom commands have no `bind -r`
 # repeat, so every press needed the prefix again. The mode holds until esc.
 
-# tmux's break-pane / join-pane. herdr has the operation (`herdr pane move`) but
-# no default binding for either direction, so both go through pane-move.sh.
-# prefix+b is the sidebar, so these sit on the shifted pair: B breaks out, J joins in.
+# Moving a pane between tabs. herdr has the operation (`herdr pane move`) but no
+# default binding for it, so both directions go through pane-move.sh.
+#
+# O and I, out and in, rather than tmux's break/join vocabulary: those two words
+# name the same move from opposite ends of a rope, and "break" reads like the
+# pane is being destroyed. Both open an fzf picker, so a fresh tab is just the
+# first row of the out list instead of a third key. h/j/k/l stay directional.
 [[keys.command]]
-key = "prefix+shift+b"
-type = "shell"
-command = "$HOME/.dotfiles/terminal/herdr/pane-move.sh break"
-
-# The other two directions need a target, so they get an fzf popup instead of a
-# detached shell: M sends this pane to a tab that already exists, J pulls a pane
-# from elsewhere into this one.
-[[keys.command]]
-key = "prefix+shift+m"
+key = "prefix+shift+o"
 type = "popup"
-command = "$HOME/.dotfiles/terminal/herdr/pane-move.sh send"
+command = "$HOME/.dotfiles/terminal/herdr/pane-move.sh out"
 width = "70%"
 height = "50%"
 
 [[keys.command]]
-key = "prefix+shift+j"
+key = "prefix+shift+i"
 type = "popup"
-command = "$HOME/.dotfiles/terminal/herdr/pane-move.sh join"
+command = "$HOME/.dotfiles/terminal/herdr/pane-move.sh in"
 width = "70%"
 height = "50%"
 
