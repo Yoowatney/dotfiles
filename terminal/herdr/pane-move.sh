@@ -21,6 +21,19 @@ break)
   # Pane leaves the split and becomes its own tab.
   herdr pane move "$pane" --new-tab --focus >>"$LOG" 2>&1
   ;;
+send)
+  # Same move as break, except the destination is a tab that already exists.
+  dst=$(herdr tab list |
+    jq -r --arg ws "$ws" --arg tab "$tab" '
+      .result.tabs[]
+      | select(.workspace_id == $ws and .tab_id != $tab)
+      | "\(.tab_id)\t\(.number). \(.label)"' |
+    fzf --delimiter='\t' --with-nth=2 --prompt='send pane to > ' --height=100% |
+    cut -f1) || exit 0
+  [ -n "$dst" ] || exit 0
+  log "send pane=$pane -> tab=$dst"
+  herdr pane move "$pane" --tab "$dst" --split right --focus >>"$LOG" 2>&1
+  ;;
 join)
   # Pick a pane living in another tab of this workspace and pull it in here.
   src=$(herdr pane list |
@@ -35,7 +48,7 @@ join)
   herdr pane move "$src" --tab "$tab" --split right --focus >>"$LOG" 2>&1
   ;;
 *)
-  echo "usage: ${0##*/} break|join" >&2
+  echo "usage: ${0##*/} break|send|join" >&2
   exit 2
   ;;
 esac

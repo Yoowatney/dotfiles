@@ -63,7 +63,16 @@ key = "prefix+shift+b"
 type = "shell"
 command = "$HOME/.dotfiles/terminal/herdr/pane-move.sh break"
 
-# Needs a TUI for the picker, so this one is a popup rather than a detached shell.
+# The other two directions need a target, so they get an fzf popup instead of a
+# detached shell: M sends this pane to a tab that already exists, J pulls a pane
+# from elsewhere into this one.
+[[keys.command]]
+key = "prefix+shift+m"
+type = "popup"
+command = "$HOME/.dotfiles/terminal/herdr/pane-move.sh send"
+width = "70%"
+height = "50%"
+
 [[keys.command]]
 key = "prefix+shift+j"
 type = "popup"
