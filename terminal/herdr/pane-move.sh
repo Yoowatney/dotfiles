@@ -22,13 +22,19 @@ pick() {
     --header="$1" --prompt='> '
 }
 
-# A tab named "2" sitting at position 4 renders as "4. 2", which says nothing, so
-# rows name what is actually inside: pane labels, or the working directory for a
-# bare shell whose title is the useless user@host:path form.
-INSIDE='
+# TabInfo.number is not the position on the tab bar — it is an id ordinal, so
+# closing a tab leaves a hole and the second tab of a workspace can report 4.
+# Rows count position in the workspace's own tab order instead, which is what is
+# actually on screen. Contents come along too: a tab named "2" identifies nothing
+# by itself, so rows name its panes, falling back to the working directory when a
+# bare shell only offers the useless user@host:path title.
+ROWS='
   def nice:
     (.label // (.terminal_title_stripped | sub("^[^:]+@[^:]+:"; "")))
     | if length > 24 then .[0:23] + "…" else . end;
+  def here($ws): map(select(.workspace_id == $ws));
+  def at($tabs): $tabs | to_entries | map({key: .value.tab_id, value: (.key + 1)})
+    | from_entries;
 '
 
 cur=$(herdr pane current)
@@ -43,13 +49,15 @@ out)
   dst=$({
     printf '__new__\t+  new tab\n'
     jq -rn --argjson t "$(herdr tab list)" --argjson p "$(herdr pane list)" \
-      --arg ws "$ws" --arg tab "$tab" "$INSIDE"'
-      ($p.result.panes | map(select(.workspace_id == $ws))) as $panes
-      | $t.result.tabs[]
-      | select(.workspace_id == $ws and .tab_id != $tab)
+      --arg ws "$ws" --arg tab "$tab" "$ROWS"'
+      ($t.result.tabs | here($ws)) as $tabs
+      | ($p.result.panes | here($ws)) as $panes
+      | at($tabs) as $pos
+      | $tabs[]
+      | select(.tab_id != $tab)
       | . as $tb
       | ($panes | map(select(.tab_id == $tb.tab_id) | nice) | join(", ")) as $has
-      | "\($tb.tab_id)\ttab \($tb.number)  \"\($tb.label)\"   holds: \($has)"'
+      | "\($tb.tab_id)\ttab \($pos[$tb.tab_id])  \"\($tb.label)\"   holds: \($has)"'
   } | pick 'move this pane to which tab?' | cut -f1) || exit 0
   [ -n "$dst" ] || exit 0
   log "out pane=$pane -> $dst"
@@ -62,11 +70,13 @@ out)
 in)
   # A pane living in another tab of this workspace comes here as a split.
   src=$(jq -rn --argjson t "$(herdr tab list)" --argjson p "$(herdr pane list)" \
-    --arg ws "$ws" --arg tab "$tab" "$INSIDE"'
-    ($t.result.tabs | map({key: .tab_id, value: .}) | from_entries) as $tabs
-    | $p.result.panes[]
-    | select(.workspace_id == $ws and .tab_id != $tab)
-    | "\(.pane_id)\t\(nice)   in tab \($tabs[.tab_id].number)  \"\($tabs[.tab_id].label)\""' |
+    --arg ws "$ws" --arg tab "$tab" "$ROWS"'
+    ($t.result.tabs | here($ws)) as $tabs
+    | at($tabs) as $pos
+    | ($tabs | map({key: .tab_id, value: .label}) | from_entries) as $name
+    | $p.result.panes | here($ws)[]
+    | select(.tab_id != $tab)
+    | "\(.pane_id)\t\(nice)   in tab \($pos[.tab_id])  \"\($name[.tab_id])\""' |
     pick 'bring which pane into this tab?' | cut -f1) || exit 0
   [ -n "$src" ] || exit 0
   log "in src=$src -> tab=$tab"
