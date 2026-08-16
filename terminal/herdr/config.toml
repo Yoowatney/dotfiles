@@ -54,3 +54,25 @@ navigate_workspace_down = "j"
 # Resize stays on the built-in prefix+r mode. tmux's H/J/K/L were tried as
 # [[keys.command]] shellouts and dropped: custom commands have no `bind -r`
 # repeat, so every press needed the prefix again. The mode holds until esc.
+
+# tmux's break-pane / join-pane. herdr has the operation (`herdr pane move`) but
+# no default binding for either direction, so both go through pane-move.sh.
+# prefix+b is the sidebar, so these sit on the shifted pair: B breaks out, J joins in.
+[[keys.command]]
+key = "prefix+shift+b"
+type = "shell"
+command = "$HOME/.dotfiles/terminal/herdr/pane-move.sh break"
+
+# Needs a TUI for the picker, so this one is a popup rather than a detached shell.
+[[keys.command]]
+key = "prefix+shift+j"
+type = "popup"
+command = "$HOME/.dotfiles/terminal/herdr/pane-move.sh join"
+width = "70%"
+height = "50%"
+
+[ui.toast]
+delivery = "herdr"
+
+[ui]
+show_agent_labels_on_pane_borders = true
