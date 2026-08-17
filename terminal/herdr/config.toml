@@ -87,12 +87,6 @@ focus_agent = "prefix+shift+1..9"
 navigate_workspace_up = "k"
 navigate_workspace_down = "j"
 
-# Emptied so the [[keys.command]] below can take prefix+o. The built-in only
-# resolves against an in-app toast, so with notifications delivered through the
-# terminal it does nothing at all — leaving it bound would just be two things
-# claiming one key, one of them dead.
-open_notification_target = ""
-
 # Resize stays on the built-in prefix+r mode. tmux's H/J/K/L were tried as
 # [[keys.command]] shellouts and dropped: custom commands have no `bind -r`
 # repeat, so every press needed the prefix again. The mode holds until esc.
@@ -117,17 +111,6 @@ type = "popup"
 command = "$HOME/.dotfiles/terminal/herdr/pane-move.sh in"
 width = "70%"
 height = "50%"
-
-# prefix+o put back to work. A banner delivered outside herdr carries no
-# destination, so the built-in open_notification_target has nothing to jump to —
-# but the destination is recoverable from state_change_seq, and this jumps to the
-# agent that most recently stopped working. Same key, same meaning, actually
-# arrives. Clicking the banner still cannot do this: iTerm owns that click and
-# herdr exposes no hook for it.
-[[keys.command]]
-key = "prefix+o"
-type = "shell"
-command = "$HOME/.dotfiles/terminal/herdr/goto-last-notified.sh"
 
 [ui.toast]
 # Let iTerm post the banner. This looked broken for a long time and was not:
