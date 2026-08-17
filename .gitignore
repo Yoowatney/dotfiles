@@ -17,6 +17,10 @@ firebase-debug.log
 *.bak
 # plist files (use xml instead)
 **/*.plist
+# Except launchd job definitions, which are hand-written source rather than app
+# noise. They have to live beside their wrapper script: install-launchd.sh
+# resolves the program path as <dir of this plist>/<basename>.
+!terminal/herdr/*.plist
 
 # Karabiner auto backups
 **/automatic_backups/
