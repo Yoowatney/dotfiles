@@ -113,37 +113,28 @@ width = "70%"
 height = "50%"
 
 [ui.toast]
-# In-app toasts on purpose, not for lack of trying. Read the source (v0.8.0)
-# before touching this again:
+# Let iTerm post the banner. This looked broken for a long time and was not:
+# iTerm's own notifications were switched off in macOS, so herdr wrote a perfectly
+# good escape sequence into a terminal that had been told to stay quiet — and
+# still answered `shown: true`, which is what made it read as a herdr bug.
+# Sending OSC 9 by hand from a plain iTerm tab, with either terminator, showed
+# both, which is what settled it. Test that first if this ever goes silent again;
+# do it OUTSIDE herdr, since a pane does not forward those bytes (herdr#2453).
 #
-#   ServerMessage::Notify carries { kind, message, body } and nothing else —
-#   no pane, no workspace (src/protocol/wire.rs). server/notifications.rs
-#   forwards a Notify only for terminal/system delivery; "herdr" is handled
-#   locally as a toast object instead. And prefix+o (open_notification_target)
-#   is focus_toast_target(), which reads self.toast.target and returns early
-#   when there is no toast (src/app/input/mouse.rs).
+# Not "system": that path shells out to terminal-notifier, which is stuck on the
+# NSUserNotification API macOS removed, so its banner arrives with a dead click
+# and its osascript fallback has no click at all. herdr's own inputs there are
+# fine — TERM_PROGRAM, the bundle-id map, and the mdfind check were each verified
+# — the tool underneath simply stopped working.
 #
-# So "jump to the pane that notified me" exists ONLY for in-app toasts. Moving
-# the popup outside herdr throws the destination away — that is upstream's
-# design, not a setting.
-#
-# The other two, measured here rather than assumed:
-#   system   — herdr does pass `terminal-notifier -activate com.googlecode.iterm2`
-#              (TERM_PROGRAM, the bundle-id map, and the mdfind check all verified
-#              good). terminal-notifier 2.0.0 is the problem: it drives the
-#              NSUserNotification API macOS has removed, so the banner appears and
-#              the click delegate never fires. Its osascript fallback has no click
-#              action at all.
-#   terminal — silent. src/terminal_notify.rs ends OSC 9 with ST (ESC \) rather
-#              than BEL; worth testing `printf '\033]9;x\a'` versus the ST form in
-#              a plain iTerm tab, outside herdr, which renders the sequence as
-#              text instead of forwarding it.
-#
-# What actually reaches a person who is in a browser is the SOUND, which is a
-# separate NotifyKind and so is not tied to this setting at all (verified
-# audible). Sound gets the attention, prefix+o makes the jump. That pairing only
-# holds while delivery stays "herdr".
-delivery = "herdr"
+# Cost of leaving in-app toasts behind: prefix+o (open_notification_target) goes
+# with them. It resolves through focus_toast_target(), which reads
+# self.toast.target, and ServerMessage::Notify carries only { kind, message, body }
+# — no pane, no workspace — so an external notification has no destination to
+# return to. Upstream closed exactly that request as intended behaviour
+# (herdr#2684). The banner names the agent, so the way back is the attention queue:
+# prefix+shift+1 for whoever is most urgent, prefix+a to walk.
+delivery = "terminal"
 
 [ui]
 show_agent_labels_on_pane_borders = true
