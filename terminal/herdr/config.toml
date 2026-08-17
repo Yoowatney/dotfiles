@@ -107,11 +107,13 @@ width = "70%"
 height = "50%"
 
 [ui.toast]
-# Hand the notification to iTerm rather than posting it to macOS directly:
-# in-app toasts are invisible once the window is behind a browser, and the
-# "system" path opens the wrong thing when clicked. iTerm's own notification at
-# least focuses iTerm.
-delivery = "terminal"
+# Back to in-app toasts, because the alternatives are worse here rather than
+# better: "terminal" produces nothing at all through iTerm (measured), and
+# "system" does fire but opens the wrong target on click, which is what got
+# notifications abandoned in the first place. iTerm is registered with
+# Notification Center, so its alert style is the thing to check before trying
+# "terminal" again.
+delivery = "herdr"
 
 [ui]
 show_agent_labels_on_pane_borders = true
