@@ -67,12 +67,18 @@ settings = "prefix+g"
 # and plain-letter plus shifted-letter are both forms this terminal is known to
 # deliver. Forward is the constant motion, so it gets the cheaper key.
 #
-# focus_agent is deliberately left unbound: the sidebar is sorted by attention
-# (see agent_panel_sort), so an index points at whoever is waiting right now
-# rather than at a fixed agent, and a number that moves never reaches the fingers.
-# Walking the queue is the operation that sort actually supports.
 next_agent = "prefix+a"
 previous_agent = "prefix+shift+a"
+
+# Jump straight into the attention queue by position. Under agent_panel_sort =
+# "priority" these indexes do not name fixed agents — which is the point:
+# prefix+shift+1 means "whoever needs me most right now", a stable meaning even
+# though the agent behind it changes. The higher numbers are worth less for the
+# same reason, so 1 is the one to actually learn.
+#
+# Not on alt, which this terminal drops. prefix+shift+1..9 is the form herdr's own
+# defaults suggest for indexed bindings, and switch_workspace leaves it free.
+focus_agent = "prefix+shift+1..9"
 
 # Workspace rows default to arrows only, which is the one list tmux's prefix+s
 # let you walk with j/k. Pane movement in this mode gives up j/k for it — no
@@ -107,12 +113,15 @@ width = "70%"
 height = "50%"
 
 [ui.toast]
-# Back to in-app toasts, because the alternatives are worse here rather than
-# better: "terminal" produces nothing at all through iTerm (measured), and
-# "system" does fire but opens the wrong target on click, which is what got
-# notifications abandoned in the first place. iTerm is registered with
-# Notification Center, so its alert style is the thing to check before trying
-# "terminal" again.
+# In-app toasts, having tried both ways out and measured each failing:
+#   terminal — nothing appears at all through iTerm.
+#   system   — appears, but clicking it goes nowhere, and prefix+o
+#              (open_notification_target) does not reach the source either.
+# There is no config for what a click does, so neither is fixable from here.
+# Getting notified outside herdr means iTerm's own notification path has to start
+# working first: test with `printf '\033]9;test\a'` in a plain iTerm tab, outside
+# herdr, since herdr renders that sequence as literal text rather than
+# forwarding it.
 delivery = "herdr"
 
 [ui]
