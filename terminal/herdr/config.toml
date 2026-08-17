@@ -44,6 +44,17 @@ next_workspace = "prefix+right"
 goto = "prefix+s"
 settings = "prefix+g"
 
+# Walking the agent sidebar, which ships with no key at all. n/p mirror the tab
+# bindings next to them; alt is what marks the agent layer, matching the
+# prefix+alt+1..9 form upstream suggests for focus_agent.
+#
+# focus_agent is deliberately left unbound: the sidebar is sorted by attention
+# (see agent_panel_sort), so an index points at whoever is waiting right now
+# rather than at a fixed agent, and a number that moves never reaches the fingers.
+# Walking the queue is the operation that sort actually supports.
+next_agent = "prefix+alt+n"
+previous_agent = "prefix+alt+p"
+
 # Workspace rows default to arrows only, which is the one list tmux's prefix+s
 # let you walk with j/k. Pane movement in this mode gives up j/k for it — no
 # loss, since panes are reached with ctrl+j/k outside the mode anyway. h/l still
