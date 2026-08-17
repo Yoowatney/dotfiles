@@ -84,8 +84,13 @@ focus_agent = "prefix+shift+1..9"
 # let you walk with j/k. Pane movement in this mode gives up j/k for it — no
 # loss, since panes are reached with ctrl+j/k outside the mode anyway. h/l still
 # move panes here.
-navigate_workspace_up = "k"
-navigate_workspace_down = "j"
+#
+# Two keys each, because every binding accepts a list as well as a string
+# (BindingConfig is untagged One|Many). ctrl+j/k are what these fingers press
+# outside this mode for pane focus, so the same chord keeps meaning "down a row"
+# once the navigator is open, and bare j/k stay for anyone reaching for vim keys.
+navigate_workspace_up = ["k", "ctrl+k"]
+navigate_workspace_down = ["j", "ctrl+j"]
 
 # Resize stays on the built-in prefix+r mode. tmux's H/J/K/L were tried as
 # [[keys.command]] shellouts and dropped: custom commands have no `bind -r`
