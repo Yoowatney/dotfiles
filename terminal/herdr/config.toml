@@ -144,6 +144,20 @@ delivery = "terminal"
 [ui]
 show_agent_labels_on_pane_borders = true
 
+# Waiting on a release for status_indicators = "symbols", which gives each agent
+# state its own shape (× blocked, ◐ working, ✓ finished, ○ seen) instead of the
+# default dots, where blocked, working, and finished-but-unseen are all the same ●
+# separated only by colour. The field is on main as of 2026-08-16 but in no
+# release yet: v0.8.0 shipped 2026-08-03 and the newest preview is 2026-08-04, so
+# the running binary answers `unknown config key ui.status_indicators; ignoring
+# key`. Re-add it after the next update; do not trust CHANGELOG's Unreleased
+# section to tell you, it was empty while main had two weeks of commits.
+#
+# Icon colour is not configurable either way — state_label_color hardcodes the
+# state-to-token mapping (blocked=red, working=yellow, done=teal, idle=green).
+# Only the palette behind those tokens can move, via [theme.custom], which
+# repaints the rest of the UI with it.
+
 # Sidebar agents are sorted by who is waiting on a human, not by which space they
 # live in. With twenty agent panes, "which one needs me" is the only question the
 # panel gets asked; grouping by space just reproduces what the tab bar shows.
