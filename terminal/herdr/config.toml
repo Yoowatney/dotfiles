@@ -41,6 +41,10 @@ cycle_pane_next = "ctrl+l"
 # for a right split — the same shift-pairing tmux uses here.
 split_horizontal = "prefix+shift+v"
 
+# tmux's prefix+prefix toggle. Unbound by default; prefix+tab came free when
+# cycle_pane_next moved to ctrl+l, and herdr's own defaults suggest this key.
+last_pane = "prefix+tab"
+
 # Unbound by default, so there was no way to reach the next workspace without
 # opening the picker every time.
 previous_workspace = "prefix+left"
