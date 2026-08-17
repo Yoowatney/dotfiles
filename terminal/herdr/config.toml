@@ -113,15 +113,36 @@ width = "70%"
 height = "50%"
 
 [ui.toast]
-# In-app toasts, having tried both ways out and measured each failing:
-#   terminal — nothing appears at all through iTerm.
-#   system   — appears, but clicking it goes nowhere, and prefix+o
-#              (open_notification_target) does not reach the source either.
-# There is no config for what a click does, so neither is fixable from here.
-# Getting notified outside herdr means iTerm's own notification path has to start
-# working first: test with `printf '\033]9;test\a'` in a plain iTerm tab, outside
-# herdr, since herdr renders that sequence as literal text rather than
-# forwarding it.
+# In-app toasts on purpose, not for lack of trying. Read the source (v0.8.0)
+# before touching this again:
+#
+#   ServerMessage::Notify carries { kind, message, body } and nothing else —
+#   no pane, no workspace (src/protocol/wire.rs). server/notifications.rs
+#   forwards a Notify only for terminal/system delivery; "herdr" is handled
+#   locally as a toast object instead. And prefix+o (open_notification_target)
+#   is focus_toast_target(), which reads self.toast.target and returns early
+#   when there is no toast (src/app/input/mouse.rs).
+#
+# So "jump to the pane that notified me" exists ONLY for in-app toasts. Moving
+# the popup outside herdr throws the destination away — that is upstream's
+# design, not a setting.
+#
+# The other two, measured here rather than assumed:
+#   system   — herdr does pass `terminal-notifier -activate com.googlecode.iterm2`
+#              (TERM_PROGRAM, the bundle-id map, and the mdfind check all verified
+#              good). terminal-notifier 2.0.0 is the problem: it drives the
+#              NSUserNotification API macOS has removed, so the banner appears and
+#              the click delegate never fires. Its osascript fallback has no click
+#              action at all.
+#   terminal — silent. src/terminal_notify.rs ends OSC 9 with ST (ESC \) rather
+#              than BEL; worth testing `printf '\033]9;x\a'` versus the ST form in
+#              a plain iTerm tab, outside herdr, which renders the sequence as
+#              text instead of forwarding it.
+#
+# What actually reaches a person who is in a browser is the SOUND, which is a
+# separate NotifyKind and so is not tied to this setting at all (verified
+# audible). Sound gets the attention, prefix+o makes the jump. That pairing only
+# holds while delivery stays "herdr".
 delivery = "herdr"
 
 [ui]
