@@ -107,7 +107,11 @@ width = "70%"
 height = "50%"
 
 [ui.toast]
-delivery = "herdr"
+# Hand the notification to iTerm rather than posting it to macOS directly:
+# in-app toasts are invisible once the window is behind a browser, and the
+# "system" path opens the wrong thing when clicked. iTerm's own notification at
+# least focuses iTerm.
+delivery = "terminal"
 
 [ui]
 show_agent_labels_on_pane_borders = true
