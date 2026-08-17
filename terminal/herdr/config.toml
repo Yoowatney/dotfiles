@@ -81,3 +81,8 @@ delivery = "herdr"
 
 [ui]
 show_agent_labels_on_pane_borders = true
+
+# Sidebar agents are sorted by who is waiting on a human, not by which space they
+# live in. With twenty agent panes, "which one needs me" is the only question the
+# panel gets asked; grouping by space just reproduces what the tab bar shows.
+agent_panel_sort = "priority"
