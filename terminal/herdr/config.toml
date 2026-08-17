@@ -4,7 +4,14 @@
 # the full annotated set.
 #
 # Key names: spelled-out punctuation like "bracketleft" is rejected; write the
-# character itself ("prefix+["). `herdr config check` catches either way.
+# character itself ("prefix+[").
+#
+# `herdr config check` does NOT catch that — "prefix+semicolon" passes as
+# `config: ok`, and so does a binding on a modifier this terminal never delivers
+# (alt, here). It validates the file, not the keyboard. The only real check is
+# pressing the key and watching the right thing happen, which matters because a
+# dead binding falls through to whatever shorter chord it shadows and looks like
+# it worked.
 #
 # Note: copy mode lives at prefix+[ but is NOT listed in [keys], so it is easy
 # to shadow it by accident. Leave that key alone.
@@ -51,15 +58,17 @@ settings = "prefix+g"
 # working, since both do move something. Upstream's prefix+alt+g and
 # prefix+alt+1..9 examples are dead here for the same reason.
 #
-# The sidebar is a vertical list, so shifted j/k keeps j meaning down, and the
-# unshifted prefix+h/j/k/l pane fallback stays intact.
+# On its own letter rather than a direction: h/j/k/l belong to panes and n/p to
+# tabs, and both sets were already spoken for. "a" carries no other meaning here,
+# and plain-letter plus shifted-letter are both forms this terminal is known to
+# deliver. Forward is the constant motion, so it gets the cheaper key.
 #
 # focus_agent is deliberately left unbound: the sidebar is sorted by attention
 # (see agent_panel_sort), so an index points at whoever is waiting right now
 # rather than at a fixed agent, and a number that moves never reaches the fingers.
 # Walking the queue is the operation that sort actually supports.
-next_agent = "prefix+shift+j"
-previous_agent = "prefix+shift+k"
+next_agent = "prefix+a"
+previous_agent = "prefix+shift+a"
 
 # Workspace rows default to arrows only, which is the one list tmux's prefix+s
 # let you walk with j/k. Pane movement in this mode gives up j/k for it — no
