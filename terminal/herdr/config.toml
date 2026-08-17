@@ -6,12 +6,15 @@
 # Key names: spelled-out punctuation like "bracketleft" is rejected; write the
 # character itself ("prefix+[").
 #
-# `herdr config check` does NOT catch that — "prefix+semicolon" passes as
-# `config: ok`, and so does a binding on a modifier this terminal never delivers
-# (alt, here). It validates the file, not the keyboard. The only real check is
-# pressing the key and watching the right thing happen, which matters because a
-# dead binding falls through to whatever shorter chord it shadows and looks like
-# it worked.
+# `herdr config check` does catch a name it cannot parse: "prefix+notakey" comes
+# back as `invalid keybinding: keys.next_agent = "prefix+notakey"; disabling
+# binding`. ("semicolon" is not an example of that — it is a real key name.)
+#
+# What it cannot catch is a perfectly valid binding on a chord this terminal never
+# delivers, which is how the alt bindings below were lost: they parsed, they were
+# accepted, and the keypress arrived as the shorter chord they shadow, so it looked
+# like it worked while doing something else. It validates the file, not the
+# keyboard — press the key and watch the right thing happen.
 #
 # Note: copy mode lives at prefix+[ but is NOT listed in [keys], so it is easy
 # to shadow it by accident. Leave that key alone.
