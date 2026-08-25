@@ -32,13 +32,20 @@ prefix = "ctrl+a"
 focus_pane_down = "ctrl+j"
 focus_pane_up = "ctrl+k"
 
-# Horizontal movement is cycle, not direction, because focus_pane_* stops dead at
-# the edge and tmux's select-pane -L/-R wraps. Every tab here is a plain two-pane
-# split, where cycling and direction are the same thing — and the wrap is the half
-# that the fingers actually remember. Directional right/left is still reachable
-# through navigate mode: prefix+g, then h/l.
-cycle_pane_previous = "ctrl+h"
-cycle_pane_next = "ctrl+l"
+# Horizontal movement used to be cycle rather than direction, because
+# focus_pane_* stops dead at the edge while tmux's select-pane -L/-R wraps, and
+# the wrap is the half the fingers remember. That traded correctly only while
+# "every tab here is a plain two-pane split", where cycling and direction are the
+# same move. They stopped being the same the first time a tab held four panes:
+# cycle walks creation order, so a 2x2 grid went 1 → 3 → 2 → 4 instead of
+# sideways (measured — herdr's own directional neighbours were right all along).
+#
+# So both halves are kept instead: pane-focus-wrap.sh moves directionally and
+# only falls back to wrapping at the edge. herdr has no setting for that pairing,
+# but it does allow prefix-less custom commands, which is what makes ctrl+h/l
+# usable for it. See the [[keys.command]] entries below.
+cycle_pane_previous = ""
+cycle_pane_next = ""
 
 # Split down moves off prefix+minus onto prefix+V, beside the default prefix+v
 # for a right split — the same shift-pairing tmux uses here.
@@ -112,6 +119,21 @@ type = "popup"
 command = "$HOME/.dotfiles/terminal/herdr/pane-move.sh out"
 width = "70%"
 height = "50%"
+
+# Directional pane movement that wraps, replacing the cycle bindings above.
+# Prefix-less on purpose: this is constant motion, and herdr intercepts direct
+# custom commands in terminal mode before the keypress reaches the pane
+# (src/app/input/terminal.rs). The vertical pair stays on the built-ins, which
+# already move directionally.
+[[keys.command]]
+key = "ctrl+h"
+type = "shell"
+command = "$HOME/.dotfiles/terminal/herdr/pane-focus-wrap.sh left"
+
+[[keys.command]]
+key = "ctrl+l"
+type = "shell"
+command = "$HOME/.dotfiles/terminal/herdr/pane-focus-wrap.sh right"
 
 [[keys.command]]
 key = "prefix+shift+i"
