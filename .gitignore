@@ -17,6 +17,8 @@ firebase-debug.log
 *.bak
 # plist files (use xml instead)
 **/*.plist
+# ...except LaunchAgent plists, which are source, not app preferences
+!tools/claude/*.plist
 
 # Karabiner auto backups
 **/automatic_backups/

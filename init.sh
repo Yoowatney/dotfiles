@@ -325,6 +325,17 @@ setup_claude() {
         fi
     done
 
+    # LaunchAgent plists (symlink only — load them manually with:
+    #   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist)
+    LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
+    mkdir -p "$LAUNCH_AGENTS"
+    for agent in "$DOTFILES/tools/claude"/*.plist; do
+        if [[ -f "$agent" ]]; then
+            agent_name=$(basename "$agent")
+            create_symlink "$agent" "$LAUNCH_AGENTS/$agent_name" "LaunchAgent: $agent_name"
+        fi
+    done
+
     info "Claude Code setup complete"
 }
 
