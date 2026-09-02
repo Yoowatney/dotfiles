@@ -15,6 +15,10 @@ MANIFEST="$LLM_WIKI/.manifest.json"
 LOGFILE="$LLM_WIKI/ingest.log"
 LAST_CHECK="$LLM_WIKI/.last-worklog-check"
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
+# Hard ceiling per claude call. A hung call used to stall the whole run
+# indefinitely (one sat for four months), and launchd will not start the
+# next cycle while the previous one is still alive.
+CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-600}"
 
 
 # ── Logging ──────────────────────────────────────────────────────────
@@ -189,7 +193,7 @@ Rules:
 
         # Run claude -p directly (< /dev/null prevents it from consuming the while-read stdin)
         local outfile="$LLM_WIKI/.tmp-worklog-output-$$.txt"
-        if "$CLAUDE_BIN" -p "$prompt" --permission-mode bypassPermissions --no-session-persistence < /dev/null > "$outfile" 2>&1; then
+        if timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" --permission-mode bypassPermissions --no-session-persistence < /dev/null > "$outfile" 2>&1; then
             if grep -q "NO_WORK" "$outfile" 2>/dev/null; then
                 log "  No non-trivial work found in $filename"
             else
@@ -198,7 +202,7 @@ Rules:
             mark_processed "$manifest_key"
             processed=$((processed + 1))
         else
-            log "  FAILED processing $filename (exit=$?). Will retry next cycle."
+            log "  FAILED processing $filename (exit=$?; 124=timeout after ${CLAUDE_TIMEOUT}s). Will retry next cycle."
         fi
         rm -f "$outfile"
     done < <(find "$CLAUDE_PROJECTS" -name "*.jsonl" -type f 2>/dev/null)
@@ -271,7 +275,7 @@ phase15_worklog_to_raw() {
 6. If there is NOTHING wiki-worthy in today's work-log, output exactly NO_WIKI_CONTENT and do not create any files."
 
     local outfile="$LLM_WIKI/.tmp-wiki-extract-$$.txt"
-    if "$CLAUDE_BIN" -p "$prompt" --permission-mode bypassPermissions --no-session-persistence > "$outfile" 2>&1; then
+    if timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" --permission-mode bypassPermissions --no-session-persistence > "$outfile" 2>&1; then
         if grep -q "NO_WIKI_CONTENT" "$outfile" 2>/dev/null; then
             log "  No wiki-worthy content in today's work-log"
         else
@@ -281,7 +285,7 @@ phase15_worklog_to_raw() {
         fi
         mark_processed "$manifest_key"
     else
-        log "  FAILED extracting wiki content from work-log (exit=$?). Will retry next cycle."
+        log "  FAILED extracting wiki content from work-log (exit=$?; 124=timeout after ${CLAUDE_TIMEOUT}s). Will retry next cycle."
     fi
     rm -f "$outfile"
 }
@@ -324,12 +328,12 @@ Write all wiki content in Korean. Follow the existing style of pages in the wiki
 
         # Run claude -p directly (< /dev/null prevents it from consuming the while-read stdin)
         local outfile="$LLM_WIKI/.tmp-wiki-output-$$.txt"
-        if "$CLAUDE_BIN" -p "$prompt" --permission-mode bypassPermissions --no-session-persistence < /dev/null > "$outfile" 2>&1; then
+        if timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" --permission-mode bypassPermissions --no-session-persistence < /dev/null > "$outfile" 2>&1; then
             log "  Wiki page created/updated for $filename"
             mark_processed "$manifest_key"
             processed=$((processed + 1))
         else
-            log "  FAILED processing wiki source $filename (exit=$?). Will retry next cycle."
+            log "  FAILED processing wiki source $filename (exit=$?; 124=timeout after ${CLAUDE_TIMEOUT}s). Will retry next cycle."
         fi
         rm -f "$outfile"
     done < <(find "$LLM_WIKI/raw" -name "*.md" -type f 2>/dev/null)

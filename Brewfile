@@ -17,6 +17,7 @@ brew "awscli"
 brew "bat"
 brew "bitwarden-cli"
 brew "broot"
+brew "coreutils"  # timeout(1), used by llm-wiki-ingest.sh
 brew "p11-kit"
 brew "unbound"
 brew "gnutls"
