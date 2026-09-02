@@ -8,7 +8,16 @@ set -uo pipefail
 
 # ── Constants ────────────────────────────────────────────────────────
 LLM_WIKI="$HOME/.local/share/llm-wiki"
-VAULT="$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-munice"
+# Site-specific config: vault path and the prompt text. Kept out of this repo
+# because the prompts cite real internal findings as examples.
+LLM_WIKI_CONFIG="${LLM_WIKI_CONFIG:-$HOME/.config/llm-wiki/config.sh}"
+if [[ ! -r "$LLM_WIKI_CONFIG" ]]; then
+    echo "llm-wiki: config not readable at $LLM_WIKI_CONFIG" >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "$LLM_WIKI_CONFIG"
+: "${VAULT:?llm-wiki: config must define VAULT}"
 CLAUDE_PROJECTS="$HOME/.claude/projects"
 WORKLOG_DIR="$VAULT/work-logs"
 MANIFEST="$LLM_WIKI/.manifest.json"
@@ -53,29 +62,25 @@ count_user_turns() {
 }
 
 # ── Helper: infer project name from session file path ────────────────
+# Claude encodes a project's path as its directory name, with "/" turned into
+# "-": $HOME/work/foo becomes -Users-me-work-foo. Derive the prefix from $HOME
+# rather than hardcoding it, so this works on any account.
 project_from_path() {
     local filepath="$1"
-    # Extract the project directory name (parent of the .jsonl file)
     local dir_name
     dir_name="$(basename "$(dirname "$filepath")")"
 
+    local work="${HOME//\//-}-work"
+
     case "$dir_name" in
-        -Users-yoyoo-work)
+        "$work")
             echo "general"
             ;;
-        -Users-yoyoo-work-munice|*-Users-yoyoo-work-munice-*)
-            echo "munice"
-            ;;
-        -Users-yoyoo-work-gomgom|*-Users-yoyoo-work-gomgom-*)
-            echo "gomgom"
-            ;;
-        -Users-yoyoo-work-*)
-            # Extract the segment after -Users-yoyoo-work-
+        "$work"-*)
+            # -Users-me-work-foo-bar-baz → foo
             local segment
-            segment="${dir_name#*-Users-yoyoo-work-}"
-            # Take the first segment (before any dash that starts a sub-path)
-            segment="${segment%%-*}"
-            echo "$segment"
+            segment="${dir_name#"$work"-}"
+            echo "${segment%%-*}"
             ;;
         *)
             # Fallback: last meaningful segment
@@ -156,40 +161,7 @@ phase1_worklog() {
         log "  Processing $filename ($turns user turns, project=$project)..."
 
         local prompt
-        prompt="You are a work-log extraction agent. Your task:
-
-1. Read the transcript file at: $session_file
-2. Extract development work entries. Include anything where:
-   - Code was written, modified, or deleted
-   - A technical decision was made
-   - Analysis or investigation was performed and reached a conclusion
-   - Infrastructure or configuration was changed
-   - A bug was diagnosed and fixed
-   When in doubt, INCLUDE the entry. The user prefers too many entries over missed ones.
-
-SKIP ONLY these:
-- Pure typo/lint/formatting fixes (no logic change)
-- Package version bumps with no other changes
-- General chat, stock talk, casual conversation with no work outcome
-
-For each qualifying piece of work, write an entry in Korean using this exact format:
-
-## [Brief title of what was done]
-
-- **프로젝트:** $project
-- **상황:** [What was the problem or trigger]
-- **판단:** [What decision was made and why — alternatives considered if any]
-- **결과:** [Outcome, metrics, or current status]
-- **PR/참고:** [PR link or related doc if applicable, or N/A]
-
-Rules:
-- The work-log file is: $worklog_file
-- If the file does not exist, create it with the header: # $session_date Work Log
-- If the file already exists, append new entries at the end (do NOT overwrite)
-- Do NOT duplicate entries that already exist in the file (check before appending)
-- Focus on WHY and DECISION, not file-level changes
-- One entry per logical unit of work
-- If there is NO qualifying work at all, output exactly NO_WORK and do not modify any files"
+        prompt="$(llm_wiki_prompt_worklog "$session_file" "$project" "$session_date" "$worklog_file")"
 
         # Run claude -p directly (< /dev/null prevents it from consuming the while-read stdin)
         local outfile="$LLM_WIKI/.tmp-worklog-output-$$.txt"
@@ -239,40 +211,7 @@ phase15_worklog_to_raw() {
     mkdir -p "$raw_dir"
 
     local prompt
-    prompt="You are a wiki knowledge extractor. Your task:
-
-1. Read the work-log file at: $worklog_file
-2. Identify entries that contain wiki-worthy knowledge:
-   - Architecture decisions (e.g. 'chose Firestore over PostgreSQL because...')
-   - Troubleshooting insights (e.g. 'DNSSEC stale key caused DNS failure')
-   - New patterns or frameworks (e.g. 'introduced Repository pattern')
-   - Infrastructure changes (e.g. 'migrated LB to Cloudflare Worker')
-   - Non-obvious technical findings (e.g. 'Firestore Read Ops = 25% of total cost')
-
-3. Skip entries that are NOT wiki-worthy:
-   - Simple bug fixes with no reusable insight
-   - Routine deployments
-   - Config changes
-   - PR reviews
-
-4. For each wiki-worthy entry, write a summary to a file at:
-   $raw_dir/${today}-{topic-in-kebab-case}.md
-
-   Format:
-   ---
-   source: work-log
-   date: $today
-   type: work-insight
-   project: {munice|gomgom|general}
-   ---
-
-   {Detailed knowledge extracted from the work-log entry.
-    Focus on the WHY, the DECISION, and the OUTCOME.
-    Include technical details that would be useful to reference later.}
-
-5. Create one file per distinct topic. If multiple work-log entries relate to the same topic, merge them into one file.
-
-6. If there is NOTHING wiki-worthy in today's work-log, output exactly NO_WIKI_CONTENT and do not create any files."
+    prompt="$(llm_wiki_prompt_extract "$worklog_file" "$today" "$raw_dir")"
 
     local outfile="$LLM_WIKI/.tmp-wiki-extract-$$.txt"
     if timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" --permission-mode bypassPermissions --no-session-persistence > "$outfile" 2>&1; then
@@ -311,20 +250,7 @@ phase2_wiki() {
         log "  Processing wiki source: $filename..."
 
         local prompt
-        prompt="You are a wiki-page generation agent. Your task:
-
-1. Read the wiki rules at: $VAULT/CLAUDE.md
-2. Read the source file at: $raw_file
-3. Determine which project this belongs to (munice, gomgom, or general)
-4. Read that project's index: $VAULT/wiki/{project}/index.md
-
-Based on the source content:
-- Create or update the appropriate wiki page(s) in $VAULT/wiki/
-- Follow the directory structure and naming conventions from CLAUDE.md
-- Update the relevant project index.md (munice/index.md, gomgom/index.md, or general/index.md)
-- Append a timestamped entry to $VAULT/wiki/log.md documenting what you did
-
-Write all wiki content in Korean. Follow the existing style of pages in the wiki."
+        prompt="$(llm_wiki_prompt_page "$raw_file")"
 
         # Run claude -p directly (< /dev/null prevents it from consuming the while-read stdin)
         local outfile="$LLM_WIKI/.tmp-wiki-output-$$.txt"
