@@ -1,0 +1,31 @@
+#!/bin/bash
+# Launch Claude Code only once the network can actually resolve names.
+#
+# Why this exists: this Mac commutes closed (09:30 lid shut → 11:00 lid open).
+# The first command typed after the lid opens races Wi-Fi association and dies
+# with "API Error: Can't reach the API server (ENOTFOUND)".
+#
+# Why it does NOT copy GomGomBot's moderation-scan guard: that one checks
+# `scutil --dns` for a `nameserver[0]` line. This Mac has DNS statically set to
+# 1.1.1.1/8.8.8.8 (the gateway 172.16.8.1 serves no DNS at all — measured 0/10),
+# so that line is present even with the radio down. It would pass instantly and
+# guard nothing. Resolving a real name is the only honest check.
+set -u
+HOST="${CLAUDE_PROBE_HOST:-api.anthropic.com}"
+DEADLINE=$(( $(date +%s) + ${CLAUDE_WAIT_SECS:-45} ))
+
+if ! dscacheutil -q host -a name "$HOST" 2>/dev/null | grep -q ip_address; then
+  printf 'waiting for DNS'
+  while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+    printf '.'
+    sleep 1
+    if dscacheutil -q host -a name "$HOST" 2>/dev/null | grep -q ip_address; then
+      printf ' ok\n'; break
+    fi
+  done
+  # Fall through on timeout: better to launch and let Claude report the error
+  # than to silently refuse to start.
+  [ "$(date +%s)" -lt "$DEADLINE" ] || printf ' timeout — 그냥 실행합니다\n'
+fi
+
+exec claude "$@"

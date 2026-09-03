@@ -67,6 +67,14 @@ alias lt="lsd --tree --hyperlink=auto -I node_modules"
 alias diff="delta"
 alias tree="broot"
 
+# Claude Code: wait for DNS before launching. This laptop commutes closed
+# (09:30 lid shut -> 11:00 lid open) and the first command after the lid opens
+# races Wi-Fi association, dying with "API Error ... (ENOTFOUND)".
+# claude-online resolves a real name first, then exec's claude unchanged;
+# with DNS already up it adds no delay. Only helps at LAUNCH — an ENOTFOUND
+# inside an already-open session is not covered.
+alias claude="$HOME/.dotfiles/scripts/claude-online"
+
 # Editor
 alias vim="nvim"
 alias vi="nvim"
