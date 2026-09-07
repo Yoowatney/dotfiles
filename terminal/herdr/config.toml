@@ -1,3 +1,4 @@
+onboarding = false
 # herdr configuration
 # Only overrides live here — everything else falls through to built-in defaults,
 # so new defaults keep applying across upgrades. `herdr --default-config` prints
