@@ -60,6 +60,16 @@ last_pane = "prefix+tab"
 previous_workspace = "prefix+left"
 next_workspace = "prefix+right"
 
+# Reordering the active tab, added in v0.8.2 and unbound by default. It wraps at
+# either end, so repeated presses walk a tab all the way around.
+#
+# NOT the alt+shift+arrow that herdr's own example suggests: this terminal drops
+# alt, so that binding would parse, pass every check, and silently do nothing.
+# prefix+arrow already moves between workspaces, so adding shift to drag the tab
+# itself keeps the arrow meaning direction.
+move_tab_previous = "prefix+shift+left"
+move_tab_next = "prefix+shift+right"
+
 # Swapped with each other: prefix+s is where tmux's session list lived, and that
 # is what the navigator does here. Settings takes over the freed prefix+g.
 goto = "prefix+s"
@@ -187,3 +197,6 @@ show_agent_labels_on_pane_borders = true
 # live in. With twenty agent panes, "which one needs me" is the only question the
 # panel gets asked; grouping by space just reproduces what the tab bar shows.
 agent_panel_sort = "priority"
+
+[ui.sound]
+enabled = false
