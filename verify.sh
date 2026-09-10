@@ -185,7 +185,9 @@ check "iterm2 plist" "[[ -f '$PREFS/com.googlecode.iterm2.plist' ]]"
 # ===========================================
 echo ""
 echo "🤖 Claude Code"
-check "claude installed" "[[ -x ~/.local/share/mise/shims/claude ]]"
+# 네이티브 설치본이 ~/.local/bin/claude 다. mise shim 은 옛 npm 설치의 잔재라
+# 있는 기기도 없는 기기도 있어서, 둘 중 하나만 있으면 통과로 본다.
+check "claude installed" "[[ -x ~/.local/bin/claude ]] || [[ -x ~/.local/share/mise/shims/claude ]]"
 check "settings.json exists" "[[ -f '$HOME/.claude/settings.json' ]]"
 check "statusline symlink" "[[ -L '$HOME/.claude/statusline-command.sh' ]]"
 check "stop-notification.sh symlink" "[[ -L '$HOME/.claude/hooks/stop-notification.sh' ]]"
