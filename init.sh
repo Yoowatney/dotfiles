@@ -564,6 +564,13 @@ post_install() {
         fi
     done
 
+    # Tailscale: root LaunchDaemon이라 로그인 전에도 tailnet에 붙는다 (서버 맥북 필수)
+    if command -v tailscale &>/dev/null; then
+        sudo brew services start tailscale &>/dev/null \
+            && info "tailscaled 시작됨 (brew services)" \
+            || warn "tailscaled 시작 실패: sudo brew services start tailscale"
+    fi
+
     echo ""
     echo -e "${YELLOW}  💡 권한 설정: 시스템 설정 > 개인정보 보호 및 보안 > 입력 모니터링 / 손쉬운 사용${NC}"
     echo -e "${YELLOW}  💡 구름 설정: 시스템 설정 > 키보드 > 입력 소스 > 구름 추가${NC}"
@@ -620,6 +627,11 @@ show_secrets_guide() {
     echo -e "${GREEN}6. Shell 재시작${NC}"
     echo "   source ~/.zshrc && mise install"
     echo ""
+
+    echo -e "${GREEN}7. Tailscale (브라우저 인증)${NC}"
+    echo '   sudo tailscale up --operator=$USER'
+    echo '   서버 맥북(--server)이면 클라이언트에서: herdr --remote $USER@<tailscale-hostname>'
+    echo ""
 }
 
 # ===========================================
@@ -646,7 +658,14 @@ main() {
     sudo pmset -a displaysleep 0
 
     # SSH 원격 로그인 끄기 + 비밀번호 변수 정리
-    trap "unset SUDO_PASS; sudo systemsetup -setremotelogin off 2>/dev/null; sudo launchctl unload -w /System/Library/LaunchDaemons/ssh.plist 2>/dev/null" EXIT
+    # --server: 서버 맥북은 herdr --remote 로 접속해야 하므로 원격 로그인을 켠 채로 둔다
+    if [[ " $* " == *" --server "* ]]; then
+        sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist 2>/dev/null
+        sudo systemsetup -setremotelogin on 2>/dev/null
+        trap "unset SUDO_PASS" EXIT
+    else
+        trap "unset SUDO_PASS; sudo systemsetup -setremotelogin off 2>/dev/null; sudo launchctl unload -w /System/Library/LaunchDaemons/ssh.plist 2>/dev/null" EXIT
+    fi
 
     # sudo 캐시 유지 (백그라운드)
     while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &

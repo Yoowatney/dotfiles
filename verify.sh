@@ -144,6 +144,8 @@ check "ripgrep installed" "command -v rg &>/dev/null"
 check "fd installed" "command -v fd &>/dev/null"
 check "bat installed" "command -v bat &>/dev/null"
 check "uv installed" "command -v uv &>/dev/null"
+check "tailscale installed" "command -v tailscale &>/dev/null"
+check_warn "tailscale connected" "tailscale status &>/dev/null" "Run: sudo brew services start tailscale && sudo tailscale up --operator=\$USER"
 
 # ===========================================
 # 7. Karabiner

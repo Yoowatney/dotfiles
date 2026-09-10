@@ -20,6 +20,19 @@ cd ~/.dotfiles
 ./init.sh
 ```
 
+### Server MacBook (reached with `herdr --remote`)
+
+```bash
+./init.sh --server                    # same, but leaves Remote Login (sshd) on
+sudo tailscale up --operator=$USER    # browser auth; init.sh already started tailscaled
+```
+
+From the client, once: `./scripts/setup-ssh.sh <tailscale-hostname> <user>`, then `herdr --remote <user>@<tailscale-hostname>`.
+
+Gotchas:
+- Run `herdr --remote` from a plain terminal window, not inside a herdr pane (nested herdr is off by default).
+- Keep herdr at the same version on both machines (`brew upgrade herdr`). An older local client cannot talk to a newer remote server; it stops the server and installs its own copy into `~/.local/bin` on the remote, bypassing the Brewfile one.
+
 ## What init.sh does
 
 1. Install Homebrew (if not installed)
