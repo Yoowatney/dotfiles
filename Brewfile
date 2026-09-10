@@ -62,6 +62,11 @@ brew "pass"
 brew "pngpaste"
 brew "protobuf"
 brew "ripgrep"
+# herdr --remote 로 서버 맥에 붙기 위한 것. 집·회사·외부 어느 망에서 시작하든
+# 같은 MagicDNS 이름으로 닿아서, 공유기 포트포워딩으로 SSH를 인터넷에 열지
+# 않아도 된다. 데몬은 `sudo brew services start tailscale`, 로그인은
+# `tailscale up` — 둘 다 기기별 1회라 init.sh 가 대신 해주지 못한다.
+brew "tailscale"
 brew "terminal-notifier"
 brew "tmux"
 brew "watch"
