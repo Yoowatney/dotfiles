@@ -317,6 +317,14 @@ setup_claude() {
     # statusline-command.sh symlink
     create_symlink "$DOTFILES/tools/claude/statusline-command.sh" "$CLAUDE_DIR/statusline-command.sh" "Claude statusline"
 
+    # 기기 간 동일해야 하는 글로벌 설정 — settings.json 과 달리 Claude 가 실행
+    # 중에 고쳐 쓰지 않으므로 복사가 아니라 링크로 건다.
+    # ~/.claude/CLAUDE.md 와 settings.json 은 여기 없다. 회사 정보가 들어 있고
+    # 이 저장소는 공개라서, scripts/sync-claude-config.sh 로 기기끼리 직접 옮긴다.
+    create_symlink "$DOTFILES/tools/claude/keybindings.json" "$CLAUDE_DIR/keybindings.json" "Claude keybindings"
+    create_symlink "$DOTFILES/tools/claude/commands" "$CLAUDE_DIR/commands" "Claude commands"
+    create_symlink "$DOTFILES/tools/claude/output-styles" "$CLAUDE_DIR/output-styles" "Claude output-styles"
+
     # hooks symlinks (all files)
     for hook in "$DOTFILES/tools/claude/hooks"/*.sh; do
         if [[ -f "$hook" ]]; then

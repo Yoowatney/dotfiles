@@ -1,0 +1,10 @@
+{
+  "bindings": [
+    {
+      "context": "Autocomplete",
+      "bindings": {
+        "right": "autocomplete:accept"
+      }
+    }
+  ]
+}
