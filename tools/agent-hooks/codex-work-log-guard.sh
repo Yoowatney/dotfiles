@@ -119,25 +119,34 @@ case "$MODE" in
             exit 0
         fi
 
-        worklog="$(jq -r '.worklog // empty' "$STATE_FILE" 2>/dev/null)"
-        baseline_worklog_size="$(jq -r '.worklog_size // 0' "$STATE_FILE" 2>/dev/null)"
+        turn_id="$(printf '%s' "$payload" | jq -r '.turn_id // empty' 2>/dev/null)"
+        safe_turn="$(printf '%s' "$turn_id" | tr -cd 'A-Za-z0-9._-')"
+        [[ -n "$safe_turn" ]] || safe_turn="unknown"
+        claimed_state="$TURN_STATE_DIR/.processing-$safe_session-$safe_turn-$$.json"
+        if ! mv "$STATE_FILE" "$claimed_state" 2>/dev/null; then
+            log_guard "baseline was already claimed for session $session_id"
+            exit 0
+        fi
+
+        worklog="$(jq -r '.worklog // empty' "$claimed_state" 2>/dev/null)"
+        baseline_worklog_size="$(jq -r '.worklog_size // 0' "$claimed_state" 2>/dev/null)"
         current_worklog_size="$(file_size "$worklog")"
         if (( current_worklog_size > baseline_worklog_size )); then
             log_guard "work-log already updated for session $session_id"
-            rm -f "$STATE_FILE"
+            rm -f "$claimed_state"
             exit 0
         fi
 
         transcript_path="$(printf '%s' "$payload" | jq -r '.transcript_path // empty' 2>/dev/null)"
         if [[ -z "$transcript_path" ]]; then
-            transcript_path="$(jq -r '.transcript_path // empty' "$STATE_FILE" 2>/dev/null)"
+            transcript_path="$(jq -r '.transcript_path // empty' "$claimed_state" 2>/dev/null)"
         fi
-        transcript_size="$(jq -r '.transcript_size // 0' "$STATE_FILE" 2>/dev/null)"
+        transcript_size="$(jq -r '.transcript_size // 0' "$claimed_state" 2>/dev/null)"
         cwd="$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null)"
         if [[ -z "$cwd" ]]; then
-            cwd="$(jq -r '.cwd // empty' "$STATE_FILE" 2>/dev/null)"
+            cwd="$(jq -r '.cwd // empty' "$claimed_state" 2>/dev/null)"
         fi
-        today="$(jq -r '.today // empty' "$STATE_FILE" 2>/dev/null)"
+        today="$(jq -r '.today // empty' "$claimed_state" 2>/dev/null)"
         [[ -n "$today" ]] || today="$TODAY"
         last_message="$(printf '%s' "$payload" | jq -r '.last_assistant_message // empty' 2>/dev/null)"
         project="$(project_from_cwd "$cwd")"
@@ -149,7 +158,7 @@ case "$MODE" in
             exit 0
         }
         cleanup_files() {
-            rm -f "$turn_file" "$result_file"
+            rm -f "$turn_file" "$result_file" "$claimed_state"
         }
         trap cleanup_files EXIT INT TERM
 
@@ -191,7 +200,7 @@ case "$MODE" in
             log_guard "recovery model failed for session $session_id"
         fi
 
-        rm -f "$STATE_FILE"
+        rm -f "$claimed_state"
         ;;
 
     *)

@@ -12,6 +12,13 @@ fail() {
     exit 1
 }
 
+assert_eq() {
+    local expected="$1"
+    local actual="$2"
+    local message="$3"
+    [[ "$actual" == "$expected" ]] || fail "$message (expected=$expected actual=$actual)"
+}
+
 assert_contains() {
     local file="$1"
     local expected="$2"
@@ -138,6 +145,26 @@ printf 'NO_WORK\n' > "$SANDBOX/home/model-result"
 stop_payload | run_guard finish
 captured_size="$(cat "$SANDBOX/home/captured-size")"
 [[ "$captured_size" -le 2097400 ]] || fail "turn capture is capped near 2 MiB (actual=$captured_size)"
+
+setup_fixture
+begin_payload | run_guard begin
+printf 'first turn work\n' >> "$SANDBOX/home/transcript.jsonl"
+printf 'NO_WORK\n' > "$SANDBOX/home/model-result"
+cat > "$SANDBOX/home/fake-claude" <<EOF
+#!/usr/bin/env bash
+cat "$SANDBOX/home/next-begin.json" | \
+  HOME="$SANDBOX/home" \
+  LLM_WIKI_STATE_DIR="$SANDBOX/home/state" \
+  LLM_WIKI_CONFIG="$SANDBOX/home/config.sh" \
+  LLM_WIKI_TODAY="2026-09-15" \
+  "$GUARD" begin
+cat "$SANDBOX/home/model-result"
+EOF
+chmod +x "$SANDBOX/home/fake-claude"
+begin_payload > "$SANDBOX/home/next-begin.json"
+stop_payload | run_guard finish
+[[ -f "$state_file" ]] || fail "finishing an older turn preserves the next turn baseline"
+assert_eq "$(stat -f %z "$SANDBOX/home/transcript.jsonl")" "$(jq -r '.transcript_size' "$state_file")" "next turn baseline keeps its transcript offset"
 
 setup_fixture
 begin_payload | run_guard begin
