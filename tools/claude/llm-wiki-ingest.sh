@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ingest.sh — LLM Wiki auto-ingest script
-# Runs every hour via launchd. Three phases:
+# Triggered by Claude Code and Codex internal Stop hooks. Three phases:
 #   Phase 1:   Claude Code session transcripts → work-log entries
 #   Phase 1.5: Work-log → raw wiki extraction (architecture decisions, insights)
 #   Phase 2:   Raw files (youtube/articles/work-insights) → wiki pages
@@ -25,8 +25,7 @@ LOGFILE="$LLM_WIKI/ingest.log"
 LAST_CHECK="$LLM_WIKI/.last-worklog-check"
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 # Hard ceiling per claude call. A hung call used to stall the whole run
-# indefinitely (one sat for four months), and launchd will not start the
-# next cycle while the previous one is still alive.
+# indefinitely and prevented later hook runs from making progress.
 CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-600}"
 
 
