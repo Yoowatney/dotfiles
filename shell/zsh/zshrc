@@ -105,6 +105,25 @@ alias ql='qlmanage -p'
 # Markdown viewer
 mdc() { open -a "Google Chrome" "$@" }
 
+# Attach to the server Mac — the one that stays awake and runs the scheduled
+# jobs (동물유형 점검 etc.). It is only reachable over tailscale, but tailscale is
+# usually already up: `status` exits non-zero only when it is stopped or logged
+# out, so `up` gets paid for only when it is actually needed.
+#
+# The ssh target is read from a file instead of being written here, because this
+# repo is public. The account name is already all over it, but which machine you
+# hold a remote shell on is reconnaissance you get nothing for handing out.
+srv() {
+  local target_file=$HOME/.config/herdr/remote-host target=
+  [[ -r $target_file ]] && target="$(<$target_file)"
+  if [[ -z $target ]]; then
+    print -u2 "srv: ssh 타깃이 없습니다 — $target_file 에 user@host 한 줄을 적어주세요"
+    return 1
+  fi
+  tailscale status >/dev/null 2>&1 || tailscale up || return
+  herdr --remote "$target" "$@"
+}
+
 killport() {
     lsof -i TCP:$1 | grep LISTEN | awk '{print $2}' | xargs kill -9
 }
@@ -206,8 +225,7 @@ bindkey "ç" fzf-cd-widget
 # mise (asdf replacement)
 eval "$(mise activate zsh)"
 
-# zoxide
-eval "$(zoxide init zsh)"
+# zoxide → init은 파일 맨 끝에 둠 (뒤에 PATH 수정이 오면 경고 뜸)
 alias cd="z"
 
 # direnv
@@ -242,3 +260,21 @@ unset CPPFLAGS
 unset LDFLAGS
 [[ -z "$TMUX" ]] && export TERM=xterm-256color
 export FIREBASE_DEBUG_LOG=/dev/null
+
+# Ensure mise shims win over Homebrew for tool dispatch
+# (mise activate's hook-env can reorder PATH such that Homebrew wins;
+#  prepending shims explicitly makes tool resolution unambiguous)
+export PATH="$HOME/.local/share/mise/shims:$PATH"
+
+# bun completions
+[ -s "/Users/yoyoo/.bun/_bun" ] && source "/Users/yoyoo/.bun/_bun"
+
+# bun
+export BUN_INSTALL="$HOME/.bun"
+export PATH="$BUN_INSTALL/bin:$PATH"
+
+# zoxide init — 반드시 PATH 수정 이후 맨 끝에 있어야 경고 안 뜸
+# Claude Code Bash 툴은 init 이후 PATH를 덧붙여 오탐을 일으키므로 doctor 비활성화
+export _ZO_DOCTOR=0
+eval "$(zoxide init zsh)"
+set -a; source ~/.config/notion/.env; set +a
