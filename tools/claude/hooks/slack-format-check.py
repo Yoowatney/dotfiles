@@ -3,7 +3,7 @@
 
 Those tools send plain `text`, which Slack renders as mrkdwn: no real lists, no
 `**bold**`, no headings. A typed `•` or `- ` shows up as a fake bullet whose
-wrapped lines don't indent. Exit 2 blocks the call and tells the model why.
+wrapped lines don't indent. A JSON deny blocks the call and tells the model why.
 
     slack-format-check.py --selftest
 """
@@ -71,6 +71,9 @@ if __name__ == "__main__":
     payload = json.load(sys.stdin)
     text = (payload.get("tool_input") or {}).get("text") or ""
     found = problems(text)
-    if found:
-        print("Slack 형식 검사에 걸렸습니다.\n- " + "\n- ".join(found) + "\n" + FIX, file=sys.stderr)
-        sys.exit(2)
+    if found:  # JSON deny: Claude Code and Codex both read it
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "Slack 형식 검사에 걸렸습니다.\n- " + "\n- ".join(found) + "\n" + FIX,
+        }}, ensure_ascii=False))

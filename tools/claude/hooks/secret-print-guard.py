@@ -60,26 +60,43 @@ def strip_captures(cmd: str) -> str:
     return re.sub(r"`[^`]*`", "", "".join(out))
 
 
-def words(segment: str) -> list[str]:
+def segments(cmd: str) -> list[list[str]]:
+    """Simple commands as word lists, split on ; & | and newlines that sit outside quotes."""
     try:
-        w = shlex.split(segment, comments=False)
-    except ValueError:
-        w = segment.split()
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=";&|\n")
+        lex.whitespace = " \t\r"
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:  # unbalanced quotes: fall back to a plain split
+        return [s.split() for s in SPLIT.split(cmd)]
+    out, cur = [], []
+    for t in toks:
+        if t and set(t) <= set(";&|\n"):
+            out.append(cur)
+            cur = []
+        else:
+            cur.append(t)
+    out.append(cur)
+    return out
+
+
+def words(w: list[str]) -> list[str]:
     while w and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w[0]):  # VAR=x cmd
-        w.pop(0)
+        w = w[1:]
     while w and w[0] in {"sudo", "command", "exec", "time", "export"}:
-        w.pop(0)
+        w = w[1:]
     return w
 
 
 def bash_problem(cmd: str) -> str | None:
     visible = strip_captures(HEREDOC.sub("<<heredoc", cmd))  # heredoc bodies are text, not commands
-    if PRINTS_SECRET.search(visible):
-        return "토큰이나 비밀값을 출력하는 명령은 `VAR=$(...)`로 변수에 담아서만 쓸 것"
-    for segment in SPLIT.split(visible):
-        w = words(segment)
+    for seg_words in segments(visible):
+        w = words(seg_words)
         if not w:
             continue
+        segment = " ".join(w)
+        if PRINTS_SECRET.match(segment):
+            return "토큰이나 비밀값을 출력하는 명령은 `VAR=$(...)`로 변수에 담아서만 쓸 것"
         verb = w[0].rsplit("/", 1)[-1]
         if verb == "printenv" or (verb == "env" and all(a.startswith("-") for a in w[1:])):
             return "printenv/env는 환경변수의 비밀값을 그대로 출력함"
@@ -128,6 +145,9 @@ def selftest():
         "T=$(cat ~/.config/x/.env); curl -v -H \"Authorization: Bearer $T\" https://x",
         "cat ~/.config/cloudflare/.env > /tmp/copy",
         "uv run --with x python3 dump.py ~/.codex/config.toml",
+        "ls ~/.codex/hooks/ 2>/dev/null; grep -n -A8 -i \"hooks\" ~/.codex/config.toml 2>/dev/null | head -30",
+        "cd /tmp && gcloud auth print-access-token",
+        "sudo cat ~/.config/x/.env",
     ]
     allow = [
         "T=$(python3 -I -c 'import re,os;print(open(os.path.expanduser(\"~/.codex/config.toml\")).read())')",
@@ -146,6 +166,9 @@ def selftest():
         "git commit -m \"stop reading ~/.claude.json with cat\"",
         "cat >> notes.md <<'EOF'\n토큰은 ~/.codex/config.toml에 있다\ncat ~/.config/x/.env 금지\nEOF\necho ok",
         "board.sh create x <<EOF\nsee ~/.claude.json\nEOF",
+        "cd /tmp && codex exec \"Step 1: run cat ~/.config/x/.env (blocked is expected; do not retry). "
+        "Step 2: gcloud auth print-access-token | head\" > out.txt 2>&1; echo $?",
+        "git commit -m \"docs: never run cat ~/.claude.json; use grep -c\"",
     ]
     for c in deny:
         assert bash_problem(c), f"should deny: {c}"
@@ -163,6 +186,9 @@ if __name__ == "__main__":
         selftest()
         sys.exit()
     reason = tool_problem(json.load(sys.stdin))
-    if reason:
-        print(f"secret-print-guard: {reason}", file=sys.stderr)
-        sys.exit(2)
+    if reason:  # JSON deny: Claude Code and Codex both read it (Codex's exit-2 handling is unverified)
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": f"secret-print-guard: {reason}",
+        }}, ensure_ascii=False))
