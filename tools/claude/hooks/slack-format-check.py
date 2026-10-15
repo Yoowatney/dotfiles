@@ -73,6 +73,7 @@ CODE_FIX = (
     "chat.postMessage의 text 안 기호는 그냥 글자라서 목록이 되지 않는다. "
     "rich_text 블록의 rich_text_list(style bullet, indent 0/1)로 만들 것. "
     "예: monaural_beat_recommend scripts/notify_slack.py의 to_blocks()는 `- ` 줄을 진짜 목록으로 바꾼다. "
+    "그런 변환 없이 기호를 `- `나 `[라벨]` 문단으로 바꾸기만 하는 것은 해결이 아니다(mrkdwn text에서는 똑같이 깨진다). "
     "보낸 뒤에는 conversations.history로 블록 종류를 다시 확인한다. "
     "기호를 지우는 편집이면 Edit 도구로 하고, 정말 글자 그대로 필요하면 그 줄에 `slack-format: ok`를 적는다 "
     "(memory: reference_slack_mcp_no_real_bullets)."
