@@ -36,8 +36,57 @@ FIX = (
 )
 
 
-def problems(text: str) -> list[str]:
+MEMBERS = os.path.expanduser("~/.config/slackcopy/members.json")
+KOREAN_MENTION = re.compile(r"(?<![\w./@])@([가-힣]+)")
+MENTION_FIX = (
+    "Slack 멘션은 영어 Slack 이름으로 쓴다(예: @Jane). 한글 @이름은 원문과 일반 텍스트 붙여넣기에 그대로 남아 "
+    "멘션이 되지 않는다. slackcopy는 영어 이름도 진짜 멘션으로 바꾼다. 멤버 목록: ~/.config/slackcopy/members.json"
+)
+
+
+def load_members(path: str = MEMBERS) -> dict[str, str]:
+    """members.json is {user id: [English label, alias, ...]}; returns alias -> English label."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return {alias.lower(): names[0] for names in json.load(f).values() for alias in names}
+    except (OSError, ValueError):
+        return {}
+
+
+def mention_problems(text: str, members: dict[str, str]) -> list[str]:
+    """Korean @mentions, with the English Slack name to use instead (Korean particles may follow: @홍길동님)."""
     found, fenced = [], False
+    for n, raw in enumerate(text.split("\n"), 1):
+        if raw.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        for word in KOREAN_MENTION.findall(INLINE_CODE.sub("", raw)):
+            name = max((a for a in members if word.startswith(a)), key=len, default=None)
+            found.append(f"{n}행: @{name} → @{members[name]} (Slack 이름은 영어로)" if name
+                         else f"{n}행: @{word} → Slack 영어 이름으로 (members.json에 없음)")
+    return found
+
+
+def slackcopy_problems(command: str, members: dict[str, str]) -> list[str]:
+    """Korean @mentions in the files a `slackcopy <file>` command is about to put on the clipboard."""
+    found = []
+    for segment in re.split(r"\|\||&&|[;|]", command):
+        words = segment.split()
+        if not words or os.path.basename(words[0]) != "slackcopy":
+            continue
+        for arg in words[1:]:
+            if arg.startswith("-") or ">" in arg or "<" in arg:
+                continue
+            path = os.path.expanduser(arg.strip("'\""))
+            if os.path.isfile(path):
+                found += [f"{os.path.basename(path)} {p}" for p in mention_problems(on_disk(path), members)]
+    return found
+
+
+def problems(text: str, members: dict[str, str] | None = None) -> list[str]:
+    found, fenced = mention_problems(text, load_members() if members is None else members), False
     for n, raw in enumerate(text.split("\n"), 1):
         if raw.lstrip().startswith("```"):
             fenced = not fenced
@@ -184,6 +233,25 @@ def selftest():
     assert code_problems("apply_patch", {"command": patch}, nowhere)
     same = "*** Begin Patch\n*** Update File: n.py\n@@\n-" + slack_line + "\n+" + slack_line + " x\n*** End Patch"
     assert code_problems("apply_patch", {"command": same}, nowhere) == []
+
+    # Korean @mentions: Slack's real names are English, so `@홍길동` pastes as plain text.
+    members = {"홍길동": "Gildong", "gildong": "Gildong"}
+    assert mention_problems("안녕 @홍길동, 확인 부탁", members) == ["1행: @홍길동 → @Gildong (Slack 이름은 영어로)"]
+    assert mention_problems("x\n@홍길동님 확인", members) == ["2행: @홍길동 → @Gildong (Slack 이름은 영어로)"]
+    assert mention_problems("@모르는이 확인", members) == ["1행: @모르는이 → Slack 영어 이름으로 (members.json에 없음)"]
+    for fine in ["@Gildong 확인", "`@홍길동`", "```\n@홍길동\n```", "mail a@b.com", "https://x.y/@홍길동"]:
+        assert mention_problems(fine, members) == [], fine
+    md = "/tmp/slack-format-check-selftest.md"
+    with open(md, "w", encoding="utf-8") as f:
+        f.write("**[ 제목 ]** @홍길동\n")
+    try:
+        assert slackcopy_problems("slackcopy " + md, members), "slackcopy file with a Korean mention"
+        assert slackcopy_problems("slackcopy --no-lint " + md + " 2>&1 | tail -3", members)
+        assert slackcopy_problems("echo slackcopy is great", members) == []
+        assert slackcopy_problems("cat " + md, members) == []  # not slackcopy
+    finally:
+        os.remove(md)
+    assert problems("*[ a ]* @홍길동", members)  # Slack MCP text too
     print("selftest ok")
 
 
@@ -195,9 +263,11 @@ if __name__ == "__main__":
     tool = payload.get("tool_name") or ""
     inp = payload.get("tool_input") or {}
     if "slack" in tool.lower() and "text" in inp:  # the Slack MCP post tools
-        found, fix = problems(inp.get("text") or ""), FIX
+        found, fix = problems(inp.get("text") or ""), FIX + "\n" + MENTION_FIX
     else:
         found, fix = code_problems(tool, inp, payload.get("cwd") or os.getcwd()), CODE_FIX
+        if not found and "slackcopy" in (inp.get("command") or ""):  # a markdown file headed for the clipboard
+            found, fix = slackcopy_problems(inp["command"], load_members()), MENTION_FIX
     if found:  # JSON deny: Claude Code and Codex both read it
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
