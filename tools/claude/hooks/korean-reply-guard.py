@@ -33,7 +33,8 @@ STRIP = [
 HANGUL = re.compile(r"[가-힣]")
 LATIN = re.compile(r"[A-Za-z]")
 REASON = ("korean-reply-guard: 방금 응답의 본문이 영어였습니다. 같은 내용을 한국어로 다시 쓰되 코드·경로·명령어는 그대로 두고, "
-          "사용자가 영어 문장을 직접 요청했다면 그 부분만 코드 블록에 넣으세요.")
+          "사용자가 영어 문장을 직접 요청했다면 그 부분만 코드 블록에 넣고, Codex 리뷰처럼 원문 그대로 옮겨야 하는 글은 "
+          "번역하지 말고 `>` 인용으로 남기세요.")
 
 
 def final_text_from_transcript(path: str) -> str:
