@@ -38,5 +38,16 @@ else
     msg="herdr pane label: no label yet (the pane shows \"$PLACEHOLDER\" or the session's first-topic title). Name it for the current task before other work: pane-label \"<issue> <2-4 words>\" (e.g. pane-label \"api#736 Dependabot 정리\")."
 fi
 
+# Every turn re-reads the whole session, so a long one eats the 5-hour and 7-day limits; a new task
+# belongs in a cleared session (요유 2026-10-17). Size = the last assistant message's usage.
+transcript=$(jq -r '.transcript_path // empty' <<<"$input" 2>/dev/null)
+if [ -n "$transcript" ] && [ -r "$transcript" ]; then
+    tokens=$(tail -n 200 "$transcript" | jq -R -r 'fromjson? | select(.type == "assistant") | .message.usage // empty
+        | (.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0)' 2>/dev/null | tail -n 1)
+    if [ "${tokens:-0}" -gt 300000 ] 2>/dev/null; then
+        msg="$msg Context is about $((tokens / 1000))k tokens. If this message starts a different task, first leave what the next session needs (board comment, work-log or memory), then suggest in one line that 요유 run /clear or open a new pane."
+    fi
+fi
+
 jq -n --arg ctx "$msg" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $ctx}}' 2>/dev/null
 exit 0

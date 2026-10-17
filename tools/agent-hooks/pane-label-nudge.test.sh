@@ -66,6 +66,26 @@ ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_HERDR_FAIL=1 | context)
 ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 새 세션 gomgom" | context)
 [[ "$ctx" == *"no label yet"* ]] || fail "placeholder should ask for a name: $ctx"
 
+# Long session: past 300k tokens of context, a new task should start in a cleared session (요유 2026-10-17).
+# The size is the last assistant message's usage; a compacted session reads small again.
+run_with_transcript() { # $1 = transcript path; prints the additionalContext
+    echo "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"hi\",\"transcript_path\":\"$1\"}" |
+        env -u FAKE_HERDR_FAIL HERDR_BIN_PATH="$SANDBOX/herdr" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 api#1 작업" "$SUBJECT" |
+        context || fail "hook exited non-zero with transcript $1"
+}
+usage_line() { echo "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":2,\"cache_read_input_tokens\":$1,\"cache_creation_input_tokens\":1000}}}"; }
+T="$SANDBOX/long.jsonl"
+{ echo '{"type":"user","message":{"content":"hi"}}'; usage_line 340000; echo 'not json'; } > "$T"
+ctx=$(run_with_transcript "$T")
+[[ "$ctx" == *"/clear"* ]] || fail "long session should suggest /clear: $ctx"
+[[ "$ctx" == *"341k"* ]] || fail "long session should say its size: $ctx"
+{ usage_line 600000; usage_line 40000; } > "$SANDBOX/compacted.jsonl"
+ctx=$(run_with_transcript "$SANDBOX/compacted.jsonl")
+[[ "$ctx" != *"/clear"* ]] || fail "only the last message counts: $ctx"
+ctx=$(run_with_transcript "$SANDBOX/missing.jsonl")
+[[ "$ctx" != *"/clear"* ]] || fail "missing transcript should not suggest /clear: $ctx"
+[[ "$ctx" == *'pane-label "'* ]] || fail "missing transcript should still remind about the label: $ctx"
+
 # Session start: a pane with no name gets "새 세션 <folder>" at once, so it never shows a bare
 # "Claude Code" title while waiting for the first message (요유 2026-10-17).
 run_start() { # session-start mode; prints stdout, must exit 0
