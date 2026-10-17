@@ -15,6 +15,7 @@ import re
 import sys
 
 # ponytail: reuse secret-print-guard's tested command parser instead of a second copy.
+sys.dont_write_bytecode = True  # no __pycache__ in the dotfiles checkout
 _spec = importlib.util.spec_from_file_location(
     "secret_print_guard", os.path.join(os.path.dirname(os.path.realpath(__file__)), "secret-print-guard.py"))
 assert _spec and _spec.loader
