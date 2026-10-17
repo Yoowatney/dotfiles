@@ -4,6 +4,8 @@
 
 # 디버깅 로그
 LOG_FILE="$HOME/.claude/hooks/session-env.log"
+# Keep one previous file and start over past 1MB.
+[ "$(stat -f%z "$LOG_FILE" 2>/dev/null || echo 0)" -gt 1048576 ] && mv -f "$LOG_FILE" "$LOG_FILE.1"
 echo "[$(date)] Hook started, CLAUDE_ENV_FILE=$CLAUDE_ENV_FILE" >> "$LOG_FILE"
 
 # tmux-resurrect integration: tag this pane with the Claude session id, its

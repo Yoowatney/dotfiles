@@ -2,6 +2,8 @@
 # Claude Code Stop Hook - 작업 완료 알림 (Hammerspoon)
 
 LOG_FILE="$HOME/.claude/hooks/stop-hook-debug.log"
+# Keep one previous file and start over past 1MB; it had grown to 8MB.
+[ "$(stat -f%z "$LOG_FILE" 2>/dev/null || echo 0)" -gt 1048576 ] && mv -f "$LOG_FILE" "$LOG_FILE.1"
 
 # stdin에서 hook input 읽기
 HOOK_INPUT=$(cat)

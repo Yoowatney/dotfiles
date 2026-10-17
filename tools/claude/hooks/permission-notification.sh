@@ -2,6 +2,8 @@
 # Claude Code Notification Hook - 입력 대기/권한 요청 알림 (Hammerspoon)
 
 LOG_FILE="$HOME/.claude/hooks/permission-notification-debug.log"
+# Keep one previous file and start over past 1MB.
+[ "$(stat -f%z "$LOG_FILE" 2>/dev/null || echo 0)" -gt 1048576 ] && mv -f "$LOG_FILE" "$LOG_FILE.1"
 
 # stdin에서 hook input 읽기
 HOOK_INPUT=$(cat)
