@@ -326,7 +326,7 @@ setup_claude() {
     create_symlink "$DOTFILES/tools/claude/output-styles" "$CLAUDE_DIR/output-styles" "Claude output-styles"
 
     # hooks symlinks (all files)
-    for hook in "$DOTFILES/tools/claude/hooks"/*.sh; do
+    for hook in "$DOTFILES/tools/claude/hooks"/*.{sh,py}; do
         if [[ -f "$hook" ]]; then
             hook_name=$(basename "$hook")
             create_symlink "$hook" "$CLAUDE_HOOKS/$hook_name" "Claude hook: $hook_name"
