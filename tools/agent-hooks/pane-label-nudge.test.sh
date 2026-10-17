@@ -43,6 +43,16 @@ ctx=$(context <<<"$out")
 [[ "$ctx" == *'"cf#543 미국 확장"'* ]] || fail "current label not shown: $ctx"
 [[ "$ctx" == *'pane-label "'* ]] || fail "rename command not shown: $ctx"
 
+# 🔴: say what it means and how to turn it back to 🟢 once nothing runs here (요유 2026-10-17).
+ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_LABEL="🔴 api#819 배포 감시" | context)
+[[ "$ctx" == *'"🔴 api#819 배포 감시"'* ]] || fail "🔴 label not shown: $ctx"
+[[ "$ctx" == *"pane-label --free"* ]] || fail "🔴 should say how to free: $ctx"
+
+# 🟢: say how to mark 🔴 when starting something that stops with the session.
+ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 api#819 배포" | context)
+[[ "$ctx" == *"pane-label --hold"* ]] || fail "🟢 should say how to hold: $ctx"
+[[ "$ctx" != *"pane-label --free"* ]] || fail "🟢 should not ask to free: $ctx"
+
 # Inside herdr without a label: say there is none.
 ctx=$(run_hook HERDR_PANE_ID=w1:p1 | context)
 [[ "$ctx" == *"no label"* ]] || fail "missing-label case not stated: $ctx"
