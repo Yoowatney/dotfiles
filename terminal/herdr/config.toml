@@ -180,6 +180,12 @@ delivery = "terminal"
 [ui]
 show_agent_labels_on_pane_borders = true
 
+# The pane name (pane-label: what the session works on, and 🟢/🔴 for whether it may be
+# closed) lives in the pane border, and "auto" draws a border only on split panes, so a
+# tab holding one pane showed no name at all (요유 2026-10-17). "always" frames a lone
+# pane too; it needs pane_outer_borders, which is on by default.
+pane_borders = "always"
+
 # Waiting on a release for status_indicators = "symbols", which gives each agent
 # state its own shape (× blocked, ◐ working, ✓ finished, ○ seen) instead of the
 # default dots, where blocked, working, and finished-but-unseen are all the same ●
