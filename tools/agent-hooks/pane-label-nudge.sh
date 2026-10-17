@@ -3,13 +3,29 @@
 # named, so it renames the pane when the user moves the session to a new task.
 # Why a hook: the rule alone was not followed, and a cleared or stale pane falls back to
 # the session's first-topic title, which is how 요유 tells panes apart (2026-10-08).
+# `pane-label-nudge.sh session` is the SessionStart side: a pane with no name gets "새 세션 <folder>",
+# so a new session never sits as a bare "Claude Code" title until its first message (요유 2026-10-17).
 # No-op outside herdr. Always exits 0: a reminder must never block a prompt.
-cat >/dev/null 2>&1 # drain the hook input; nothing in it is needed
+input=$(cat 2>/dev/null)
+PLACEHOLDER="새 세션"
 
 [ -n "${HERDR_PANE_ID:-}" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 
 label=$("${HERDR_BIN_PATH:-herdr}" pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.label // empty' 2>/dev/null)
+
+if [ "${1:-}" = session ]; then
+    # a named pane (resume, /clear) keeps its name
+    if [ -z "$label" ]; then
+        dir=$(jq -r '.cwd // empty' <<<"$input" 2>/dev/null)
+        dir=${dir:-$PWD}
+        bash "$(dirname "$0")/pane-label" "$PLACEHOLDER ${dir##*/}"
+    fi
+    exit 0
+fi
+
+name=${label#🔴}; name=${name#🟢}
+case "${name# }" in "$PLACEHOLDER"*) label= ;; esac # the session-start name is no name yet
 
 # The mark tells 요유 whether closing this session stops something (요유 2026-10-17): see pane-label.
 if [ -n "$label" ]; then
@@ -19,7 +35,7 @@ if [ -n "$label" ]; then
         *) msg="$msg The 🟢 mark tells 요유 this session may be closed. If you start something here that stops when it closes, run pane-label --hold (Claude's background tools set it automatically)." ;;
     esac
 else
-    msg="herdr pane label: no label (the pane shows the session's first-topic title). Name it for the current task before other work: pane-label \"<issue> <2-4 words>\" (e.g. pane-label \"api#736 Dependabot 정리\")."
+    msg="herdr pane label: no label yet (the pane shows \"$PLACEHOLDER\" or the session's first-topic title). Name it for the current task before other work: pane-label \"<issue> <2-4 words>\" (e.g. pane-label \"api#736 Dependabot 정리\")."
 fi
 
 jq -n --arg ctx "$msg" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $ctx}}' 2>/dev/null

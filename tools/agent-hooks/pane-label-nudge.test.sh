@@ -11,10 +11,11 @@ fail() {
 }
 
 # A fake herdr: `herdr pane get <id>` prints a pane with the label in $FAKE_LABEL,
-# or fails when FAKE_HERDR_FAIL is set.
+# or fails when FAKE_HERDR_FAIL is set; `herdr pane rename <id> <name>` logs the name.
 cat > "$SANDBOX/herdr" <<'EOF'
 #!/usr/bin/env bash
 [ -n "${FAKE_HERDR_FAIL:-}" ] && exit 1
+if [ "$1 $2" = "pane rename" ]; then echo "$4" >> "$(dirname "$0")/rename.log"; exit 0; fi
 [ "$1 $2" = "pane get" ] || exit 2
 if [ -n "${FAKE_LABEL:-}" ]; then
     jq -n --arg l "$FAKE_LABEL" '{result: {pane: {pane_id: "w1:p1", label: $l}}}'
@@ -60,5 +61,32 @@ ctx=$(run_hook HERDR_PANE_ID=w1:p1 | context)
 # herdr unreachable: still remind, never fail the prompt.
 ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_HERDR_FAIL=1 | context)
 [[ "$ctx" == *"no label"* ]] || fail "herdr failure should read as no label: $ctx"
+
+# The placeholder a new session gets reads as no name yet: name it, not "rename if the task changed".
+ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 새 세션 gomgom" | context)
+[[ "$ctx" == *"no label yet"* ]] || fail "placeholder should ask for a name: $ctx"
+
+# Session start: a pane with no name gets "새 세션 <folder>" at once, so it never shows a bare
+# "Claude Code" title while waiting for the first message (요유 2026-10-17).
+run_start() { # session-start mode; prints stdout, must exit 0
+    echo "{\"hook_event_name\":\"SessionStart\",\"cwd\":\"/Users/yoyoo/work/gomgom\"}" |
+        env -u HERDR_PANE_ID -u FAKE_LABEL -u FAKE_HERDR_FAIL HERDR_BIN_PATH="$SANDBOX/herdr" "$@" "$SUBJECT" session ||
+        fail "session-start exited non-zero ($*)"
+}
+rm -f "$SANDBOX/rename.log"
+out=$(run_start HERDR_PANE_ID=w1:p1)
+[ -z "$out" ] || fail "session-start should print nothing, got: $out"
+[ "$(cat "$SANDBOX/rename.log" 2>/dev/null)" = "🟢 새 세션 gomgom" ] || fail "new pane not named: $(cat "$SANDBOX/rename.log" 2>/dev/null)"
+
+# A named pane (resume, /clear) keeps its name.
+rm -f "$SANDBOX/rename.log"
+run_start HERDR_PANE_ID=w1:p1 FAKE_LABEL="🔴 cf#584 계측" >/dev/null
+[ ! -s "$SANDBOX/rename.log" ] || fail "named pane renamed: $(cat "$SANDBOX/rename.log")"
+
+# Outside herdr or herdr down: nothing, exit 0.
+rm -f "$SANDBOX/rename.log"
+run_start >/dev/null
+run_start HERDR_PANE_ID=w1:p1 FAKE_HERDR_FAIL=1 >/dev/null
+[ ! -s "$SANDBOX/rename.log" ] || fail "renamed outside herdr: $(cat "$SANDBOX/rename.log")"
 
 echo "ok: pane-label-nudge"
