@@ -79,6 +79,8 @@ T="$SANDBOX/long.jsonl"
 ctx=$(run_with_transcript "$T")
 [[ "$ctx" == *"/clear"* ]] || fail "long session should suggest /clear: $ctx"
 [[ "$ctx" == *"341k"* ]] || fail "long session should say its size: $ctx"
+# A /clear suggestion comes with a handoff prompt on the clipboard (요유 2026-10-17).
+[[ "$ctx" == *"pbcopy"* ]] || fail "long session should ask for a pbcopy handoff prompt: $ctx"
 { usage_line 600000; usage_line 40000; } > "$SANDBOX/compacted.jsonl"
 ctx=$(run_with_transcript "$SANDBOX/compacted.jsonl")
 [[ "$ctx" != *"/clear"* ]] || fail "only the last message counts: $ctx"
