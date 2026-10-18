@@ -111,6 +111,8 @@ def problems(text: str, members: dict[str, str] | None = None) -> list[str]:
 SLACK_CODE = re.compile(
     r"chat[._](?:postMessage|update|postEphemeral|scheduleMessage)|hooks\.slack\.com|slack\.com/api"
     r"|slack_sdk|@slack/|SLACK_[A-Z_]*(?:TOKEN|WEBHOOK)"
+    # wrappers that post their stdin as text (nightly_api scripts/deploy/slack-post.sh, 10/18)
+    r"|slack-post\.sh"
 )
 # A bullet that starts a line of message text: after a newline (real or a literal \n),
 # or right after a string opener / concatenation, then a space.
@@ -229,6 +231,10 @@ def selftest():
         assert code_problems(tool, inp, "") == [], (tool, inp)
     curl = "curl https://slack.com/api/chat.postMessage -d '{\"text\":\"" + B + " a\"}'"
     assert code_problems("Bash", {"command": curl}, "")
+    # 10/18 cloud-functions release post: lines piped into nightly_api's slack-post.sh wrapper,
+    # which names no Slack API in the command itself
+    wrapper = "printf '%s\\n' '*[ a ]*' '" + B + " item' | GCP_PROJECT_ID=p scripts/deploy/slack-post.sh C0536DQTREV"
+    assert code_problems("Bash", {"command": wrapper}, "")
     patch = "*** Begin Patch\n*** Add File: n.py\n+import slack_sdk\n+t = \"" + B + " a\"\n*** End Patch"
     assert code_problems("apply_patch", {"command": patch}, nowhere)
     same = "*** Begin Patch\n*** Update File: n.py\n@@\n-" + slack_line + "\n+" + slack_line + " x\n*** End Patch"
