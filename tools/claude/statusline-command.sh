@@ -1,9 +1,32 @@
 #!/bin/bash
 # Claude Code Statusline with Firebase/gcloud env check and API Quota
-# Shows: 🔥 firebase-project ☁️ gcloud-project 👤 user@email.com [Model | quota]
+# Shows: dir (branch) 👤 user@email.com / Model │ 5h N% │ 7d N%
+# Firebase/gcloud projects appear only when they point at PROD or are not set up.
 
 # Read input from stdin
 input=$(cat)
+
+# Claude Code paints the whole line gray (38;5;246), so every part sets its own color
+C_DIR=$'\033[1;36m'
+C_BRANCH=$'\033[0;35m'
+C_ACCOUNT=$'\033[0;34m'
+C_WARN=$'\033[1;33m'
+C_PROD=$'\033[1;97;41m'
+C_MODEL=$'\033[1;39m'
+C_LABEL=$'\033[0;39m'
+C_SEP=$'\033[0;90m'
+C_RESET=$'\033[0m'
+
+# 사용률 색: 50% 미만 초록, 80% 미만 노랑, 그 이상 빨강
+pct_color() {
+	if [ "$1" -ge 80 ]; then
+		printf '\033[1;31m'
+	elif [ "$1" -ge 50 ]; then
+		printf '\033[1;33m'
+	else
+		printf '\033[1;32m'
+	fi
+}
 
 # Extract basic info
 current_dir="$(echo "$input" | jq -r '.workspace.current_dir // .cwd')"
@@ -16,7 +39,7 @@ git_branch="$(cd "$current_dir" 2>/dev/null && git -c gc.auto=0 branch --show-cu
 dir_name="$(basename "$current_dir")"
 
 if [ -n "$git_branch" ]; then
-	git_info=" ($git_branch)"
+	git_info=" ${C_BRANCH}($git_branch)"
 else
 	git_info=""
 fi
@@ -64,28 +87,30 @@ fi
 gcloud_project=$(gcloud config get-value project 2>/dev/null)
 [ -z "$gcloud_project" ] && gcloud_project="?"
 
-# Firebase 로그인 표시
+# Firebase 표시: 로그인 안 됨 또는 PROD(f06c6)일 때만, dev면 숨김
 if [ -z "$firebase_email" ] || [ "$firebase_email" = "-" ]; then
-	firebase_info=" ⚠️ Firebase:로그인필요"
+	firebase_info=" ${C_WARN}⚠️ Firebase:로그인필요"
+elif echo "$firebase_project" | grep -q "f06c6"; then
+	firebase_info=" ${C_PROD} 🔥 PROD:${firebase_project} ${C_RESET}"
 else
-	firebase_info=" 🔥 ${firebase_project}"
+	firebase_info=""
 fi
 
-# gcloud 프로젝트 표시 (production 경고: f06c6 포함 시)
+# gcloud 표시: 미설정 또는 PROD(f06c6)일 때만, dev면 숨김
 if [ "$gcloud_project" = "?" ]; then
-	gcloud_info=" ⚠️ gcloud:미설정"
+	gcloud_info=" ${C_WARN}⚠️ gcloud:미설정"
 elif echo "$gcloud_project" | grep -q "f06c6"; then
-	gcloud_info=" ⚠️ PROD:${gcloud_project}"
+	gcloud_info=" ${C_PROD} ☁️ PROD:${gcloud_project} ${C_RESET}"
 else
-	gcloud_info=" ☁️  ${gcloud_project}"
+	gcloud_info=""
 fi
 
 # 계정 표시 (gcloud account 또는 firebase email)
 if [ -n "$firebase_email" ] && [ "$firebase_email" != "-" ]; then
-	account_info=" 👤 ${firebase_email}"
+	account_info=" ${C_ACCOUNT}👤 ${firebase_email}"
 else
 	gcloud_account=$(gcloud config get-value account 2>/dev/null)
-	account_info=" 👤 ${gcloud_account:-?}"
+	account_info=" ${C_ACCOUNT}👤 ${gcloud_account:-?}"
 fi
 
 # Function to get API quota from Anthropic OAuth API
@@ -155,8 +180,11 @@ if [ -z "$quota_info" ]; then
 fi
 
 # Build status info
-if [ -n "$quota_info" ]; then
-	status_info="$model | $quota_info"
+sep=" ${C_SEP}│ "
+if [[ "$quota_info" =~ ^5h:([0-9]+)%\ 7d:([0-9]+)%$ ]]; then
+	five=${BASH_REMATCH[1]}
+	seven=${BASH_REMATCH[2]}
+	status_info="${C_MODEL}${model}${sep}${C_LABEL}5h $(pct_color "$five")${five}%${sep}${C_LABEL}7d $(pct_color "$seven")${seven}%"
 else
 	# Fallback to context window usage
 	size=$(echo "$input" | jq -r '.context_window.context_window_size // 0')
@@ -174,14 +202,14 @@ else
 				current_num=$((current))
 				if [ "$current_num" -gt 0 ] 2>/dev/null; then
 					pct=$((current_num * 100 / size_num))
-					ctx_pct=" ctx:${pct}%"
+					ctx_pct="${sep}${C_LABEL}ctx $(pct_color "$pct")${pct}%"
 				fi
 			fi
 		fi
 	fi
-	status_info="$model$ctx_pct"
+	status_info="${C_MODEL}${model}${ctx_pct}"
 fi
 
-# Output statusline
-printf "%s:%s%s%s%s%s [%s]" \
-	"$dir_name" "" "$git_info" "$firebase_info" "$gcloud_info" "$account_info" "$status_info"
+# Output statusline (2 lines: env on top, model/quota below - keeps quota visible with long branch names)
+printf "%s%s:%s%s%s%s\n%s%s" \
+	"$C_DIR" "$dir_name" "$git_info" "$firebase_info" "$gcloud_info" "$account_info" "$status_info" "$C_RESET"
