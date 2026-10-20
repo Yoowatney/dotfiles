@@ -12,13 +12,14 @@ cat > "$SANDBOX/herdr" <<EOF
 #!/usr/bin/env bash
 case "\$1 \$2" in
   "pane list") cat "$SANDBOX/panes" ;;
+  "tab list") cat "$SANDBOX/tabs" 2>/dev/null || echo '{"result":{"tabs":[]}}' ;;
   "agent prompt") printf '%s|%s\n' "\$3" "\$4" >> "$SANDBOX/log" ;;
   *) exit 2 ;;
 esac
 EOF
 chmod +x "$SANDBOX/herdr"
-panes() { # "<id>|<label>|<session>" ...
-  local p; for p in "$@"; do IFS='|' read -r id label sid <<<"$p"; jq -nc --arg i "$id" --arg l "$label" --arg s "$sid" '{pane_id: $i, label: $l, agent_session: {value: $s}, cwd: "/w"}'; done \
+panes() { # "<id>|<label>|<session>[|<tab id>]" ...
+  local p; for p in "$@"; do IFS='|' read -r id label sid tab <<<"$p"; jq -nc --arg i "$id" --arg l "$label" --arg s "$sid" --arg t "${tab:-w1:t1}" '{pane_id: $i, label: $l, agent_session: {value: $s}, cwd: "/w", tab_id: $t}'; done \
     | jq -s '{result: {panes: .}}' > "$SANDBOX/panes"
   rm -f "$SANDBOX/log"
 }
@@ -42,5 +43,11 @@ pt "와우" "x" 2>/dev/null; check "this pane refuses" "$?|$(sent)" "2|"
 panes "w1:p5|🟢 api#8 자동 일|s5"; mkdir -p "$SANDBOX/home/.claude/projects/p"
 echo '{"type":"user","origin":{"kind":"human"},"message":{"content":"[auto-dispatch] work"}}' > "$SANDBOX/home/.claude/projects/p/s5.jsonl"
 pt "api#8" "x" 2>/dev/null; check "auto-dispatch session refuses" "$?|$(sent)" "2|"
+# Claude review 10/21: with no session id to read, the 자동 tab itself still refuses (board.sh unwatch tells this pane)
+echo '{"result":{"tabs":[{"tab_id":"w1:t1","label":"작업"},{"tab_id":"w1:t7","label":"자동 api#8"},{"tab_id":"w1:t8","label":"자동화"}]}}' > "$SANDBOX/tabs"
+panes "w1:p6|🟢 api#8 자동 일||w1:t7"
+pt "api#8" "x" 2>/dev/null; check "auto tab without a session id refuses" "$?|$(sent)" "2|"
+panes "w1:p7|🟢 마케팅 자동화|s7|w1:t8"
+pt "마케팅" "x" >/dev/null; check "a tab named 자동화 is not an auto tab" "$?|$(sent)" "0|w1:p7 "
 pt "only-one-arg" 2>/dev/null; check "usage" "$?" 2
 exit $fails

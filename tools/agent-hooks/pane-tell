@@ -11,7 +11,7 @@ die() { echo "pane-tell: $*" >&2; exit 2; }
 command -v "$H" >/dev/null 2>&1 || die "herdr not found"
 command -v jq >/dev/null 2>&1 || die "jq not found"
 panes=$("$H" pane list 2>/dev/null | jq -r '.result.panes[]
-  | [.pane_id, ((.label // "") | ltrimstr("🔴 ") | ltrimstr("🟢 ")), (.agent_session.value // ""), (.cwd // "")] | @tsv') ||
+  | [.pane_id, ((.label // "") | ltrimstr("🔴 ") | ltrimstr("🟢 ")), (.agent_session.value // ""), (.cwd // ""), (.tab_id // "")] | @tsv') ||
   die "herdr pane list failed"
 
 if [ "${1:-}" = --list ]; then
@@ -31,8 +31,14 @@ if [ "$(wc -l <<<"$hits" | tr -d ' ')" -gt 1 ]; then
   cut -f1,2 <<<"$hits" >&2
   exit 2
 fi
-IFS=$'\t' read -r pane name sid _ <<<"$hits"
+# cut, not `IFS=$'\t' read`: read merges the tabs around an empty session id and shifts every later field
+pane=$(cut -f1 <<<"$hits"); name=$(cut -f2 <<<"$hits"); sid=$(cut -f3 <<<"$hits"); tab=$(cut -f5 <<<"$hits")
 [ "$pane" != "${HERDR_PANE_ID:-}" ] || die "\"$1\" is this pane"
+# The dispatch job names its tabs "자동 <tag>". This holds even when herdr gives no session id to look up, which let
+# board.sh unwatch type into an auto pane and lift its guard (Claude review 10/21).
+tabs=$("$H" tab list 2>/dev/null | jq -r '.result.tabs[] | [.tab_id, (.label // "")] | @tsv') || die "herdr tab list failed"
+awk -F'\t' -v t="$tab" '$1 == t && index($2, "자동 ") == 1 {found=1} END {exit !found}' <<<"$tabs" &&
+  die "$pane ($name) is in an auto-dispatch tab; comment on its board item instead"
 for t in "$HOME"/.claude/projects/*/"$sid".jsonl; do
   [ -n "$sid" ] && [ -f "$t" ] || continue
   grep -m1 -F '"origin":{"kind":"human"}' "$t" | grep -qF auto-dispatch &&
