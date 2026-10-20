@@ -27,6 +27,11 @@ CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 # Hard ceiling per claude call. A hung call used to stall the whole run
 # indefinitely and prevented later hook runs from making progress.
 CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-600}"
+# Phase 2 page builds are slower: measured p50 367 s, p90 564 s, so 600 s cut off
+# normal runs. 5 pages x 1200 s stays under the runner's 7200 s stale-lock window.
+CLAUDE_TIMEOUT_PAGE="${CLAUDE_TIMEOUT_PAGE:-1200}"
+# Stop retrying an item after this many failures (counted per manifest key).
+LLM_WIKI_MAX_FAILS="${LLM_WIKI_MAX_FAILS:-3}"
 
 
 # ── Logging ──────────────────────────────────────────────────────────
@@ -43,15 +48,37 @@ is_processed() {
     jq -r --arg k "$key" 'if has($k) then "true" else "" end' "$MANIFEST" 2>/dev/null
 }
 
-# Mark a key as processed in the manifest (atomic write via tmp+mv).
-mark_processed() {
-    local key="$1"
+# Set a key to a JSON value in the manifest (atomic write via tmp+mv).
+manifest_set() {
+    local key="$1" value="$2"
     local tmp
     tmp="$(mktemp "$LLM_WIKI/.manifest.tmp.XXXXXX")"
-    jq --arg k "$key" '. + {($k): true}' "$MANIFEST" > "$tmp" 2>/dev/null \
+    jq --arg k "$key" --argjson v "$value" '. + {($k): $v}' "$MANIFEST" > "$tmp" 2>/dev/null \
         && mv "$tmp" "$MANIFEST"
     # Clean up tmp on failure
     [[ -f "$tmp" ]] && rm -f "$tmp"
+}
+
+mark_processed() { manifest_set "$1" true; }
+
+# Failure counts live in the manifest as "fail:<key>" so a source that always
+# fails stops being retried every cycle.
+too_many_fails() {
+    local n
+    n="$(jq -r --arg k "fail:$1" '.[$k] // 0' "$MANIFEST" 2>/dev/null)"
+    [[ "${n:-0}" -ge "$LLM_WIKI_MAX_FAILS" ]]
+}
+
+# Bump the failure count; on reaching the cap log GAVE UP and notify once.
+record_failure() {
+    local key="$1" name="$2" n
+    n="$(jq -r --arg k "fail:$key" '(.[$k] // 0) + 1' "$MANIFEST" 2>/dev/null)"
+    manifest_set "fail:$key" "${n:-1}"
+    if [[ "${n:-1}" -ge "$LLM_WIKI_MAX_FAILS" ]]; then
+        log "  GAVE UP on $name after $n failures (no more retries)"
+        [[ "${LLM_WIKI_NOTIFY:-1}" == "0" ]] || \
+            osascript -e "display notification \"gave up on $name\" with title \"llm-wiki\"" >/dev/null 2>&1 || true
+    fi
 }
 
 # ── Helper: count user turns in a JSONL session file ─────────────────
@@ -135,6 +162,15 @@ phase1_worklog() {
             continue
         fi
 
+        # Headless runs (launchd bots, `claude -p`) are noise, not Yoyoo's work.
+        # The transcript stays on disk; only this phase skips it.
+        if [[ "$(grep -m1 -o '"entrypoint":"[^"]*"' "$session_file" 2>/dev/null)" == '"entrypoint":"sdk'* ]]; then
+            mark_processed "$manifest_key"
+            continue
+        fi
+
+        too_many_fails "$manifest_key" && continue
+
         # Count user turns
         local turns
         turns="$(count_user_turns "$session_file")"
@@ -178,6 +214,7 @@ phase1_worklog() {
             processed=$((processed + 1))
         else
             log "  FAILED processing $filename (exit=$?; 124=timeout after ${CLAUDE_TIMEOUT}s). Will retry next cycle."
+            record_failure "$manifest_key" "$filename"
         fi
         rm -f "$outfile"
     done < <(find "$CLAUDE_PROJECTS" -name "*.jsonl" -type f 2>/dev/null)
@@ -207,6 +244,7 @@ phase15_worklog_to_raw() {
         log "  Already extracted wiki content for $today (hash=$content_hash), skipping"
         return
     fi
+    too_many_fails "$manifest_key" && return
 
     log "  Analyzing $today work-log for wiki-worthy content..."
 
@@ -228,6 +266,7 @@ phase15_worklog_to_raw() {
         mark_processed "$manifest_key"
     else
         log "  FAILED extracting wiki content from work-log (exit=$?; 124=timeout after ${CLAUDE_TIMEOUT}s). Will retry next cycle."
+        record_failure "$manifest_key" "work-log $today"
     fi
     rm -f "$outfile"
 }
@@ -237,6 +276,8 @@ phase2_wiki() {
     log "Phase 2: Scanning for raw wiki sources..."
     local count=0
     local processed=0
+    local attempted=0
+    local max_per_run=5  # Attempts, not successes: bounds the run to 5 x CLAUDE_TIMEOUT_PAGE
 
     while IFS= read -r raw_file; do
         local filename
@@ -249,6 +290,13 @@ phase2_wiki() {
         if [[ -n "$(is_processed "$manifest_key")" ]]; then
             continue
         fi
+        too_many_fails "$manifest_key" && continue
+
+        if [[ "$attempted" -ge "$max_per_run" ]]; then
+            log "  Reached max_per_run=$max_per_run, deferring rest to next cycle"
+            break
+        fi
+        attempted=$((attempted + 1))
 
         log "  Processing wiki source: $filename..."
 
@@ -257,12 +305,13 @@ phase2_wiki() {
 
         # Run claude -p directly (< /dev/null prevents it from consuming the while-read stdin)
         local outfile="$LLM_WIKI/.tmp-wiki-output-$$.txt"
-        if timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" --permission-mode bypassPermissions --no-session-persistence < /dev/null > "$outfile" 2>&1; then
+        if timeout "$CLAUDE_TIMEOUT_PAGE" "$CLAUDE_BIN" -p "$prompt" --permission-mode bypassPermissions --no-session-persistence < /dev/null > "$outfile" 2>&1; then
             log "  Wiki page created/updated for $filename"
             mark_processed "$manifest_key"
             processed=$((processed + 1))
         else
-            log "  FAILED processing wiki source $filename (exit=$?; 124=timeout after ${CLAUDE_TIMEOUT}s). Will retry next cycle."
+            log "  FAILED processing wiki source $filename (exit=$?; 124=timeout after ${CLAUDE_TIMEOUT_PAGE}s). Will retry next cycle."
+            record_failure "$manifest_key" "$filename"
         fi
         rm -f "$outfile"
     done < <(find "$LLM_WIKI/raw" -name "*.md" -type f 2>/dev/null)
