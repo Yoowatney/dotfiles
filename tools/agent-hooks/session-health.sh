@@ -6,6 +6,8 @@
 # Prints nothing when healthy. Fail open: any error exits 0 silently.
 # Env (tests): SESSION_HEALTH_NO_FETCH=1 skips the background fetch, SESSION_HEALTH_ROOT overrides the workspace root.
 input=$(cat 2>/dev/null)
+# Headless runs (claude -p: the board watch job every 30 minutes) neither read the warning nor need ~10 fetches each.
+case "${CLAUDE_CODE_ENTRYPOINT:-}" in sdk*) exit 0 ;; esac
 command -v jq >/dev/null 2>&1 || exit 0
 BEHIND_MIN=20
 MEMORY_WARN_BYTES=20000

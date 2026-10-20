@@ -34,7 +34,11 @@ NOTE = ("secret-paste-guard: 프롬프트에 {kinds}로 보이는 값이 있다.
         "Gemini 등 비공개 키일 수도 있다. 값을 응답·파일·메모리·커밋에 다시 쓰지 말고, 필요하면 환경변수나 파일 경로로만 다룬다.")
 
 
-def decide(payload: dict) -> dict | None:
+def decide(payload: dict, env=os.environ) -> dict | None:
+    # Headless runs (claude -p: the board watch job) build prompts from issue text, not from a human paste;
+    # a token quoted in one issue must not silently stop the job.
+    if env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
+        return None
     prompt = payload.get("prompt")
     if not isinstance(prompt, str):
         return None
@@ -50,6 +54,8 @@ def decide(payload: dict) -> dict | None:
 
 def selftest():
     import subprocess
+
+    os.environ["CLAUDE_CODE_ENTRYPOINT"] = "cli"  # the checks below are for a human session; subprocesses inherit it
 
     def fake(*parts):  # built at runtime so this file never holds a secret-looking literal
         return "".join(parts)
@@ -81,6 +87,7 @@ def selftest():
         assert text[-12:] not in out["reason"] and "sk-" not in out["reason"], f"reason leaks value: {name}"
     for name, text in allow.items():
         assert decide({"prompt": text}) is None, f"should allow: {name}"
+    assert decide({"prompt": block["JWT"]}, {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}) is None, "headless runs pass"
     gem = fake("AI", "za", "S" * 35)
     warn = decide({"prompt": f"Gemini 키 {gem} 쓰면 돼?"})
     assert warn and "decision" not in warn and warn["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit", warn
