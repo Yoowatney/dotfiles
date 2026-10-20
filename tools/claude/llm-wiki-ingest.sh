@@ -111,6 +111,10 @@ phase1_worklog() {
 
         local filename
         filename="$(basename "$session_file")"
+        # The private config may list sessions that must never be read.
+        if [[ " ${LLM_WIKI_SKIP_SESSIONS[*]:-} " == *" ${filename%.jsonl} "* ]]; then
+            continue
+        fi
         local file_size
         file_size="$(stat -f %z "$session_file")"
         local manifest_key="worklog:${filename}:${file_size}"
