@@ -2,7 +2,7 @@
 # Carries the next-session prompt across /clear, so 요유 never copies and pastes a handoff
 # (요유 2026-10-21: the clipboard round trip made them the bottleneck).
 #   handoff save [file]   stdin or file -> this pane's pending handoff (outside herdr: the clipboard)
-#   handoff load          Claude SessionStart hook (matcher clear): print it once, then set it aside.
+#   handoff load          Claude SessionStart hook (matcher clear): print it once, set it aside, and start the first turn.
 #                         Not wired into Codex: its hooks.json entry needs 요유 to trust it first.
 # One pending handoff per herdr pane; a newer save replaces it. The last loaded one stays as <pane>.md.loaded.
 dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-handoff"
@@ -23,7 +23,12 @@ case "${1:-}" in
     head="The previous session in this pane saved this handoff at $(stat -f '%Sm' -t '%m-%d %H:%M' "$f") before /clear. Unless 요유's first message asks for something else, continue from it."
     # The JSON shape both Claude and Codex read as SessionStart context.
     jq -n --arg ctx "$head"$'\n\n'"$(cat "$f")" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}' &&
-      mv "$f" "$f.loaded"
+      mv "$f" "$f.loaded" || exit
+    # Context alone waits for a first message, and interactive sessions ignore initialUserMessage (tested 10/21),
+    # so type the first prompt into this pane once the session is up (요유 approved 10/21). Detached: the hook returns first.
+    kick="[handoff: /clear 뒤 자동으로 보낸 글입니다. 요유가 직접 친 글이 아닙니다] 세션 시작 때 받은 인수인계대로 이어서 진행하세요. 되돌리기 어려운 일은 요유에게 확인하세요."
+    nohup bash -c 'sleep "$1"; "$2" agent prompt "$3" "$4"' _ "${HANDOFF_KICK_DELAY:-3}" "${HERDR_BIN_PATH:-herdr}" \
+      "$HERDR_PANE_ID" "$kick" >/dev/null 2>&1 &
     ;;
   *) echo 'usage: handoff save [file] | handoff load' >&2; exit 2 ;;
 esac
