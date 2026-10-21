@@ -72,4 +72,11 @@ pl --free
 (sleep 0.5; echo working > "$SANDBOX/status") &
 close; wait; [ ! -f "$SANDBOX/closed" ] || fail "요유 typing during the grace period should cancel the close"
 
+# --close works only in a tab the dispatch job opened (MUNICE_AUTO_DISPATCH=1); 요유 closes ordinary sessions.
+echo idle > "$SANDBOX/status"; rm -f "$SANDBOX/closed"
+( unset MUNICE_AUTO_DISPATCH; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close 2>/dev/null )
+sleep 2; [ ! -f "$SANDBOX/closed" ] || fail "an ordinary session should not close itself"
+( export MUNICE_AUTO_DISPATCH=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close >/dev/null )
+sleep 2; [ -f "$SANDBOX/closed" ] || fail "an auto-dispatch tab should close itself"
+
 echo "ok: pane-label"
