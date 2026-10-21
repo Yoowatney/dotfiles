@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""PreToolUse hook: Slack writes go to one channel only.
+"""PreToolUse hook: Slack writes go to #임시작업 (and #3-release-dev) only.
 
 요유 asked on 2026-10-20 that sessions write to Slack (posts, thread replies,
-reactions) only in #임시작업 until they lift the rule. Reading any channel is
-fine. When the rule is lifted, delete this file and its entries in
+reactions) only in #임시작업 until they lift the rule. On 2026-10-21 they also
+allowed #3-release-dev, for release notices they ask for (release-notify).
+Reading any channel is fine. When the rule is lifted, delete this file and its entries in
 ~/.claude/settings.json and ~/.codex/hooks.json.
 Memory: feedback_slack_writes_temp_work_channel.
 
@@ -22,6 +23,8 @@ import re
 import sys
 
 ALLOWED = "C0CAND31MA8"  # #임시작업
+RELEASE = "C0536DQTREV"  # #3-release-dev, release notices 요유 asks for (2026-10-21)
+WRITABLE = {ALLOWED, RELEASE}
 
 READ_TOOL = re.compile(r"(?:^|_)(?:get|list|search|read|fetch|lookup)", re.I)
 HTTP_CLIENT = re.compile(r"\b(?:curl|wget|requests|urllib|fetch|axios|httpx|xh)\b")
@@ -57,7 +60,7 @@ def problem(tool: str, inp: dict) -> str | None:
         if READ_TOOL.search(tool.rsplit("__", 1)[-1]):
             return None
         channel = inp.get("channel_id") or inp.get("channel") or ""
-        return None if channel == ALLOWED else f"{tool.rsplit('__', 1)[-1]}의 채널이 {channel or '(없음)'}"
+        return None if channel in WRITABLE else f"{tool.rsplit('__', 1)[-1]}의 채널이 {channel or '(없음)'}"
     command = inp.get("command") if tool in ("Bash", "Monitor") else None
     if not isinstance(command, str):
         return None
@@ -69,7 +72,7 @@ def problem(tool: str, inp: dict) -> str | None:
     targets = set(CHANNEL_ID.findall(REFS.sub("", command)))
     if not targets:
         return "글을 쓸 채널 ID가 명령에 없음(변수나 파일로 넘기면 확인할 수 없으니 ID를 명령에 그대로 쓸 것)"
-    others = targets - {ALLOWED}
+    others = targets - WRITABLE
     return f"다른 채널: {', '.join(sorted(others))}" if others else None
 
 
@@ -101,7 +104,8 @@ def selftest() -> None:
         (f"curl -s https://slack.com/api/chat.update -d channel={other} -d ts=1.2 -d text=x", True),
         (f"curl -s https://slack.com/api/reactions.add -d channel={other} -d name=eyes -d timestamp=1.2", True),
         ("curl -s -X POST https://hooks.slack.com/services/T/B/x -d '{\"text\":\"hi\"}'", True),
-        ("printf '%s\\n' '*[ a ]*' | GCP_PROJECT_ID=p scripts/deploy/slack-post.sh C0536DQTREV", True),
+        (f"printf '%s\\n' '*[ a ]*' | GCP_PROJECT_ID=p scripts/deploy/slack-post.sh {RELEASE} < msg.txt", False),
+        (f"printf '%s\\n' '*[ a ]*' | GCP_PROJECT_ID=p scripts/deploy/slack-post.sh {other}", True),
         (f"printf '%s\\n' '*[ a ]*' | bash scripts/deploy/slack-post.sh {ALLOWED}", False),
         (f"python3 -c 'from slack_sdk import WebClient; WebClient().chat_postMessage(channel=\"{other}\", text=\"x\")'", True),
         # reads and searches stay open
@@ -134,7 +138,8 @@ if __name__ == "__main__":
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": (
-                f"Slack 쓰기는 #임시작업({ALLOWED})에만 할 수 있습니다(요유 10/20, 요유가 풀 때까지). {found}. "
+                f"Slack 쓰기는 #임시작업({ALLOWED})과, 요유가 시킨 릴리스 공지의 #3-release-dev({RELEASE})에만 "
+                f"할 수 있습니다(요유 10/20·10/21, 요유가 풀 때까지). {found}. "
                 "그 채널에 없는 사람에게 갈 글이면 요유 말투 초안을 slackcopy로 넘기세요. 읽기는 어느 채널이든 됩니다."
             ),
         }}, ensure_ascii=False))
