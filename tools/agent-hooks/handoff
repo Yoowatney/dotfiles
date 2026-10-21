@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Carries the next-session prompt across /clear, so 요유 never copies and pastes a handoff
+# (요유 2026-10-21: the clipboard round trip made them the bottleneck). Claude and Codex both use it.
+#   handoff save [file]   stdin or file -> this pane's pending handoff (outside herdr: the clipboard)
+#   handoff load          SessionStart hook: print this pane's pending handoff once, then set it aside
+# One pending handoff per herdr pane; a newer save replaces it. The last loaded one stays as <pane>.md.loaded.
+dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-handoff"
+f="$dir/${HERDR_PANE_ID:-}.md"
+case "${1:-}" in
+  save)
+    if [ -z "${HERDR_PANE_ID:-}" ]; then
+      cat "${2:-/dev/stdin}" | pbcopy && echo "handoff: not in herdr, copied to the clipboard instead"
+      exit
+    fi
+    mkdir -p "$dir" && cat "${2:-/dev/stdin}" > "$f" &&
+      echo "handoff: saved for the next session in $HERDR_PANE_ID; 요유 only types /clear"
+    ;;
+  load)
+    [ -n "${HERDR_PANE_ID:-}" ] && [ -f "$f" ] || exit 0
+    # ponytail: fixed one-day expiry; a handoff nobody picked up by then belongs to work that moved on
+    if [ -n "$(find "$f" -mmin +1440)" ]; then rm -f "$f"; exit 0; fi
+    head="The previous session in this pane saved this handoff at $(stat -f '%Sm' -t '%m-%d %H:%M' "$f") before /clear. Unless 요유's first message asks for something else, continue from it."
+    # The JSON shape both Claude and Codex read as SessionStart context.
+    jq -n --arg ctx "$head"$'\n\n'"$(cat "$f")" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}' &&
+      mv "$f" "$f.loaded"
+    ;;
+  *) echo 'usage: handoff save [file] | handoff load' >&2; exit 2 ;;
+esac
