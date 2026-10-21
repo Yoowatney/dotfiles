@@ -17,7 +17,9 @@ import sys
 HOME = r"(?:~|\$HOME|\$\{HOME\}|/Users/[^/\s'\"]+)"
 SECRET_PATH = re.compile(
     HOME + r"/(?:\.codex/config\.toml|\.claude\.json"
-    r"|\.config/[^\s'\"]*?(?:\.env|token|secret|key|cred)[^\s'\"/]*)",
+    r"|\.config/[^\s'\"]*?(?:\.env|token|secret|key|cred)[^\s'\"/]*)"
+    # any repo env file (.env, .env.staging, ...) except examples; values can span lines (PEM keys)
+    r"|(?:^|(?<=[\s'\"=/:(]))\.env(?:\.(?!example|sample|template)[\w.-]+)?(?=$|[\s'\"|;&)<>])",
     re.I,
 )
 SECRET_VAR = re.compile(r"\$\{?[A-Za-z_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE)[A-Za-z_]*\}?", re.I)
@@ -106,6 +108,8 @@ def bash_problem(cmd: str) -> str | None:
             SECRET_VAR.search(cmd) or re.search(r"authorization", cmd, re.I)
         ):
             return "curl -v/--trace는 Authorization 헤더를 그대로 출력함"
+        if verb == "git" and len(w) > 1 and w[1] in {"show", "cat-file"} and SECRET_PATH.search(segment):
+            return "`git show`가 비밀 파일 내용을 출력함. 있는지만 볼 때는 `git ls-tree`를 쓸 것"
         readers = [b for b in (x.rsplit("/", 1)[-1] for x in w) if b in READERS]
         if readers and SECRET_PATH.search(segment):
             if set(readers) <= GREPS and (
@@ -148,6 +152,11 @@ def selftest():
         "ls ~/.codex/hooks/ 2>/dev/null; grep -n -A8 -i \"hooks\" ~/.codex/config.toml 2>/dev/null | head -30",
         "cd /tmp && gcloud auth print-access-token",
         "sudo cat ~/.config/x/.env",
+        # 2026-10-21: a multi-line PEM value spilled out of a repo env file while listing key names
+        "cut -d= -f1 /Users/yoyoo/work/munice/nightly_api/.env.staging | grep -vE '^#'",
+        "grep -h '^GOOGLE_PLAY_PACKAGE_NAME' .env.staging .env.production",
+        "cat nightly_api/.env",
+        "git show origin/main:.env.production | cut -d= -f1",
     ]
     allow = [
         "T=$(python3 -I -c 'import re,os;print(open(os.path.expanduser(\"~/.codex/config.toml\")).read())')",
@@ -169,6 +178,13 @@ def selftest():
         "cd /tmp && codex exec \"Step 1: run cat ~/.config/x/.env (blocked is expected; do not retry). "
         "Step 2: gcloud auth print-access-token | head\" > out.txt 2>&1; echo $?",
         "git commit -m \"docs: never run cat ~/.claude.json; use grep -c\"",
+        "U=$(grep '^ADMIN_USER=' /x/nightly_api/.env.production | cut -d= -f2-)",
+        "set -a; source .env.staging; set +a; npm run start:dev",
+        "ln -sf /x/nightly_api/.env.production /y/.env.production",
+        "cat .env.example",
+        "grep -c ADMIN_USER .env.staging",
+        "ls -a nightly_api | grep -E '^\\.env'",
+        "cat .envrc",
     ]
     for c in deny:
         assert bash_problem(c), f"should deny: {c}"
@@ -178,6 +194,8 @@ def selftest():
     assert not tool_problem({"tool_name": "Read", "tool_input": {"file_path": "/Users/yoyoo/.claude/settings.json"}})
     assert tool_problem({"tool_name": "Grep", "tool_input": {"path": "/Users/yoyoo/.claude.json", "output_mode": "content"}})
     assert not tool_problem({"tool_name": "Grep", "tool_input": {"path": "/Users/yoyoo/.claude.json"}})
+    assert tool_problem({"tool_name": "Read", "tool_input": {"file_path": "/Users/yoyoo/work/x/.env.staging"}})
+    assert not tool_problem({"tool_name": "Read", "tool_input": {"file_path": "/Users/yoyoo/work/x/.env.example"}})
     print("selftest ok")
 
 
