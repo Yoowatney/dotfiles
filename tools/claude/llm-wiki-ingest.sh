@@ -162,6 +162,17 @@ phase1_worklog() {
             continue
         fi
 
+        # The private config may also list text that marks a session as private.
+        # Unlike session IDs, this survives /clear starting a new transcript.
+        local pattern skip=""
+        for pattern in "${LLM_WIKI_SKIP_PATTERNS[@]:-}"; do
+            [[ -n "$pattern" ]] && grep -qF -- "$pattern" "$session_file" 2>/dev/null && skip=1 && break
+        done
+        if [[ -n "$skip" ]]; then
+            mark_processed "$manifest_key"
+            continue
+        fi
+
         # Headless runs (launchd bots, `claude -p`) are noise, not Yoyoo's work.
         # The transcript stays on disk; only this phase skips it.
         if [[ "$(grep -m1 -o '"entrypoint":"[^"]*"' "$session_file" 2>/dev/null)" == '"entrypoint":"sdk'* ]]; then
