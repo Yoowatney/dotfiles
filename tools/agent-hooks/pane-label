@@ -8,12 +8,28 @@
 #   pane-label --hold | --free                set the mark to 🔴 / 🟢, keeping the name
 #   pane-label --clear                        remove it
 #   pane-label --clear-if-prefix "api#736 "   remove it only if it still names that item
+#   pane-label --close                        close this pane once the agent's turn ends (요유 2026-10-21: "세션 닫아도
+#                                             됨이면 너가 알아서 닫아"); detached, so it outlives the tool call. Skips a
+#                                             🔴 pane, and cancels if the agent works again within the grace period
+#                                             (요유 typed a new message)
 H=${HERDR_BIN_PATH:-herdr}
 [ -n "${HERDR_PANE_ID:-}" ] && command -v "$H" >/dev/null 2>&1 || exit 0
 HOLD=🔴
 FREE=🟢
 
 current() { "$H" pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.label // ""' 2>/dev/null; }
+status() { "$H" pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.agent_status // ""' 2>/dev/null; }
+close_when_idle() {
+  local wait=${PANE_CLOSE_WAIT:-600} grace=${PANE_CLOSE_GRACE:-20} poll=${PANE_CLOSE_POLL:-2} t0=$SECONDS
+  while [ "$(status)" = working ]; do (( SECONDS - t0 < wait )) || return 0; sleep "$poll"; done
+  t0=$SECONDS
+  while (( SECONDS - t0 < grace )); do
+    [ "$(status)" = working ] && return 0
+    [ "$(mark_of "$(current)")" = "$HOLD" ] && return 0
+    sleep "$poll"
+  done
+  [ "$(mark_of "$(current)")" = "$HOLD" ] || "$H" pane close "$HERDR_PANE_ID" >/dev/null 2>&1
+}
 mark_of() { case "$1" in "$HOLD"*) echo "$HOLD" ;; "$FREE"*) echo "$FREE" ;; esac; }
 name_of() { local t=${1#"$HOLD"}; t=${t#"$FREE"}; echo "${t# }"; }
 rename() { "$H" pane rename "$HERDR_PANE_ID" "$@" >/dev/null 2>&1; }
@@ -22,13 +38,19 @@ mark() { # mark name
 }
 
 case "${1:-}" in
-  "") echo 'usage: pane-label "<text>" | --hold | --free | --clear | --clear-if-prefix "<prefix>"' >&2; exit 2 ;;
+  "") echo 'usage: pane-label "<text>" | --hold | --free | --clear | --clear-if-prefix "<prefix>" | --close' >&2; exit 2 ;;
   --clear) rename --clear ;;
   --clear-if-prefix)
     cur=$(name_of "$(current)")
     [ -n "${2:-}" ] && [[ "$cur" == "$2"* ]] && rename --clear ;;
   --hold) mark "$HOLD" "$(name_of "$(current)")" ;;
   --free) mark "$FREE" "$(name_of "$(current)")" ;;
+  --close)
+    if [ "$(mark_of "$(current)")" = "$HOLD" ]; then echo "pane-label: 🔴 pane, not closing" >&2; exit 0; fi
+    # Own session so the agent's tool runner does not kill it with the command's process group.
+    nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' bash "$0" --close-now >/dev/null 2>&1 &
+    echo "pane-label: closing this pane once the turn ends" ;;
+  --close-now) close_when_idle ;;
   *)
     m=$(mark_of "$*")
     [ -n "$m" ] || m=$(mark_of "$(current)")

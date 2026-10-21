@@ -16,16 +16,18 @@ cat > "$SANDBOX/herdr" <<EOF
 #!/usr/bin/env bash
 case "\$1 \$2" in
   "pane get")
-    if [ -f "$SANDBOX/label" ]; then jq -n --rawfile l "$SANDBOX/label" '{result: {pane: {label: \$l}}}'
-    else echo '{"result":{"pane":{}}}'; fi ;;
+    st=\$(cat "$SANDBOX/status" 2>/dev/null || echo idle)
+    if [ -f "$SANDBOX/label" ]; then jq -n --rawfile l "$SANDBOX/label" --arg s "\$st" '{result: {pane: {label: \$l, agent_status: \$s}}}'
+    else jq -n --arg s "\$st" '{result: {pane: {agent_status: \$s}}}'; fi ;;
   "pane rename")
     if [ "\$4" = "--clear" ]; then rm -f "$SANDBOX/label"; else printf '%s' "\$4" > "$SANDBOX/label"; fi ;;
+  "pane close") touch "$SANDBOX/closed" ;;
   *) exit 2 ;;
 esac
 EOF
 chmod +x "$SANDBOX/herdr"
 
-pl() { env HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "$@"; }
+pl() { env PANE_CLOSE_WAIT="${PANE_CLOSE_WAIT:-}" PANE_CLOSE_GRACE="${PANE_CLOSE_GRACE:-}" PANE_CLOSE_POLL="${PANE_CLOSE_POLL:-}" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "$@"; }
 label() { cat "$SANDBOX/label" 2>/dev/null || true; }
 expect() { [ "$(label)" = "$1" ] || fail "$2: expected [$1], got [$(label)]"; }
 
@@ -57,5 +59,17 @@ pl --clear-if-prefix "api#3 "; expect "" "own prefix clears"
 # --hold on an unnamed pane still shows the mark.
 pl --hold; expect "🔴" "hold without a name"
 pl "api#4 일"; expect "🔴 api#4 일" "naming after hold keeps 🔴"
+
+# --close-now (what --close runs detached) closes only a 🟢 pane whose agent stays idle through the grace period.
+close() { rm -f "$SANDBOX/closed"; PANE_CLOSE_WAIT=1 PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close-now; }
+pl "🟢 api#5 끝"; echo idle > "$SANDBOX/status"
+close; [ -f "$SANDBOX/closed" ] || fail "idle 🟢 pane should close"
+echo working > "$SANDBOX/status"
+close; [ ! -f "$SANDBOX/closed" ] || fail "a pane still working should not close"
+echo idle > "$SANDBOX/status"; pl --hold
+close; [ ! -f "$SANDBOX/closed" ] || fail "a 🔴 pane should not close"
+pl --free
+(sleep 0.5; echo working > "$SANDBOX/status") &
+close; wait; [ ! -f "$SANDBOX/closed" ] || fail "요유 typing during the grace period should cancel the close"
 
 echo "ok: pane-label"
