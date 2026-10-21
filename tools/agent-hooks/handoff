@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Carries the next-session prompt across /clear, so 요유 never copies and pastes a handoff
-# (요유 2026-10-21: the clipboard round trip made them the bottleneck). Claude and Codex both use it.
+# (요유 2026-10-21: the clipboard round trip made them the bottleneck).
 #   handoff save [file]   stdin or file -> this pane's pending handoff (outside herdr: the clipboard)
-#   handoff load          SessionStart hook: print this pane's pending handoff once, then set it aside
+#   handoff load          Claude SessionStart hook (matcher clear): print it once, then set it aside.
+#                         Not wired into Codex: its hooks.json entry needs 요유 to trust it first.
 # One pending handoff per herdr pane; a newer save replaces it. The last loaded one stays as <pane>.md.loaded.
 dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-handoff"
 f="$dir/${HERDR_PANE_ID:-}.md"

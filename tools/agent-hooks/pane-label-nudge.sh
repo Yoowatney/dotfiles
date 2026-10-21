@@ -45,7 +45,7 @@ if [ -n "$transcript" ] && [ -r "$transcript" ]; then
     tokens=$(tail -n 200 "$transcript" | jq -R -r 'fromjson? | select(.type == "assistant") | .message.usage // empty
         | (.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0)' 2>/dev/null | tail -n 1)
     if [ "${tokens:-0}" -gt 300000 ] 2>/dev/null; then
-        msg="$msg Context is about $((tokens / 1000))k tokens. If this message starts a different task, first leave what the next session needs (board comment, work-log or memory), then pipe a short handoff prompt (Korean, absolute paths, board link) into \`handoff save\` and suggest in one line that 요유 run /clear here: the next session in this pane loads it, so 요유 pastes nothing."
+        msg="$msg Context is about $((tokens / 1000))k tokens. If this message starts a different task, first leave what the next session needs (board comment, work-log or memory), then pipe a short handoff prompt (Korean, absolute paths, board link) into \`handoff save\` and suggest in one line that 요유 run /clear here: the next session in this pane loads it, so 요유 pastes nothing (Codex does not load it yet: pbcopy the prompt and show it instead)."
     fi
 fi
 

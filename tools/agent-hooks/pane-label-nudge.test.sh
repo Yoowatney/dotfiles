@@ -82,7 +82,8 @@ ctx=$(run_with_transcript "$T")
 # A /clear suggestion saves the handoff for the next session, which loads it itself (요유 2026-10-21);
 # the clipboard round trip made 요유 the bottleneck.
 [[ "$ctx" == *"handoff save"* ]] || fail "long session should ask for handoff save: $ctx"
-[[ "$ctx" != *"pbcopy"* ]] || fail "long session should not ask for a pbcopy handoff: $ctx"
+# Codex has no load hook (its hook trust prompt is 요유's call), so Codex keeps the clipboard.
+[[ "$ctx" == *"Codex"*"pbcopy"* ]] || fail "Codex should keep the pbcopy handoff: $ctx"
 { usage_line 600000; usage_line 40000; } > "$SANDBOX/compacted.jsonl"
 ctx=$(run_with_transcript "$SANDBOX/compacted.jsonl")
 [[ "$ctx" != *"/clear"* ]] || fail "only the last message counts: $ctx"
