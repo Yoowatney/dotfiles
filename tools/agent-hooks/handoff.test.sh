@@ -27,6 +27,8 @@ check "load emits SessionStart JSON" "$(jq -r '.hookSpecificOutput.hookEventName
 ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out")
 check "load carries the handoff" "$(grep -c '보드 api#1 이어서' <<<"$ctx")" 1
 check "load says where it came from" "$(grep -c 'previous session in this pane' <<<"$ctx")" 1
+# 요유 typed during the silent wait and the kick merged onto it (10/21); their words come first in that message.
+check "load says text before the kick marker is 요유's" "$(grep -c "before the \[handoff:" <<<"$ctx")" 1
 # Interactive sessions ignore initialUserMessage (tested 10/21), so load types the first prompt into its own pane.
 check "load starts the first turn in its own pane" "$(prompts)" "w1:p1 "
 check "the kick says it was not typed by 요유" "$(grep -c '요유가 직접 친 글이 아닙니다' "$SANDBOX/prompts")" 1

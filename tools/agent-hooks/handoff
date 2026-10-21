@@ -20,8 +20,9 @@ case "${1:-}" in
     [ -n "${HERDR_PANE_ID:-}" ] && [ -f "$f" ] || exit 0
     # ponytail: fixed one-day expiry; a handoff nobody picked up by then belongs to work that moved on
     if [ -n "$(find "$f" -mmin +1440)" ]; then rm -f "$f"; exit 0; fi
-    head="The previous session in this pane saved this handoff at $(stat -f '%Sm' -t '%m-%d %H:%M' "$f") before /clear. Unless 요유's first message asks for something else, continue from it."
-    # The JSON shape both Claude and Codex read as SessionStart context.
+    head="The previous session in this pane saved this handoff at $(stat -f '%Sm' -t '%m-%d %H:%M' "$f") before /clear. Unless 요유's first message asks for something else, continue from it. Any text before the [handoff: marker in that message is 요유's own, typed while the prompt was on its way: answer it first."
+    # The JSON shape both Claude and Codex read as SessionStart context. No systemMessage: Claude draws it only
+    # with the first turn, so it cannot fill the wait (measured 10/21).
     jq -n --arg ctx "$head"$'\n\n'"$(cat "$f")" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}' &&
       mv "$f" "$f.loaded" || exit
     # Context alone waits for a first message, and interactive sessions ignore initialUserMessage (tested 10/21),
