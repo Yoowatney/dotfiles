@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""PreToolUse hook: Slack writes go to #임시작업 (and #3-release-dev) only.
+"""PreToolUse hook: Slack posts go to #임시작업, #3-share-backend and #3-release-dev only.
 
 요유 asked on 2026-10-20 that sessions write to Slack (posts, thread replies,
 reactions) only in #임시작업 until they lift the rule. On 2026-10-21 they also
 allowed #3-release-dev, for release notices they ask for (release-notify).
+On 2026-10-22 they opened #3-share-backend for posts and reactions in every channel.
 Reading any channel is fine. When the rule is lifted, delete this file and its entries in
 ~/.claude/settings.json and ~/.codex/hooks.json.
 Memory: feedback_slack_writes_temp_work_channel.
 
-Checked: Slack MCP tools that are not get/list/search/read tools, and Bash or
+Checked: Slack MCP tools that are not get/list/search/read or reaction tools, and Bash or
 Monitor commands that call a Slack write API, an incoming webhook, or nightly_api's
 slack-post.sh. The target channel must appear in the command as a literal ID.
 A variable or a payload file is denied, because the hook cannot see it.
@@ -24,17 +25,19 @@ import sys
 
 ALLOWED = "C0CAND31MA8"  # #임시작업
 RELEASE = "C0536DQTREV"  # #3-release-dev, release notices 요유 asks for (2026-10-21)
-WRITABLE = {ALLOWED, RELEASE}
+SHARE_BACKEND = "C078C6SHC87"  # #3-share-backend (2026-10-22)
+WRITABLE = {ALLOWED, RELEASE, SHARE_BACKEND}
 
 READ_TOOL = re.compile(r"(?:^|_)(?:get|list|search|read|fetch|lookup)", re.I)
+REACTION_TOOL = re.compile(r"reaction", re.I)  # reactions are open in every channel (2026-10-22)
 HTTP_CLIENT = re.compile(r"\b(?:curl|wget|requests|urllib|fetch|axios|httpx|xh)\b")
 WRITE_API = re.compile(
     r"slack\.com/api/(?:chat\.(?:postMessage|update|delete|postEphemeral|scheduleMessage|meMessage)"
-    r"|reactions\.(?:add|remove)|files\.(?:upload|completeUploadExternal)|pins\.add|bookmarks\.add|canvases\."
+    r"|files\.(?:upload|completeUploadExternal)|pins\.add|bookmarks\.add|canvases\."
     r"|conversations\.(?:create|invite|kick|rename|archive|setTopic|setPurpose))"
 )
 WEBHOOK = re.compile(r"hooks\.slack\.com/(?:services|workflows|triggers)/")
-SDK_WRITE = re.compile(r"\.(?:chat_(?:postMessage|update|delete|postEphemeral|scheduleMessage)|reactions_add|files_upload(?:_v2)?)\(")
+SDK_WRITE = re.compile(r"\.(?:chat_(?:postMessage|update|delete|postEphemeral|scheduleMessage)|files_upload(?:_v2)?)\(")
 # Slack IDs carry a digit, which keeps words like CONTAINER out
 CHANNEL_ID = re.compile(r"\b[CDG](?=[A-Z0-9]*\d)[A-Z0-9]{8,}\b")
 # links to other channels inside the message text are not targets
@@ -57,7 +60,8 @@ def runs_slack_post(command: str) -> bool:
 
 def problem(tool: str, inp: dict) -> str | None:
     if tool.startswith("mcp__") and "slack" in tool.lower():
-        if READ_TOOL.search(tool.rsplit("__", 1)[-1]):
+        name = tool.rsplit("__", 1)[-1]
+        if READ_TOOL.search(name) or REACTION_TOOL.search(name):
             return None
         channel = inp.get("channel_id") or inp.get("channel") or ""
         return None if channel in WRITABLE else f"{tool.rsplit('__', 1)[-1]}의 채널이 {channel or '(없음)'}"
@@ -77,13 +81,16 @@ def problem(tool: str, inp: dict) -> str | None:
 
 
 def selftest() -> None:
-    other = "C078C6SHC87"
+    other = "C08GR5ADXC5"  # #1-product
     mcp_cases = [
         ("mcp__slack__slack_post_message", {"channel_id": other, "text": "x"}, True),
         ("mcp__slack__slack_post_message", {"channel_id": ALLOWED, "text": "x"}, False),
         ("mcp__slack__slack_reply_to_thread", {"channel_id": other, "thread_ts": "1.2", "text": "x"}, True),
         ("mcp__slack__slack_reply_to_thread", {"channel_id": ALLOWED, "thread_ts": "1.2", "text": "x"}, False),
-        ("mcp__slack__slack_add_reaction", {"channel_id": other, "timestamp": "1.2", "reaction": "eyes"}, True),
+        ("mcp__slack__slack_reply_to_thread", {"channel_id": SHARE_BACKEND, "thread_ts": "1.2", "text": "x"}, False),
+        # reactions are open in every channel (요유 2026-10-22)
+        ("mcp__slack__slack_add_reaction", {"channel_id": other, "timestamp": "1.2", "reaction": "eyes"}, False),
+        ("mcp__claude_ai_Slack__slack_remove_reaction", {"channel": other, "timestamp": "1.2", "name": "eyes"}, False),
         ("mcp__claude_ai_Slack__slack_send_message", {"channel": other, "text": "x"}, True),
         ("mcp__claude_ai_Slack__slack_create_canvas", {"title": "x"}, True),  # unknown write, no channel
         ("mcp__slack__slack_get_thread_replies", {"channel_id": other, "thread_ts": "1.2"}, False),
@@ -102,7 +109,12 @@ def selftest() -> None:
         (f"curl -s {api} -d channel={other} -d text=hi", True),
         (f"curl -s {api} -d channel=$CH -d text=hi", True),  # channel not visible
         (f"curl -s https://slack.com/api/chat.update -d channel={other} -d ts=1.2 -d text=x", True),
-        (f"curl -s https://slack.com/api/reactions.add -d channel={other} -d name=eyes -d timestamp=1.2", True),
+        (f"curl -s https://slack.com/api/reactions.add -d channel={other} -d name=eyes -d timestamp=1.2", False),
+        (f"curl -s https://slack.com/api/reactions.remove -d channel={other} -d name=eyes -d timestamp=1.2", False),
+        (f"python3 -c 'from slack_sdk import WebClient; WebClient().reactions_add(channel=\"{other}\", name=\"x\", timestamp=\"1.2\")'", False),
+        (f"curl -s {api} -d channel={SHARE_BACKEND} -d thread_ts=1.2 -d text=hi", False),
+        # a reaction does not open a post that rides along in the same command
+        (f"curl -s https://slack.com/api/reactions.add -d channel={other} -d name=x -d timestamp=1.2; curl -s {api} -d channel={other} -d text=hi", True),
         ("curl -s -X POST https://hooks.slack.com/services/T/B/x -d '{\"text\":\"hi\"}'", True),
         (f"printf '%s\\n' '*[ a ]*' | GCP_PROJECT_ID=p scripts/deploy/slack-post.sh {RELEASE} < msg.txt", False),
         (f"printf '%s\\n' '*[ a ]*' | GCP_PROJECT_ID=p scripts/deploy/slack-post.sh {other}", True),
@@ -138,8 +150,8 @@ if __name__ == "__main__":
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": (
-                f"Slack 쓰기는 #임시작업({ALLOWED})과, 요유가 시킨 릴리스 공지의 #3-release-dev({RELEASE})에만 "
-                f"할 수 있습니다(요유 10/20·10/21, 요유가 풀 때까지). {found}. "
+                f"Slack 글은 #임시작업({ALLOWED}), #3-share-backend({SHARE_BACKEND}), 요유가 시킨 릴리스 공지의 "
+                f"#3-release-dev({RELEASE})에만 쓸 수 있습니다(요유 10/20~10/22, 요유가 풀 때까지). 리액션은 어느 채널이든 됩니다. {found}. "
                 "그 채널에 없는 사람에게 갈 글이면 요유 말투 초안을 slackcopy로 넘기세요. 읽기는 어느 채널이든 됩니다."
             ),
         }}, ensure_ascii=False))
