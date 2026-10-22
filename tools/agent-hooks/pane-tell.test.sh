@@ -60,6 +60,13 @@ pt "tf#928" "x" 2>/dev/null; check "refuses_ambient_session (moved out of its ta
 panes "w1:p12|🟢 tf#929 전환|s12|w1:t1"
 printf '{"type":"user","origin":{"kind":"human"},"message":{"content":"\0[ambient-round] work.md"}}\n' > "$SANDBOX/home/.claude/projects/p/s12.jsonl"
 pt "tf#929" "x" 2>/dev/null; check "refuses_ambient_session with a NUL byte in the line" "$?|$(sent)" "2|"
+panes "w1:p14|🟢 tf#930 전환|s14|w1:t1"
+echo '{"type":"user","origin":{"kind":"human"},"message":{"content":"ambient-round] work.md"}}' > "$SANDBOX/home/.claude/projects/p/s14.jsonl"
+pt "tf#930" "x" 2>/dev/null; check "refuses_ambient_session with the [ eaten" "$?|$(sent)" "2|"
+# only a session the poll started (its first prompt opens with the marker), not one that talks about the marker
+panes "w1:p15|🟢 ambient 리뷰|s15|w1:t1"
+echo '{"type":"user","origin":{"kind":"human"},"message":{"content":"deliver.py의 [ambient-round] 마커를 리뷰해 줘"}}' > "$SANDBOX/home/.claude/projects/p/s15.jsonl"
+pt "ambient 리뷰" "x" >/dev/null; check "a session that only mentions ambient-round is told" "$?|$(sent)" "0|w1:p15 "
 panes "w1:p13|🟢 할 일 정리|s13|w1:t10"
 echo '{"type":"user","origin":{"kind":"human"},"message":{"content":"ambient 모드 설계"}}' > "$SANDBOX/home/.claude/projects/p/s13.jsonl"
 pt "할 일" "x" >/dev/null; check "a tab named 알아서하기 is not an ambient tab" "$?|$(sent)" "0|w1:p13 "

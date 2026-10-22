@@ -48,7 +48,10 @@ for t in "$HOME"/.claude/projects/*/"$sid".jsonl; do
   # -a: a NUL byte would make grep print "Binary file ... matches" instead of the line
   first=$(grep -a -m1 -F '"origin":{"kind":"human"}' "$t")
   [[ $first == *auto-dispatch* ]] && die "$pane ($name) is an auto-dispatch session; comment on its board item instead"
-  [[ $first == *ambient-round* ]] && die "$pane ($name) is a Slack ambient session; it takes rounds only from the ambient poll"
+  # only a session the ambient poll started: its first prompt opens with the marker ("[" may be eaten), so a session
+  # that merely talks about the marker is still told
+  [[ $first =~ \"content\":\"\[?ambient-round\] ]] &&
+    die "$pane ($name) is a Slack ambient session; it takes rounds only from the ambient poll"
 done
 from=$(awk -F'\t' -v me="${HERDR_PANE_ID:-}" '$1 == me {print $2}' <<<"$panes")
 "$H" agent prompt "$pane" "[pane-tell: '${from:-자동 작업}' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] $2" >/dev/null ||
