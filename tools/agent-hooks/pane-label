@@ -8,10 +8,11 @@
 #   pane-label --hold | --free                set the mark to 🔴 / 🟢, keeping the name
 #   pane-label --clear                        remove it
 #   pane-label --clear-if-prefix "api#736 "   remove it only if it still names that item
-#   pane-label --close                        close this pane once the agent's turn ends, only in a tab the dispatch
-#                                             job opened (MUNICE_AUTO_DISPATCH=1); detached, so it outlives the tool
-#                                             call. Skips a 🔴 pane, and cancels if the agent works again within the
-#                                             grace period (요유 typed a new message)
+#   pane-label --close                        close this pane once the agent's turn ends, only in a tab a job opened
+#                                             (the dispatch job: MUNICE_AUTO_DISPATCH=1, the Slack ambient poll:
+#                                             MUNICE_AMBIENT=1); detached, so it outlives the tool call. Skips a 🔴
+#                                             pane, and cancels if the agent works again within the grace period
+#                                             (요유 typed a new message, or the next ambient round arrived)
 H=${HERDR_BIN_PATH:-herdr}
 [ -n "${HERDR_PANE_ID:-}" ] && command -v "$H" >/dev/null 2>&1 || exit 0
 HOLD=🔴
@@ -46,8 +47,10 @@ case "${1:-}" in
   --hold) mark "$HOLD" "$(name_of "$(current)")" ;;
   --free) mark "$FREE" "$(name_of "$(current)")" ;;
   --close)
-    # Only a tab the dispatch job opened closes itself; 요유 closes the sessions they started (요유 2026-10-21).
-    if [ -z "${MUNICE_AUTO_DISPATCH:-}" ]; then echo "pane-label: 요유가 연 세션이라 닫지 않음 (자동 탭만 닫힘)" >&2; exit 0; fi
+    # Only a tab a job opened (dispatch, Slack ambient) closes itself; 요유 closes the sessions they started (요유 2026-10-21).
+    if [ -z "${MUNICE_AUTO_DISPATCH:-}" ] && [ -z "${MUNICE_AMBIENT:-}" ]; then
+      echo "pane-label: 요유가 연 세션이라 닫지 않음 (자동·알아서 탭만 닫힘)" >&2; exit 0
+    fi
     if [ "$(mark_of "$(current)")" = "$HOLD" ]; then echo "pane-label: 🔴 pane, not closing" >&2; exit 0; fi
     # Own session so the agent's tool runner does not kill it with the command's process group.
     nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' bash "$0" --close-now >/dev/null 2>&1 &

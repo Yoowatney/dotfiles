@@ -61,7 +61,8 @@ pl --hold; expect "🔴" "hold without a name"
 pl "api#4 일"; expect "🔴 api#4 일" "naming after hold keeps 🔴"
 
 # --close-now (what --close runs detached) closes only a 🟢 pane whose agent stays idle through the grace period.
-close() { rm -f "$SANDBOX/closed"; PANE_CLOSE_WAIT=1 PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close-now; }
+# grace counts whole $SECONDS, so a grace of 1 can end at once; the cancel case below needs 2 to be sure to see 0.5 s
+close() { rm -f "$SANDBOX/closed"; PANE_CLOSE_WAIT=1 PANE_CLOSE_GRACE=${GRACE:-1} PANE_CLOSE_POLL=0.2 pl --close-now; }
 pl "🟢 api#5 끝"; echo idle > "$SANDBOX/status"
 close; [ -f "$SANDBOX/closed" ] || fail "idle 🟢 pane should close"
 echo working > "$SANDBOX/status"
@@ -70,13 +71,18 @@ echo idle > "$SANDBOX/status"; pl --hold
 close; [ ! -f "$SANDBOX/closed" ] || fail "a 🔴 pane should not close"
 pl --free
 (sleep 0.5; echo working > "$SANDBOX/status") &
-close; wait; [ ! -f "$SANDBOX/closed" ] || fail "요유 typing during the grace period should cancel the close"
+GRACE=2 close; wait; [ ! -f "$SANDBOX/closed" ] || fail "요유 typing during the grace period should cancel the close"
 
-# --close works only in a tab the dispatch job opened (MUNICE_AUTO_DISPATCH=1); 요유 closes ordinary sessions.
+# --close works only in a tab a job opened (MUNICE_AUTO_DISPATCH=1 dispatch, MUNICE_AMBIENT=1 Slack ambient);
+# 요유 closes ordinary sessions.
 echo idle > "$SANDBOX/status"; rm -f "$SANDBOX/closed"
-( unset MUNICE_AUTO_DISPATCH; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close 2>/dev/null )
+( unset MUNICE_AUTO_DISPATCH MUNICE_AMBIENT; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close 2>/dev/null )
 sleep 2; [ ! -f "$SANDBOX/closed" ] || fail "an ordinary session should not close itself"
-( export MUNICE_AUTO_DISPATCH=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close >/dev/null )
+( unset MUNICE_AMBIENT; export MUNICE_AUTO_DISPATCH=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close >/dev/null )
 sleep 2; [ -f "$SANDBOX/closed" ] || fail "an auto-dispatch tab should close itself"
+# close_allowed_in_ambient
+rm -f "$SANDBOX/closed"
+( unset MUNICE_AUTO_DISPATCH; export MUNICE_AMBIENT=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close >/dev/null 2>&1 )
+sleep 2; [ -f "$SANDBOX/closed" ] || fail "close_allowed_in_ambient: an ambient tab should close itself"
 
 echo "ok: pane-label"

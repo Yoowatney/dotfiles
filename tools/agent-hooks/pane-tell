@@ -4,7 +4,8 @@
 #   pane-tell --list                          one line per pane: id, name, cwd; pick the target from these
 #   pane-tell <pane id|name text> "<message>"  name text: any piece of the pane name, case-insensitive ("KPI 표")
 # Exit 3: no pane matches. Exit 2: bad usage, more than one match (listed on stderr), this pane itself, or an
-# auto-dispatch session: a prompt typed there counts as 요유 speaking and lifts the board's dispatch/guard.sh.
+# auto-dispatch or Slack ambient session: a prompt typed there counts as 요유 speaking and lifts the board's
+# dispatch/guard.sh (for good in a dispatch session, for that round in an ambient one).
 # The message arrives marked as coming from another session, since the receiver would otherwise read it as 요유's.
 H=${HERDR_BIN_PATH:-herdr}
 die() { echo "pane-tell: $*" >&2; exit 2; }
@@ -34,15 +35,20 @@ fi
 # cut, not `IFS=$'\t' read`: read merges the tabs around an empty session id and shifts every later field
 pane=$(cut -f1 <<<"$hits"); name=$(cut -f2 <<<"$hits"); sid=$(cut -f3 <<<"$hits"); tab=$(cut -f5 <<<"$hits")
 [ "$pane" != "${HERDR_PANE_ID:-}" ] || die "\"$1\" is this pane"
-# The dispatch job names its tabs "자동 <tag>". This holds even when herdr gives no session id to look up, which let
-# board.sh unwatch type into an auto pane and lift its guard (Claude review 10/21).
+# The dispatch job names its tabs "자동 <tag>", the Slack ambient poll "알아서 <#channel> <title>". This holds even when
+# herdr gives no session id to look up, which let board.sh unwatch type into an auto pane and lift its guard (Claude
+# review 10/21). The first human prompt catches a session moved or renamed out of its tab.
 tabs=$("$H" tab list 2>/dev/null | jq -r '.result.tabs[] | [.tab_id, (.label // "")] | @tsv') || die "herdr tab list failed"
-awk -F'\t' -v t="$tab" '$1 == t && index($2, "자동 ") == 1 {found=1} END {exit !found}' <<<"$tabs" &&
-  die "$pane ($name) is in an auto-dispatch tab; comment on its board item instead"
+case "$(awk -F'\t' -v t="$tab" '$1 == t {print $2; exit}' <<<"$tabs")" in
+  "자동 "*) die "$pane ($name) is in an auto-dispatch tab; comment on its board item instead" ;;
+  "알아서 "*) die "$pane ($name) is in a Slack ambient tab; it takes rounds only from the ambient poll" ;;
+esac
 for t in "$HOME"/.claude/projects/*/"$sid".jsonl; do
   [ -n "$sid" ] && [ -f "$t" ] || continue
-  grep -m1 -F '"origin":{"kind":"human"}' "$t" | grep -qF auto-dispatch &&
-    die "$pane ($name) is an auto-dispatch session; comment on its board item instead"
+  # -a: a NUL byte would make grep print "Binary file ... matches" instead of the line
+  first=$(grep -a -m1 -F '"origin":{"kind":"human"}' "$t")
+  [[ $first == *auto-dispatch* ]] && die "$pane ($name) is an auto-dispatch session; comment on its board item instead"
+  [[ $first == *ambient-round* ]] && die "$pane ($name) is a Slack ambient session; it takes rounds only from the ambient poll"
 done
 from=$(awk -F'\t' -v me="${HERDR_PANE_ID:-}" '$1 == me {print $2}' <<<"$panes")
 "$H" agent prompt "$pane" "[pane-tell: '${from:-자동 작업}' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] $2" >/dev/null ||
