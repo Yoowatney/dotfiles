@@ -4,7 +4,8 @@
 요유 asked on 2026-10-20 that sessions write to Slack (posts, thread replies,
 reactions) only in #임시작업 until they lift the rule. On 2026-10-21 they also
 allowed #3-release-dev, for release notices they ask for (release-notify).
-On 2026-10-22 they opened #3-share-backend for posts and reactions in every channel.
+On 2026-10-22 they opened #3-share-backend for posts and reactions in every channel,
+and moved bot QA and test posts to their DM with backend-bot (#임시작업 got cluttered).
 Reading any channel is fine. When the rule is lifted, delete this file and its entries in
 ~/.claude/settings.json and ~/.codex/hooks.json.
 Memory: feedback_slack_writes_temp_work_channel.
@@ -26,7 +27,8 @@ import sys
 ALLOWED = "C0CAND31MA8"  # #임시작업
 RELEASE = "C0536DQTREV"  # #3-release-dev, release notices 요유 asks for (2026-10-21)
 SHARE_BACKEND = "C078C6SHC87"  # #3-share-backend (2026-10-22)
-WRITABLE = {ALLOWED, RELEASE, SHARE_BACKEND}
+BOT_DM = "D0A965712JU"  # 요유's DM with backend-bot: bot QA and test posts go here, not #임시작업 (2026-10-22)
+WRITABLE = {ALLOWED, RELEASE, SHARE_BACKEND, BOT_DM}
 
 READ_TOOL = re.compile(r"(?:^|_)(?:get|list|search|read|fetch|lookup)", re.I)
 REACTION_TOOL = re.compile(r"reaction", re.I)  # reactions are open in every channel (2026-10-22)
@@ -113,6 +115,8 @@ def selftest() -> None:
         (f"curl -s https://slack.com/api/reactions.remove -d channel={other} -d name=eyes -d timestamp=1.2", False),
         (f"python3 -c 'from slack_sdk import WebClient; WebClient().reactions_add(channel=\"{other}\", name=\"x\", timestamp=\"1.2\")'", False),
         (f"curl -s {api} -d channel={SHARE_BACKEND} -d thread_ts=1.2 -d text=hi", False),
+        (f"curl -s {api} -d channel={BOT_DM} -d text=QA", False),
+        ("curl -s https://slack.com/api/chat.postMessage -d channel=D0OTHERDM12 -d text=hi", True),  # other DMs stay closed
         # a reaction does not open a post that rides along in the same command
         (f"curl -s https://slack.com/api/reactions.add -d channel={other} -d name=x -d timestamp=1.2; curl -s {api} -d channel={other} -d text=hi", True),
         ("curl -s -X POST https://hooks.slack.com/services/T/B/x -d '{\"text\":\"hi\"}'", True),
@@ -151,7 +155,8 @@ if __name__ == "__main__":
             "permissionDecision": "deny",
             "permissionDecisionReason": (
                 f"Slack 글은 #임시작업({ALLOWED}), #3-share-backend({SHARE_BACKEND}), 요유가 시킨 릴리스 공지의 "
-                f"#3-release-dev({RELEASE})에만 쓸 수 있습니다(요유 10/20~10/22, 요유가 풀 때까지). 리액션은 어느 채널이든 됩니다. {found}. "
+                f"#3-release-dev({RELEASE})에만 쓸 수 있습니다(요유 10/20~10/22, 요유가 풀 때까지). 봇 QA·테스트 글은 "
+                f"#임시작업이 아니라 요유와 backend-bot의 DM({BOT_DM})에 씁니다. 리액션은 어느 채널이든 됩니다. {found}. "
                 "그 채널에 없는 사람에게 갈 글이면 요유 말투 초안을 slackcopy로 넘기세요. 읽기는 어느 채널이든 됩니다."
             ),
         }}, ensure_ascii=False))
