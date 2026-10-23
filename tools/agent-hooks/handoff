@@ -9,6 +9,13 @@
 # One pending handoff per herdr pane; a newer save replaces it. The last loaded one stays as <pane>.md.loaded.
 dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-handoff"
 f="$dir/${HERDR_PANE_ID:-}.md"
+typed="Any text before the [handoff: marker in that message is 요유's own, typed while the prompt was on its way: answer it first."
+# Context alone waits for a first message, and interactive sessions ignore initialUserMessage (tested 10/21),
+# so type the first prompt into this pane once the session is up (요유 approved 10/21). Detached: the hook returns first.
+kick() {
+  nohup bash -c 'sleep "$1"; "$2" agent prompt "$3" "$4"' _ "${HANDOFF_KICK_DELAY:-3}" "${HERDR_BIN_PATH:-herdr}" "$HERDR_PANE_ID" \
+    "[handoff: /clear 뒤 자동으로 보낸 글입니다. 요유가 직접 친 글이 아닙니다] $1 되돌리기 어려운 일은 요유에게 확인하세요." >/dev/null 2>&1 &
+}
 case "${1:-}" in
   save)
     if [ -z "${HERDR_PANE_ID:-}" ]; then
@@ -22,16 +29,12 @@ case "${1:-}" in
     [ -n "${HERDR_PANE_ID:-}" ] && [ -f "$f" ] || exit 0
     # ponytail: fixed one-day expiry; a handoff nobody picked up by then belongs to work that moved on
     if [ -n "$(find "$f" -mmin +1440)" ]; then rm -f "$f"; exit 0; fi
-    head="The previous session in this pane saved this handoff at $(stat -f '%Sm' -t '%m-%d %H:%M' "$f") before /clear. Unless 요유's first message asks for something else, continue from it. Any text before the [handoff: marker in that message is 요유's own, typed while the prompt was on its way: answer it first."
+    head="The previous session in this pane saved this handoff at $(stat -f '%Sm' -t '%m-%d %H:%M' "$f") before /clear. Unless 요유's first message asks for something else, continue from it. $typed"
     # The JSON shape both Claude and Codex read as SessionStart context. No systemMessage: Claude draws it only
     # with the first turn, so it cannot fill the wait (measured 10/21).
     jq -n --arg ctx "$head"$'\n\n'"$(cat "$f")" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}' &&
       mv "$f" "$f.loaded" || exit
-    # Context alone waits for a first message, and interactive sessions ignore initialUserMessage (tested 10/21),
-    # so type the first prompt into this pane once the session is up (요유 approved 10/21). Detached: the hook returns first.
-    kick="[handoff: /clear 뒤 자동으로 보낸 글입니다. 요유가 직접 친 글이 아닙니다] 세션 시작 때 받은 인수인계대로 이어서 진행하세요. 되돌리기 어려운 일은 요유에게 확인하세요."
-    nohup bash -c 'sleep "$1"; "$2" agent prompt "$3" "$4"' _ "${HANDOFF_KICK_DELAY:-3}" "${HERDR_BIN_PATH:-herdr}" \
-      "$HERDR_PANE_ID" "$kick" >/dev/null 2>&1 &
+    kick "세션 시작 때 받은 인수인계대로 이어서 진행하세요."
     ;;
   session)
     # 10/23: 요유 ran /clear on a session that never saved, and the next one started blank. A save is only made when
@@ -54,9 +57,10 @@ case "${1:-}" in
       | [.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] as $a
       | "요유의 마지막 메시지:\n\(($u[-1] // "(없음)")[0:600])\n\n유요의 마지막 답:\n\(($a[-1] // "(없음)")[0:1500])"
         + ([$a[] | scan("남은 것:[^\n]*")] | last | if . then "\n\n마지막 남은 것 줄:\n\(.)" else "" end)') || exit 0
-    # No kick: the old session had already handed the turn back to 요유, so starting work now could act on stale state.
-    head="The previous session in this pane ended with /clear without saving a handoff. Its full transcript is $prev; read its end with jq if you need more than the excerpt below. It had handed the turn back to 요유, so do not resume work on your own: use this to answer 요유's next message in context."
-    jq -n --arg ctx "$head"$'\n\n'"$last" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}'
+    head="The previous session in this pane ended with /clear without saving a handoff. Its full transcript is $prev; read its end with jq if you need more than the excerpt below. Unless 요유's first message asks for something else, pick up where it left off: the 유요 몫 in its last 남은 것 line. $typed"
+    jq -n --arg ctx "$head"$'\n\n'"$last" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}' || exit
+    # 요유 only types /clear, saved or not (10/23).
+    kick "세션 시작 때 받은 직전 세션 기록을 보고, 유요 몫으로 남은 일을 이어서 진행하세요. 남은 일이 없으면 이어받은 내용만 짧게 알리세요."
     ;;
   *) echo 'usage: handoff save [file] | handoff session | handoff load' >&2; exit 2 ;;
 esac

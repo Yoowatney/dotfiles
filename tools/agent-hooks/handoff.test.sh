@@ -74,7 +74,11 @@ check "fallback carries 요유's last message" "$(grep -c '서버에서 도는 �
 check "fallback carries the last reply" "$(grep -c '사내 서버에서 돕니다' <<<"$ctx")" 1
 check "fallback carries the last 남은 것 line" "$(grep -c '남은 것: 요유 몫: 키 발급' <<<"$ctx")" 1
 check "fallback skips hook text and the kick" "$(grep -c -e 'meta caveat' -e '<command-name>' -e '자동으로 보낸 글' <<<"$ctx")" 0
-check "fallback does not start a turn" "$(prompts)" ""
+# 요유 only types /clear, saved or not (10/23: "clear만 하면 알아서 핸드오프받고 되야하는거 아님?").
+check "fallback starts the first turn in its own pane" "$(prompts)" "w2:p1 "
+check "the fallback kick points at the old session's record" "$(grep -c '직전 세션 기록' "$SANDBOX/prompts")" 1
+check "fallback says text before the kick marker is 요유's" "$(grep -c "before the \[handoff:" <<<"$ctx")" 1
+rm -f "$SANDBOX/prompts"
 check "clear records the new transcript" "$(cat "$dir/w2:p1.md.transcript")" "$SANDBOX/c.jsonl"
 # A `claude -p` run from a Bash call inherits the pane id; Claude sets its entrypoint to sdk-cli (probed 10/23).
 check "a headless startup prints nothing" "$(EP=sdk-cli ss w2:p1 startup "$SANDBOX/z.jsonl")" ""
@@ -87,6 +91,7 @@ ctx=$(ss w2:p1 clear "$SANDBOX/d.jsonl" | jq -r '.hookSpecificOutput.additionalC
 check "a saved handoff beats the fallback" "$(grep -c '저장한 인수인계' <<<"$ctx")" 1
 check "and the fallback stays out" "$(grep -c 'without saving a handoff' <<<"$ctx")" 0
 check "a saved handoff still starts the turn" "$(prompts)" "w2:p1 "
+check "with the handoff kick" "$(grep -c '인수인계대로' "$SANDBOX/prompts")" 1
 check "outside herdr session prints nothing" "$(ss "" clear "$SANDBOX/e.jsonl")" ""
 
 printf 'no pane\n' | ho "" save >/dev/null
