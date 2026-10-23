@@ -13,7 +13,7 @@ printf '#!/usr/bin/env bash\ncat > "%s/clip"\n' "$SANDBOX" > "$SANDBOX/bin/pbcop
 printf '#!/usr/bin/env bash\nprintf "%%s|%%s\\n" "$3" "$4" >> "%s/prompts"\n' "$SANDBOX" > "$SANDBOX/bin/herdr"
 chmod +x "$SANDBOX/bin/pbcopy" "$SANDBOX/bin/herdr"
 ho() { local pane="$1"; shift; env XDG_STATE_HOME="$SANDBOX/state" HERDR_PANE_ID="$pane" HERDR_BIN_PATH="$SANDBOX/bin/herdr" \
-  HANDOFF_KICK_DELAY=0 PATH="$SANDBOX/bin:$PATH" bash "$SUBJECT" "$@"; }
+  HANDOFF_KICK_DELAY=0 CLAUDE_CODE_ENTRYPOINT="${EP:-cli}" PATH="$SANDBOX/bin:$PATH" bash "$SUBJECT" "$@"; }
 # The kick runs detached, so give it a moment to land.
 prompts() { local i; for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$SANDBOX/prompts" ] && break; sleep 0.2; done; cut -d'|' -f1 "$SANDBOX/prompts" 2>/dev/null | tr '\n' ' '; }
 dir="$SANDBOX/state/agent-handoff"
@@ -76,6 +76,9 @@ check "fallback carries the last 남은 것 line" "$(grep -c '남은 것: 요유
 check "fallback skips hook text and the kick" "$(grep -c -e 'meta caveat' -e '<command-name>' -e '자동으로 보낸 글' <<<"$ctx")" 0
 check "fallback does not start a turn" "$(prompts)" ""
 check "clear records the new transcript" "$(cat "$dir/w2:p1.md.transcript")" "$SANDBOX/c.jsonl"
+# A `claude -p` run from a Bash call inherits the pane id; Claude sets its entrypoint to sdk-cli (probed 10/23).
+check "a headless startup prints nothing" "$(EP=sdk-cli ss w2:p1 startup "$SANDBOX/z.jsonl")" ""
+check "and keeps the pane's transcript" "$(cat "$dir/w2:p1.md.transcript")" "$SANDBOX/c.jsonl"
 
 # An explicit save still wins over the fallback, kick included.
 printf '저장한 인수인계\n' | ho w2:p1 save >/dev/null

@@ -38,6 +38,8 @@ case "${1:-}" in
     # the old session sees /clear coming, so the fallback cannot depend on it.
     in=$(cat)
     [ -n "${HERDR_PANE_ID:-}" ] || exit 0
+    # A `claude -p` run from a Bash call inherits the pane id but is not the pane's session: it runs as sdk-cli (probed 10/23).
+    [ "${CLAUDE_CODE_ENTRYPOINT:-cli}" = cli ] || exit 0
     mkdir -p "$dir" || exit
     prev=$(cat "$f.transcript" 2>/dev/null)
     jq -r '.transcript_path // empty' <<<"$in" > "$f.transcript"
