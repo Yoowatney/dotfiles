@@ -2,7 +2,9 @@
 # Carries the next-session prompt across /clear, so 요유 never copies and pastes a handoff
 # (요유 2026-10-21: the clipboard round trip made them the bottleneck).
 #   handoff save [file]   stdin or file -> this pane's pending handoff (outside herdr: the clipboard)
-#   handoff load          Claude SessionStart hook (matcher clear): print it once, set it aside, and start the first turn.
+#   handoff session       Claude SessionStart hook (every source): remember this pane's transcript in <pane>.md.transcript.
+#                         On /clear: load, or with nothing saved, point the new session at the transcript /clear ended.
+#   handoff load          print the pending handoff once, set it aside, and start the first turn.
 #                         Not wired into Codex: its hooks.json entry needs 요유 to trust it first.
 # One pending handoff per herdr pane; a newer save replaces it. The last loaded one stays as <pane>.md.loaded.
 dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-handoff"
@@ -31,5 +33,28 @@ case "${1:-}" in
     nohup bash -c 'sleep "$1"; "$2" agent prompt "$3" "$4"' _ "${HANDOFF_KICK_DELAY:-3}" "${HERDR_BIN_PATH:-herdr}" \
       "$HERDR_PANE_ID" "$kick" >/dev/null 2>&1 &
     ;;
-  *) echo 'usage: handoff save [file] | handoff load' >&2; exit 2 ;;
+  session)
+    # 10/23: 요유 ran /clear on a session that never saved, and the next one started blank. A save is only made when
+    # the old session sees /clear coming, so the fallback cannot depend on it.
+    in=$(cat)
+    [ -n "${HERDR_PANE_ID:-}" ] || exit 0
+    mkdir -p "$dir" || exit
+    prev=$(cat "$f.transcript" 2>/dev/null)
+    jq -r '.transcript_path // empty' <<<"$in" > "$f.transcript"
+    [ "$(jq -r '.source // empty' <<<"$in")" = clear ] || exit 0
+    out=$(bash "$0" load)
+    if [ -n "$out" ]; then printf '%s\n' "$out"; exit; fi
+    [ -f "$prev" ] || exit 0
+    # ponytail: only the last 2000 lines; the transcript path is there for anything older
+    last=$(tail -n 2000 "$prev" | jq -rs '
+      [.[] | select(.type == "user" and .isMeta != true and .isCompactSummary != true and (.message.content | type) == "string")
+           | .message.content | select((startswith("<") or startswith("[handoff:")) | not)] as $u
+      | [.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] as $a
+      | "요유의 마지막 메시지:\n\(($u[-1] // "(없음)")[0:600])\n\n유요의 마지막 답:\n\(($a[-1] // "(없음)")[0:1500])"
+        + ([$a[] | scan("남은 것:[^\n]*")] | last | if . then "\n\n마지막 남은 것 줄:\n\(.)" else "" end)') || exit 0
+    # No kick: the old session had already handed the turn back to 요유, so starting work now could act on stale state.
+    head="The previous session in this pane ended with /clear without saving a handoff. Its full transcript is $prev; read its end with jq if you need more than the excerpt below. It had handed the turn back to 요유, so do not resume work on your own: use this to answer 요유's next message in context."
+    jq -n --arg ctx "$head"$'\n\n'"$last" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}'
+    ;;
+  *) echo 'usage: handoff save [file] | handoff session | handoff load' >&2; exit 2 ;;
 esac

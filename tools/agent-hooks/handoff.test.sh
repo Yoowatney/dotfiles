@@ -46,6 +46,46 @@ touch -t "$(date -v-2d +%Y%m%d%H%M)" "$dir/w1:p4.md"
 check "a day-old handoff is ignored" "$(ho w1:p4 load)" ""
 check "and removed" "$([ -e "$dir/w1:p4.md" ] && echo kept || echo gone)" "gone"
 
+# `session` is the SessionStart hook for every source. 10/23: 요유 ran /clear on a session that never saved,
+# and the next session started blank. It now records each pane's transcript and falls back to the one /clear ended.
+ss() { local pane="$1" src="$2" tp="$3"; jq -nc --arg s "$src" --arg t "$tp" '{source: $s, transcript_path: $t}' | ho "$pane" session; }
+rm -f "$SANDBOX/prompts"
+check "startup prints nothing" "$(ss w2:p1 startup "$SANDBOX/a.jsonl")" ""
+check "startup records the transcript" "$(cat "$dir/w2:p1.md.transcript")" "$SANDBOX/a.jsonl"
+check "clear with nothing recorded and nothing saved prints nothing" "$(ss w2:p9 clear "$SANDBOX/x.jsonl")" ""
+check "clear whose old transcript is gone prints nothing" "$(ss w2:p1 clear "$SANDBOX/b.jsonl")" ""
+
+# A synthetic transcript: hook text and the auto kick are not 요유's words.
+{
+  jq -nc '{type: "user", message: {content: "첫 질문"}}'
+  jq -nc '{type: "assistant", message: {content: [{type: "text", text: "작업 끝\n\n남은 것: 요유 몫: 키 발급 · 유요 몫: 없음 · 세션: 닫아도 됨"}]}}'
+  jq -nc '{type: "user", message: {content: "서버에서 도는 거지?"}}'
+  jq -nc '{type: "assistant", message: {content: [{type: "tool_use", name: "Bash"}]}}'
+  jq -nc '{type: "user", message: {content: [{type: "tool_result", content: "running"}]}}'
+  jq -nc '{type: "assistant", message: {content: [{type: "text", text: "네, 사내 서버에서 돕니다."}]}}'
+  jq -nc '{type: "user", isMeta: true, message: {content: "meta caveat"}}'
+  jq -nc '{type: "user", message: {content: "<command-name>/clear</command-name>"}}'
+  jq -nc '{type: "user", message: {content: "[handoff: 자동으로 보낸 글]"}}'
+} > "$SANDBOX/b.jsonl"
+out=$(ss w2:p1 clear "$SANDBOX/c.jsonl")
+ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out")
+check "fallback names the old transcript" "$(grep -c "$SANDBOX/b.jsonl" <<<"$ctx")" 1
+check "fallback carries 요유's last message" "$(grep -c '서버에서 도는 거지?' <<<"$ctx")" 1
+check "fallback carries the last reply" "$(grep -c '사내 서버에서 돕니다' <<<"$ctx")" 1
+check "fallback carries the last 남은 것 line" "$(grep -c '남은 것: 요유 몫: 키 발급' <<<"$ctx")" 1
+check "fallback skips hook text and the kick" "$(grep -c -e 'meta caveat' -e '<command-name>' -e '자동으로 보낸 글' <<<"$ctx")" 0
+check "fallback does not start a turn" "$(prompts)" ""
+check "clear records the new transcript" "$(cat "$dir/w2:p1.md.transcript")" "$SANDBOX/c.jsonl"
+
+# An explicit save still wins over the fallback, kick included.
+printf '저장한 인수인계\n' | ho w2:p1 save >/dev/null
+cp "$SANDBOX/b.jsonl" "$SANDBOX/c.jsonl"
+ctx=$(ss w2:p1 clear "$SANDBOX/d.jsonl" | jq -r '.hookSpecificOutput.additionalContext')
+check "a saved handoff beats the fallback" "$(grep -c '저장한 인수인계' <<<"$ctx")" 1
+check "and the fallback stays out" "$(grep -c 'without saving a handoff' <<<"$ctx")" 0
+check "a saved handoff still starts the turn" "$(prompts)" "w2:p1 "
+check "outside herdr session prints nothing" "$(ss "" clear "$SANDBOX/e.jsonl")" ""
+
 printf 'no pane\n' | ho "" save >/dev/null
 check "outside herdr save falls back to the clipboard" "$(cat "$SANDBOX/clip")" "no pane"
 check "outside herdr load prints nothing" "$(ho "" load)" ""
