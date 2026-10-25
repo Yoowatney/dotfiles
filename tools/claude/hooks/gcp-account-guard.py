@@ -30,7 +30,7 @@ SWITCH = [
     (re.compile(r"--impersonate-service-account\b"), "다른 서비스 계정 대리 실행"),
     (re.compile(r"\bconfig\s+(?:set|unset)\s+(?:core/)?(?:account|auth/\S+)"), "gcloud 계정 설정 변경"),
     (re.compile(r"\bauth\s+(?:login|activate-service-account|application-default\s+login)\b"), "gcloud 로그인"),
-    (re.compile(r"\bfirebase\s+login\b"), "firebase 로그인"),
+    (re.compile(r"\bfirebase\s+login(?!:list\b)"), "firebase 로그인"),  # login:use, login:ci, login:add too
     (re.compile(r"\bCLOUDSDK_(?:CONFIG|CORE_ACCOUNT|AUTH_[A-Z_]+)="), "gcloud 신원 환경 변수"),
     (re.compile(r"--account[= ]\S+@"), "gcloud --account"),
     (re.compile(r"credentials\.db|access_tokens\.db|legacy_credentials|application_default_credentials\.json"
@@ -128,6 +128,8 @@ def selftest():
         "gcloud auth application-default login",
         "gcloud auth activate-service-account --key-file=k.json",
         "firebase login --reauth",
+        "firebase login:use other@example.com",
+        "firebase login:ci",
         "CLOUDSDK_CONFIG=/tmp/gc gcloud auth list",
         "gcloud --account=me@example.com secrets list",
         "cp ~/.config/gcloud/adc-munice-admin.json ~/.config/gcloud/adc-munice.json",
@@ -146,6 +148,7 @@ def selftest():
         "gcloud config get auth/impersonate_service_account --configuration=munice",
         "gcloud auth list",
         "firebase projects:list",
+        "firebase login:list",
         "ls ~/.config/gcloud",
         "grep -n prod AGENTS.md",
         "git commit -m 'docs: cla keeps the munice-admin config'",
