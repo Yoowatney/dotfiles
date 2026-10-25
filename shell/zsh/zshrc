@@ -73,7 +73,26 @@ alias tree="broot"
 # claude-online resolves a real name first, then exec's claude unchanged;
 # with DNS already up it adds no delay. Only helps at LAUNCH — an ENOTFOUND
 # inside an already-open session is not covered.
-alias claude="$HOME/.dotfiles/scripts/claude-online"
+alias claude="$HOME/.dotfiles/scripts/claude-online --dangerously-skip-permissions"
+alias cl=claude
+# cla: a session that works on production on purpose (refunds, data fixes). It runs as
+# Yoyoo's own GCP account through the munice-admin gcloud config and its ADC copy; plain
+# cl/claude sessions run as the agent account once the munice config is switched to it.
+# MUNICE_GCP_ADMIN tells .envrc and the credential guard that this session chose admin.
+alias cla='MUNICE_GCP_ADMIN=1 CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gcloud/adc-munice-admin.json claude'
+
+# Codex: upgrade before every run. An old client gets the newest default model
+# refused with a misleading "not supported when using Codex with a ChatGPT
+# account", and mise's "latest" never upgrades by itself (0.147.0 sat there
+# for two months). Costs ~0.7s when already current. `mise which` finds the
+# version just installed even if this shell's PATH still names the old one.
+# Both run from ~ because mise refuses to work in a directory whose
+# .mise.toml is not trusted yet (every new worktree).
+codex() {
+  local bin
+  bin=$(cd ~ && mise upgrade npm:@openai/codex >/dev/null 2>&1; mise which codex)
+  "$bin" "$@"
+}
 
 # Editor
 alias vim="nvim"
