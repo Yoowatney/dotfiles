@@ -3,9 +3,11 @@
 
 AI sessions run as an agent service account (production read, staging write) through the
 default `munice` gcloud config and ADC files. Yoyoo's own account lives in the `munice-admin`
-config and `adc-munice-admin.json`. This hook refuses commands that reach that identity or
-change which identity gcloud/firebase use, unless the session chose admin (`cla` sets
-MUNICE_GCP_ADMIN=1) or Yoyoo's latest typed prompt contains `prod 허용` (that turn only).
+config and `adc-munice-admin.json`. Two kinds of commands are refused:
+  - SELECT: one command picks another identity. Allowed when the session chose admin (`cla`
+    sets MUNICE_GCP_ADMIN=1) or Yoyoo's latest typed prompt contains `prod 허용` (that turn only).
+  - PERSIST: a change that outlives the command (a login, `config set`, the active config, the
+    credential files). Always refused, so an unlocked turn cannot leave admin behind.
 terraform#1005.
 
     gcp-account-guard.py --selftest
@@ -20,19 +22,22 @@ UNLOCK = "prod 허용"
 # ponytail: text patterns over the whole command, heredoc bodies included (a script there runs).
 # They stop accidents (a wrong config, a script that grabs the admin ADC), not a session set on
 # getting around them: a script can still read the credential store without naming it here.
-SWITCH = [
+SELECT = [  # one command, another identity
     # Picking the config, not mentioning it: notes and commit messages may name it.
-    (re.compile(r"(?:--configuration[= ]+|CLOUDSDK_ACTIVE_CONFIG_NAME=|\bactivate\s+)['\"]?munice-admin"),
-     "요유 계정 구성(munice-admin)"),
+    (re.compile(r"(?:--configuration[= ]+|CLOUDSDK_ACTIVE_CONFIG_NAME=)['\"]?munice-admin"), "요유 계정 구성(munice-admin)"),
     # .envrc picks the admin config when this is set, e.g. under `direnv exec`.
     (re.compile(r"\bMUNICE_GCP_ADMIN="), "요유 계정 세션 표시(MUNICE_GCP_ADMIN)"),
-    # Setting it in a config is the `config set` line below; `config get` only reads.
+    # Setting it in a config is a PERSIST `config set`; `config get` only reads.
     (re.compile(r"--impersonate-service-account\b"), "다른 서비스 계정 대리 실행"),
-    (re.compile(r"\bconfig\s+(?:set|unset)\s+(?:core/)?(?:account|auth/\S+)"), "gcloud 계정 설정 변경"),
-    (re.compile(r"\bauth\s+(?:login|activate-service-account|application-default\s+login)\b"), "gcloud 로그인"),
-    (re.compile(r"\bfirebase\s+login(?!:list\b)"), "firebase 로그인"),  # login:use, login:ci, login:add too
     (re.compile(r"\bCLOUDSDK_(?:CONFIG|CORE_ACCOUNT|AUTH_[A-Z_]+)="), "gcloud 신원 환경 변수"),
     (re.compile(r"--account[= ]\S+@"), "gcloud --account"),
+]
+PERSIST = [  # outlives the command
+    (re.compile(r"\bconfig\s+(?:set|unset)\s+(?:core/)?(?:account|auth/\S+)"), "gcloud 계정 설정 변경"),
+    (re.compile(r"\bactivate\s+['\"]?munice-admin"), "활성 gcloud 구성을 요유 계정으로 바꾸기"),
+    (re.compile(r"\bauth\s+(?:login|activate-service-account|application-default\s+login)\b"), "gcloud 로그인"),
+    (re.compile(r"\bfirebase\s+login(?!:list\b)"), "firebase 로그인"),  # login:use, login:ci, login:add too
+    # Reading one leaks a login into the transcript, writing one swaps an identity for good.
     (re.compile(r"credentials\.db|access_tokens\.db|legacy_credentials|application_default_credentials\.json"
                 r"|adc-munice|\.config/gcloud/configurations|configstore/firebase-tools\.json"), "자격 증명 파일"),
 ]
@@ -42,28 +47,35 @@ CONFIG_DIRS = re.compile(r"/\.config/gcloud/|configstore/firebase-tools\.json")
 WRITERS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch"}
 
 
-def bash_problem(cmd: str) -> str | None:
-    for pattern, what in SWITCH:
+def bash_problem(cmd: str) -> tuple[str, bool] | None:
+    """(what, persists) for the first refused part of a command."""
+    # The file an ADC assignment names is a SELECT, not a read of the credential store.
+    for pattern, what in PERSIST:
+        if pattern.search(ADC_ASSIGN.sub("", cmd)):
+            return what, True
+    for pattern, what in SELECT:
         if pattern.search(cmd):
-            return what
-    for m in ADC_ASSIGN.finditer(cmd):
-        if "gomgom" not in m.group(1):
-            return "GOOGLE_APPLICATION_CREDENTIALS 바꾸기"
+            return what, False
+    for m in ADC_ASSIGN.finditer(cmd):  # gomgom's own file, or the agent's default file named outright
+        if not re.search(r"(?:gomgom\S*|/adc-munice\.json['\"]?)$", m.group(1)):
+            return "GOOGLE_APPLICATION_CREDENTIALS 바꾸기", False
     return None
 
 
 PATCH_PATHS = re.compile(r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$", re.M)
 
 
-def write_targets(tool: str, inp: dict) -> str:
-    """The paths a write lands on; the content may quote config paths freely."""
+def write_targets(tool: str, inp: dict, cwd: str) -> str:
+    """Absolute paths a write lands on; the content may quote config paths freely."""
     if tool == "apply_patch":
-        return "\n".join(PATCH_PATHS.findall(str(inp.get("command") or inp.get("input") or inp.get("patch") or "")))
-    return str(inp.get("file_path") or inp.get("notebook_path") or "")
+        paths = PATCH_PATHS.findall(str(inp.get("command") or inp.get("input") or inp.get("patch") or ""))
+    else:
+        paths = [str(inp.get("file_path") or inp.get("notebook_path") or "")]
+    return "\n".join(os.path.normpath(os.path.join(cwd, os.path.expanduser(p.strip()))) for p in paths if p.strip())
 
 
-def write_problem(text: str) -> str | None:
-    return "gcloud·firebase 설정 파일 쓰기" if CONFIG_DIRS.search(text) else None
+def write_problem(text: str) -> tuple[str, bool] | None:
+    return ("gcloud·firebase 설정 파일 쓰기", True) if CONFIG_DIRS.search(text) else None
 
 
 def latest_prompt(transcript_path: str) -> str:
@@ -99,12 +111,19 @@ def latest_prompt(transcript_path: str) -> str:
 def tool_problem(payload: dict, env: dict) -> str | None:
     tool, inp = payload.get("tool_name"), payload.get("tool_input") or {}
     if tool in ("Bash", "Monitor"):
-        what = bash_problem(inp.get("command") or "")
+        hit = bash_problem(inp.get("command") or "")
     elif tool in WRITERS:
-        what = write_problem(write_targets(tool, inp))
+        hit = write_problem(write_targets(tool, inp, str(payload.get("cwd") or os.getcwd())))
     else:
         return None
-    if not what or env.get("MUNICE_GCP_ADMIN") == "1":
+    if not hit:
+        return None
+    what, persists = hit
+    if persists:
+        return (f"{what}: 명령이 끝난 뒤에도 남는 신원 변경이라 AI 세션에서는 하지 않습니다(`{UNLOCK}`이나 `cla`로도 "
+                "안 풀림). 필요하면 요유가 직접 터미널에서 할 것(예: `! gcloud auth login`). 재로그인 뒤에는 "
+                "use-agent-account.sh를 다시 돌린다. terraform#1005")
+    if env.get("MUNICE_GCP_ADMIN") == "1":
         return None
     # Job-opened tabs get their prompts typed in by a job (ambient pastes Slack threads), so the word proves nothing.
     auto = env.get("MUNICE_AUTO_DISPATCH") == "1" or env.get("MUNICE_AMBIENT") == "1"
@@ -202,6 +221,32 @@ def selftest():
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript("prod 허용", "이제 로그만 봐줘")}, {})
     # subagent transcript has no human line
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript(tail_tool=True)}, {})
+    # an unlocked turn may pick admin for one command, never leave it behind (Codex review P1)
+    unlocked = claude_transcript("고쳐줘", "prod 허용")
+
+    def bash(cmd, env=None, cwd="/tmp"):
+        return tool_problem({"tool_name": "Bash", "tool_input": {"command": cmd}, "transcript_path": unlocked,
+                             "cwd": cwd}, env or {})
+    assert bash("GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gcloud/adc-munice-admin.json node fix.js") is None
+    assert bash("CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin gcloud run services update api") is None
+    assert bash("cp ~/.config/gcloud/adc-munice-admin.json ~/.config/gcloud/adc-munice.json")
+    assert bash("gcloud config set account me@example.com")
+    assert bash("gcloud config configurations activate munice-admin")
+    assert bash("cat ~/.config/gcloud/adc-munice-admin.json")
+    # cla picks admin per command but cannot persist either
+    assert bash("gcloud --configuration=munice-admin run services list", {"MUNICE_GCP_ADMIN": "1"}) is None
+    assert bash("gcloud auth login", {"MUNICE_GCP_ADMIN": "1"})
+    # the agent's own default file named outright is not a switch
+    assert bash_problem("GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud/adc-munice.json node job.js") is None
+    # relative write paths resolve against cwd (Codex review P2)
+    home = os.path.expanduser("~")
+    assert tool_problem({"tool_name": "Edit", "tool_input": {"file_path": ".config/gcloud/configurations/config_munice"},
+                         "transcript_path": unlocked, "cwd": home}, {})
+    assert tool_problem({"tool_name": "apply_patch", "tool_input": {"command": "*** Begin Patch\n*** Update File: "
+                         ".config/gcloud/adc-munice.json\n@@\n-a\n+b\n*** End Patch"}, "transcript_path": unlocked,
+                         "cwd": home}, {})
+    assert tool_problem({"tool_name": "Edit", "tool_input": {"file_path": "notes.md"}, "transcript_path": unlocked,
+                         "cwd": home}, {}) is None
     # an auto tab (ambient, dispatch) never unlocks by the word
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript("prod 허용")}, {"MUNICE_AMBIENT": "1"})
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript("prod 허용")}, {"MUNICE_AUTO_DISPATCH": "1"})
