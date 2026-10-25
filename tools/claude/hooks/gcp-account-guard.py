@@ -104,8 +104,15 @@ def tool_problem(payload: dict, env: dict) -> str | None:
         what = write_problem(write_targets(tool, inp))
     else:
         return None
-    if not what or env.get("MUNICE_GCP_ADMIN") == "1" or UNLOCK in latest_prompt(payload.get("transcript_path") or ""):
+    if not what or env.get("MUNICE_GCP_ADMIN") == "1":
         return None
+    # Job-opened tabs get their prompts typed in by a job (ambient pastes Slack threads), so the word proves nothing.
+    auto = env.get("MUNICE_AUTO_DISPATCH") == "1" or env.get("MUNICE_AMBIENT") == "1"
+    if not auto and UNLOCK in latest_prompt(payload.get("transcript_path") or ""):
+        return None
+    if auto:
+        return (f"{what}: 자동 탭은 에이전트 계정(staging 쓰기, prod 읽기)으로만 GCP를 쓰고, 이 잠금은 풀 수 없습니다. "
+                "prod 쓰기가 필요하면 무엇을 왜 바꾸는지 보드 항목에 적고 owner를 yoyoo로 넘길 것. terraform#1005")
     return (f"{what}: AI 세션은 에이전트 계정(staging 쓰기, prod 읽기)으로만 GCP를 씁니다. prod 쓰기가 꼭 필요하면 "
             f"여기서 멈추고, 무엇을 왜 바꾸는지 적은 뒤 요유에게 '`{UNLOCK}`이라고 입력하면 이번 턴만 요유 계정으로 "
             "할 수 있다'고 말할 것. 처음부터 prod 작업 세션이면 요유가 `cla`로 띄움. terraform#1005")
@@ -195,6 +202,9 @@ def selftest():
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript("prod 허용", "이제 로그만 봐줘")}, {})
     # subagent transcript has no human line
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript(tail_tool=True)}, {})
+    # an auto tab (ambient, dispatch) never unlocks by the word
+    assert tool_problem({**admin_cmd, "transcript_path": claude_transcript("prod 허용")}, {"MUNICE_AMBIENT": "1"})
+    assert tool_problem({**admin_cmd, "transcript_path": claude_transcript("prod 허용")}, {"MUNICE_AUTO_DISPATCH": "1"})
     # cla session
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript("고쳐줘")}, {"MUNICE_GCP_ADMIN": "1"}) is None
     # missing transcript stays locked
