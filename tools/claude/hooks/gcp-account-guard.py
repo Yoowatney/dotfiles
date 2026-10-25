@@ -26,7 +26,8 @@ SWITCH = [
      "요유 계정 구성(munice-admin)"),
     # .envrc picks the admin config when this is set, e.g. under `direnv exec`.
     (re.compile(r"\bMUNICE_GCP_ADMIN="), "요유 계정 세션 표시(MUNICE_GCP_ADMIN)"),
-    (re.compile(r"--impersonate-service-account\b|\bimpersonate_service_account\b"), "다른 서비스 계정 대리 실행"),
+    # Setting it in a config is the `config set` line below; `config get` only reads.
+    (re.compile(r"--impersonate-service-account\b"), "다른 서비스 계정 대리 실행"),
     (re.compile(r"\bconfig\s+(?:set|unset)\s+(?:core/)?(?:account|auth/\S+)"), "gcloud 계정 설정 변경"),
     (re.compile(r"\bauth\s+(?:login|activate-service-account|application-default\s+login)\b"), "gcloud 로그인"),
     (re.compile(r"\bfirebase\s+login\b"), "firebase 로그인"),
@@ -142,6 +143,7 @@ def selftest():
         "gcloud config configurations activate gomgom",
         "GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gcloud/adc-gomgom.json node gomgom.js",
         "gcloud config list",
+        "gcloud config get auth/impersonate_service_account --configuration=munice",
         "gcloud auth list",
         "firebase projects:list",
         "ls ~/.config/gcloud",
