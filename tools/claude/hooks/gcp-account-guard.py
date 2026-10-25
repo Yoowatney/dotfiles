@@ -51,6 +51,16 @@ def bash_problem(cmd: str) -> str | None:
     return None
 
 
+PATCH_PATHS = re.compile(r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$", re.M)
+
+
+def write_targets(tool: str, inp: dict) -> str:
+    """The paths a write lands on; the content may quote config paths freely."""
+    if tool == "apply_patch":
+        return "\n".join(PATCH_PATHS.findall(str(inp.get("command") or inp.get("input") or inp.get("patch") or "")))
+    return str(inp.get("file_path") or inp.get("notebook_path") or "")
+
+
 def write_problem(text: str) -> str | None:
     return "gcloud·firebase 설정 파일 쓰기" if CONFIG_DIRS.search(text) else None
 
@@ -90,7 +100,7 @@ def tool_problem(payload: dict, env: dict) -> str | None:
     if tool in ("Bash", "Monitor"):
         what = bash_problem(inp.get("command") or "")
     elif tool in WRITERS:
-        what = write_problem(json.dumps(inp, ensure_ascii=False))
+        what = write_problem(write_targets(tool, inp))
     else:
         return None
     if not what or env.get("MUNICE_GCP_ADMIN") == "1" or UNLOCK in latest_prompt(payload.get("transcript_path") or ""):
@@ -193,6 +203,11 @@ def selftest():
     assert tool_problem({"tool_name": "apply_patch", "tool_input": {"command": "*** Begin Patch\n*** Update File: "
         + os.path.expanduser("~/.config/gcloud/configurations/config_munice") + "\n@@\n-a\n+b\n*** End Patch"},
         "transcript_path": codex_transcript("x")}, {})
+    # a note whose content quotes a config path is not a write into the config dir
+    assert tool_problem({"tool_name": "Write", "tool_input": {"file_path": "/tmp/notes.md", "content":
+        "backup: ~/.config/gcloud/adc-munice.json.bak"}, "transcript_path": claude_transcript("x")}, {}) is None
+    assert tool_problem({"tool_name": "apply_patch", "tool_input": {"command": "*** Begin Patch\n*** Add File: notes.md\n"
+        "+see ~/.config/gcloud/configurations\n*** End Patch"}, "transcript_path": codex_transcript("x")}, {}) is None
     assert tool_problem({"tool_name": "Bash", "tool_input": {"command": "gcloud run services list"},
                          "transcript_path": claude_transcript("x")}, {}) is None
     assert tool_problem({"tool_name": "Monitor", "tool_input": {"command": "gcloud auth login"},
