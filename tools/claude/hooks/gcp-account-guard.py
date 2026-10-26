@@ -12,6 +12,8 @@ terraform#1005.
 
     gcp-account-guard.py --selftest
 """
+from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
+
 import json
 import os
 import re
@@ -22,6 +24,8 @@ UNLOCK = "prod 허용"
 # ponytail: text patterns over the whole command, heredoc bodies included (a script there runs).
 # They stop accidents (a wrong config, a script that grabs the admin ADC), not a session set on
 # getting around them: a script can still read the credential store without naming it here.
+# Global options may sit between the words of a subcommand: `gcloud config --quiet unset ...`, `firebase -P p login`.
+OPTS = r"(?:\s+--?[\w-]+(?:[= ](?!-)\S+)?)*"
 SELECT = [  # one command, another identity
     # Picking the config, not mentioning it: notes and commit messages may name it.
     (re.compile(r"(?:--configuration[= ]+|CLOUDSDK_ACTIVE_CONFIG_NAME=)['\"]?munice-admin"), "요유 계정 구성(munice-admin)"),
@@ -31,20 +35,23 @@ SELECT = [  # one command, another identity
     (re.compile(r"--impersonate-service-account\b"), "다른 서비스 계정 대리 실행"),
     (re.compile(r"\bCLOUDSDK_(?:CONFIG|CORE_ACCOUNT|AUTH_[A-Z_]+)="), "gcloud 신원 환경 변수"),
     (re.compile(r"--account[= ]\S+@"), "gcloud --account"),
+    # The firebase CLI prefers a token over its login and over ADC.
+    (re.compile(r"\bFIREBASE_TOKEN=|\bfirebase\b[^\n;|&]*\s--token\b"), "firebase 토큰"),
 ]
 PERSIST = [  # outlives the command
-    (re.compile(r"\bconfig\s+(?:set|unset)\s+(?:core/)?(?:account|auth/\S+)"), "gcloud 계정 설정 변경"),
-    (re.compile(r"\bactivate\s+['\"]?munice-admin"), "활성 gcloud 구성을 요유 계정으로 바꾸기"),
-    (re.compile(r"\bauth\s+(?:login|activate-service-account|application-default\s+login)\b"), "gcloud 로그인"),
-    (re.compile(r"\bfirebase\s+login(?!:list\b)"), "firebase 로그인"),  # login:use, login:ci, login:add too
+    (re.compile(rf"\bconfig{OPTS}\s+(?:set|unset){OPTS}\s+(?:core/)?(?:account|auth/\S+)"), "gcloud 계정 설정 변경"),
+    (re.compile(rf"\bactivate{OPTS}\s+['\"]?munice-admin"), "활성 gcloud 구성을 요유 계정으로 바꾸기"),
+    (re.compile(rf"\bauth{OPTS}\s+(?:login|activate-service-account|application-default{OPTS}\s+login)\b"), "gcloud 로그인"),
+    (re.compile(rf"\bfirebase{OPTS}\s+login(?!:list\b)"), "firebase 로그인"),  # login:use, login:ci, login:add too
     # Reading one leaks a login into the transcript, writing one swaps an identity for good.
     (re.compile(r"credentials\.db|access_tokens\.db|legacy_credentials|application_default_credentials\.json"
                 r"|adc-munice|\.config/gcloud/configurations|configstore/firebase-tools\.json"), "자격 증명 파일"),
 ]
 # Pointing ADC at another file swaps the identity of every library call; gomgom keeps its own file.
 ADC_ASSIGN = re.compile(r"\bGOOGLE_APPLICATION_CREDENTIALS=(\S*)")
-CONFIG_DIRS = re.compile(r"/\.config/gcloud/|configstore/firebase-tools\.json")
+CONFIG_DIRS = re.compile(r"/\.config/gcloud(?:/|$)|configstore/firebase-tools\.json")
 WRITERS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch"}
+READERS = {"Read", "Grep"}  # a credential file read into the transcript leaks the login
 
 
 def bash_problem(cmd: str) -> tuple[str, bool] | None:
@@ -114,6 +121,11 @@ def tool_problem(payload: dict, env: dict) -> str | None:
         hit = bash_problem(inp.get("command") or "")
     elif tool in WRITERS:
         hit = write_problem(write_targets(tool, inp, str(payload.get("cwd") or os.getcwd())))
+    elif tool in READERS:
+        target = str(inp.get("file_path") or inp.get("path") or "")
+        cwd = str(payload.get("cwd") or os.getcwd())
+        hit = target and CONFIG_DIRS.search(os.path.normpath(os.path.join(cwd, os.path.expanduser(target))))
+        hit = ("gcloud·firebase 자격 증명 파일 읽기", True) if hit else None
     else:
         return None
     if not hit:
@@ -163,6 +175,15 @@ def selftest():
         "TOKEN=$(gcloud --configuration munice-admin auth print-access-token)",
         "MUNICE_GCP_ADMIN=1 direnv exec . gcloud run services update api",
         "export CLOUDSDK_ACTIVE_CONFIG_NAME='munice-admin'",
+        # global options between the words, firebase tokens (shared-library#27 Codex review)
+        "gcloud config --quiet unset auth/impersonate_service_account",
+        "gcloud config set --quiet account me@example.com",
+        "gcloud auth --quiet login",
+        "gcloud auth application-default --quiet login",
+        "gcloud config configurations activate --quiet munice-admin",
+        "firebase --project example-prod login --reauth",
+        "FIREBASE_TOKEN=abc firebase deploy --only firestore:rules",
+        "firebase deploy --only firestore:rules --token abc",
     ]
     allow = [
         "gcloud run services list --project example-prod",
@@ -172,9 +193,12 @@ def selftest():
         "GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gcloud/adc-gomgom.json node gomgom.js",
         "gcloud config list",
         "gcloud config get auth/impersonate_service_account --configuration=munice",
+        "gcloud config --quiet set project example-staging",
         "gcloud auth list",
         "firebase projects:list",
         "firebase login:list",
+        "firebase --project example-prod login:list",
+        "firebase deploy -m 'fix login screen'",
         "ls ~/.config/gcloud",
         "grep -n prod AGENTS.md",
         "git commit -m 'docs: cla keeps the munice-admin config'",
@@ -187,6 +211,17 @@ def selftest():
     assert write_problem(os.path.expanduser("~/.config/gcloud/configurations/config_munice"))
     assert write_problem("/Users/yoyoo/.config/configstore/firebase-tools.json")
     assert write_problem("/Users/yoyoo/work/munice/notes.md") is None
+
+    def read(tool: str, target: str, cwd: str = "/tmp") -> str | None:
+        key = "file_path" if tool == "Read" else "path"
+        return tool_problem({"tool_name": tool, "tool_input": {key: target}, "cwd": cwd}, {"MUNICE_GCP_ADMIN": "1"})
+    # a credential file read into the transcript leaks the login, even in a cla session
+    assert read("Read", "~/.config/gcloud/adc-munice-admin.json")
+    assert read("Read", ".config/gcloud/application_default_credentials.json", cwd=os.path.expanduser("~"))
+    assert read("Grep", os.path.expanduser("~/.config/gcloud"))
+    assert read("Read", "~/.config/configstore/firebase-tools.json")
+    assert read("Read", "/tmp/notes.md") is None
+    assert read("Grep", "src") is None
 
     tmp = tempfile.mkdtemp()
 
