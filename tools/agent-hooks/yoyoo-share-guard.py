@@ -22,7 +22,7 @@ STRIP = [
     re.compile(r"^[ \t]*>[^\n]*", re.M),  # blockquote lines
     re.compile(r'"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’|「[^」\n]*」'),  # quoted text
 ]
-SHARE = re.compile(r"요유\s*몫\s*\**\s*[:：]\s*\**([^·\n]*)")
+SHARE = re.compile(r"요유[ \t]*몫[ \t]*\**[ \t]*[:：][ \t]*\**([^·\n]*)")  # horizontal space only: never the next line
 NONE = re.compile(r"^(?:없음|없습니다|none)\b", re.I)
 REASON = ("yoyoo-share-guard: 보고의 '요유 몫'에 항목이 남아 있습니다. 이 가운데 유요가 지금 할 수 있는 것(명령 실행, "
           "Slack 글, 팀원과 이미 합의한 단계)은 지금 하고, 요유 몫에는 결정, 요유 화면에서만 할 수 있는 확인, 처음 정하는 "
@@ -107,6 +107,7 @@ def selftest():
         '"요유 몫: PR 머지"처럼 쓰면 훅이 되묻습니다.',
         "요유 몫:",  # empty value
         "남은 것: 요유 몫: · 유요 몫: 없음",  # empty value: the next field is not read as 요유's
+        "남은 것:\n- 요유 몫:\n- 유요 몫: CI 대기",  # nor the next line (Codex review)
         "",
     ]
     for t in block:
