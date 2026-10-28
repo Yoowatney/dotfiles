@@ -8,6 +8,9 @@ missing `무엇을:` when a reply carries more `왜:` labels than `무엇을:` l
 Only the `요유 몫:` value counts, up to `·` or the end of its line; `없음` passes, and so does a reply without the line.
 Code, quotes and blockquotes are ignored (a report about the format is not a report). Skipped for headless Claude runs
 (claude -p / SDK) and on the second stop of a turn (stop_hook_active), so it blocks at most once. Fails open.
+Claude runs it with --claude: the question goes back as Stop additionalContext, which Claude shows as "Stop hook feedback"
+instead of a red "Stop hook error". Codex keeps decision:block (its schema allows only decision and reason). The flag is
+explicit because CLAUDE_CODE_ENTRYPOINT leaks into commands Claude runs, Codex included.
 
     yoyoo-share-guard.py --selftest
 """
@@ -25,9 +28,10 @@ STRIP = [
 ]
 SHARE = re.compile(r"요유[ \t]*몫[ \t]*\**[ \t]*[:：][ \t]*\**([^·\n]*)")  # horizontal space only: never the next line
 NONE = re.compile(r"^(?:없음|없습니다|none)\b", re.I)
-REASON = ("yoyoo-share-guard: 보고의 '요유 몫'에 항목이 남아 있습니다. 이 가운데 유요가 지금 할 수 있는 것(명령 실행, "
-          "Slack 글, 팀원과 이미 합의한 단계)은 지금 하고, 요유 몫에는 결정, 요유 화면에서만 할 수 있는 확인, 처음 정하는 "
-          "prod 배포·데이터·과금만 남겼는가? 이미 그렇다면 보고를 그대로 두고 끝내세요.")
+# Short, since Claude prints it under the report. The rewrite puts the report back at the bottom, so 요유 does not
+# scroll up past a "그대로 둡니다" note to find it (요유 2026-10-28). Asked to end silently, Opus rewrote it anyway (2 of 2).
+REASON = ("yoyoo-share-guard: 요유 몫 가운데 유요가 지금 할 수 있는 일(명령 실행, Slack 글, 합의된 단계)은 지금 하세요. "
+          "그다음 설명을 덧붙이지 말고, 보고 전체를 다시 써서 끝내세요(바뀐 곳만 고쳐서).")
 # 요유 2026-10-28 ("왜는 쓰는데 무엇을을 왜 안쓰지, 모든 세션이 다그러네"): every `왜:` label comes with a `무엇을:` label
 WHY = re.compile(r"(?<![가-힣])왜[ \t]*\**[ \t]*[:：]")
 WHAT = re.compile(r"무엇을[ \t]*\**[ \t]*[:：]")
@@ -175,18 +179,23 @@ def selftest():
         os.unlink(with_share)
         os.unlink(old_share)
 
-    def run(stdin, env=cli):
-        r = subprocess.run([sys.executable, "-I", os.path.realpath(__file__)], input=stdin,
+    def run(stdin, env=cli, args=()):
+        r = subprocess.run([sys.executable, "-I", os.path.realpath(__file__), *args], input=stdin,
                            capture_output=True, text=True, env={**os.environ, **env}, timeout=10)
         return r.returncode, r.stdout
 
     assert run("not json{") == (0, ""), "malformed input must exit 0 silently"
+    assert run("not json{", args=["--claude"]) == (0, ""), "malformed input must exit 0 silently (Claude)"
     assert run(json.dumps(p(None, transcript_path="/nonexistent/x.jsonl"))) == (0, ""), "missing transcript must exit 0"
     assert run(json.dumps(p(allow[0]))) == (0, ""), "요유 몫: 없음 must print nothing"
+    assert run(json.dumps(p(allow[0])), args=["--claude"]) == (0, ""), "요유 몫: 없음 must print nothing (Claude)"
     assert run(json.dumps(p(block[0], stop_hook_active=True))) == (0, ""), "second stop must print nothing"
     code, out = run(json.dumps(p(block[0])))
     # Codex's stop.command.output schema has additionalProperties: false, so exactly these two keys.
     assert code == 0 and json.loads(out) == {"decision": "block", "reason": REASON}, out
+    # Claude shows decision:block as a red "Stop hook error"; additionalContext continues the turn as yellow feedback.
+    code, out = run(json.dumps(p(block[0])), args=["--claude"])
+    assert code == 0 and json.loads(out) == {"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": REASON}}, out
     print("selftest ok")
 
 
@@ -198,5 +207,8 @@ if __name__ == "__main__":
         reason = decide(json.load(sys.stdin), os.environ)
     except Exception:  # never break a session
         sys.exit(0)
-    if reason:
+    if reason and "--claude" in sys.argv:
+        # Same once-per-turn continuation as a block (stop_hook_active is set), shown as feedback, not an error.
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": reason}}, ensure_ascii=False))
+    elif reason:
         print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
