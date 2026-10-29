@@ -17,7 +17,7 @@ plugins=(
 	zsh-autosuggestions
 	fzf
 	git
-  github
+  gh
   direnv
 	docker
 	docker-compose
