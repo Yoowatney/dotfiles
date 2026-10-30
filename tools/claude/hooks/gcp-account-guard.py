@@ -66,9 +66,11 @@ KEYS = [  # matched per shell segment, after joining `\` continuations
      "조직 정책 API"),
 ]
 # A commit message, a PR body or a search may name a key command; such a segment only carries text.
+# No echo/printf (they feed `| sh`), and a segment with $( or a backtick still runs what it holds.
 # ponytail: a heredoc commit body is still read line by line, so commit long messages with -F <file>.
 TEXT_ONLY = re.compile(r"\s*(?:\w+=\S*\s+)*(?:git\s+(?:commit|tag|grep|log|show)|gh\s+(?:pr|issue|release)\s+"
-                       r"(?:create|edit|comment|view)|rg|grep|echo|printf)\b")
+                       r"(?:create|edit|comment|view)|rg|grep)\b")
+SUBST = re.compile(r"\$\(|`")  # checked after dropping '...' strings, where the shell substitutes nothing
 SEGMENTS = re.compile(r"&&|\|\||[;|\n]")
 # A key resource written into a .tf file lands its private key in state and makes a key on merge.
 KEY_TF = re.compile(r'resource\s+"google_service_account_key"|"google_service_account_key"\s*:')
@@ -85,7 +87,7 @@ def bash_problem(cmd: str) -> tuple[str, bool | str] | None:
     """(what, persists) for the first refused part of a command; persists is "key" for KEYS."""
     flat = cmd.replace("\\\n", " ")
     for segment in SEGMENTS.split(flat):
-        if TEXT_ONLY.match(segment):
+        if TEXT_ONLY.match(segment) and not SUBST.search(re.sub(r"'[^']*'", "", segment)):
             continue
         for pattern, what in KEYS:
             if pattern.search(segment):
@@ -396,6 +398,11 @@ def selftest():
         "if true; then gcloud iam service-accounts keys create k.json --iam-account=a@x; fi",
         "timeout 30 gcloud iam service-accounts keys create k.json --iam-account=a@x",
         "gcloud iam service-accounts keys --format 'value(name, keyType)' create k.json --iam-account=a@x",
+        # text commands that still run what they carry: a pipe to a shell, a command substitution
+        "echo 'gcloud iam service-accounts keys create k.json --iam-account=a@x' | sh",
+        "printf 'gcloud iam service-accounts keys create k.json --iam-account=a@x\\n' | bash",
+        'git commit --allow-empty -m "$(gcloud iam service-accounts keys create k.json --iam-account=a@x)"',
+        "gh pr comment 1 --body `gcloud iam service-accounts keys create k.json --iam-account=a@x`",
     ]
     for c in key_deny:
         for env in ({}, {"MUNICE_GCP_ADMIN": "1"}, {"MUNICE_AMBIENT": "1"}):
@@ -417,6 +424,7 @@ def selftest():
         # text that only names a key command: commit messages, PR bodies, searches (Claude review)
         "git commit -m 'fix: refuse gcloud iam service-accounts keys create in AI sessions'",
         "gh pr create --title t --body 'org-policies disable-enforce is refused now'",
+        "gh pr create --title t --body 'Blocks `gcloud iam service-accounts keys create` in AI sessions'",
         "rg -n 'service-accounts keys create' ~/.dotfiles",
         "curl -s https://iam.googleapis.com/v1/projects/-/serviceAccounts/a@x/keys | cut -d '/' -f6",
         "gcloud logging read 'protoPayload.resourceName:\"serviceAccounts/x/keys\"' --project=p | cut -d 'T' -f1",
