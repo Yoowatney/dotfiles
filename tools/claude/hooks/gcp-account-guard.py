@@ -47,6 +47,19 @@ PERSIST = [  # outlives the command
     (re.compile(r"credentials\.db|access_tokens\.db|legacy_credentials|application_default_credentials\.json"
                 r"|adc-munice|\.config/gcloud/configurations|configstore/firebase-tools\.json"), "자격 증명 파일"),
 ]
+# Service account keys never expire and Yoyoo's account can lift the org policy that blocks them, so an AI
+# session never makes, uploads or re-enables one, nor changes an org policy, even when unlocked (terraform#1040).
+# Listing, disabling and deleting keys stay allowed. Yoyoo runs a needed key with `!` in the terminal.
+POSTS = r"(?=.*(?:-X\s*(?:POST|PATCH|DELETE)|--request[= ](?:POST|PATCH|DELETE)|\s-d\s|--data))"
+KEYS = [
+    (re.compile(rf"\bservice-accounts{OPTS}\s+keys{OPTS}\s+(?:create|upload|enable)\b"), "서비스 계정 키 만들기"),
+    (re.compile(rf"\borg-policies{OPTS}\s+(?:disable-enforce|enable-enforce|set-policy|allow|deny|delete|reset|create"
+                r"|update|set-custom-constraint|delete-custom-constraint)\b"), "조직 정책 바꾸기"),
+    (re.compile(r"serviceAccounts/\S*/keys:upload|" + POSTS + r".*serviceAccounts/\S*/keys\b"), "서비스 계정 키 API"),
+    (re.compile(r"\.keys\(\)\s*\.create\(|\b(?:create|upload)_service_account_key\b"), "서비스 계정 키 API"),
+    (re.compile(r":(?:set|clear)OrgPolicy\b|" + POSTS + r".*orgpolicy\.googleapis\.com"), "조직 정책 API"),
+]
+KEY_TF = re.compile(r'resource\s+"google_service_account_key"')
 # Pointing ADC at another file swaps the identity of every library call; gomgom keeps its own file.
 ADC_ASSIGN = re.compile(r"\bGOOGLE_APPLICATION_CREDENTIALS=(\S*)")
 CONFIG_DIRS = re.compile(r"/\.config/gcloud(?:/|$)|configstore/firebase-tools\.json")
@@ -54,8 +67,11 @@ WRITERS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch"}
 READERS = {"Read", "Grep"}  # a credential file read into the transcript leaks the login
 
 
-def bash_problem(cmd: str) -> tuple[str, bool] | None:
-    """(what, persists) for the first refused part of a command."""
+def bash_problem(cmd: str) -> tuple[str, bool | str] | None:
+    """(what, persists) for the first refused part of a command; persists is "key" for KEYS."""
+    for pattern, what in KEYS:
+        if pattern.search(cmd):
+            return what, "key"
     # The file an ADC assignment names is a SELECT, not a read of the credential store.
     for pattern, what in PERSIST:
         if pattern.search(ADC_ASSIGN.sub("", cmd)):
@@ -83,6 +99,13 @@ def write_targets(tool: str, inp: dict, cwd: str) -> str:
 
 def write_problem(text: str) -> tuple[str, bool] | None:
     return ("gcloud·firebase 설정 파일 쓰기", True) if CONFIG_DIRS.search(text) else None
+
+
+def written_text(inp: dict) -> str:
+    """What a write puts into files: Write content, Edit/MultiEdit new text, a Codex patch."""
+    parts = [inp.get(k) for k in ("content", "new_string", "command", "input", "patch")]
+    parts += [e.get("new_string") for e in inp.get("edits") or [] if isinstance(e, dict)]
+    return "\n".join(str(p) for p in parts if p)
 
 
 def latest_prompt(transcript_path: str) -> str:
@@ -121,6 +144,8 @@ def tool_problem(payload: dict, env: dict) -> str | None:
         hit = bash_problem(inp.get("command") or "")
     elif tool in WRITERS:
         hit = write_problem(write_targets(tool, inp, str(payload.get("cwd") or os.getcwd())))
+        if not hit and KEY_TF.search(written_text(inp)):
+            hit = ("terraform 서비스 계정 키 리소스", "key")
     elif tool in READERS:
         target = str(inp.get("file_path") or inp.get("path") or "")
         cwd = str(payload.get("cwd") or os.getcwd())
@@ -131,6 +156,11 @@ def tool_problem(payload: dict, env: dict) -> str | None:
     if not hit:
         return None
     what, persists = hit
+    if persists == "key":
+        return (f"{what}: AI 세션은 서비스 계정 키를 만들거나 다시 켜지 않고 조직 정책도 바꾸지 않습니다(`{UNLOCK}`이나 "
+                "`cla`로도 안 풀림). 키는 만료가 없습니다. GCP 밖 기계라면 먼저 X.509 인증서 방식(terraform#1028)을 "
+                "쓸 것. 그래도 키가 필요하면 무엇을 왜 만드는지 한국어 한 문장으로 요유에게 따로 묻고, 요유가 직접 "
+                "터미널에서 `!`로 실행한다. terraform#1040")
     if persists:
         return (f"{what}: 명령이 끝난 뒤에도 남는 신원 변경이라 AI 세션에서는 하지 않습니다(`{UNLOCK}`이나 `cla`로도 "
                 "안 풀림). 필요하면 요유가 직접 터미널에서 할 것(예: `! gcloud auth login`). 재로그인 뒤에는 "
@@ -307,6 +337,48 @@ def selftest():
                          "transcript_path": claude_transcript("x")}, {}) is None
     assert tool_problem({"tool_name": "Monitor", "tool_input": {"command": "gcloud auth login"},
                          "transcript_path": claude_transcript("x")}, {})
+    # service account keys and org policy: never from an AI session, unlocked turn and cla included (terraform#1040)
+    key_deny = [
+        "gcloud iam service-accounts keys create k.json --iam-account=a@example-prod.iam.gserviceaccount.com",
+        "gcloud --configuration=munice-admin iam service-accounts keys create k.json --iam-account=a@x",
+        "gcloud iam --quiet service-accounts keys upload pub.pem --iam-account=a@x",
+        "gcloud iam service-accounts keys enable 58992b45 --iam-account=a@x",
+        "gcloud beta iam service-accounts keys create k.json --iam-account=a@x",
+        "gcloud resource-manager org-policies disable-enforce iam.disableServiceAccountKeyCreation --project=p",
+        "gcloud resource-manager org-policies set-policy policy.yaml --project=p",
+        "gcloud org-policies reset iam.disableServiceAccountKeyCreation --project=p",
+        "gcloud org-policies set-policy policy.yaml",
+        "gcloud org-policies delete iam.disableServiceAccountKeyCreation --project=p",
+        "curl -X POST https://iam.googleapis.com/v1/projects/p/serviceAccounts/a@x/keys:upload -d @k",
+        "curl -X POST -H 'Authorization: Bearer x' https://iam.googleapis.com/v1/projects/-/serviceAccounts/a@x/keys",
+        "python3 -c 'svc.projects().serviceAccounts().keys().create(name=n, body={}).execute()'",
+    ]
+    for c in key_deny:
+        for env in ({}, {"MUNICE_GCP_ADMIN": "1"}, {"MUNICE_AMBIENT": "1"}):
+            reason = bash(c, env)
+            assert reason and "terraform#1040" in reason, f"key command should be denied: {c} {env} -> {reason}"
+    key_allow = [
+        "gcloud iam service-accounts keys list --iam-account=a@x --managed-by=user",
+        "gcloud iam service-accounts keys disable 58992b45 --iam-account=a@x",
+        "gcloud iam service-accounts keys delete 58992b45 --iam-account=a@x --quiet",
+        "gcloud resource-manager org-policies describe iam.disableServiceAccountKeyCreation --project=p --effective",
+        "gcloud org-policies describe iam.disableServiceAccountKeyCreation --project=p",
+        "gcloud logging read 'protoPayload.methodName=\"google.iam.admin.v1.CreateServiceAccountKey\"' --project=p",
+        "curl -s https://iam.googleapis.com/v1/projects/-/serviceAccounts/a@x/keys",
+    ]
+    for c in key_allow:
+        assert bash(c) is None, f"should allow: {c} -> {bash(c)}"
+    # a key resource in terraform would land its private key in state and make a key on merge
+    key_tf = 'resource "google_service_account_key" "k" {\n  service_account_id = x\n}\n'
+    for payload in ({"tool_name": "Write", "tool_input": {"file_path": "/tmp/tf/key.tf", "content": key_tf}},
+                    {"tool_name": "Edit", "tool_input": {"file_path": "/tmp/tf/key.tf", "old_string": "a",
+                                                          "new_string": key_tf}},
+                    {"tool_name": "apply_patch", "tool_input": {"command": "*** Begin Patch\n*** Add File: key.tf\n+"
+                                                                + key_tf.replace("\n", "\n+") + "\n*** End Patch"}}):
+        reason = tool_problem({**payload, "transcript_path": unlocked, "cwd": "/tmp"}, {"MUNICE_GCP_ADMIN": "1"})
+        assert reason and "terraform#1040" in reason, f"key resource should be denied: {payload['tool_name']}"
+    assert tool_problem({"tool_name": "Write", "tool_input": {"file_path": "/tmp/notes.md", "content":
+        "we never use google_service_account_key"}, "transcript_path": unlocked, "cwd": "/tmp"}, {}) is None
     print("selftest ok")
 
 
