@@ -25,7 +25,7 @@ UNLOCK = "prod 허용"
 # They stop accidents (a wrong config, a script that grabs the admin ADC), not a session set on
 # getting around them: a script can still read the credential store without naming it here.
 # Global options may sit between the words of a subcommand: `gcloud config --quiet unset ...`, `firebase -P p login`.
-OPTS = r"(?:\s+--?[\w-]+(?:[= ](?!-)\S+)?)*"
+OPTS = r"(?:\s+--?[\w-]+(?:[= ](?!-)(?:'[^']*'|\"[^\"]*\"|\S+))?)*"
 SELECT = [  # one command, another identity
     # Picking the config, not mentioning it: notes and commit messages may name it.
     (re.compile(r"(?:--configuration[= ]+|CLOUDSDK_ACTIVE_CONFIG_NAME=)['\"]?munice-admin"), "요유 계정 구성(munice-admin)"),
@@ -50,16 +50,30 @@ PERSIST = [  # outlives the command
 # Service account keys never expire and Yoyoo's account can lift the org policy that blocks them, so an AI
 # session never makes, uploads or re-enables one, nor changes an org policy, even when unlocked (terraform#1040).
 # Listing, disabling and deleting keys stay allowed. Yoyoo runs a needed key with `!` in the terminal.
-POSTS = r"(?=.*(?:-X\s*(?:POST|PATCH|DELETE)|--request[= ](?:POST|PATCH|DELETE)|\s-d\s|--data))"
-KEYS = [
+POSTS = (r"(?=.*(?:-X\s*['\"]?(?:POST|PATCH|DELETE)|--request[= ]['\"]?(?:POST|PATCH|DELETE)"
+         r"|\s-d(?:\s|['\"@{])|--data|--json))")
+SA = r"serviceAccounts/[^\s/'\"]+/keys"
+KEYS = [  # matched per shell segment, after joining `\` continuations
     (re.compile(rf"\bservice-accounts{OPTS}\s+keys{OPTS}\s+(?:create|upload|enable)\b"), "서비스 계정 키 만들기"),
     (re.compile(rf"\borg-policies{OPTS}\s+(?:disable-enforce|enable-enforce|set-policy|allow|deny|delete|reset|create"
                 r"|update|set-custom-constraint|delete-custom-constraint)\b"), "조직 정책 바꾸기"),
-    (re.compile(r"serviceAccounts/\S*/keys:upload|" + POSTS + r".*serviceAccounts/\S*/keys\b"), "서비스 계정 키 API"),
-    (re.compile(r"\.keys\(\)\s*\.create\(|\b(?:create|upload)_service_account_key\b"), "서비스 계정 키 API"),
-    (re.compile(r":(?:set|clear)OrgPolicy\b|" + POSTS + r".*orgpolicy\.googleapis\.com"), "조직 정책 API"),
+    # POST to the keys collection creates; /keys/<id> (delete) and /keys/<id>:disable stay allowed.
+    (re.compile(rf"{SA}:upload|{SA}/[^\s/:'\"]+:enable|{POSTS}.*{SA}(?![/\w:])"), "서비스 계정 키 API"),
+    # Client libraries. Lower-case `create...` keeps log filters on `v1.CreateServiceAccountKey` readable.
+    (re.compile(r"\.keys(?:\(\))?\s*\.(?:create|upload|enable)\(|\b(?:create|upload|enable)"
+                r"(?:_service_account_key|ServiceAccountKey)\b"), "서비스 계정 키 API"),
+    (re.compile(r"[.:](?:set|clear)OrgPolicy\b|\bOrgPolicyClient\b|" + POSTS + r".*orgpolicy\.googleapis\.com"),
+     "조직 정책 API"),
 ]
-KEY_TF = re.compile(r'resource\s+"google_service_account_key"')
+# A commit message, a PR body or a search may name a key command; such a segment only carries text.
+# ponytail: a heredoc commit body is still read line by line, so commit long messages with -F <file>.
+TEXT_ONLY = re.compile(r"\s*(?:\w+=\S*\s+)*(?:git\s+(?:commit|tag|grep|log|show)|gh\s+(?:pr|issue|release)\s+"
+                       r"(?:create|edit|comment|view)|rg|grep|echo|printf)\b")
+SEGMENTS = re.compile(r"&&|\|\||[;|\n]")
+# A key resource written into a .tf file lands its private key in state and makes a key on merge.
+KEY_TF = re.compile(r'resource\s+"google_service_account_key"|"google_service_account_key"\s*:')
+TF_FILE = re.compile(r"\.tf(?:\.json)?$", re.M)
+TF_SHELL_WRITE = re.compile(r"(?:>>?|\btee(?:\s+-a)?)\s*['\"]?[^\s;|&'\"]*\.tf(?:\.json)?\b")
 # Pointing ADC at another file swaps the identity of every library call; gomgom keeps its own file.
 ADC_ASSIGN = re.compile(r"\bGOOGLE_APPLICATION_CREDENTIALS=(\S*)")
 CONFIG_DIRS = re.compile(r"/\.config/gcloud(?:/|$)|configstore/firebase-tools\.json")
@@ -69,9 +83,15 @@ READERS = {"Read", "Grep"}  # a credential file read into the transcript leaks t
 
 def bash_problem(cmd: str) -> tuple[str, bool | str] | None:
     """(what, persists) for the first refused part of a command; persists is "key" for KEYS."""
-    for pattern, what in KEYS:
-        if pattern.search(cmd):
-            return what, "key"
+    flat = cmd.replace("\\\n", " ")
+    for segment in SEGMENTS.split(flat):
+        if TEXT_ONLY.match(segment):
+            continue
+        for pattern, what in KEYS:
+            if pattern.search(segment):
+                return what, "key"
+    if KEY_TF.search(flat) and TF_SHELL_WRITE.search(flat):
+        return "terraform 서비스 계정 키 리소스", "key"
     # The file an ADC assignment names is a SELECT, not a read of the credential store.
     for pattern, what in PERSIST:
         if pattern.search(ADC_ASSIGN.sub("", cmd)):
@@ -101,9 +121,12 @@ def write_problem(text: str) -> tuple[str, bool] | None:
     return ("gcloud·firebase 설정 파일 쓰기", True) if CONFIG_DIRS.search(text) else None
 
 
-def written_text(inp: dict) -> str:
-    """What a write puts into files: Write content, Edit/MultiEdit new text, a Codex patch."""
-    parts = [inp.get(k) for k in ("content", "new_string", "command", "input", "patch")]
+def written_text(tool: str, inp: dict) -> str:
+    """What a write adds: Write content, Edit/MultiEdit new text, a Codex patch's `+` lines."""
+    if tool == "apply_patch":
+        patch = str(inp.get("command") or inp.get("input") or inp.get("patch") or "")
+        return "\n".join(line[1:] for line in patch.splitlines() if line.startswith("+"))
+    parts = [inp.get("content"), inp.get("new_string")]
     parts += [e.get("new_string") for e in inp.get("edits") or [] if isinstance(e, dict)]
     return "\n".join(str(p) for p in parts if p)
 
@@ -143,8 +166,9 @@ def tool_problem(payload: dict, env: dict) -> str | None:
     if tool in ("Bash", "Monitor"):
         hit = bash_problem(inp.get("command") or "")
     elif tool in WRITERS:
-        hit = write_problem(write_targets(tool, inp, str(payload.get("cwd") or os.getcwd())))
-        if not hit and KEY_TF.search(written_text(inp)):
+        targets = write_targets(tool, inp, str(payload.get("cwd") or os.getcwd()))
+        hit = write_problem(targets)
+        if not hit and TF_FILE.search(targets) and KEY_TF.search(written_text(tool, inp)):
             hit = ("terraform 서비스 계정 키 리소스", "key")
     elif tool in READERS:
         target = str(inp.get("file_path") or inp.get("path") or "")
@@ -352,6 +376,26 @@ def selftest():
         "curl -X POST https://iam.googleapis.com/v1/projects/p/serviceAccounts/a@x/keys:upload -d @k",
         "curl -X POST -H 'Authorization: Bearer x' https://iam.googleapis.com/v1/projects/-/serviceAccounts/a@x/keys",
         "python3 -c 'svc.projects().serviceAccounts().keys().create(name=n, body={}).execute()'",
+        # line continuations, --json, -XPOST, a heredoc that writes a key resource (Codex review)
+        "curl -X POST \\\n  -H 'Authorization: Bearer x' \\\n  https://iam.googleapis.com/v1/projects/-/serviceAccounts/a@x/keys",
+        "curl --json '{}' https://iam.googleapis.com/v1/projects/-/serviceAccounts/a@x/keys",
+        "curl -XPOST https://iam.googleapis.com/v1/projects/-/serviceAccounts/a@x/keys/58992b45:enable",
+        "python3 -c 'iam_admin_v1.IAMClient().create_service_account_key(request=r)'",
+        'cat > key.tf <<TF\nresource "google_service_account_key" "k" {\n  service_account_id = x\n}\nTF',
+        'tee -a google-cloud-platform/staging/k.tf <<TF\nresource "google_service_account_key" "k" {}\nTF',
+        # body flags written tight, a quoted method, Node and other clients, commands behind shell words (Claude review)
+        "curl -d@body.json https://iam.googleapis.com/v1/projects/-/serviceAccounts/a@x/keys",
+        "curl -d'{}' https://iam.googleapis.com/v1/projects/-/serviceAccounts/a@x/keys",
+        "curl -X 'POST' https://iam.googleapis.com/v1/projects/-/serviceAccounts/a@x/keys",
+        "node -e 'await iam.projects.serviceAccounts.keys.create({name})'",
+        "node -e 'await client.createServiceAccountKey({name})'",
+        "python3 -c 'svc.projects().serviceAccounts().keys().upload(name=n, body=b)'",
+        "python3 -c 'svc.projects().serviceAccounts().keys().enable(name=n)'",
+        "python3 -c 'crm.projects().setOrgPolicy(resource=r, body=b).execute()'",
+        "python3 -c 'orgpolicy_v2.OrgPolicyClient().update_policy(policy=p)'",
+        "if true; then gcloud iam service-accounts keys create k.json --iam-account=a@x; fi",
+        "timeout 30 gcloud iam service-accounts keys create k.json --iam-account=a@x",
+        "gcloud iam service-accounts keys --format 'value(name, keyType)' create k.json --iam-account=a@x",
     ]
     for c in key_deny:
         for env in ({}, {"MUNICE_GCP_ADMIN": "1"}, {"MUNICE_AMBIENT": "1"}):
@@ -365,6 +409,18 @@ def selftest():
         "gcloud org-policies describe iam.disableServiceAccountKeyCreation --project=p",
         "gcloud logging read 'protoPayload.methodName=\"google.iam.admin.v1.CreateServiceAccountKey\"' --project=p",
         "curl -s https://iam.googleapis.com/v1/projects/-/serviceAccounts/a@x/keys",
+        # disabling and deleting through REST stay allowed (Codex review)
+        "curl -X DELETE https://iam.googleapis.com/v1/projects/-/serviceAccounts/a@x/keys/58992b45",
+        "curl -X POST https://iam.googleapis.com/v1/projects/-/serviceAccounts/a@x/keys/58992b45:disable -d '{}'",
+        "git grep -n 'resource \"google_service_account_key\"'",
+        "git commit -m 'docs: never add a google_service_account_key resource'",
+        # text that only names a key command: commit messages, PR bodies, searches (Claude review)
+        "git commit -m 'fix: refuse gcloud iam service-accounts keys create in AI sessions'",
+        "gh pr create --title t --body 'org-policies disable-enforce is refused now'",
+        "rg -n 'service-accounts keys create' ~/.dotfiles",
+        "curl -s https://iam.googleapis.com/v1/projects/-/serviceAccounts/a@x/keys | cut -d '/' -f6",
+        "gcloud logging read 'protoPayload.resourceName:\"serviceAccounts/x/keys\"' --project=p | cut -d 'T' -f1",
+        "gcloud logging read 'protoPayload.methodName=\"SetOrgPolicy\"' --project=p",
     ]
     for c in key_allow:
         assert bash(c) is None, f"should allow: {c} -> {bash(c)}"
@@ -374,11 +430,17 @@ def selftest():
                     {"tool_name": "Edit", "tool_input": {"file_path": "/tmp/tf/key.tf", "old_string": "a",
                                                           "new_string": key_tf}},
                     {"tool_name": "apply_patch", "tool_input": {"command": "*** Begin Patch\n*** Add File: key.tf\n+"
-                                                                + key_tf.replace("\n", "\n+") + "\n*** End Patch"}}):
+                                                                + key_tf.replace("\n", "\n+") + "\n*** End Patch"}},
+                    {"tool_name": "Write", "tool_input": {"file_path": "/tmp/tf/key.tf.json", "content":
+                        '{"resource": {"google_service_account_key": {"k": {"service_account_id": "x"}}}}'}}):
         reason = tool_problem({**payload, "transcript_path": unlocked, "cwd": "/tmp"}, {"MUNICE_GCP_ADMIN": "1"})
         assert reason and "terraform#1040" in reason, f"key resource should be denied: {payload['tool_name']}"
     assert tool_problem({"tool_name": "Write", "tool_input": {"file_path": "/tmp/notes.md", "content":
         "we never use google_service_account_key"}, "transcript_path": unlocked, "cwd": "/tmp"}, {}) is None
+    # a patch that removes a key resource is cleanup, not a new key (Codex review)
+    assert tool_problem({"tool_name": "apply_patch", "tool_input": {"command": "*** Begin Patch\n*** Update File: key.tf\n"
+        "@@\n-" + key_tf.rstrip("\n").replace("\n", "\n-") + "\n*** End Patch"}, "transcript_path": unlocked,
+        "cwd": "/tmp"}, {}) is None
     print("selftest ok")
 
 
