@@ -6,6 +6,10 @@
 # No-op outside herdr. Display only: always exits 0 except on bad usage.
 #   pane-label "api#736 Dependabot 정리"      set the name, keeping the mark (🟢 when there is none)
 #   pane-label --hold | --free                set the mark to 🔴 / 🟢, keeping the name
+#   pane-label --lead | --unlead              add / drop 👑 after the mark: 요유's lead pane (요유 2026-10-30). herdr has
+#                                             no per-pane border or background colour, and the collapsed sidebar shows
+#                                             no text, so the name in the pane border is the one place it can show.
+#                                             Renames keep it.
 #   pane-label --clear                        remove it
 #   pane-label --clear-if-prefix "api#736 "   remove it only if it still names that item
 #   pane-label --close                        close this pane once the agent's turn ends, only in a tab a job opened
@@ -17,6 +21,7 @@ H=${HERDR_BIN_PATH:-herdr}
 [ -n "${HERDR_PANE_ID:-}" ] && command -v "$H" >/dev/null 2>&1 || exit 0
 HOLD=🔴
 FREE=🟢
+LEAD=👑
 
 current() { "$H" pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.label // ""' 2>/dev/null; }
 status() { "$H" pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.agent_status // ""' 2>/dev/null; }
@@ -33,16 +38,24 @@ close_when_idle() {
 }
 mark_of() { case "$1" in "$HOLD"*) echo "$HOLD" ;; "$FREE"*) echo "$FREE" ;; esac; }
 name_of() { local t=${1#"$HOLD"}; t=${t#"$FREE"}; echo "${t# }"; }
+task_of() { local t; t=$(name_of "$1"); t=${t#"$LEAD"}; echo "${t# }"; }
+is_lead() { [[ "$(name_of "$1")" == "$LEAD"* ]]; }
 rename() { "$H" pane rename "$HERDR_PANE_ID" "$@" >/dev/null 2>&1; }
 mark() { # mark name
   if [ -n "$2" ]; then rename "$1 $2"; else rename "$1"; fi
 }
+lead() { # lead|"" label: rewrite the label with or without 👑, keeping mark and task
+  local m t; m=$(mark_of "$2"); t=$(task_of "$2")
+  if [ -n "$1" ]; then mark "${m:-$FREE}" "$LEAD${t:+ $t}"; else mark "${m:-$FREE}" "$t"; fi
+}
 
 case "${1:-}" in
-  "") echo 'usage: pane-label "<text>" | --hold | --free | --clear | --clear-if-prefix "<prefix>" | --close' >&2; exit 2 ;;
+  "") echo 'usage: pane-label "<text>" | --hold | --free | --lead | --unlead | --clear | --clear-if-prefix "<prefix>" | --close' >&2; exit 2 ;;
   --clear) rename --clear ;;
+  --lead) lead 1 "$(current)" ;;
+  --unlead) lead "" "$(current)" ;;
   --clear-if-prefix)
-    cur=$(name_of "$(current)")
+    cur=$(task_of "$(current)")
     [ -n "${2:-}" ] && [[ "$cur" == "$2"* ]] && rename --clear ;;
   --hold) mark "$HOLD" "$(name_of "$(current)")" ;;
   --free) mark "$FREE" "$(name_of "$(current)")" ;;
@@ -57,8 +70,10 @@ case "${1:-}" in
     echo "pane-label: closing this pane once the turn ends" ;;
   --close-now) close_when_idle ;;
   *)
+    cur=$(current)
     m=$(mark_of "$*")
-    [ -n "$m" ] || m=$(mark_of "$(current)")
-    mark "${m:-$FREE}" "$(name_of "$*")" ;;
+    [ -n "$m" ] || m=$(mark_of "$cur")
+    if is_lead "$cur" || is_lead "$*"; then lead 1 "${m:-$FREE} $(task_of "$*")"
+    else mark "${m:-$FREE}" "$(name_of "$*")"; fi ;;
 esac
 exit 0

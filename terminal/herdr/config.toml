@@ -205,15 +205,11 @@ pane_borders = "always"
 # panel gets asked; grouping by space just reproduces what the tab bar shows.
 agent_panel_sort = "priority"
 
-# 요유's lead pane carries an orange "리드" in its sidebar row (요유 2026-10-30). They
-# asked for a coloured border on that one pane, but herdr has a single global accent
-# and no per-pane border colour (checked 0.9.0 and the 0.9.5 config reference), so
-# the mark goes in the sidebar, which is where 요유 picks the pane to open anyway.
-# A pane name mark would not last: pane-label rewrites the whole name per task.
-#   mark:  herdr pane report-metadata <pane> --source custom:lead --token role=리드
-#   clear: herdr pane report-metadata <pane> --source custom:lead --clear-token role
-[ui.sidebar.agents]
-rows = [["state_icon", { token = "$role", fg = "#ff9e64", bold = true }, "machine", "workspace", "tab"], ["agent"]]
+# 요유's lead pane is marked 👑 in its pane name (`pane-label --lead`, 요유 2026-10-30),
+# not by colour. herdr has one global accent and no per-pane border colour (0.9.0 and
+# the 0.9.5 config reference), a pane ignores OSC 11 background changes, and a styled
+# $token in [ui.sidebar.agents] rows shows only in the expanded sidebar, which 요유
+# keeps collapsed to index numbers and dots. All three were tried on 2026-10-30.
 
 [ui.sound]
 enabled = false

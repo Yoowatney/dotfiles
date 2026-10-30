@@ -60,6 +60,15 @@ pl --clear-if-prefix "api#3 "; expect "" "own prefix clears"
 pl --hold; expect "🔴" "hold without a name"
 pl "api#4 일"; expect "🔴 api#4 일" "naming after hold keeps 🔴"
 
+# --lead puts 👑 right after the mark; renames, --hold and --free keep it, --unlead drops it.
+pl --free; pl "api#6 설계"; pl --lead; expect "🟢 👑 api#6 설계" "lead"
+pl --lead; expect "🟢 👑 api#6 설계" "lead twice is not doubled"
+pl "api#6 구현 지시"; expect "🟢 👑 api#6 구현 지시" "rename keeps 👑"
+pl --hold; expect "🔴 👑 api#6 구현 지시" "hold keeps 👑"
+pl --free; pl --clear-if-prefix "api#6 "; expect "" "clear-if-prefix looks past 👑"
+pl --lead; expect "🟢 👑" "lead without a name"
+pl "api#7 리드"; pl --unlead; expect "🟢 api#7 리드" "unlead"
+
 # --close-now (what --close runs detached) closes only a 🟢 pane whose agent stays idle through the grace period.
 # grace counts whole $SECONDS, so a grace of 1 can end at once; the cancel case below needs 2 to be sure to see 0.5 s
 close() { rm -f "$SANDBOX/closed"; PANE_CLOSE_WAIT=1 PANE_CLOSE_GRACE=${GRACE:-1} PANE_CLOSE_POLL=0.2 pl --close-now; }
