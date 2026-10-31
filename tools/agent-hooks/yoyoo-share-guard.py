@@ -11,7 +11,8 @@ Code, quotes and blockquotes are ignored (a report about the format is not a rep
 A report whose 요유 몫 holds only decisions is not asked at all (only_decisions); auto-tab-close still sees it as work left.
 It also sends back names 요유 cannot read: a pane's herdr id (`w5:pKR`, 27 reports in 14 days; the reason carries the
 pane's name) and the machine names the global rule bans. A last report (it has `남은 것:`) also comes back while a test pane
-this session opened (`임시 …`) is open: 4 of them stayed idle after this hook's own tests (10/31).
+this session opened (`임시 …`) is open: 4 of them stayed idle after this hook's own tests (10/31). A report after an explainer
+page Claude had to write itself because Codex failed comes back unless it says so (요유 2026-10-31).
 A report with nothing left to do ends without a word: the question used to demand a rewrite. Of 102 fires on 10/28-10/31,
 25 went on to a tool call and 69 only wrote text, most of it the same report again.
 Claude runs it with --claude: the question goes back as Stop additionalContext, which Claude shows as "Stop hook feedback"
@@ -62,6 +63,8 @@ BAD_MAC = re.compile(r"상시[ \t]?맥(?!락)|always-on Mac|서버[ \t]?맥(?![�
 LAST_REPORT = re.compile(r"남은[ \t]*것[ \t]*\**[ \t]*[:：]")
 TEST_PANE = "임시 "  # with the space: `임시저장 API 수정` is a work name
 OPENED_BY = re.compile(r"^spawn-([0-9A-Za-z]+)-")  # pane-spawn's agent name: spawn-<caller's terminal>-<random>
+WROTE_IT = re.compile(r"(?:Claude|유요).{0,12}(?:썼|작성)")
+EXPLAIN_REASON = "yoyoo-share-guard: 이번 설명 페이지는 Codex가 실패해 Claude가 썼습니다. 보고에 'Claude가 썼습니다'와 실패 이유를 넣어 다시 쓰세요."
 
 
 def final_text(path: str) -> str:
@@ -172,6 +175,16 @@ def names_reason(text: str, env) -> str | None:
     return f"yoyoo-share-guard: {' '.join(parts)} 바뀐 곳만 고쳐 보고 전체를 다시 쓰세요." if parts else None
 
 
+def explain_reason(payload: dict, text: str, env) -> str | None:
+    """The rewrite for a page Claude wrote because Codex failed (html-explainer's explain-page leaves the mark), or None."""
+    root = env.get("EXPLAIN_STATE") or os.path.expanduser("~/.local/state/explain")
+    mark = os.path.join(root, "claude-wrote", os.path.basename(payload.get("session_id") or "none"))
+    if not os.path.exists(mark):
+        return None
+    os.unlink(mark)  # once: the report is rewritten now or it never is
+    return None if WROTE_IT.search(unicodedata.normalize("NFC", text)) else EXPLAIN_REASON
+
+
 def asks_which(item: str) -> bool:
     """The question ending of `둘지`, `돌릴지`, `있는지`. Nouns end in 지 too (공지, 메시지), but not after a ㄹ final or 는/은/인."""
     before = item[-2:-1]
@@ -208,7 +221,8 @@ def decide(payload: dict, env) -> str | None:
         text = final_text(payload["transcript_path"])  # unreadable transcript raises: fail open
     if not isinstance(text, str):
         return None
-    checks = (names_reason(text, env), WHAT_REASON if misses_what(text) else None, temp_reason(payload, text, env))
+    checks = (names_reason(text, env), WHAT_REASON if misses_what(text) else None, temp_reason(payload, text, env),
+              explain_reason(payload, text, env))
     rewrites = [r for r in checks if r]
     if leaves_yoyoo_work(text) and not only_decisions(text):
         rewrites.append(DO_REASON if rewrites else REASON)  # a rewrite that is due must not be told to stay silent
@@ -370,6 +384,23 @@ def selftest():
     assert (decide(p("`w5:pKR` 확인\n남은 것: 요유 몫: 값 넣기 · 유요 몫: 없음"), cli) or "").endswith(DO_REASON), \
         "a rewrite for a name keeps the 요유 몫 question without telling it to stay silent"
     assert leaves_yoyoo_work("남은 것: 요유 몫: 결정 하나 · 유요 몫: 없음"), "auto-tab-close keeps a pane with a decision left"
+
+    with tempfile.TemporaryDirectory() as d:
+        wrote = {**cli, "EXPLAIN_STATE": d}
+        mark = os.path.join(d, "claude-wrote", "s9")
+        os.makedirs(os.path.dirname(mark))
+
+        def after_fallback(text):
+            with open(mark, "w", encoding="utf-8") as f:
+                f.write("page")
+            return decide(p(text, session_id="s9"), wrote)
+
+        assert "Claude가 썼" in (after_fallback("페이지를 띄웠습니다.") or ""), "a page Claude wrote must be named in the report"
+        assert not os.path.exists(mark) and decide(p("다른 일입니다.", session_id="s9"), wrote) is None, "asked once"
+        for t in ("Codex 로그인이 만료되어 이 페이지는 Claude가 썼습니다.", "Codex가 실패해 유요가 대신 썼습니다.", "Claude가 작성했습니다."):
+            assert after_fallback(t) is None, t
+        assert decide(p("페이지를 띄웠습니다.", session_id="other"), wrote) is None, "another session's page is not this report's"
+        assert decide(p("페이지를 띄웠습니다."), wrote) is None, "no session id, nothing to read"
 
     def transcript(entries):
         f = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
