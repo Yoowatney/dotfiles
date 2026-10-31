@@ -11,7 +11,7 @@ fail() {
 }
 
 # A fake herdr that logs each call to $SANDBOX/log. FAIL_START=<n> fails the first n agent starts, SESSIONLESS=1 keeps
-# the session id empty as Codex does until its first prompt.
+# the session id empty as Codex does until its first prompt, FAIL_WAIT=<n> fails the first n waits for work.
 cat > "$SANDBOX/herdr" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$SANDBOX/log"
@@ -19,7 +19,10 @@ case "\$1 \$2" in
   "pane get") jq -n '{result: {pane: {pane_id: "w7:p3", workspace_id: "w7", terminal_id: "term_65f21913323dc21"}}}' ;; # moved: env says w1:p1
   "tab create") jq -n '{result: {root_pane: {pane_id: "w1:new"}, tab: {tab_id: "w1:t9"}}}' ;;
   "pane split") jq -n '{result: {pane: {pane_id: "w1:new"}}}' ;;
-  "pane rename"|"agent prompt"|"agent wait"|"pane close") ;;
+  "pane rename"|"agent prompt"|"pane close") ;;
+  "agent wait")
+    n=\$(cat "$SANDBOX/waits" 2>/dev/null || echo 0); echo \$((n + 1)) > "$SANDBOX/waits"
+    [ "\$n" -ge "\${FAIL_WAIT:-0}" ] ;;
   "agent start")
     [[ "\$3" =~ ^[a-z][a-z0-9_-]{0,31}\$ ]] || { echo invalid_agent_name; exit 1; } # herdr's rule
     n=\$(cat "$SANDBOX/starts" 2>/dev/null || echo 0); echo \$((n + 1)) > "$SANDBOX/starts"
@@ -34,7 +37,7 @@ chmod +x "$SANDBOX/herdr"
 printf '#!/bin/sh\necho "pane-label $*" >> "%s/log"\n' "$SANDBOX" > "$SANDBOX/pane-label"
 chmod +x "$SANDBOX/pane-label"
 
-ps() { rm -f "$SANDBOX/log" "$SANDBOX/starts"; env PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_RETRY_WAIT=0 bash "$SUBJECT" "$@"; }
+ps() { rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits"; env PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_RETRY_WAIT=0 bash "$SUBJECT" "$@"; }
 log() { cat "$SANDBOX/log" 2>/dev/null || true; }
 has() { grep -qF -- "$1" "$SANDBOX/log" || fail "$2: no [$1] in: $(log)"; }
 hasnt() { if grep -qF -- "$1" "$SANDBOX/log"; then fail "$2: found [$1] in: $(log)"; fi; }
@@ -53,6 +56,7 @@ before "pane-label --sync-tabs" "agent start"
 has "--kind claude --pane w1:new" "claude by default"
 has "agent prompt w1:new 할 일입니다" "instruction delivered"
 before "agent get w1:new" "agent prompt"
+before "agent prompt" "agent wait w1:new --until working --until blocked"
 [[ "$out" == *"w1:new"* ]] || fail "prints the new pane: $out"
 
 # Same work: --same-tab splits the caller's tab.
@@ -74,6 +78,18 @@ has "agent prompt w1:new 지시" "retry delivers"
 if FAIL_START=9 ps "실패" "지시" 2>/dev/null; then fail "a failed start must exit non-zero"; fi
 has "pane close w1:new" "the empty pane goes"
 hasnt "agent prompt" "nothing to prompt"
+
+# An instruction Codex dropped (ready reported before its input box took text) is sent once more.
+out=$(FAIL_WAIT=1 ps "유실" "지시")
+[ "$(grep -c "agent prompt w1:new 지시" "$SANDBOX/log")" = 2 ] || fail "should send the instruction again: $(log)"
+[[ "$out" == *"w1:new"* ]] || fail "prints the new pane after a resend: $out"
+
+# Work that never shows fails loudly but keeps the pane: herdr can be slow to see work, and closing would kill a job that did start.
+if out=$(FAIL_WAIT=9 ps "무응답" "지시" 2>"$SANDBOX/err"); then fail "no work seen must exit non-zero"; fi
+[ "$(grep -c "agent prompt w1:new 지시" "$SANDBOX/log")" = 2 ] || fail "sends at most twice: $(log)"
+hasnt "pane close" "the pane stays"
+[[ "$out" == *"w1:new"* ]] || fail "still names the pane: $out"
+grep -q "did not start working" "$SANDBOX/err" || fail "says so: $(cat "$SANDBOX/err")"
 
 # Bad usage.
 if ps "이름만" 2>/dev/null; then fail "missing instruction must exit non-zero"; fi

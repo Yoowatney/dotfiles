@@ -63,5 +63,16 @@ for _ in $(seq 1 60); do # `agent start` can return while a wrapper still runs i
   [ "$_" != 60 ] || give_up "$kind never became ready"
   sleep "${PANE_SPAWN_POLL:-2}"
 done
-"$H" agent prompt "$pane" "$prompt" >/dev/null || give_up "the instruction was not delivered"
+# Codex can report ready before its input box takes text, and `agent prompt` still succeeds: on 2026-11-01 an instruction
+# vanished and the pane sat idle while its lead waited. Only the agent starting to work proves delivery. The pane stays open
+# on failure: herdr can be slow to see work, and closing would kill a job that did start.
+for _ in 1 2; do
+  "$H" agent prompt "$pane" "$prompt" >/dev/null || give_up "the instruction was not delivered"
+  if "$H" agent wait "$pane" --until working --until blocked --timeout "${PANE_SPAWN_START_WAIT:-30000}" >/dev/null 2>&1; then
+    echo "$pane"
+    exit 0
+  fi
+done
 echo "$pane"
+echo "pane-spawn: $pane did not start working; look at the pane before waiting on it" >&2
+exit 1
