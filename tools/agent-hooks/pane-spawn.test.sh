@@ -56,7 +56,7 @@ before "pane-label --sync-tabs" "agent start"
 has "--kind claude --pane w1:new" "claude by default"
 has "agent prompt w1:new 할 일입니다" "instruction delivered"
 before "agent get w1:new" "agent prompt"
-before "agent prompt" "agent wait w1:new --until working --until blocked"
+before "agent prompt" "agent wait w1:new --until working --until blocked --until done"
 [[ "$out" == *"w1:new"* ]] || fail "prints the new pane: $out"
 
 # Same work: --same-tab splits the caller's tab.
@@ -79,17 +79,13 @@ if FAIL_START=9 ps "실패" "지시" 2>/dev/null; then fail "a failed start must
 has "pane close w1:new" "the empty pane goes"
 hasnt "agent prompt" "nothing to prompt"
 
-# An instruction Codex dropped (ready reported before its input box took text) is sent once more.
-out=$(FAIL_WAIT=1 ps "유실" "지시")
-[ "$(grep -c "agent prompt w1:new 지시" "$SANDBOX/log")" = 2 ] || fail "should send the instruction again: $(log)"
-[[ "$out" == *"w1:new"* ]] || fail "prints the new pane after a resend: $out"
-
-# Work that never shows fails loudly but keeps the pane: herdr can be slow to see work, and closing would kill a job that did start.
-if out=$(FAIL_WAIT=9 ps "무응답" "지시" 2>"$SANDBOX/err"); then fail "no work seen must exit non-zero"; fi
-[ "$(grep -c "agent prompt w1:new 지시" "$SANDBOX/log")" = 2 ] || fail "sends at most twice: $(log)"
+# Work that never shows fails loudly, with no resend and the pane left open: an instruction Codex dropped looks the same as a
+# wait that failed on an accepted one, and resending that would run the job twice.
+if out=$(FAIL_WAIT=1 ps "무응답" "지시" 2>"$SANDBOX/err"); then fail "no work seen must exit non-zero"; fi
+[ "$(grep -c "agent prompt w1:new 지시" "$SANDBOX/log")" = 1 ] || fail "sends once: $(log)"
 hasnt "pane close" "the pane stays"
 [[ "$out" == *"w1:new"* ]] || fail "still names the pane: $out"
-grep -q "did not start working" "$SANDBOX/err" || fail "says so: $(cat "$SANDBOX/err")"
+grep -q "pane-tell" "$SANDBOX/err" || fail "says what to do: $(cat "$SANDBOX/err")"
 
 # Bad usage.
 if ps "이름만" 2>/dev/null; then fail "missing instruction must exit non-zero"; fi

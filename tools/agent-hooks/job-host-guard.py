@@ -31,11 +31,11 @@ ASK = ("job-host: 회사맥에 정기 잡을 올리거나 바꾸기 직전입니
 NAMES = re.compile(r"launchctl|crontab|install-launchd|LaunchAgents")
 HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?([^\n]*)\n(.*?)\n[ \t]*\1\b", re.S)
 QUOTED = re.compile(r"""'[^']*'|"(?:[^"\\]|\\.)*\"""")
-AT_COMMAND = (r"(?:^|[;&|({\n])\s*(?:(?:[A-Za-z_]\w*=\S*|sudo|command|exec|env|nohup|time|xargs|if|elif|while|until|then|do|else|!)"
+AT_COMMAND = (r"(?:^|[;&|({\n`])\s*(?:(?:[A-Za-z_]\w*=\S*|sudo|command|exec|env|nohup|time|xargs|if|elif|while|until|then|do|else|!)"
               r"(?:\s+-\S+)*\s+)*")
 LOCAL_SHELL = re.compile(AT_COMMAND + r"(?:\S*/)?(?:ba|z)?sh\s+-\w*c\s+$")
 SHELL_STDIN = re.compile(AT_COMMAND + r"(?:\S*/)?(?:ba|z)?sh(?:\s+-\S+)*\s*$")
-SUBSTITUTION = re.compile(r"\$\(([^()]*)\)")
+SUBSTITUTION = re.compile(r"(?<!\\)(?:\$\(([^()]*)\)|`([^`]*)`)")
 # cp, mv and ln count only with LaunchAgents as the last argument: copying a job out of there is a read.
 JOB = re.compile(AT_COMMAND + r"(?:\S*/)?(?:launchctl\s+(?:-\S+\s+)*(?:bootstrap|load|enable)\b"
                  r"|crontab\s+(?![^;&|\n]*(?<!\S)-[lr]\b)[^\s>]|(?:(?:ba|z)?sh\s+(?:\S*/)?)?install-launchd\b"
@@ -50,7 +50,7 @@ def run_here(command: str) -> str:
     """The command without what the shell here does not run: heredoc bodies and quoted text that is not a plain path.
 
     What stays: a quoted plain path, so `cp a "$HOME/Library/LaunchAgents/b"` is still seen; the text a local shell is given
-    (`bash -c '...'`, `bash <<EOF`); and `$(...)` in double quotes, which runs here whatever the quotes go to.
+    (`bash -c '...'`, `bash <<EOF`); and a substitution in double quotes, which runs here whatever the quotes go to.
     `ssh server 'a; b'` and `rg 'a|b'` are gone.
     """
 
@@ -62,9 +62,8 @@ def run_here(command: str) -> str:
         if LOCAL_SHELL.search(m.string, 0, m.start()):
             return f"; {text[1:-1]} ;"
         ran = SUBSTITUTION.findall(text) if text[0] == '"' else []
-        if ran:
-            return "".join(f"; {inner} ;" for inner in ran)
-        return "''" if re.search(r"[\s;&|()]", text) else text
+        outer = SUBSTITUTION.sub("x", text) if ran else text
+        return ("''" if re.search(r"[\s;&|()]", outer) else outer) + "".join(f" ; {a or b} ;" for a, b in ran)
 
     return QUOTED.sub(quoted, HEREDOC.sub(heredoc, command.replace("\\\n", " ")))
 
@@ -130,7 +129,9 @@ def selftest():
                  "sudo sh -c 'cat > /Library/LaunchAgents/r.plist'", "if ! launchctl load /tmp/i.plist; then echo x; fi",
                  "nohup launchctl load /tmp/n.plist", "ls *.plist | xargs -n1 launchctl load", "launchctl \\\n  load /tmp/j.plist",
                  "bash <<'SCRIPT'\nlaunchctl load /tmp/l.plist\nSCRIPT", 'output="$(launchctl load /tmp/v.plist 2>&1)"',
-                 'ssh server "echo $(launchctl load /tmp/w.plist)"', 'cp f "$HOME/Library/LaunchAgents/${NAME}.plist"']
+                 'ssh server "echo $(launchctl load /tmp/w.plist)"', 'cp f "$HOME/Library/LaunchAgents/${NAME}.plist"',
+                 'cp a.plist "$HOME/Library/LaunchAgents/$(whoami).plist"', 'ln -sf /tmp/job.plist "$HOME/Library/LaunchAgents/$(hostname).plist"',
+                 'output="`launchctl load /tmp/bt.plist 2>&1`"', "x=`launchctl load /tmp/bu.plist`"]
         for command in asked:
             assert check(bash(command), env) == ASK, command
             assert check(bash(command), env) is None, f"the repeat passes: {command}"
@@ -150,7 +151,8 @@ def selftest():
                         "scp a.plist server:~/Library/LaunchAgents/", "launchctl list | grep yoyoo", "command -v crontab >/dev/null 2>&1",
                         "crontab -u yoyoo -l", "ssh server \\\n  launchctl load /tmp/a", "ssh server bash -c 'launchctl load /tmp/a'",
                         "cp ~/Library/LaunchAgents/a.plist ~/backup/LaunchAgents/a.plist", "cat a > /tmp/x/LaunchAgents/a.plist", "rg -n 'launchctl|crontab|install-launchd|LaunchAgents' /repo",
-                        "ssh server 'true;install-launchd'", "ssh server bash <<'EOF'\nlaunchctl load /tmp/a\nEOF"):
+                        "ssh server 'true;install-launchd'", "ssh server bash <<'EOF'\nlaunchctl load /tmp/a\nEOF",
+                        'printf "%s\\n" "\\$(launchctl load /tmp/local.plist)"', "echo '$(launchctl load /tmp/a)'"):
             assert check(bash(command), env) is None, command
         for payload in (edit("/repo/a.py"), edit("/Users/y/Library/LaunchAgents/a.plist", "Read"),
                         edit("/repo/watch/run.sh.bak")):
