@@ -69,6 +69,7 @@ GOOD_MAC = re.compile(r"회사[ \t]*서버[ \t]*맥")
 BAD_MAC = re.compile(r"상시[ \t]?맥(?!락)|always-on Mac|서버[ \t]?맥(?![북미락스])", re.I)
 LAST_REPORT = re.compile(r"남은[ \t]*것[ \t]*\**[ \t]*[:：]")
 TEST_PANE = "임시 "  # with the space: `임시저장 API 수정` is a work name
+STOPPED = ("idle", "done", "blocked")  # herdr's agent_status for an agent that is not working
 OPENED_BY = re.compile(r"^spawn-([0-9A-Za-z]+)-")  # pane-spawn's agent name: spawn-<caller's terminal>-<random>
 WROTE_IT = re.compile(r"(?:Claude|유요).{0,12}(?:썼|작성)")
 EXPLAIN_REASON = "yoyoo-share-guard: 이번 설명 페이지는 Codex가 실패해 Claude가 썼습니다. 보고에 'Claude가 썼습니다'와 실패 이유를 넣어 다시 쓰세요."
@@ -166,8 +167,12 @@ def opener_of(pane: dict, names: dict, env) -> str:
         return ""
 
 
-def temp_reason(payload: dict, text: str, env) -> str | None:
-    """The rewrite for test panes this session left open at a last report, or None."""
+def left_open_reason(payload: dict, text: str, env) -> str | None:
+    """The rewrite for panes this session opened and left open at a last report, or None.
+
+    A test pane comes back whatever it is doing, any other pane once it stopped: 요유 talks only to the lead (2026-11-01),
+    so reading, answering or closing a pane is never 요유 몫. A pane kept on purpose costs one rewrite: decide() asks once a turn.
+    """
     if not LAST_REPORT.search(prose(text)):
         return None
     panes, session = herdr_list(env, "pane"), payload.get("session_id")
@@ -176,9 +181,17 @@ def temp_reason(payload: dict, text: str, env) -> str | None:
     if not me or pane_name(me).startswith(TEST_PANE):
         return None
     names = {a.get("pane_id"): a.get("name") for a in herdr_list(env, "agent")}
-    mine = [p for p in panes if pane_name(p).startswith(TEST_PANE) and p is not me and opener_of(p, names, env) == me.get("terminal_id")]
-    listed = ", ".join(f"{pane_name(p)}({p.get('pane_id')})" for p in mine)
-    return listed and f"yoyoo-share-guard: 이 세션이 띄운 시험용 칸이 아직 열려 있습니다: {listed}. `herdr pane close <ID>`로 닫고 보고를 다시 쓰세요." or None
+    mine = [p for p in panes if p is not me and opener_of(p, names, env) == me.get("terminal_id")]
+    tests = [p for p in mine if pane_name(p).startswith(TEST_PANE)]
+    stopped = [p for p in mine if p not in tests and p.get("agent_status") in STOPPED]
+    listed = lambda group: ", ".join(f"{pane_name(p)}({p.get('pane_id')})" for p in group)
+    parts = []
+    if tests:
+        parts.append(f"yoyoo-share-guard: 이 세션이 띄운 시험용 칸이 아직 열려 있습니다: {listed(tests)}. `herdr pane close <ID>`로 닫고 보고를 다시 쓰세요.")
+    if stopped:
+        parts.append(f"yoyoo-share-guard: 이 세션이 띄운 칸이 멈춰 있습니다: {listed(stopped)}. 요유는 리드하고만 이야기하니 그 칸을 보거나 답하거나 닫는 일을 요유 몫으로 넘기지 마세요. "
+                     "남은 일이 있으면 `pane-tell`로 시키고, 요유 결정이 필요하면 이 칸에서 묻고, 없으면 도는 작업이 없는지 확인한 뒤 `herdr pane close <ID>`로 닫고 보고를 다시 쓰세요.")
+    return " ".join(parts) or None
 
 
 def names_reason(text: str, env) -> str | None:
@@ -255,7 +268,7 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
     if not isinstance(text, str):
         return None
     checks = (names_reason(text, env), WHAT_REASON if misses_what(text) else None,
-              PROBLEM_REASON if misses_problem_line(text) else None, temp_reason(payload, text, env),
+              PROBLEM_REASON if misses_problem_line(text) else None, left_open_reason(payload, text, env),
               explain_reason(payload, text, env),
               LONG_REASON if claude and not job_session(env) and too_long(text) else None)
     rewrites = [r for r in checks if r]
@@ -412,6 +425,21 @@ def selftest():
         assert ends() is None, "nor is a word that starts with it"
         herdr_has([me])
         assert ends() is None, "nothing left open"
+        # 요유 2026-11-01: they talk only to the lead, so a stopped pane is the lead's to finish and close, never 요유 몫.
+        worker = {"pane_id": "w1:p3", "tab_id": "w1:t2", "terminal_id": "term_dd", "label": "🔴 🫡 구현", "agent_status": "idle"}
+        opened = [{"pane_id": "w1:p3", "name": "spawn-aa-1"}]
+        herdr_has([me, worker], opened)
+        assert "구현(w1:p3)" in (ends() or "") and "요유 몫" in (ends() or ""), "a stopped pane this session opened comes back"
+        herdr_has([me, {**worker, "agent_status": "done"}], opened)
+        assert "구현(w1:p3)" in (ends() or ""), "done is stopped too"
+        herdr_has([me, {**worker, "agent_status": "working"}], opened)
+        assert ends() is None, "a pane still working is not left over"
+        herdr_has([me, worker], [{"pane_id": "w1:p3", "name": "spawn-cc-1"}])
+        assert ends() is None, "another lead's pane is not this report's"
+        herdr_has([me, worker], opened)
+        assert ends("계속 진행합니다.") is None, "only a last report is held back"
+        herdr_has([{**me, "label": "🟢 임시 시험"}, worker], opened)
+        assert ends() is None, "a test pane answers for nothing"
         moved = {**me, "pane_id": "w2:p9"}
         herdr_has([moved, test_pane])
         assert ends(), "a moved pane is found by its session"
