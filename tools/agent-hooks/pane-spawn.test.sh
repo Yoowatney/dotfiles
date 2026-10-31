@@ -16,11 +16,12 @@ cat > "$SANDBOX/herdr" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$SANDBOX/log"
 case "\$1 \$2" in
-  "pane get") jq -n '{result: {pane: {workspace_id: "w1"}}}' ;;
+  "pane get") jq -n '{result: {pane: {pane_id: "w7:p3", workspace_id: "w7", terminal_id: "term_65f21913323dc21"}}}' ;; # moved: env says w1:p1
   "tab create") jq -n '{result: {root_pane: {pane_id: "w1:new"}, tab: {tab_id: "w1:t9"}}}' ;;
   "pane split") jq -n '{result: {pane: {pane_id: "w1:new"}}}' ;;
   "pane rename"|"agent prompt"|"agent wait"|"pane close") ;;
   "agent start")
+    [[ "\$3" =~ ^[a-z][a-z0-9_-]{0,31}\$ ]] || { echo invalid_agent_name; exit 1; } # herdr's rule
     n=\$(cat "$SANDBOX/starts" 2>/dev/null || echo 0); echo \$((n + 1)) > "$SANDBOX/starts"
     [ "\$n" -ge "\${FAIL_START:-0}" ] ;;
   "agent get")
@@ -42,7 +43,8 @@ before() { [ "$(grep -nF -- "$1" "$SANDBOX/log" | head -1 | cut -d: -f1)" -lt "$
 # Default: a new tab named for the work; the caller is marked 👑, the new pane 🫡 before its agent starts.
 out=$(ps --cwd /work "api#1 설계" "할 일입니다")
 has "pane-label --lead" "caller becomes the lead"
-has "tab create --workspace w1 --cwd /work --label api#1 설계 --no-focus" "new tab"
+has "tab create --workspace w7 --cwd /work --label api#1 설계 --no-focus" "new tab in the caller's current workspace"
+has "agent start spawn-65f21913323dc21-" "the agent's name records the caller's terminal, within herdr's limit"
 hasnt "pane split" "no split by default"
 has "pane rename w1:new 🟢 🫡 api#1 설계" "the first name carries 🫡"
 before "pane rename w1:new" "agent start"
@@ -53,7 +55,7 @@ before "agent get w1:new" "agent prompt"
 
 # Same work: --same-tab splits the caller's tab.
 ps --same-tab "api#1 리뷰" "리뷰" >/dev/null
-has "pane split --pane w1:p1 --direction right" "same tab splits"
+has "pane split --pane w7:p3 --direction right" "same tab splits the caller's current pane"
 hasnt "tab create" "same tab opens no tab"
 
 # Agent arguments pass through, and Codex works without a session id until its first prompt.

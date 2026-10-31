@@ -21,7 +21,7 @@ if [ "${1:-}" = --list ]; then
 fi
 [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ] || die 'usage: pane-tell --list | pane-tell <pane id|name text> "<message>"'
 
-if [[ "$1" =~ ^w[0-9]+:p[0-9A-Za-z]+$ ]]; then
+if [[ "$1" =~ ^w[0-9A-Za-z]+:p[0-9A-Za-z]+$ ]]; then # herdr counts on past 9: wA:p7
   hits=$(awk -F'\t' -v t="$1" '$1 == t' <<<"$panes")
 else
   hits=$(awk -F'\t' -v t="$1" 'index(tolower($2), tolower(t))' <<<"$panes")
@@ -34,7 +34,10 @@ if [ "$(wc -l <<<"$hits" | tr -d ' ')" -gt 1 ]; then
 fi
 # cut, not `IFS=$'\t' read`: read merges the tabs around an empty session id and shifts every later field
 pane=$(cut -f1 <<<"$hits"); name=$(cut -f2 <<<"$hits"); sid=$(cut -f3 <<<"$hits"); tab=$(cut -f5 <<<"$hits")
-[ "$pane" != "${HERDR_PANE_ID:-}" ] || die "\"$1\" is this pane"
+# a moved pane keeps its old id in the env; `pane get` still resolves it
+me=$("$H" pane get "${HERDR_PANE_ID:-}" 2>/dev/null | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
+me=${me:-${HERDR_PANE_ID:-}}
+[ "$pane" != "$me" ] || die "\"$1\" is this pane"
 # The dispatch job names its tabs "자동 <tag>", the Slack ambient poll "알아서 <#channel> <title>". This holds even when
 # herdr gives no session id to look up, which let board.sh unwatch type into an auto pane and lift its guard (Claude
 # review 10/21). The first human prompt catches a session moved or renamed out of its tab.
@@ -53,7 +56,7 @@ for t in "$HOME"/.claude/projects/*/"$sid".jsonl; do
   [[ $first =~ \"content\":\"\[?ambient-round\] ]] &&
     die "$pane ($name) is a Slack ambient session; it takes rounds only from the ambient poll"
 done
-from=$(awk -F'\t' -v me="${HERDR_PANE_ID:-}" '$1 == me {print $2}' <<<"$panes")
+from=$(awk -F'\t' -v me="$me" '$1 == me {print $2}' <<<"$panes")
 "$H" agent prompt "$pane" "[pane-tell: '${from:-자동 작업}' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] $2" >/dev/null ||
   die "herdr agent prompt failed"
 echo "told $pane ($name)"

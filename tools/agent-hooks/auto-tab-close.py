@@ -11,11 +11,14 @@ A `요유 몫` with something in it keeps the tab open even at `닫아도 됨`: 
 A pane `herdr agent start` opened closes the same way, whichever session started it and whether or not that session still
 lives: herdr's agent name tells it from a session 요유 started by hand, which has none (요유 2026-10-31). A closing pane
 takes its report with it, so the whole reply is first appended to a day file under ~/.local/state/pane-reports/, and the
-closing lines go to the nearest 👑 pane if one is alive. A reply that cannot be saved keeps the pane open; a 👑 that cannot
-hear does not, and job tabs tell no 👑 (their reports go to the board and Slack). 🔴 and 👑 panes stay and tell nobody.
+closing lines go to the pane that opened it, else a 👑 it can be sure of. A reply that cannot be saved keeps the pane open; a
+👑 that cannot hear does not, and job tabs tell no 👑 (their reports go to the board and Slack). A 🔴 pane stays and tells
+nobody, and so does a 👑 while a pane it opened is alive; a named 👑 whose panes are gone closes like the rest.
+A pane moved to another workspace gets a new id, and only `herdr pane get` still knows the old one from its env, so the
+current pane comes from there, and pane-spawn records its caller by terminal id, which a move does not change.
 Never blocks; prints nothing. Fails open.
 
---sweep lists the panes that already finished, which no Stop hook will visit again: named, idle, neither 🔴 nor 👑, and a
+--sweep lists the panes that already finished, which no Stop hook will visit again: named, idle, not held as above, and a
 last reply that passes the same test. --sweep --apply closes them the same way.
 
     auto-tab-close.py --selftest
@@ -39,6 +42,7 @@ _spec.loader.exec_module(share)  # reuse its 요유 몫 reader, code and quote s
 
 SESSION = re.compile(r"세션[ \t]*\**[ \t]*[:：][ \t]*\**([^·\n]*)")
 REPORT = re.compile(r"^[ \t]*(?:[-*][ \t]+)?\**(?:무엇을|왜|남은[ \t]*것)[ \t]*\**[ \t]*[:：]", re.M)
+OPENER = re.compile(r"^spawn-([0-9A-Za-z]+)-")  # pane-spawn's agent name: spawn-<caller's terminal>-<random>
 
 
 def should_close(text: str) -> bool:
@@ -59,10 +63,27 @@ def herdr(env, *args) -> dict:
     return (json.loads(r.stdout).get("result") or {}) if r.returncode == 0 else {}
 
 
+def here(env) -> dict:
+    """This pane as herdr has it now. HERDR_PANE_ID goes stale when the pane moves; `pane get` alone still resolves it."""
+    pane = env.get("HERDR_PANE_ID")
+    return (herdr(env, "pane", "get", pane).get("pane") or {}) if pane else {}
+
+
 def agent_name(env) -> str:
     """`herdr agent start` names the agent; a session started by hand, even in that pane afterwards, has no name."""
-    pane = env.get("HERDR_PANE_ID")
+    pane = here(env).get("pane_id") or env.get("HERDR_PANE_ID")
     return ((herdr(env, "agent", "get", pane).get("agent") or {}).get("name") or "") if pane else ""
+
+
+def opener(name) -> str:
+    """The terminal of the pane that opened this agent, from pane-spawn's name."""
+    m = OPENER.match(name or "")
+    return f"term_{m[1]}" if m else ""
+
+
+def held(label: str, terminal, agents: list) -> bool:
+    """🔴 stops something; a 👑 waits for its panes. 요유's own leads never get here: they have no agent name."""
+    return "🔴" in label or ("👑" in label and any(opener(a.get("name")) == terminal for a in agents))
 
 
 def report(text: str) -> str:
@@ -84,14 +105,21 @@ def decide(payload: dict, env) -> str | None:
     return text if env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT") or agent_name(env) else None
 
 
-def nearest_lead(me: dict, panes: list) -> str:
-    """The 👑 pane in this tab, else in this workspace. Another workspace is another life (company, home)."""
-    leads = [p for p in panes if "👑" in (p.get("label") or "") and p.get("pane_id") != me.get("pane_id")]
-    for scope in ("tab_id", "workspace_id"):
-        for p in leads:
-            if p.get(scope) == me.get(scope):
-                return p["pane_id"]
-    return ""
+def nearest_lead(me: dict, panes: list, name: str = "") -> str:
+    """The pane that opened this one, else the 👑 in this tab, else the only 👑 in this workspace. With several, none is
+    known to be ours, and a report in the wrong session reads as a task: the saved copy is enough. Another workspace is
+    another life (company, home)."""
+    others = [p for p in panes if p.get("pane_id") != me.get("pane_id")]
+    parent = opener(name)
+    for p in others:
+        if parent and p.get("terminal_id") == parent:
+            return p["pane_id"]
+    leads = [p for p in others if "👑" in (p.get("label") or "")]
+    tab = [p for p in leads if p.get("tab_id") == me.get("tab_id")]
+    if tab:
+        return tab[0]["pane_id"]
+    workspace = [p for p in leads if p.get("workspace_id") == me.get("workspace_id")]
+    return workspace[0]["pane_id"] if len(workspace) == 1 else ""
 
 
 def save(reply: str, me: dict, pane: str, env) -> str:
@@ -109,14 +137,17 @@ def save(reply: str, me: dict, pane: str, env) -> str:
 
 def finish(reply: str, env):
     """Keep the report, tell the 👑, then close. Only a failed save stops the close (it raises)."""
-    pane = env.get("HERDR_PANE_ID", "")
+    me = here(env)
+    pane = me.get("pane_id") or env.get("HERDR_PANE_ID", "")
+    env = {**env, "HERDR_PANE_ID": pane}
     panes = herdr(env, "pane", "list").get("panes") or []
-    me = next((p for p in panes if p.get("pane_id") == pane), {})
-    if any(mark in (me.get("label") or "") for mark in "🔴👑"):
+    agents = herdr(env, "agent", "list").get("agents") or []
+    if held(me.get("label") or "", me.get("terminal_id"), agents):
         return
+    name = next((a.get("name") for a in agents if a.get("pane_id") == pane), "")
     path = save(reply, me, pane, env)
     quiet: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-    lead = "" if env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT") else nearest_lead(me, panes)
+    lead = "" if env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT") else nearest_lead(me, panes, name)
     if lead:
         pt = env.get("AUTO_TAB_CLOSE_PANE_TELL") or os.path.join(HERE, "pane-tell")
         try:
@@ -143,12 +174,14 @@ def last_reply(session: str) -> str:
 
 
 def sweep(env, apply: bool):
-    labels = {p.get("pane_id"): p.get("label") or "" for p in herdr(env, "pane", "list").get("panes") or []}
-    for a in herdr(env, "agent", "list").get("agents") or []:
+    panes = {p.get("pane_id"): p for p in herdr(env, "pane", "list").get("panes") or []}
+    agents = herdr(env, "agent", "list").get("agents") or []
+    me = here(env).get("pane_id") or env.get("HERDR_PANE_ID")
+    for a in agents:
         pane, session = a.get("pane_id"), (a.get("agent_session") or {}).get("value")
-        label = labels.get(pane, "")
-        if (not a.get("name") or not session or a.get("agent_status") not in ("idle", "done")
-                or pane == env.get("HERDR_PANE_ID") or any(mark in label for mark in "🔴👑")):
+        label = panes.get(pane, {}).get("label") or ""
+        if (not a.get("name") or not session or a.get("agent_status") not in ("idle", "done") or pane == me
+                or held(label, panes.get(pane, {}).get("terminal_id"), agents)):
             continue
         try:
             reply = last_reply(session)
@@ -209,7 +242,9 @@ def selftest():
                 json.dump({"result": result}, f)
 
     fake_herdr = script("herdr", f'''case "$1 $2" in
-  "agent get") [ -f {sandbox}/agent-gone ] && exit 1; cat {sandbox}/agent.json ;;
+  "agent get") [ -f {sandbox}/agent-gone ] || [ "$3" = "$(cat {sandbox}/old-id 2>/dev/null)" ] && exit 1; cat {sandbox}/agent.json ;;
+  "pane get") jq --arg id "$3" --arg new "$(cat {sandbox}/new-id 2>/dev/null)" \
+    '{{result: {{pane: ([.result.panes[] | select(.pane_id == $id or .pane_id == $new)][0])}}}}' {sandbox}/panes.json ;;
   "agent list") cat {sandbox}/agents.json ;;
   "pane list") cat {sandbox}/panes.json ;;
   *) exit 2 ;;
@@ -218,7 +253,7 @@ esac''')
     fake_tell = script("pane-tell", f'echo "tell $1" >> {sandbox}/calls\necho "$2" > {sandbox}/told\nexit ${{TELL_EXIT:-0}}')
 
     me = {"pane_id": "w1:p2", "tab_id": "w1:t1", "workspace_id": "w1", "label": "🟢 일", "cwd": "/w",
-          "agent_session": {"value": "sid-2"}}
+          "terminal_id": "term_2", "agent_session": {"value": "sid-2"}}
     spawned = {"HERDR_BIN_PATH": fake_herdr, "HERDR_PANE_ID": "w1:p2"}
     herdr_says({"name": "spawned"})
     assert decide({"last_assistant_message": done}, spawned), "a pane `herdr agent start` opened closes"
@@ -271,9 +306,11 @@ esac''')
     text = saved()
     assert full in text and "w1:p2" in text and "sid-2" in text, f"the whole reply, with where it came from: {text!r}"
 
-    crown = {"pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1", "label": "🟢 👑 리드"}
-    other_tab = {**crown, "pane_id": "w1:p7", "tab_id": "w1:t2"}
-    other_space = {**crown, "pane_id": "w2:p1", "tab_id": "w2:t1", "workspace_id": "w2"}
+    crown = {"pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1", "label": "🟢 👑 리드", "terminal_id": "term_1"}
+    other_tab = {**crown, "pane_id": "w1:p7", "tab_id": "w1:t2", "terminal_id": "term_7"}
+    third_tab = {**crown, "pane_id": "w1:p8", "tab_id": "w1:t3", "terminal_id": "term_8"}
+    other_space = {**crown, "pane_id": "w2:p1", "tab_id": "w2:t1", "workspace_id": "w2", "terminal_id": "term_9"}
+    mine = [{"pane_id": "w1:p2", "name": "spawn-7-000000-1"}]  # pane-spawn records the caller's terminal in the name
     herdr_says({"name": "spawned"}, [other_tab, crown, me])
     assert run(reported, pane2) == (0, "", "tell w1:p1\n" + closed), "the 👑 in this tab first"
     told = open(f"{sandbox}/told").read()
@@ -281,7 +318,24 @@ esac''')
     assert full in saved(), "kept even when a 👑 hears it"
     assert run(reported, {**pane2, "TELL_EXIT": "3"}) == (0, "", "tell w1:p1\n" + closed), "a 👑 that cannot hear holds nothing"
     herdr_says({"name": "spawned"}, [other_space, other_tab, me])
-    assert run(reported, pane2) == (0, "", "tell w1:p7\n" + closed), "no 👑 in the tab: one in the workspace"
+    assert run(reported, pane2) == (0, "", "tell w1:p7\n" + closed), "no 👑 in the tab: the only one in the workspace"
+    herdr_says({"name": "spawned"}, [third_tab, other_tab, me])
+    assert run(reported, pane2) == (0, "", closed), "several 👑 and none is known to be ours: the saved copy only"
+    herdr_says({"name": "spawned"}, [third_tab, crown, other_tab, me], mine)
+    assert run(reported, pane2) == (0, "", "tell w1:p7\n" + closed), "the pane that opened this one comes first"
+    herdr_says({"name": "spawned"}, [third_tab, crown, me], mine)
+    assert run(reported, pane2) == (0, "", "tell w1:p1\n" + closed), "its opener is gone: back to the tab's 👑"
+    saved()
+    open(f"{sandbox}/old-id", "w").write("w1:p2")
+    open(f"{sandbox}/new-id", "w").write("w9:p2")
+    moved = {**me, "pane_id": "w9:p2", "workspace_id": "w9", "tab_id": "w9:t1"}
+    herdr_says({"name": "spawned"}, [moved])
+    assert decide({"last_assistant_message": done}, spawned), "a moved pane keeps its old id in its env and is still found"
+    assert run(reported, pane2) == (0, "", "reported=1 pane=w9:p2 --close\n"), "a moved pane closes by its current id"
+    assert "w9:p2" in saved()
+    os.unlink(f"{sandbox}/old-id")
+    os.unlink(f"{sandbox}/new-id")
+    herdr_says({"name": "spawned"}, [other_tab, me])
     herdr_says({"name": "spawned"}, [other_space, me])
     assert run(reported, pane2) == (0, "", closed), "a 👑 in another workspace is another life: company, home"
     herdr_says({"name": "spawned"}, [crown, me])
@@ -290,10 +344,14 @@ esac''')
 
     assert run(json.dumps({"last_assistant_message": keep[0]}), pane2) == (0, "", ""), "요유 몫 left: no report, no close"
     assert saved() == ""
-    for label in ("🔴 감시", "🟢 👑 리드"):
-        herdr_says({"name": "spawned"}, [crown, {**me, "label": label}])
+    child = [{"pane_id": "w1:pc", "name": "spawn-2-000000-1"}]
+    for label, agents in (("🔴 감시", ()), ("🟢 👑 리드", child)):
+        herdr_says({"name": "spawned"}, [crown, {**me, "label": label}], agents)
         assert run(reported, pane2) == (0, "", ""), f"{label} stays, and tells nobody it is closing"
     assert saved() == ""
+    herdr_says({"name": "spawned"}, [crown, {**me, "label": "🟢 👑 끝난 리드"}])
+    assert run(reported, pane2) == (0, "", "tell w1:p1\n" + closed), "a named 👑 whose panes are gone closes like the rest"
+    saved()
     herdr_says({"name": "spawned"}, [crown, me])
     open(reports, "w").close()
     assert run(reported, pane2) == (0, "", ""), "report not saved: the pane stays, it holds the only copy"
@@ -314,13 +372,15 @@ esac''')
 
     rows = {"w1:p2": ("🟢 끝난 일", "x", done), "w1:p3": ("🟢 코덱스", "x", done), "w1:p4": ("🟢 요유 칸", None, done),
             "w1:p5": ("🟢 도는 중", "x", done), "w1:p6": ("🔴 감시", "x", done), "w1:p8": ("🟢 👑 리드2", "x", done),
-            "w1:p9": ("🟢 나", "x", done), "w1:pa": ("🟢 결정 대기", "x", keep[0]), "w1:pb": ("🟢 기록 없음", "x", None)}
+            "w1:p9": ("🟢 나", "x", done), "w1:pa": ("🟢 결정 대기", "x", keep[0]), "w1:pb": ("🟢 기록 없음", "x", None),
+            "w1:pc": ("🟢 자식", "spawn-p8-000000-1", keep[0]), "w1:pd": ("🟢 👑 끝난 리드", "x", done)}
     agents: list = []
     panes: list = [crown]
     for pane, (label, name, text) in rows.items():
         sid = "sid-" + pane[-1]
         agents.append(agent(pane, name, sid, "working" if pane == "w1:p5" else "idle"))
-        panes.append({**me, "pane_id": pane, "label": label, "agent_session": {"value": sid}})
+        panes.append({**me, "pane_id": pane, "label": label, "terminal_id": "term_" + pane[-2:].replace(":", ""),
+                      "agent_session": {"value": sid}})
         if text and pane == "w1:p3":
             rollout(sid, text)
         elif text:
@@ -328,12 +388,13 @@ esac''')
     herdr_says({"name": "x"}, panes, agents)
     code, out, calls = run("", {"HERDR_PANE_ID": "w1:p9"}, ["--sweep"])
     assert (code, calls) == (0, ""), "--sweep alone only lists"
-    assert "w1:p2" in out and "w1:p3" in out and not any(p in out for p in ("w1:p4", "w1:p5", "w1:p6", "w1:p8", "w1:p9", "w1:pa", "w1:pb")), out
+    assert "w1:p2" in out and "w1:p3" in out and "w1:pd" in out, out
+    assert not any(p in out for p in ("w1:p4", "w1:p5", "w1:p6", "w1:p8", "w1:p9", "w1:pa", "w1:pb", "w1:pc")), out
     assert saved() == ""
     code, out, calls = run("", {"HERDR_PANE_ID": "w1:p9"}, ["--sweep", "--apply"])
-    assert calls.count("--close") == 2 and "pane=w1:p2 --close" in calls and "pane=w1:p3 --close" in calls, calls
-    assert calls.count("tell w1:p1") == 2, calls
-    assert saved().count(done) == 2, "swept panes keep their reports too"
+    assert calls.count("--close") == 3 and "pane=w1:p2 --close" in calls and "pane=w1:p3 --close" in calls, calls
+    assert calls.count("tell w1:p1") == 3, calls
+    assert saved().count(done) == 3, "swept panes keep their reports too"
     print("selftest ok")
 
 

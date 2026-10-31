@@ -13,6 +13,7 @@ cat > "$SANDBOX/herdr" <<EOF
 case "\$1 \$2" in
   "pane list") cat "$SANDBOX/panes" ;;
   "tab list") cat "$SANDBOX/tabs" 2>/dev/null || echo '{"result":{"tabs":[]}}' ;;
+  "pane get") [ -f "$SANDBOX/new-id" ] && jq -n --arg i "\$(cat "$SANDBOX/new-id")" '{result: {pane: {pane_id: \$i}}}' ;;
   "agent prompt") printf '%s|%s\n' "\$3" "\$4" >> "$SANDBOX/log" ;;
   *) exit 2 ;;
 esac
@@ -71,4 +72,13 @@ panes "w1:p13|🟢 할 일 정리|s13|w1:t10"
 echo '{"type":"user","origin":{"kind":"human"},"message":{"content":"ambient 모드 설계"}}' > "$SANDBOX/home/.claude/projects/p/s13.jsonl"
 pt "할 일" "x" >/dev/null; check "a tab named 알아서하기 is not an ambient tab" "$?|$(sent)" "0|w1:p13 "
 pt "only-one-arg" 2>/dev/null; check "usage" "$?" 2
+# herdr's workspace ids go on past 9 as letters: an id is an id, not a piece of a name.
+panes "wA:p7|🟢 👑 리드|" "wA:p3|🟢 🫡 일|"
+pt wA:p7 "보고" >/dev/null 2>&1; check "workspace wA id" "$(sent)" "wA:p7 "
+# A pane moved to another workspace keeps its old id in the env: still its own name, still not told itself.
+echo wA:p3 > "$SANDBOX/new-id"
+pt wA:p7 "보고" >/dev/null 2>&1; check "moved caller signs with its name" "$(grep -c "'🫡 일' 세션" "$SANDBOX/log")" "1"
+pt wA:p3 "나" >/dev/null 2>&1; check "moved caller is not told itself" "$(sent)" ""
+rm -f "$SANDBOX/new-id"
+
 exit $fails

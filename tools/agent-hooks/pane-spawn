@@ -6,6 +6,9 @@
 # Agents cannot run `herdr agent start` or `herdr pane split` themselves: the hook no-sed-inplace.py sends them here.
 #   pane-spawn [--same-tab] [--kind claude|codex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
 #   pane-spawn "api#1 설계" "지시" -- --model opus --effort high
+# The tab opens in the caller's current workspace: HERDR_PANE_ID and HERDR_WORKSPACE_ID go stale when a pane moves, so both
+# come from `herdr pane get`. The agent's name records the caller's terminal id, which a move does not change; the pane
+# reports to that caller first (auto-tab-close.py), and a 👑 stays open while a pane it opened is alive.
 # Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
 H=${HERDR_BIN_PATH:-herdr}
 USAGE='usage: pane-spawn [--same-tab] [--kind claude|codex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]'
@@ -35,21 +38,23 @@ esac
 [ -n "${HERDR_PANE_ID:-}" ] || die "run this inside a herdr pane"
 command -v jq >/dev/null 2>&1 || die "jq not found"
 
+IFS=$'\t' read -r me ws term < <("$H" pane get "$HERDR_PANE_ID" | jq -r '.result.pane | [.pane_id, .workspace_id, (.terminal_id | ltrimstr("term_"))] | @tsv')
+[ -n "${term:-}" ] || die "herdr does not know this pane"
+export HERDR_PANE_ID=$me
 pane-label --lead
 if [ -n "$same" ]; then
-  pane=$("$H" pane split --pane "$HERDR_PANE_ID" --direction right --cwd "$cwd" --no-focus | jq -r '.result.pane.pane_id // empty')
+  pane=$("$H" pane split --pane "$me" --direction right --cwd "$cwd" --no-focus | jq -r '.result.pane.pane_id // empty')
 else
-  ws=$("$H" pane get "$HERDR_PANE_ID" | jq -r '.result.pane.workspace_id // empty')
   pane=$("$H" tab create --workspace "$ws" --cwd "$cwd" --label "$name" --no-focus | jq -r '.result.root_pane.pane_id // empty')
 fi
 [ -n "$pane" ] || die "herdr opened no pane"
 "$H" pane rename "$pane" "🟢 🫡 $name" >/dev/null
 
 give_up() { "$H" pane close "$pane" >/dev/null 2>&1; echo "pane-spawn: $1" >&2; exit 1; }
-agent="spawn-$(date +%H%M%S)-$RANDOM"
+agent="spawn-$term-$RANDOM" # herdr allows 32 characters; terminal ids run about 15
 for try in 1 2 3; do # a pane opened a moment ago may not be at its shell prompt yet
-  "$H" agent start "$agent" --kind "$kind" --pane "$pane" --timeout 120000 ${1+--} "$@" >/dev/null 2>&1 && break
-  [ "$try" != 3 ] || give_up "$kind did not start"
+  out=$("$H" agent start "$agent" --kind "$kind" --pane "$pane" --timeout 120000 ${1+--} "$@" 2>&1) && break
+  [ "$try" != 3 ] || give_up "$kind did not start: $out"
   sleep "${PANE_SPAWN_RETRY_WAIT:-3}"
 done
 for _ in $(seq 1 60); do # `agent start` can return while a wrapper still runs in the pane (dispatch/run.sh)

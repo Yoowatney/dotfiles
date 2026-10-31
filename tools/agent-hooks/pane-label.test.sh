@@ -18,8 +18,9 @@ cat > "$SANDBOX/herdr" <<EOF
 case "\$1 \$2" in
   "pane get")
     st=\$(cat "$SANDBOX/status" 2>/dev/null || echo idle)
-    if [ -f "$SANDBOX/label" ]; then jq -n --rawfile l "$SANDBOX/label" --arg s "\$st" '{result: {pane: {label: \$l, agent_status: \$s}}}'
-    else jq -n --arg s "\$st" '{result: {pane: {agent_status: \$s}}}'; fi ;;
+    id=\$(cat "$SANDBOX/new-id" 2>/dev/null || echo "\$3")
+    if [ -f "$SANDBOX/label" ]; then jq -n --rawfile l "$SANDBOX/label" --arg s "\$st" --arg i "\$id" '{result: {pane: {pane_id: \$i, label: \$l, agent_status: \$s}}}'
+    else jq -n --arg s "\$st" --arg i "\$id" '{result: {pane: {pane_id: \$i, agent_status: \$s}}}'; fi ;;
   "pane rename")
     echo "\$3 \$4" >> "$SANDBOX/renames"
     if [ "\$4" = "--clear" ]; then rm -f "$SANDBOX/label"; else printf '%s' "\$4" > "$SANDBOX/label"; fi ;;
@@ -28,6 +29,7 @@ case "\$1 \$2" in
   "agent list") cat "$SANDBOX/agents.json" ;;
   "pane close") touch "$SANDBOX/closed" ;;
   "agent get")
+    if [ -f "$SANDBOX/new-id" ] && [ "\$3" != "\$(cat "$SANDBOX/new-id")" ]; then exit 1; fi
     if [ -f "$SANDBOX/name" ]; then jq -n --rawfile n "$SANDBOX/name" '{result: {agent: {name: \$n}}}'
     else jq -n '{result: {agent: {name: null}}}'; fi ;;
   *) exit 2 ;;
@@ -111,9 +113,9 @@ sleep 2; [ ! -f "$SANDBOX/closed" ] || fail "an agent-started pane should wait f
 ( export PANE_CLOSE_REPORTED=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close >/dev/null )
 sleep 2; [ -f "$SANDBOX/closed" ] || fail "an agent-started pane should close after its report"
 rm -f "$SANDBOX/closed"; pl --lead
-( export PANE_CLOSE_REPORTED=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close 2>/dev/null )
-sleep 2; [ ! -f "$SANDBOX/closed" ] || fail "a 👑 pane should not close"
-pl --unlead; rm -f "$SANDBOX/name"
+( export PANE_CLOSE_REPORTED=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close >/dev/null )
+sleep 2; [ -f "$SANDBOX/closed" ] || fail "the hook decides for a named 👑: it closes once its panes are gone"
+rm -f "$SANDBOX/closed"; pl --unlead; rm -f "$SANDBOX/name"
 ( export PANE_CLOSE_REPORTED=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close 2>/dev/null )
 sleep 2; [ ! -f "$SANDBOX/closed" ] || fail "a pane with no agent name is 요유's, even with the flag"
 
@@ -137,6 +139,11 @@ printf '🟢 🫡 시작' > "$SANDBOX/label"; rm -f "$SANDBOX/name"
 pl "일 이름"; expect "🟢 🫡 일 이름" "a pane pane-spawn named keeps 🫡 until herdr has its agent"
 pl --clear
 pl "요유 칸"; expect "🟢 요유 칸" "no 🫡 without an agent name"
+
+# A pane moved to another workspace keeps its old id in the env; herdr's agent lookup knows only the new one.
+printf 'spawned' > "$SANDBOX/name"; printf 'w9:p1' > "$SANDBOX/new-id"; rm -f "$SANDBOX/label"
+pl "옮겨진 칸"; expect "🟢 🫡 옮겨진 칸" "a moved pane is still found"
+rm -f "$SANDBOX/new-id" "$SANDBOX/label"
 
 # --mark-subs gives already running panes the same mark, once.
 printf 'spawned' > "$SANDBOX/name"; rm -f "$SANDBOX/renames" "$SANDBOX/label"
