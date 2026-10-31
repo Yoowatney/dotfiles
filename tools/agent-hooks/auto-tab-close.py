@@ -12,8 +12,10 @@ A pane `herdr agent start` opened closes the same way, whichever session started
 lives: herdr's agent name tells it from a session 요유 started by hand, which has none (요유 2026-10-31). A closing pane
 takes its report with it, so the whole reply is first appended to a day file under ~/.local/state/pane-reports/, and the
 closing lines go to the pane that opened it, else a 👑 it can be sure of. A reply that cannot be saved keeps the pane open; a
-👑 that cannot hear does not, and job tabs tell no 👑 (their reports go to the board and Slack). A 🔴 pane stays and tells
-nobody, and so does a 👑 while a pane it opened is alive; a named 👑 whose panes are gone closes like the rest.
+👑 that cannot hear does not, and job tabs tell no 👑 (their reports go to the board and Slack). A 🔴 pane stays, and so does
+any pane while a pane it opened is alive; one whose panes are gone closes like the rest. A report that keeps the pane open
+(요유 몫 left, `세션: 닫으면 …`, held as above) goes up the same way and the pane stays: an implementer finished with two
+questions for 요유 and its lead never heard (요유 2026-11-01). A reply without `남은 것:` is no report and tells nobody.
 A pane moved to another workspace gets a new id, and only `herdr pane get` still knows the old one from its env, so the
 current pane comes from there, and pane-spawn records its caller by terminal id, which a move does not change.
 A Stop hook runs beside the other Stop hooks, and any of them can send the reply back to be rewritten, so a Stop is not the
@@ -49,6 +51,7 @@ _spec.loader.exec_module(share)  # reuse its 요유 몫 reader, code and quote s
 
 SESSION = re.compile(r"세션[ \t]*\**[ \t]*[:：][ \t]*\**([^·\n]*)")
 REPORT = re.compile(r"^[ \t]*(?:[-*][ \t]+)?\**(?:무엇을|왜|남은[ \t]*것)[ \t]*\**[ \t]*[:：]", re.M)
+LEFT = re.compile(r"남은[ \t]*것[ \t]*\**[ \t]*[:：]")
 OPENER = re.compile(r"^spawn-([0-9A-Za-z]+)-")  # pane-spawn's agent name: spawn-<caller's terminal>-<random>
 
 
@@ -89,8 +92,8 @@ def opener(name) -> str:
 
 
 def held(label: str, terminal, agents: list) -> bool:
-    """🔴 stops something; a 👑 waits for its panes. 요유's own leads never get here: they have no agent name."""
-    return "🔴" in label or ("👑" in label and any(opener(a.get("name")) == terminal for a in agents))
+    """🔴 stops something; a pane waits for the panes it opened. 요유's own leads never get here: they have no agent name."""
+    return "🔴" in label or any(opener(a.get("name")) == terminal for a in agents)
 
 
 def report(text: str) -> str:
@@ -114,24 +117,30 @@ def ended_in_silence(payload: dict) -> bool:
 
 
 def decide(payload: dict, env) -> str | None:
-    """The reply to close on, or None. The nested claude -p inherits this pane's env but is not its session."""
+    """The reply to act on when the turn ends, or None: one that closes this pane, or a report that keeps it open and still has
+    to reach the pane above. The nested claude -p inherits this pane's env but is not its session."""
     if env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
         return None
     text = reply_of(payload)
-    if not (isinstance(text, str) and should_close(text)):
+    if not isinstance(text, str):
         return None
-    return text if env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT") or agent_name(env) else None
+    job = env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT")
+    if should_close(text):
+        return text if job or agent_name(env) else None
+    return text if not job and LEFT.search(share.prose(text)) and agent_name(env) else None
 
 
-def nearest_lead(me: dict, panes: list, name: str = "") -> str:
+def nearest_lead(me: dict, panes: list, name: str = "", sideways: bool = True) -> str:
     """The pane that opened this one, else the 👑 in this tab, else the only 👑 in this workspace. With several, none is
     known to be ours, and a report in the wrong session reads as a task: the saved copy is enough. Another workspace is
-    another life (company, home)."""
+    another life (company, home). Without `sideways` only the opener counts: two open 👑 would answer each other for ever."""
     others = [p for p in panes if p.get("pane_id") != me.get("pane_id")]
     parent = opener(name)
     for p in others:
         if parent and p.get("terminal_id") == parent:
             return p["pane_id"]
+    if not sideways:
+        return ""
     leads = [p for p in others if "👑" in (p.get("label") or "")]
     tab = [p for p in leads if p.get("tab_id") == me.get("tab_id")]
     if tab:
@@ -154,27 +163,29 @@ def save(reply: str, me: dict, pane: str, env) -> str:
 
 
 def finish(reply: str, env):
-    """Keep the report, tell the 👑, then close. Only a failed save stops the close (it raises)."""
+    """Keep the report, tell the pane above, then close unless the report or the pane says to stay. Only a failed save stops
+    the close (it raises)."""
     me = here(env)
     pane = me.get("pane_id") or env.get("HERDR_PANE_ID", "")
     env = {**env, "HERDR_PANE_ID": pane}
     panes = herdr(env, "pane", "list").get("panes") or []
     agents = herdr(env, "agent", "list").get("agents") or []
-    if held(me.get("label") or "", me.get("terminal_id"), agents):
-        return
+    close = should_close(reply) and not held(me.get("label") or "", me.get("terminal_id"), agents)
     name = next((a.get("name") for a in agents if a.get("pane_id") == pane), "")
     path = save(reply, me, pane, env)
     quiet: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-    lead = "" if env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT") else nearest_lead(me, panes, name)
+    sideways = close or "👑" not in (me.get("label") or "")
+    lead = "" if env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT") else nearest_lead(me, panes, name, sideways)
     if lead:
         pt = env.get("AUTO_TAB_CLOSE_PANE_TELL") or os.path.join(HERE, "pane-tell")
+        head = "이 칸의 마지막 보고입니다(칸을 닫기 전에 보냅니다)" if close else "이 칸의 보고입니다(칸은 열어 둡니다)"
         try:
-            subprocess.run([pt, lead, f"이 칸의 마지막 보고입니다(칸을 닫기 전에 보냅니다):\n{report(reply)}\n\n전체 보고: {path}"],
-                           env=dict(env), timeout=5, **quiet)
+            subprocess.run([pt, lead, f"{head}:\n{report(reply)}\n\n전체 보고: {path}"], env=dict(env), timeout=5, **quiet)
         except subprocess.TimeoutExpired:
             pass
-    pl = env.get("AUTO_TAB_CLOSE_PANE_LABEL") or os.path.join(HERE, "pane-label")
-    subprocess.run([pl, "--close"], env={**env, "PANE_CLOSE_REPORTED": "1"}, timeout=3, **quiet)
+    if close:
+        pl = env.get("AUTO_TAB_CLOSE_PANE_LABEL") or os.path.join(HERE, "pane-label")
+        subprocess.run([pl, "--close"], env={**env, "PANE_CLOSE_REPORTED": "1"}, timeout=3, **quiet)
 
 
 def pending_file(env) -> str:
@@ -353,7 +364,9 @@ esac''')
     spawned = {"HERDR_BIN_PATH": fake_herdr, "HERDR_PANE_ID": "w1:p2"}
     herdr_says({"name": "spawned"})
     assert decide({"last_assistant_message": done}, spawned), "a pane `herdr agent start` opened closes"
-    assert not decide({"last_assistant_message": keep[0]}, spawned), "요유 몫 left keeps it"
+    assert decide({"last_assistant_message": keep[0]}, spawned) == keep[0], "요유 몫 left keeps the pane, and the report goes up"
+    assert not decide({"last_assistant_message": keep[3]}, spawned), "a progress line is no report"
+    assert not decide({"last_assistant_message": keep[5]}, spawned), "a quoted report is no report"
     assert not decide({"last_assistant_message": done}, {**spawned, "CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}), \
         "a headless claude -p inside the pane inherits its id but is not the pane's session"
     herdr_says({"name": None})
@@ -452,13 +465,33 @@ esac''')
     assert run(reported, {**pane2, "MUNICE_AUTO_DISPATCH": "1"}) == (0, "", closed), "job tabs report on the board, not to a 👑"
     saved()
 
-    assert run(json.dumps({"last_assistant_message": keep[0]}), pane2) == (0, "", ""), "요유 몫 left: no report, no close"
+    # 요유 2026-11-01: a pane that stays open told its lead nothing, so a finished implementer sat there unreported.
+    stays = json.dumps({"last_assistant_message": keep[0]})
+    assert run(stays, pane2) == (0, "", "tell w1:p1\n"), "요유 몫 left: the pane stays, and its lead still hears the report"
+    assert "칸은 열어 둡니다" in open(f"{sandbox}/told").read() and keep[0] in saved()
+    assert run(stays, {**pane2, "MUNICE_AUTO_DISPATCH": "1"}) == (0, "", ""), "job tabs report on the board, not to a 👑"
     assert saved() == ""
+    herdr_says({"name": "spawned"}, [crown, {**other_tab, "label": "🟢 🫡 구현"}, me], mine)
+    assert run(stays, pane2) == (0, "", "tell w1:p7\n"), "a 🫡 that opened this pane hears it, not the 👑 above that 🫡"
+    # With no pane above, a report goes sideways to another 👑. An open pane can answer, and two would go on for ever.
+    second = {**me, "label": "🟢 👑 다른 리드"}
+    herdr_says({"name": "spawned"}, [crown, second])
+    assert run(stays, pane2) == (0, "", ""), "an open 👑 tells no other 👑"
+    assert keep[0] in saved(), "the report is still kept"
+    herdr_says({"name": "spawned"}, [third_tab, crown, other_tab, second], mine)
+    assert run(stays, pane2) == (0, "", "tell w1:p7\n"), "an open 👑 still tells the pane that opened it"
+    saved()
     child = [{"pane_id": "w1:pc", "name": "spawn-2-000000-1"}]
-    for label, agents in (("🔴 감시", ()), ("🟢 👑 리드", child)):
-        herdr_says({"name": "spawned"}, [crown, {**me, "label": label}], agents)
-        assert run(reported, pane2) == (0, "", ""), f"{label} stays, and tells nobody it is closing"
-    assert saved() == ""
+    for label, openers in (("🔴 감시", ()), ("🟢 👑 리드", child), ("🟢 🫡 구현", child)):
+        herdr_says({"name": "spawned"}, [crown, {**me, "label": label}], openers)
+        expected = "" if "👑" in label else "tell w1:p1\n"
+        assert run(reported, pane2) == (0, "", expected), f"{label} stays, and its report goes up unless it would go sideways"
+        if expected:
+            assert "칸은 열어 둡니다" in open(f"{sandbox}/told").read(), f"{label} is not closing and must not say so"
+    saved()
+    herdr_says({"name": "spawned"}, [crown, {**me, "label": "🟢 🫡 구현"}])
+    assert run(reported, pane2) == (0, "", "tell w1:p1\n" + closed), "a 🫡 whose panes are gone closes like the rest"
+    saved()
     herdr_says({"name": "spawned"}, [crown, {**me, "label": "🟢 👑 끝난 리드"}])
     assert run(reported, pane2) == (0, "", "tell w1:p1\n" + closed), "a named 👑 whose panes are gone closes like the rest"
     saved()
@@ -481,7 +514,15 @@ esac''')
     stop(json.dumps({"last_assistant_message": keep[0]}), slow)
     herdr_says({"name": "spawned"}, [crown, me])
     time.sleep(0.4)
-    assert taken() == "" and saved() == "", "the rewrite left work for 요유: the first reply no longer closes anything"
+    assert taken() == "tell w1:p1\n", "the rewrite left work for 요유: nothing closes, and only the rewrite goes up"
+    text = saved()
+    assert keep[0] in text and full not in text, f"the last version alone: {text!r}"
+    herdr_says({"name": "spawned"}, [crown, busy])
+    stop(json.dumps({"last_assistant_message": full}), slow)
+    stop(json.dumps({"last_assistant_message": keep[3]}), slow)
+    herdr_says({"name": "spawned"}, [crown, me])
+    time.sleep(0.4)
+    assert taken() == "" and saved() == "", "the rewrite is no report: it withdraws the first"
     herdr_says({"name": "spawned"}, [crown, me])
     stop(json.dumps({"last_assistant_message": full}), {**slow, "AUTO_TAB_CLOSE_SETTLE": "0.5"})
     herdr_says({"name": "spawned"}, [crown, busy])

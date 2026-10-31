@@ -16,7 +16,7 @@ cat > "$SANDBOX/herdr" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$SANDBOX/log"
 case "\$1 \$2" in
-  "pane get") jq -n '{result: {pane: {pane_id: "w7:p3", workspace_id: "w7", terminal_id: "term_65f21913323dc21"}}}' ;; # moved: env says w1:p1
+  "pane get") jq -n --arg label "\${CALLER_LABEL:-}" '{result: {pane: {pane_id: "w7:p3", workspace_id: "w7", terminal_id: "term_65f21913323dc21", label: \$label}}}' ;; # moved: env says w1:p1
   "tab create") jq -n '{result: {root_pane: {pane_id: "w1:new"}, tab: {tab_id: "w1:t9"}}}' ;;
   "pane split") jq -n '{result: {pane: {pane_id: "w1:new"}}}' ;;
   "pane rename"|"agent prompt"|"pane close") ;;
@@ -54,10 +54,20 @@ before "pane rename w1:new" "agent start"
 before "pane rename w1:new" "pane-label --sync-tabs"
 before "pane-label --sync-tabs" "agent start"
 has "--kind claude --pane w1:new" "claude by default"
+
 has "agent prompt w1:new 할 일입니다" "instruction delivered"
 before "agent get w1:new" "agent prompt"
 before "agent prompt" "agent wait w1:new --until working --until blocked --until done"
 [[ "$out" == *"w1:new"* ]] || fail "prints the new pane: $out"
+
+# 요유 2026-11-01: a job has one lead. A pane under a lead that opens a review pane stays under it, and that pane reports to it.
+CALLER_LABEL="🟢 🫡 구현" ps --same-tab "리뷰" "봐 줘" >/dev/null
+hasnt "pane-label --lead" "a pane under a lead does not become one"
+has "agent start spawn-65f21913323dc21-" "the new pane still reports to the pane that opened it"
+CALLER_LABEL="🟢 👑 리드" ps --same-tab "리뷰" "봐 줘" >/dev/null
+has "pane-label --lead" "a lead stays one"
+CALLER_LABEL="🟢 일" ps "리뷰" "봐 줘" >/dev/null
+has "pane-label --lead" "a pane under nobody becomes the lead"
 
 # Same work: --same-tab splits the caller's tab.
 ps --same-tab "api#1 리뷰" "리뷰" >/dev/null

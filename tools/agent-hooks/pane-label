@@ -32,7 +32,7 @@
 #                                             tool call. Skips a 🔴 pane, and cancels if the agent works again within
 #                                             the grace period (요유 typed a new message, or the next ambient round
 #                                             arrived). An agent-started pane closes only through the Stop hook
-#                                             auto-tab-close.py, which saves the report first, keeps a 👑 until the panes
+#                                             auto-tab-close.py, which saves the report first, keeps a pane until the panes
 #                                             it opened are gone, and sets PANE_CLOSE_REPORTED=1: the report would go
 #                                             with the pane
 H=${HERDR_BIN_PATH:-herdr}
