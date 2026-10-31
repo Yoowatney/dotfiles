@@ -11,7 +11,7 @@ check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected 
 cat > "$SANDBOX/herdr" <<EOF
 #!/usr/bin/env bash
 case "\$1 \$2" in
-  "pane list") cat "$SANDBOX/panes" ;;
+  "pane list") [ ! -f "$SANDBOX/herdr-down" ] || exit 1; cat "$SANDBOX/panes" ;;
   "tab list") cat "$SANDBOX/tabs" 2>/dev/null || echo '{"result":{"tabs":[]}}' ;;
   "pane get") jq -n --arg i "\$(cat "$SANDBOX/new-id" 2>/dev/null)" --argjson o "\$(cat "$SANDBOX/scrolled" 2>/dev/null || echo 0)" \
     '{result: {pane: ({scroll: {offset_from_bottom: \$o}} + (if \$i == "" then {} else {pane_id: \$i} end))}}' ;;
@@ -102,9 +102,12 @@ check "claude: an old prompt above the box is not the box" "$(box claude "${P}�
 check "claude: a task picker below the box is not the box" "$(box claude "$R$P\n$R\n\xe2\x9d\xaf \xe2\x8f\xba main\n")" 0
 check "claude: a question dialog in place of the box" "$(box claude "$R\xe2\x9d\xaf 1. Yes\n  2. No\n$R")" 1
 check "claude: no box on the screen" "$(box claude "그냥 출력\n")" 1
+check "claude: a dim suggestion is no typed text" "$(box claude "$R${P}${DIM}제안 문구$OFF\n$R")" 0
+check "claude: dim text below the prompt line counts" "$(box claude "$R$P\n  ${DIM}둘째 줄$OFF\n$R")" 1
 check "codex: the dim placeholder is empty" "$(box codex "$BG  $OFF\n$C$OFF$BG $OFF$DIM${BG}Ask Codex to do anything$OFF$BG   $OFF\n$BG  $OFF\n  status\n")" 0
 check "codex: typed" "$(box codex "$BG  $OFF\n$C$OFF$BG 야 리드야   $OFF\n$BG  $OFF\n  status\n")" 1
 check "codex: only a wrapped line holds text" "$(box codex "$C$OFF$BG $OFF$DIM${BG}x$OFF\n$BG  둘째 줄$OFF\n$BG  $OFF\n  status\n")" 1
+check "codex: dim text below the prompt line counts" "$(box codex "$C$OFF$BG $OFF$DIM${BG}x$OFF\n$BG  ${DIM}둘째 줄$OFF\n  status\n")" 1
 check "codex: status text under the box is not typed" "$(box codex "$C$OFF$BG $OFF$DIM${BG}x$OFF\n$BG  $OFF\n  status\n")" 0
 check "codex: an old prompt above the box is not the box" "$(box codex "\033[2m$C ${OFF}지난 글\n$C$OFF$BG $OFF$DIM${BG}x$OFF\n$BG  $OFF\n")" 0
 check "codex: only old prompts on the screen, no box" "$(box codex "\033[2m$C ${OFF}지난 글\n  status\n")" 1
@@ -144,6 +147,10 @@ rm -f "$SANDBOX"/state/pane-tell/undelivered/*
 panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9"; claude_screen "야" > "$SANDBOX/screen"; pt "리드" "보고" >/dev/null
 jq '(.result.panes[] | select(.pane_id == "w1:p1") | .pane_id) = "w2:p5"' "$SANDBOX/panes" > "$SANDBOX/panes.new"; mv "$SANDBOX/panes.new" "$SANDBOX/panes"
 claude_screen > "$SANDBOX/screen"; settled; check "receiver moved: found by its terminal" "$(sent)" "w2:p5 "
+panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9"; claude_screen "야" > "$SANDBOX/screen"; pt "리드" "보고" >/dev/null
+touch "$SANDBOX/herdr-down"; sleep 0.3
+check "herdr away for a moment: the message keeps waiting" "$(ls "$SANDBOX"/state/pane-tell/waiting | wc -l | tr -d ' ')" 1
+rm -f "$SANDBOX/herdr-down"; claude_screen > "$SANDBOX/screen"; settled; check "herdr back: delivered" "$(sent)" "w1:p1 "
 panes "w1:p1|🟢 빈 칸|s1|w1:t1|-" "w1:p9|🟢 일|s9"
 pt "빈 칸" "x" 2>/dev/null; check "no agent in the pane refuses" "$?|$(sent)" "2|"
 panes "w1:p1|🟢 다른 도구|s1|w1:t1|gemini" "w1:p9|🟢 일|s9"

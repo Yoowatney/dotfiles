@@ -16,8 +16,8 @@ H=${HERDR_BIN_PATH:-herdr}
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}/pane-tell
 die() { echo "pane-tell: $*" >&2; exit 2; }
 
-# Exit 0 when the ansi screen on stdin shows the agent's input box empty. Any screen it cannot place is "not empty", and
-# dim text is a placeholder, never typed words.
+# Exit 0 when the ansi screen on stdin shows the agent's input box empty. Any screen it cannot place is "not empty". Dim text
+# on the prompt line is a placeholder, never typed words; on the lines below it counts.
 # ponytail: reads the TUI's drawing, so a redesign of either box stops delivery (messages wait, nothing merges); a key typed
 # in the moment after the second read, or a Korean syllable still composing in the IME, does not show on the screen.
 BOX=$(cat <<'PY'
@@ -35,7 +35,7 @@ if kind == "claude":  # the last two rules, the upper one may carry the session 
         box = lines[rules[-2] + 1:rules[-1]]
     if not box or not SGR.sub("", box[0]).startswith("❯\xa0"):
         sys.exit(1)
-    box[0] = SGR.sub("", box[0])[1:]
+    box[0] = typed(box[0])[1:]
 elif kind == "codex":  # the last › line unless its mark is dim (an old prompt), then the block of lines with its background
     marks = [i for i, l in enumerate(lines) if plain(l).startswith("›")]
     if not marks or not typed(lines[marks[-1]]).startswith("›"):
@@ -47,7 +47,7 @@ elif kind == "codex":  # the last › line unless its mark is dim (an old prompt
         i += 1
 else:
     sys.exit(1)
-sys.exit(1 if any(typed(line) for line in box) else 0)
+sys.exit(1 if any(plain(line) for line in box) else 0)
 PY
 )
 if [ "${1:-}" = --box-empty ]; then python3 -I -c "$BOX" "$2"; exit; fi
@@ -64,11 +64,12 @@ box_ready() { # pane kind
 send() { box_ready "$1" "$2" && "$H" agent prompt "$1" "$3" >/dev/null 2>&1; }
 
 deliver() { # message file, receiver's terminal (a moved pane gets a new pane id), its session when queued
-  local row pane kind sid t0=$SECONDS
+  local list row pane kind sid t0=$SECONDS
   while (( SECONDS - t0 < ${PANE_TELL_WAIT:-86400} )); do
     sleep "${PANE_TELL_POLL:-5}"
-    row=$("$H" pane list 2>/dev/null | jq -r --arg t "$2" '.result.panes[]
-      | select(.terminal_id == $t) | [.pane_id, (.agent // ""), (.agent_session.value // "")] | @tsv') || continue
+    list=$("$H" pane list 2>/dev/null) || continue # herdr restarting is not the receiver gone
+    row=$(jq -r --arg t "$2" '.result.panes[]
+      | select(.terminal_id == $t) | [.pane_id, (.agent // ""), (.agent_session.value // "")] | @tsv' <<<"$list") || continue
     pane=$(cut -f1 <<<"$row"); kind=$(cut -f2 <<<"$row"); sid=$(cut -f3 <<<"$row")
     [ -n "$kind" ] && { [ -z "$3" ] || [ "$sid" = "$3" ]; } || break
     if send "$pane" "$kind" "$(cat "$1")"; then

@@ -199,9 +199,24 @@ def held_reply(token: str, env) -> str | None:
     return held["reply"] if held.get("token") == token else None
 
 
+def drop(token: str, env):
+    """A later Stop's reply is not this step's to remove."""
+    if held_reply(token, env) is not None:
+        os.unlink(pending_file(env))
+
+
+def ready_for_input(env) -> bool:
+    """Only these two are the end of a turn: `blocked` is a dialog, and herdr not answering says nothing."""
+    try:
+        return here(env).get("agent_status") in ("idle", "done")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
 def after_turn(token: str, env):
     """herdr keeps an agent `working` through a sent-back reply. A short quiet spell after it covers the gap before a turn
-    starts again; 요유 typing in that spell restarts it, and that turn's own Stop then decides."""
+    starts again; 요유 typing in that spell restarts it, and that turn's own Stop then decides. Past the wait the pane is
+    busy with something else: the report is kept and the pane stays."""
     settle = float(env.get("AUTO_TAB_CLOSE_SETTLE", 3))
     deadline = time.monotonic() + float(env.get("AUTO_TAB_CLOSE_WAIT", 600))
     quiet_from = time.monotonic()
@@ -209,17 +224,19 @@ def after_turn(token: str, env):
         reply = held_reply(token, env)
         if reply is None:
             return
-        if here(env).get("agent_status") == "working":
+        if not ready_for_input(env):
             quiet_from = time.monotonic()
         elif time.monotonic() - quiet_from >= settle:
             try:
                 finish(reply, env)
             finally:
-                os.unlink(pending_file(env))
+                drop(token, env)
             return
         time.sleep(float(env.get("AUTO_TAB_CLOSE_POLL", 0.5)))
-    if held_reply(token, env) is not None:
-        os.unlink(pending_file(env))
+    reply = held_reply(token, env)
+    if reply is not None:
+        save(reply, {}, env["HERDR_PANE_ID"], env)
+        drop(token, env)
 
 
 def last_reply(session: str) -> str:
@@ -306,17 +323,17 @@ def selftest():
 
     fake_herdr = script("herdr", f'''case "$1 $2" in
   "agent get") [ -f {sandbox}/agent-gone ] || [ "$3" = "$(cat {sandbox}/old-id 2>/dev/null)" ] && exit 1; cat {sandbox}/agent.json ;;
-  "pane get") jq --arg id "$3" --arg new "$(cat {sandbox}/new-id 2>/dev/null)" \
+  "pane get") [ -f {sandbox}/herdr-bad ] && {{ echo "not json"; exit 0; }}; jq --arg id "$3" --arg new "$(cat {sandbox}/new-id 2>/dev/null)" \
     '{{result: {{pane: ([.result.panes[] | select(.pane_id == $id or .pane_id == $new)][0])}}}}' {sandbox}/panes.json ;;
   "agent list") cat {sandbox}/agents.json ;;
   "pane list") cat {sandbox}/panes.json ;;
   *) exit 2 ;;
 esac''')
     fake = script("pane-label", f'echo "reported=$PANE_CLOSE_REPORTED pane=$HERDR_PANE_ID $@" >> {sandbox}/calls')
-    fake_tell = script("pane-tell", f'echo "tell $1" >> {sandbox}/calls\necho "$2" > {sandbox}/told\nexit ${{TELL_EXIT:-0}}')
+    fake_tell = script("pane-tell", f'echo "tell $1" >> {sandbox}/calls\necho "$2" > {sandbox}/told\nsleep ${{TELL_SLEEP:-0}}\nexit ${{TELL_EXIT:-0}}')
 
     me = {"pane_id": "w1:p2", "tab_id": "w1:t1", "workspace_id": "w1", "label": "🟢 일", "cwd": "/w",
-          "terminal_id": "term_2", "agent_session": {"value": "sid-2"}}
+          "terminal_id": "term_2", "agent_session": {"value": "sid-2"}, "agent_status": "idle"}
     spawned = {"HERDR_BIN_PATH": fake_herdr, "HERDR_PANE_ID": "w1:p2"}
     herdr_says({"name": "spawned"})
     assert decide({"last_assistant_message": done}, spawned), "a pane `herdr agent start` opened closes"
@@ -458,6 +475,33 @@ esac''')
     stop(json.dumps({"last_assistant_message": full}), {**pane2, "CLAUDE_CODE_ENTRYPOINT": "sdk-cli"})
     assert taken() == "tell w1:p1\n" + closed, "a claude -p inside the pane withdraws nothing"
     saved()
+    for state in ("blocked", "unknown"):  # a dialog opened during the rewrite: this is not the end of the turn
+        herdr_says({"name": "spawned"}, [crown, {**me, "agent_status": state}])
+        stop(json.dumps({"last_assistant_message": full}), slow)
+        time.sleep(0.4)
+        assert not os.path.exists(f"{sandbox}/calls"), f"{state} is not quiet"
+        herdr_says({"name": "spawned"}, [crown, me])
+        assert taken() == "tell w1:p1\n" + closed, f"after {state}, idle closes"
+    herdr_says({"name": "spawned"}, [crown, busy])
+    stop(json.dumps({"last_assistant_message": full}), slow)
+    open(f"{sandbox}/herdr-bad", "w").close()
+    time.sleep(0.3)
+    assert not os.path.exists(f"{sandbox}/calls"), "herdr cannot say: not quiet"
+    os.unlink(f"{sandbox}/herdr-bad")
+    herdr_says({"name": "spawned"}, [crown, me])
+    assert taken() == "tell w1:p1\n" + closed, "a herdr hiccup does not end the wait"
+    saved()
+    herdr_says({"name": "spawned"}, [crown, busy])
+    stop(json.dumps({"last_assistant_message": full}), {**slow, "AUTO_TAB_CLOSE_WAIT": "0.2"})
+    assert taken() == "", "still working when the wait ends: no tell, no close"
+    assert full in saved(), "the report is kept, as it was at Stop before the wait existed"
+    herdr_says({"name": "spawned"}, [crown, me])
+    stop(json.dumps({"last_assistant_message": "무엇을: 앞 보고\n남은 것: 요유 몫: 없음 · 세션: 닫음"}), {**pane2, "TELL_SLEEP": "0.4"})
+    time.sleep(0.2)  # the first report is on its way when the next Stop comes
+    stop(json.dumps({"last_assistant_message": full}), {**slow, "TELL_SLEEP": "0"})
+    time.sleep(0.5)
+    taken()
+    assert full in saved(), "the first step's cleanup leaves the next Stop's reply alone"
     herdr_says({"name": "spawned"}, [crown, me])
     open(reports, "w").close()
     assert run(reported, pane2) == (0, "", ""), "report not saved: the pane stays, it holds the only copy"
