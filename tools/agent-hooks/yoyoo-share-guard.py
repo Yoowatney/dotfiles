@@ -11,9 +11,9 @@ Code, quotes and blockquotes are ignored (a report about the format is not a rep
 A report whose 요유 몫 holds only decisions is not asked at all (only_decisions); auto-tab-close still sees it as work left.
 It also sends back names 요유 cannot read: a pane's herdr id (`w5:pKR`, 27 reports in 14 days; the reason carries the
 pane's name) and the machine names the global rule bans. A last report (it has `남은 것:`) also comes back while a test pane
-named `임시 …` is open, unless another session opened it: 4 of them stayed idle after this hook's own tests (10/31).
-A report with nothing left to do ends without a word: the question used to demand a rewrite, and 69 of 102 fires printed
-the same report twice (10/28-10/31).
+this session opened (`임시 …`) is open: 4 of them stayed idle after this hook's own tests (10/31).
+A report with nothing left to do ends without a word: the question used to demand a rewrite. Of 102 fires on 10/28-10/31,
+25 went on to a tool call and 69 only wrote text, most of it the same report again.
 Claude runs it with --claude: the question goes back as Stop additionalContext, which Claude shows as "Stop hook feedback"
 instead of a red "Stop hook error". Codex keeps decision:block (its schema allows only decision and reason). The flag is
 explicit because CLAUDE_CODE_ENTRYPOINT leaks into commands Claude runs, Codex included.
@@ -58,8 +58,9 @@ PANE_ID = re.compile(r"(?<![A-Za-z0-9_:/.-])w[0-9A-Z]+:p[0-9A-Z]+(?![0-9A-Za-z])
 PANE_MARKS = re.compile(r"^[\s🟢🔴👑🫡]+")
 # The global rule's names for the three Macs: a bare 서버 맥 leaves 요유 guessing which one (요유 2026-10-24).
 GOOD_MAC = re.compile(r"회사[ \t]*서버[ \t]*맥")
-BAD_MAC = re.compile(r"상시[ \t]?맥|always-on Mac|서버[ \t]?맥(?![북미])", re.I)
+BAD_MAC = re.compile(r"상시[ \t]?맥(?!락)|always-on Mac|서버[ \t]?맥(?![북미락스])", re.I)
 LAST_REPORT = re.compile(r"남은[ \t]*것[ \t]*\**[ \t]*[:：]")
+TEST_PANE = "임시 "  # with the space: `임시저장 API 수정` is a work name
 OPENED_BY = re.compile(r"^spawn-([0-9A-Za-z]+)-")  # pane-spawn's agent name: spawn-<caller's terminal>-<random>
 
 
@@ -129,24 +130,32 @@ def pane_names(env) -> dict:
     return {p["pane_id"]: pane_name(p) for p in herdr_list(env, "pane") if p.get("label")}
 
 
+def opener_of(pane: dict, names: dict, env) -> str:
+    """The terminal that opened a pane, or "": pane-spawn writes it into the agent name, pane-temp into a file."""
+    opened = OPENED_BY.match(names.get(pane.get("pane_id")) or "")
+    if opened:
+        return f"term_{opened[1]}"
+    folder = env.get("PANE_TEMP_DIR") or os.path.expanduser("~/.local/state/pane-temp")
+    try:
+        with open(os.path.join(folder, os.path.basename(pane.get("terminal_id") or "none")), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
 def temp_reason(payload: dict, text: str, env) -> str | None:
-    """The rewrite for test panes still open at a last report, or None. A pane with no opener on record may be anyone's."""
+    """The rewrite for test panes this session left open at a last report, or None."""
     if not LAST_REPORT.search(prose(text)):
         return None
     panes, session = herdr_list(env, "pane"), payload.get("session_id")
     me = next((p for p in panes if session and (p.get("agent_session") or {}).get("value") == session), None) or next(
         (p for p in panes if p.get("pane_id") == env.get("HERDR_PANE_ID")), None)  # a moved pane keeps an old HERDR_PANE_ID
-    if not me or pane_name(me).startswith("임시"):
+    if not me or pane_name(me).startswith(TEST_PANE):
         return None
     names = {a.get("pane_id"): a.get("name") for a in herdr_list(env, "agent")}
-
-    def left(p):
-        opened = OPENED_BY.match(names.get(p.get("pane_id")) or "")
-        return pane_name(p).startswith("임시") and p is not me and (not opened or f"term_{opened[1]}" == me.get("terminal_id"))
-
-    listed = ", ".join(f"{pane_name(p)}({p.get('pane_id')})" for p in panes if left(p))
-    return listed and (f"yoyoo-share-guard: 시험용 칸이 아직 열려 있습니다: {listed}. 이 세션이 띄운 칸이면 "
-                       "`herdr pane close <ID>`로 닫고 보고를 다시 쓰세요. 다른 세션 칸이면 그 칸의 이름을 보고에 한 줄로 적으세요.") or None
+    mine = [p for p in panes if pane_name(p).startswith(TEST_PANE) and p is not me and opener_of(p, names, env) == me.get("terminal_id")]
+    listed = ", ".join(f"{pane_name(p)}({p.get('pane_id')})" for p in mine)
+    return listed and f"yoyoo-share-guard: 이 세션이 띄운 시험용 칸이 아직 열려 있습니다: {listed}. `herdr pane close <ID>`로 닫고 보고를 다시 쓰세요." or None
 
 
 def names_reason(text: str, env) -> str | None:
@@ -182,8 +191,8 @@ def only_decisions(text: str) -> bool:
     """Nothing in 요유 몫 is a step 유요 could take: asking would only print the report again.
 
     Model text cannot stop that: told to end silently, Codex rewrote it 2 of 2 and Claude left a note 2 of 3 (2026-10-31).
-    ponytail: word endings, so "할지 결정" also passes a step 유요 should just take. Replayed on 102 fires of 21 days this
-    drops 43 of 77 idle fires and 10 of 25 that did work, about 5 of them real wins. Ask once per session if those come back.
+    ponytail: word endings, so "할지 결정" also passes a step 유요 should just take. Replayed on the 102 fires of 10/28-10/31
+    this drops 42 of 77 idle fires and 10 of 25 that did work, about 5 of them real wins. Ask once per session if those come back.
     """
     text = STRIP[2].sub(" ", STRIP[0].sub(" ", unicodedata.normalize("NFC", text)))
     values = [ASIDE.sub(" ", m.group(1)) for m in SHARE_FULL.finditer(text)]
@@ -318,18 +327,31 @@ def selftest():
         def ends(text=done):
             return decide(p(text, session_id="s1"), herdr_env)
 
+        herdr_env["PANE_TEMP_DIR"] = d
+        with open(os.path.join(d, "term_bb"), "w", encoding="utf-8") as f:
+            f.write("term_aa\n")  # pane-temp's record of who opened it
         herdr_has([me, test_pane])
         assert "임시 시험 Claude(w1:p2)" in (ends() or ""), "a test pane left open comes back with what to close"
         herdr_has([me, test_pane], [{"pane_id": "w1:p2", "name": "spawn-aa-1"}])
-        assert "임시 시험 Claude" in (ends() or ""), "a test pane this session opened"
+        assert "임시 시험 Claude" in (ends() or ""), "a test pane this session opened through pane-spawn"
+        os.unlink(os.path.join(d, "term_bb"))
+        herdr_has([me, test_pane])
+        assert ends() is None, "no record of who opened it: not this report's"
         herdr_has([me, test_pane], [{"pane_id": "w1:p2", "name": "spawn-cc-1"}])
         assert ends() is None, "another session's test pane is not this report's"
+        with open(os.path.join(d, "term_bb"), "w", encoding="utf-8") as f:
+            f.write("term_cc\n")
         herdr_has([me, test_pane])
+        assert ends() is None, "nor is one pane-temp opened for another session"
+        with open(os.path.join(d, "term_bb"), "w", encoding="utf-8") as f:
+            f.write("term_aa\n")
         assert ends("시험을 계속합니다.") is None, "only the last report is held back"
         herdr_has([{**me, "label": "🟢 임시 시험 Codex"}, test_pane])
         assert ends() is None, "a test pane is not asked about its siblings"
         herdr_has([me, {**test_pane, "label": "🟢 칸 임시 정리"}])
         assert ends() is None, "the word in a work name is not a test pane"
+        herdr_has([me, {**test_pane, "label": "🟢 임시저장 API 수정"}])
+        assert ends() is None, "nor is a word that starts with it"
         herdr_has([me])
         assert ends() is None, "nothing left open"
         moved = {**me, "pane_id": "w2:p9"}
@@ -342,7 +364,7 @@ def selftest():
         assert decide(p(t), cli) is None, f"not a pane id in prose: {t!r}"
     for t in ("상시 맥에서 돕니다.", "상시맥을 씁니다.", "always-on Mac에서 돕니다.", "서버맥에서 받았습니다.", "서버 맥에 둡니다."):
         assert "회사서버맥" in (decide(p(t), cli) or ""), f"machine name must come back: {t!r}"
-    for t in ("회사서버맥에서 돕니다.", "회사 서버맥에서 돕니다.", "회사맥과 집맥입니다.", "서버 맥북을 씁니다.",
+    for t in ("회사서버맥에서 돕니다.", "회사 서버맥에서 돕니다.", "회사맥과 집맥입니다.", "서버 맥북을 씁니다.", "서버 맥락을 봅니다.", "상시 맥락입니다.",
               "`서버맥`은 쓰지 않습니다.", '"상시 맥"은 금지입니다.'):
         assert decide(p(t), cli) is None, f"machine name is fine: {t!r}"
     assert (decide(p("`w5:pKR` 확인\n남은 것: 요유 몫: 값 넣기 · 유요 몫: 없음"), cli) or "").endswith(DO_REASON), \

@@ -17,6 +17,8 @@ A JSON deny blocks the call and tells the model why.
 
     slack-format-check.py --selftest
 """
+from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
+
 import json
 import os
 import re

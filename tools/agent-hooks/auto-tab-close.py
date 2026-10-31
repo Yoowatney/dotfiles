@@ -28,6 +28,8 @@ last reply that passes the same test. --sweep --apply closes them the same way.
     auto-tab-close.py --selftest
     auto-tab-close.py --sweep [--apply]
 """
+from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
+
 import datetime
 import glob
 import importlib.util

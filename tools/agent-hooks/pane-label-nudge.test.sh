@@ -72,6 +72,11 @@ ctx=$(ask "로그 봐 줘" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 일" | context)
 
 # Each message arms the pane question, under a name that cannot leave the folder.
 [ -f "$SANDBOX/fit/s_1" ] || fail "message did not arm pane-fit"
+rm "$SANDBOX/fit/s_1"
+ask "[pane-tell: 다른 세션] 보고입니다" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 일" >/dev/null
+[ ! -e "$SANDBOX/fit/s_1" ] || fail "another session's message armed pane-fit"
+ask "로그 봐 줘" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 일" >/dev/null
+[ -f "$SANDBOX/fit/s_1" ] || fail "a message from 요유 stopped arming"
 
 # Inside herdr without a label: say there is none.
 ctx=$(run_hook HERDR_PANE_ID=w1:p1 | context)

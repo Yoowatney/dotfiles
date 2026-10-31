@@ -16,9 +16,10 @@
 
 ## 전체 제약
 
-- `auto-tab-close.py`, `pane-label`, `pane-spawn`, `no-sed-inplace.py`는 `리드 패널 자동 닫기` 칸 소유라 고치지 않는다.
+- `auto-tab-close.py`, `pane-label`, `pane-spawn`은 다른 칸 소유라 고치지 않는다.
 - `auto-tab-close.py`가 `share.leaves_yoyoo_work`, `share.STRIP`, `share.final_text`를 가져다 쓴다. 이 셋의 동작을 바꾸지 않는다. 바꾸면 결정이 남은 칸이 닫힌다.
-- 칸 안내 명령은 `pane-spawn "<작업 이름>" "<지시>"`이고, 직접 실행을 막는 훅은 만들지 않는다.
+- 칸 안내 명령은 `pane-spawn "<작업 이름>" "<지시>"`이다.
+- 작업 중 리드가 범위를 넓혔다. 직접 띄우기를 막는 훅은 `리드 패널 자동 닫기` 칸이 만든 `no-sed-inplace.py`를 이 칸이 이어받아 `herdr pane run`, `send-text` 경로까지 넓힌다. 시험 칸이 남는 문제는 작업 6으로 다룬다.
 - dotfiles는 PUBLIC이다. 비밀, 고객 정보, 가족 이야기를 시험 자료에 넣지 않는다.
 - 훅은 실패하면 통과시킨다. 세션을 멈추지 않는다.
 - 커밋은 경로를 지정해서만 하고, 직전에 `git status`를 다시 본다.
@@ -72,3 +73,12 @@
 - [ ] 훅을 고치기 전에 띄운 임시 Claude·Codex 칸(이미 열린 세션)과, 고친 뒤 새로 띄운 칸(새 세션)에서 칸 ID 되돌림, 결정만 남은 보고, 칸 판단, 지적 상기를 각각 확인한다.
 - [ ] 최근 14일 최종 답변 4,226개와 재질문 102건을 새 판으로 다시 돌려 잘못 막는 수를 센다.
 - [ ] 끝나면 임시 칸을 지운다.
+
+### 작업 6: 시험 칸이 남지 않게 하기 (리드 지시로 추가)
+
+**파일:** `tools/claude/hooks/no-sed-inplace.py`, 새 `tools/agent-hooks/pane-temp`, `pane-temp.test.sh`, `yoyoo-share-guard.py`
+
+- [ ] `no-sed-inplace.py --selftest`: `tab create`, `pane run claude`, `send-text "claude --flag"`, 별칭 `cl`·`cla`, `then herdr`, `"$HERDR_BIN_PATH"`는 거절하고, 다른 칸에 보내는 문장(`claude 쪽 결과`, `codex-review 돌려 주세요`)과 일회성 명령은 통과한다.
+- [ ] `pane-temp`: 이름 없는 칸을 칸의 셸로 띄워 별칭과 함수가 적용되게 한다. 에이전트가 끝나거나 `PANE_TEMP_TTL`이 지나면 칸 자신이 닫는다. 띄운 칸의 terminal을 `~/.local/state/pane-temp/<새 칸 terminal_id>`에 적는다. 이름 뒤 옵션은 사용법 오류다.
+- [ ] `temp_reason`: 이 세션이 띄운 `임시 ` 칸이 열려 있으면 마지막 보고를 되돌린다. 띄운 칸은 `spawn-` 이름 또는 위 기록으로 판단하고, 기록이 없거나 다른 세션 칸이면 묻지 않는다.
+- [ ] 실제 칸 확인: Claude와 Codex 각각 이름 없음, 별칭·`--no-daemon` 적용, TTL 닫힘, 에이전트 종료 시 닫힘, 다른 세션의 보고는 되돌아오지 않음.

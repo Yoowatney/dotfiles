@@ -41,16 +41,19 @@ INPLACE = {
 }
 LAUNCHERS = {"xargs", "-exec", "-execdir"}  # sed reached through `xargs sed` or `find -exec sed`
 # A regex, unlike the sed check: `pane=$(herdr pane split ...)` is the usual form, and strip_captures would hide it.
-HERDR = r"(?:^|[;&|(`]|\$\()\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?herdr(?:\s+-\S+(?:\s+[^\s-]\S*)?)*"
+# ponytail: only the ways people write it, a determined caller can always get past a regex (`$H tab create`).
+HERDR_BIN = re.compile(r'"?\$(?:HERDR_BIN_PATH\b|\{HERDR_BIN_PATH[^}]*\})"?')
+HERDR = r"(?:^|[;&|(`]|\$\()\s*(?:(?:then|do|else|command|env)\s+)*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?herdr(?:\s+-\S+(?:\s+[^\s-]\S*)?)*"
 SPAWN = re.compile(HERDR + r"\s+(?:agent\s+start|pane\s+split|tab\s+create)\b(?![^\n;|&]*--help)", re.M)
 # An agent typed into a pane gets no herdr name, so nothing closes it. LAUNCH reads the raw command, since the agent word sits
 # inside the quotes code_only blanks; TYPES is what makes it a real call and not an example in a commit message. A one-shot
 # subcommand starts no session. In send-text a following word is a sentence to the agent already there ("claude 쪽 결과…").
+# `cl` and `cla` are 요유's aliases for claude.
 ONE_SHOT = r"(?!\s+(?:mcp|auth|login|logout|doctor|update|config|plugin|exec|-p|--print|--version|-v|--help|-h)\b)"
-AGENT = r"""\s+\S+\s+['"]?(?:cd\s+\S+\s*&&\s*|[A-Za-z_]\w*=\S*\s+)*(?:exec\s+)?(?:\S*/)?(?:claude|codex)\b"""
+AGENT = r"""\s+\S+\s+['"]?(?:cd\s+\S+\s*(?:&&|;)\s*|[A-Za-z_]\w*=\S*\s+)*(?:exec\s+)?(?:\S*/)?(?:claude|codex|cla?)(?![\w-])"""
 TYPES = re.compile(HERDR + r"\s+pane\s+(?:run|send-text)\b", re.M)
 LAUNCH = re.compile(HERDR + r"\s+pane\s+(?:run" + AGENT + ONE_SHOT + "|send-text" + AGENT
-                    + r"""(?=\s*(?:$|['";&|]|-|resume\b))""" + ONE_SHOT + ")", re.M)
+                    + r"""(?=\s+-|\s*(?:$|['";&|]|resume\b))""" + ONE_SHOT + ")", re.M)
 QUOTED = re.compile(r"""'[^']*'|"(?:[^"\\]|\\.)*\"""")
 CAPTURE = re.compile(r"\$\([^)]*\)|`[^`]*`")
 
@@ -62,6 +65,7 @@ def code_only(cmd: str) -> str:
 
 
 def bash_problem(cmd: str) -> str | None:
+    cmd = HERDR_BIN.sub("herdr", cmd)
     code = code_only(cmd)
     if SPAWN.search(code) or (TYPES.search(code) and LAUNCH.search(_guard.HEREDOC.sub("<<heredoc", cmd))):
         return ('pane-spawn: 칸을 직접 띄우지 말 것. `pane-spawn "<일 이름>" "<지시>"`로 띄울 것: 일 이름을 붙인 새 탭에서 시작하고, '
@@ -131,10 +135,21 @@ def selftest():
         'herdr pane send-text "$p" "claude --model haiku"',
         'herdr pane run w1:p2 "claude hello"',
         'herdr pane run w1:p2 "exec claude"',
+        'herdr pane run "$p" "cd /tmp; claude"',
+        'herdr pane run "$p" cl',
+        'herdr pane run "$p" "cla --model x"',
+        "if ok; then herdr tab create; fi",
+        "for i in 1; do herdr tab create; done",
+        "command herdr tab create",
+        "env A=1 herdr tab create",
+        '"$HERDR_BIN_PATH" tab create --label x',
     ]
     allow = [
         "pane-spawn '설계' '지시'",
-        "pane-temp '시험' --kind codex",
+        "pane-temp --kind codex '시험'",
+        'herdr pane send-text "$p" "claude-code 버전 확인해 주세요"',
+        'herdr pane send-text "$p" "codex-review 돌려 주세요"',
+        'herdr pane run "$p" "claude-online --version"',
         "herdr tab create --help | head",
         "herdr tab close w1:t2",
         'herdr pane run "$pane" "claude mcp list > /tmp/x"',

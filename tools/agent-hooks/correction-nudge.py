@@ -28,11 +28,13 @@ REMINDER = ("요유 메시지가 일하는 방식에 대한 지적으로 보입�
             "확인까지 하세요. 사과하고 다시 쓰는 것은 해결이 아닙니다. 지적이 아니라 질문이면 답만 하세요.")
 
 
+def from_yoyoo(text: str) -> bool:
+    return not unicodedata.normalize("NFC", text or "").strip().startswith(MACHINE)
+
+
 def reminder(text: str) -> str | None:
     text = unicodedata.normalize("NFC", text or "").strip()
-    if text.startswith(MACHINE):
-        return None
-    return REMINDER if CORRECTION.search(text[:HEAD]) else None
+    return REMINDER if from_yoyoo(text) and CORRECTION.search(text[:HEAD]) else None
 
 
 def selftest():
@@ -45,6 +47,8 @@ def selftest():
     for t in miss:
         assert reminder(t) is None, t
     assert reminder("[pane-tell: 다른 세션] 왜 또 그랬어") is None, "another session's words are not 요유's"
+    assert not from_yoyoo("[pane-tell: 다른 세션] 보고입니다") and not from_yoyoo("<task-notification>끝"), "a machine wrote these"
+    assert from_yoyoo("배포해 줘") and from_yoyoo(""), "everything else is 요유"
     assert reminder("로그입니다.\n" + "가" * HEAD + "\n왜 또 그랬어") is None, "a long paste is not a correction"
     print("selftest ok")
 
@@ -54,8 +58,10 @@ if __name__ == "__main__":
         selftest()
         sys.exit()
     try:
-        message = reminder(json.load(sys.stdin).get("prompt") or "")
+        prompt = json.load(sys.stdin).get("prompt") or ""
     except Exception:  # never break a prompt
         sys.exit(0)
+    message = reminder(prompt)
     if message:
         print(message)
+    sys.exit(0 if from_yoyoo(prompt) else 3)  # pane-label-nudge.sh arms pane-fit only for a message from 요유

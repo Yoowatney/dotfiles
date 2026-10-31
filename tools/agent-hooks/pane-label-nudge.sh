@@ -16,8 +16,11 @@ emit() {
     jq -n --arg ctx "$1" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $ctx}}' 2>/dev/null
     exit 0
 }
-correction=
-[ "${1:-}" = session ] || correction=$(python3 -I "$(dirname "$0")/correction-nudge.py" <<<"$input" 2>/dev/null)
+correction= machine=
+if [ "${1:-}" != session ]; then
+    correction=$(python3 -I "$(dirname "$0")/correction-nudge.py" <<<"$input" 2>/dev/null)
+    [ $? != 3 ] || machine=1
+fi
 if [ -z "${HERDR_PANE_ID:-}" ]; then
     [ -z "$correction" ] || emit "$correction"
     exit 0
@@ -35,9 +38,9 @@ if [ "${1:-}" = session ]; then
     exit 0
 fi
 
-# A new message: the next working tool asks whether this work belongs in a pane (pane-fit-guard.py).
+# A new message from 요유: the next working tool asks whether this work belongs in a pane (pane-fit-guard.py).
 session=$(jq -r '.session_id // empty' <<<"$input" 2>/dev/null)
-if [ -n "$session" ]; then
+if [ -n "$session" ] && [ -z "$machine" ]; then
     armed=${PANE_FIT_DIR:-$HOME/.local/state/pane-fit}
     mkdir -p "$armed" && touch "$armed/${session//[^A-Za-z0-9_-]/_}" 2>/dev/null
     find "$armed" -type f -mtime +7 -delete 2>/dev/null

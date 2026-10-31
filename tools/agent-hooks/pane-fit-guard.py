@@ -30,8 +30,8 @@ WAIT = 300
 EDITORS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"}
 READ_ONLY_AGENTS = {"Explore", "researcher", "code-reviewer", "claude-code-guide", "Plan", "statusline-setup"}
 NOTES = re.compile(r"/scratchpad/|/\.claude/projects/[^/]+/memory/|^/private/tmp/|^/tmp/|/explain/|/work-logs/")
-GIT_WORK = re.compile(r"\bgit\b[^|;&\n]*\s(?:commit|push)\b|\bgh pr (?:create|merge)\b")
 AT_COMMAND = r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*"
+GIT_WORK = re.compile(AT_COMMAND + r"(?:git(?:\s+-\S+(?:\s+[^\s-]\S*)?)*\s+(?:commit|push)\b(?!-)|gh pr (?:create|merge)\b)")
 # PreToolUse runs once before a long foreground command, so the 5-minute check never sees it: ask at the start.
 LONG_RUN = re.compile(AT_COMMAND + r"(?:(?:uv run|npx|bash|sh)\s+)?(?:\S*/)?(?:npm (?:run )?(?:test|build)|yarn (?:test|build)|pytest"
                       r"|vitest|jest|docker build|terraform (?:plan|apply)|gradlew|xcodebuild|deploy-release|gcloud\b[^|;&\n]*\bdeploy)\b")
@@ -65,12 +65,15 @@ def starts_work(payload: dict) -> bool:
 
 
 def hand_opened(payload: dict, env) -> bool:
-    """True for a session 요유 started by hand. A moved pane keeps an old HERDR_PANE_ID, so the session id is tried too."""
+    """True for a session 요유 started by hand. A moved pane keeps an old HERDR_PANE_ID, so the session id comes first.
+
+    The pane id counts only for a pane whose session herdr does not know: a `codex exec` run inside a pane is not that pane.
+    """
     herdr = env.get("HERDR_BIN_PATH") or "herdr"
     out = subprocess.run([herdr, "agent", "list"], capture_output=True, text=True, timeout=2).stdout
     for agent in json.loads(out)["result"]["agents"]:
         session = (agent.get("agent_session") or {}).get("value")
-        if session == payload.get("session_id") or agent.get("pane_id") == env.get("HERDR_PANE_ID"):
+        if session == payload.get("session_id") or (not session and agent.get("pane_id") == env.get("HERDR_PANE_ID")):
             return not agent.get("name")
     return False
 
@@ -135,6 +138,8 @@ def selftest():
             armed()
             assert check(payload, env) == START, payload
         for payload in (p("Read", file_path="/repo/a.py"), p("Bash", command="git status"), p("Bash", command="git log -3"),
+                        p("Bash", command="git stash push"), p("Bash", command="git commit-graph write"),
+                        p("Bash", command="git log -- push"), p("Bash", command="echo 'gh pr merge'"),
                         p("Agent", subagent_type="Explore"), p("Write", file_path="/private/tmp/x/scratchpad/a.md"),
                         p("Write", file_path="/Users/y/.claude/projects/-x/memory/a.md"),
                         p("Edit", file_path="/Users/y/explain/a.html"),
@@ -177,6 +182,12 @@ def selftest():
         listing()
         armed()
         assert check(p(), env) is None, "herdr has no record: not asked"
+        listing({"pane_id": "w1:p1", "agent_session": {"value": "parent"}})
+        armed()
+        assert check(p(), env) is None, "a `codex exec` inside a pane is not the session of that pane"
+        listing({"pane_id": "w1:p1"})
+        armed()
+        assert check(p(), env) == START, "a pane herdr knows only by id is still asked"
 
         # Through the real entry point, the way both tools call it.
         guard = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "claude", "hooks", "gcp-account-guard.py")

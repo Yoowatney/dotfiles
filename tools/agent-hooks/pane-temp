@@ -3,11 +3,13 @@
 # hand behaves (the name is what tells the two apart). Every other pane comes from pane-spawn.
 # A pane with no name never closes itself, and 4 of them sat idle after a test on 10/31. So this pane goes on its own: when
 # its agent exits, or PANE_TEMP_TTL seconds (1 hour) after it started, whoever forgets. Nothing runs outside the pane, so
-# nothing is left to die first. Label `임시 …`: yoyoo-share-guard.py sends a last report back while one is open.
+# nothing is left to die first. Label `임시 …`: yoyoo-share-guard.py sends the last report of the session that opened it back
+# while one is open, and this pane has no name to say whose it is, so the opener goes in $PANE_TEMP_DIR/<its terminal id>.
 #   pane-temp [--kind claude|codex] [--cwd <dir>] [--env KEY=VALUE]... "<name>" [-- <agent arguments>]
 #   pane-temp --kind codex "손세션 시험" -- --model gpt-5
 # Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
 H=${HERDR_BIN_PATH:-herdr}
+STATE=${PANE_TEMP_DIR:-$HOME/.local/state/pane-temp}
 USAGE='usage: pane-temp [--kind claude|codex] [--cwd <dir>] [--env KEY=VALUE]... "<name>" [-- <agent arguments>]'
 die() { echo "pane-temp: $*" >&2; exit 2; }
 
@@ -29,20 +31,28 @@ done
 [ $# -ge 1 ] && [ -n "$1" ] || die "$USAGE"
 name=$1
 shift
-[ "${1:-}" != -- ] || shift
+if [ $# -gt 0 ]; then [ "$1" = -- ] || die "$USAGE"; shift; fi # an option after the name would reach the agent
 case "$kind" in claude | codex) ;; *) die "$USAGE" ;; esac
 [ -n "${HERDR_PANE_ID:-}" ] || die "run this inside a herdr pane"
 command -v jq >/dev/null 2>&1 || die "jq not found"
 
-ws=$("$H" pane get "$HERDR_PANE_ID" | jq -r '.result.pane.workspace_id // empty') # HERDR_* go stale when a pane moves
+caller=$("$H" pane get "$HERDR_PANE_ID") # HERDR_* go stale when a pane moves
+ws=$(jq -r '.result.pane.workspace_id // empty' <<<"$caller")
 [ -n "$ws" ] || die "herdr does not know this pane"
 pane=$("$H" tab create --workspace "$ws" --cwd "$cwd" --label "임시 $name" ${envs[@]+"${envs[@]}"} --no-focus | jq -r '.result.root_pane.pane_id // empty')
 [ -n "$pane" ] || die "herdr opened no pane"
 "$H" pane rename "$pane" "🟢 임시 $name" >/dev/null
+terminal=$("$H" pane get "$pane" | jq -r '.result.pane.terminal_id // empty')
+if [ -n "$terminal" ] && mkdir -p "$STATE"; then
+  jq -r '.result.pane.terminal_id // empty' <<<"$caller" >"$STATE/$terminal"
+  find "$STATE" -type f -mtime +7 -delete 2>/dev/null
+fi
 
-# alarm survives exec and SIGALRM ends either agent. The pane resolves its own id at the end: a move changes it.
+# The pane's own shell runs the agent, so an alias or function applies: `claude` gets its permission flag, `codex` --no-daemon.
+# Closing the pane ends the agent and the timer. It resolves its own id at the end: a move changes it.
 agent=$(printf '%q ' "$kind" "$@")
-run="perl -e 'alarm shift; exec @ARGV' ${PANE_TEMP_TTL:-3600} $agent; $H pane close \"\$($H pane get \"\$HERDR_PANE_ID\" | jq -r .result.pane.pane_id)\""
+close="$H pane close \"\$($H pane get \"\$HERDR_PANE_ID\" | jq -r .result.pane.pane_id)\""
+run="( sleep ${PANE_TEMP_TTL:-3600}; $close ) & $agent; $close"
 for try in 1 2 3; do # a pane opened a moment ago may not be at its shell prompt yet; none of the closing runs until this does
   "$H" pane run "$pane" "$run" >/dev/null && break
   [ "$try" != 3 ] || { "$H" pane close "$pane" >/dev/null 2>&1; echo "pane-temp: $kind did not start" >&2; exit 1; }
