@@ -1,6 +1,6 @@
 #!/bin/bash
-# Claude Code Statusline with Firebase/gcloud env check and API Quota
-# Shows: dir (branch) 👤 user@email.com / Model │ 5h N% │ 7d N%
+# Claude Code Statusline: Firebase/gcloud env check above Claude HUD (jarrodwatts/claude-hud)
+# Without the HUD it falls back to: dir (branch) 👤 user@email.com / Model │ 5h N% │ 7d N%
 # Firebase/gcloud projects appear only when they point at PROD or are not set up.
 
 # Read input from stdin
@@ -111,6 +111,20 @@ if [ -n "$firebase_email" ] && [ "$firebase_email" != "-" ]; then
 else
 	gcloud_account=$(gcloud config get-value account 2>/dev/null)
 	account_info=" ${C_ACCOUNT}👤 ${gcloud_account:-?}"
+fi
+
+# The HUD draws the session lines and has no PROD warning, so the env line stays on top. This runs the launcher from
+# the plugin cache because plugin sync installs the plugin on 집맥 but not the copy /claude-hud:setup makes. Any installed
+# copy works: the launcher picks the newest version. Node, not bun: bun reads .env and bunfig.toml from the session
+# folder, and a bunfig.toml preload would run that repo's code on every refresh.
+hud_launchers=("${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/claude-hud/claude-hud/*/scripts/statusline.mjs)
+if [ -f "${hud_launchers[0]}" ]; then
+	hud_lines=$(printf '%s' "$input" | node "${hud_launchers[0]}" 2>/dev/null)
+	if [ -n "$hud_lines" ]; then
+		env_line="${firebase_info}${gcloud_info}${account_info}"
+		printf '%s%s\n%s' "${env_line# }" "$C_RESET" "$hud_lines"
+		exit 0
+	fi
 fi
 
 # Function to get API quota from Anthropic OAuth API
