@@ -18,7 +18,9 @@ case "\$1 \$2" in
   "pane get") jq -n '{result: {pane: {pane_id: "w7:p3", workspace_id: "w7"}}}' ;;
   "tab create") jq -n '{result: {root_pane: {pane_id: "w1:new"}, tab: {tab_id: "w1:t9"}}}' ;;
   "pane rename"|"pane close") ;;
-  "pane run") HERDR_PANE_ID=w1:p1 bash -c "\$4" ;;
+  "pane run")
+    [ -z "\${FAIL_RUN:-}" ] || exit 1
+    HERDR_PANE_ID=w1:p1 bash -c "\$4" ;;
   *) exit 2 ;;
 esac
 EOF
@@ -45,6 +47,11 @@ SECONDS=0
 pt env PANE_TEMP_TTL=1 bash "$SUBJECT" --kind codex "대기" >/dev/null
 [ "$SECONDS" -lt 10 ] || fail "the time limit must end a waiting agent: ${SECONDS}s"
 has "pane close w7:p3" "the time limit closes the pane too"
+
+code=0
+pt env FAIL_RUN=1 PANE_TEMP_RETRY_WAIT=0 bash "$SUBJECT" "실패" >/dev/null 2>&1 || code=$?
+[ "$code" = 1 ] || fail "a pane the agent never reached must not count as opened: exit $code"
+has "pane close w1:new" "and it must not stay behind empty"
 
 for bad in "--kind gemini 이름" "--env" ""; do
     code=0

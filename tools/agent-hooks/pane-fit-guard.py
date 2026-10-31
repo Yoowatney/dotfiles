@@ -31,6 +31,11 @@ EDITORS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"}
 READ_ONLY_AGENTS = {"Explore", "researcher", "code-reviewer", "claude-code-guide", "Plan", "statusline-setup"}
 NOTES = re.compile(r"/scratchpad/|/\.claude/projects/[^/]+/memory/|^/private/tmp/|^/tmp/|/explain/|/work-logs/")
 GIT_WORK = re.compile(r"\bgit\b[^|;&\n]*\s(?:commit|push)\b|\bgh pr (?:create|merge)\b")
+AT_COMMAND = r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*"
+# PreToolUse runs once before a long foreground command, so the 5-minute check never sees it: ask at the start.
+LONG_RUN = re.compile(AT_COMMAND + r"(?:(?:uv run|npx|bash|sh)\s+)?(?:\S*/)?(?:npm (?:run )?(?:test|build)|yarn (?:test|build)|pytest"
+                      r"|vitest|jest|docker build|terraform (?:plan|apply)|gradlew|xcodebuild|deploy-release|gcloud\b[^|;&\n]*\bdeploy)\b")
+SPAWNS = re.compile(AT_COMMAND + r"(?:\S*/)?pane-spawn\b")
 PATCH_PATH = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.M)
 HOW = ("이 호출을 버리고 `pane-spawn \"<작업 이름>\" \"<짧은 지시>\"`로 넘기세요(지시에는 마지막 보고를 `남은 것` 줄로 끝내라고만 적습니다). "
        "그렇지 않으면 같은 호출을 그대로 다시 실행하세요. 이 질문은 요유 메시지마다 한 번만 나옵니다.")
@@ -55,7 +60,8 @@ def starts_work(payload: dict) -> bool:
         return inp.get("subagent_type") not in READ_ONLY_AGENTS
     if tool == "Workflow":
         return True
-    return tool == "Bash" and bool(GIT_WORK.search(str(inp.get("command") or "")))
+    command = str(inp.get("command") or "")
+    return tool == "Bash" and bool(GIT_WORK.search(command) or LONG_RUN.search(command))
 
 
 def hand_opened(payload: dict, env) -> bool:
@@ -78,7 +84,7 @@ def check(payload: dict, env, now: float | None = None) -> str | None:
             or env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk") or payload.get("agent_id")):
         return None
     late = (time.time() if now is None else now) - os.path.getmtime(path) >= WAIT
-    spawning = payload.get("tool_name") == "Bash" and "pane-spawn" in str((payload.get("tool_input") or {}).get("command"))
+    spawning = payload.get("tool_name") == "Bash" and bool(SPAWNS.search(str((payload.get("tool_input") or {}).get("command"))))
     if not (late or spawning or starts_work(payload)):
         return None
     os.unlink(path)  # first, so a broken herdr call never asks twice
@@ -122,6 +128,9 @@ def selftest():
                         p("Agent", prompt="x"), p("Task", subagent_type="fork"), p("Workflow", script="x"),
                         p("Bash", command="git commit -m x"), p("Bash", command="git -C /repo push origin main"),
                         p("Bash", command="gh pr create --fill"), p("Bash", command="ls && gh pr merge 1"),
+                        p("Bash", command="npm test"), p("Bash", command="npm run build"), p("Bash", command="uv run pytest -q"),
+                        p("Bash", command="gcloud run deploy api --image x"), p("Bash", command="terraform apply"),
+                        p("Bash", command="bash deploy-release.sh worker"), p("Bash", command="./gradlew assemble"),
                         p("apply_patch", command="*** Begin Patch\n*** Update File: /repo/a.py\n*** End Patch")):
             armed()
             assert check(payload, env) == START, payload
@@ -141,6 +150,12 @@ def selftest():
         armed()
         assert check(p("Bash", command='pane-spawn "a" "b"'), env) is None, "handing over is the answer"
         assert not os.path.exists(state_file(p(), env)), "and it ends the question"
+        for command in ("cat tools/agent-hooks/pane-spawn", "rg pane-spawn tools", "grep -n pytest notes.md"):
+            armed()
+            assert check(p("Bash", command=command), env) is None, command
+            assert os.path.exists(state_file(p(), env)), f"reading about it hands nothing over: {command}"
+        armed()
+        assert check(p("Bash", command='git commit -m "fix pane-spawn"'), env) == START, "a word in a message hands nothing over"
 
         for extra in ({"MUNICE_AUTO_DISPATCH": "1"}, {"MUNICE_AMBIENT": "1"}, {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"},
                       {"HERDR_PANE_ID": ""}):

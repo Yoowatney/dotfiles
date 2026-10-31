@@ -51,7 +51,7 @@ WHAT_REASON = ("yoyoo-share-guard: 보고에 '왜:'는 있는데 짝이 되는 '
 SHARE_FULL = re.compile(r"요유[ \t]*몫[ \t]*\**[ \t]*[:：][ \t]*\**(.*?)[ \t]*(?=·[ \t]*\**(?:유요[ \t]*몫|세션)|$)", re.M)
 ITEM = re.compile(r",|，|·|\s그리고\s")
 ASIDE = re.compile(r"\([^)]*\)|（[^）]*）")  # the reason a session gives, and its commas, are not items
-DECISION = re.compile(r"(?:결정(?:하기| 입력)?|정하기|고르기|선택|승인|답하기|판단|여부|(?<!까)지)$")
+DECISION = re.compile(r"(?:결정(?:하기| 입력)?|정하기|고르기|선택|승인|답하기|판단|여부)$")
 DELEGATED = re.compile(r"머지|맡기|공유|리뷰|검토|댓글")  # standing permission: these are 유요's own steps, however they are worded
 ONLY_YOYOO = re.compile(r"`/clear`|`prod 허용`")  # typed by 요유 alone: the handoff rule and the production unlock
 PANE_ID = re.compile(r"(?<![A-Za-z0-9_:/.-])w[0-9A-Z]+:p[0-9A-Z]+(?![0-9A-Za-z])")  # ASCII edges: 에 may follow directly
@@ -163,13 +163,19 @@ def names_reason(text: str, env) -> str | None:
     return f"yoyoo-share-guard: {' '.join(parts)} 바뀐 곳만 고쳐 보고 전체를 다시 쓰세요." if parts else None
 
 
+def asks_which(item: str) -> bool:
+    """The question ending of `둘지`, `돌릴지`, `있는지`. Nouns end in 지 too (공지, 메시지), but not after a ㄹ final or 는/은/인."""
+    before = item[-2:-1]
+    return item.endswith("지") and (before in ("는", "은", "인") or ("가" <= before <= "힣" and (ord(before) - 0xAC00) % 28 == 8))
+
+
 def is_decision(item: str) -> bool:
     if ONLY_YOYOO.search(item):
         return True
     for pat in STRIP:
         item = pat.sub(" ", item)
     item = item.strip(" \t*_.,;")
-    return bool(DECISION.search(item)) and not DELEGATED.search(item)
+    return (bool(DECISION.search(item)) or asks_which(item)) and not DELEGATED.search(item)
 
 
 def only_decisions(text: str) -> bool:
@@ -216,6 +222,8 @@ def selftest():
         "남은 것: 요유 몫: 결정 하나, 위 스크립트 실행 · 유요 몫: 없음",  # one step 유요 could take is enough
         "남은 것: 요유 몫: #12 머지 승인 · 유요 몫: 없음",  # 유요 merges its own PRs
         "남은 것: 요유 몫: 저에게 맡기실지 답하기 · 유요 몫: 없음",
+        "남은 것: 요유 몫: 합의한 Slack 공지 · 유요 몫: 없음",  # 지 in a noun is not a question ending
+        "남은 것: 요유 몫: 팀원에게 보낼 메시지 · 유요 몫: 없음",
         "요유 몫: 없음 · 유요 몫: 없음\n\n남은 것: 요유 몫: 값 넣기 · 유요 몫: 없음",  # the last line counts too
         "요유 몫：태그 확인",  # full-width colon
         unicodedata.normalize("NFD", "남은 것: 요유 몫: 머지 · 유요 몫: 없음"),  # NFD text from a macOS paste
