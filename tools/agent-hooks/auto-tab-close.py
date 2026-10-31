@@ -8,6 +8,7 @@ closed the tabs by hand (요유 2026-10-28: "자동탭에서 할거없으면 좀
 with `요유 몫: 없음`, runs `pane-label --close`. That command keeps its own guards: only job tabs, never a 🔴 pane, and it
 waits for the turn to end and cancels if the agent works again within 20 seconds (요유 typed, a goal judge sent it back).
 A `요유 몫` with something in it keeps the tab open even at `닫아도 됨`: 요유 may need to type in it (`결정 필요`, `승격`).
+Under a lead nobody but the lead types there: it asks 요유 in its own pane and passes the answer down.
 A pane `herdr agent start` opened closes the same way, whichever session started it and whether or not that session still
 lives: herdr's agent name tells it from a session 요유 started by hand, which has none (요유 2026-10-31). A closing pane
 takes its report with it, so the whole reply is first appended to a day file under ~/.local/state/pane-reports/, and the

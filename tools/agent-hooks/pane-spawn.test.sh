@@ -56,6 +56,7 @@ before "pane-label --sync-tabs" "agent start"
 has "--kind claude --pane w1:new" "claude by default"
 
 has "agent prompt w1:new 할 일입니다" "instruction delivered"
+has "요유는 이 칸을 보지 않으니" "a new pane learns its reports go to the lead"
 before "agent get w1:new" "agent prompt"
 before "agent prompt" "agent wait w1:new --until working --until blocked --until done"
 [[ "$out" == *"w1:new"* ]] || fail "prints the new pane: $out"

@@ -28,6 +28,8 @@ while [ $# -gt 0 ]; do
 done
 [ $# -ge 2 ] && [ -n "$1" ] && [ -n "$2" ] || die "$USAGE"
 name=$1 prompt=$2
+# 요유 talks only to the lead (2026-11-01), so a new pane hears it here and not from each lead's memory.
+prompt+=$'\n\n이 칸은 리드 밑 칸입니다. 요유는 이 칸을 보지 않으니 요유에게 직접 묻거나 `prod 허용`, `/clear`를 부탁하지 마세요. 질문, 결정 요청, 보고는 답을 `남은 것:` 줄로 끝내면 이 칸을 연 리드에게 갑니다.'
 shift 2
 [ "${1:-}" != -- ] || shift
 case "$kind" in

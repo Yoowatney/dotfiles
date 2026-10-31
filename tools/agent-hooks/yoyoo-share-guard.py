@@ -81,7 +81,6 @@ GOOD_MAC = re.compile(r"회사[ \t]*서버[ \t]*맥")
 BAD_MAC = re.compile(r"상시[ \t]?맥(?!락)|always-on Mac|서버[ \t]?맥(?![북미락스])", re.I)
 LAST_REPORT = re.compile(r"남은[ \t]*것[ \t]*\**[ \t]*[:：]")
 TEST_PANE = "임시 "  # with the space: `임시저장 API 수정` is a work name
-STOPPED = ("idle", "done", "blocked")  # herdr's agent_status for an agent that is not working
 OPENED_BY = re.compile(r"^spawn-([0-9A-Za-z]+)-")  # pane-spawn's agent name: spawn-<caller's terminal>-<random>
 WROTE_IT = re.compile(r"(?:Claude|유요).{0,12}(?:썼|작성)")
 EXPLAIN_REASON = "yoyoo-share-guard: 이번 설명 페이지는 Codex가 실패해 Claude가 썼습니다. 보고에 'Claude가 썼습니다'와 실패 이유를 넣어 다시 쓰세요."
@@ -195,7 +194,7 @@ def left_open_reason(payload: dict, text: str, env) -> str | None:
     names = {a.get("pane_id"): a.get("name") for a in herdr_list(env, "agent")}
     mine = [p for p in panes if p is not me and opener_of(p, names, env) == me.get("terminal_id")]
     tests = [p for p in mine if pane_name(p).startswith(TEST_PANE)]
-    stopped = [p for p in mine if p not in tests and p.get("agent_status") in STOPPED]
+    stopped = [p for p in mine if p not in tests and p.get("agent_status") != "working"]
     listed = lambda group: ", ".join(f"{pane_name(p)}({p.get('pane_id')})" for p in group)
     parts = []
     if tests:
@@ -443,7 +442,7 @@ def selftest():
         herdr_env = {**cli, "HERDR_BIN_PATH": fake}
         done = "끝났습니다.\n\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨"
         me = {"pane_id": "w1:p1", "tab_id": "w1:t1", "terminal_id": "term_aa", "agent_session": {"value": "s1"}, "label": "🟢 일"}
-        test_pane = {"pane_id": "w1:p2", "tab_id": "w1:t2", "terminal_id": "term_bb", "label": "🟢 🫡 임시 시험 Claude"}
+        test_pane = {"pane_id": "w1:p2", "tab_id": "w1:t2", "terminal_id": "term_bb", "label": "🟢 🫡 임시 시험 Claude", "agent_status": "working"}
 
         def herdr_has(panes, agents=()):
             with open(f"{listing}.pane", "w", encoding="utf-8") as f:
@@ -488,6 +487,8 @@ def selftest():
         assert "구현(w1:p3)" in (ends() or "") and "요유 몫" in (ends() or ""), "a stopped pane this session opened comes back"
         herdr_has([me, {**worker, "agent_status": "done"}], opened)
         assert "구현(w1:p3)" in (ends() or ""), "done is stopped too"
+        herdr_has([me, {**worker, "agent_status": "unknown"}], opened)
+        assert "구현(w1:p3)" in (ends() or ""), "so is any status but working"
         herdr_has([me, {**worker, "agent_status": "working"}], opened)
         assert ends() is None, "a pane still working is not left over"
         herdr_has([me, worker], [{"pane_id": "w1:p3", "name": "spawn-cc-1"}])
