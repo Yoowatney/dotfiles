@@ -33,6 +33,7 @@ READS = re.compile(r"slack-thread\.sh|conversations\.replies|slack_get_thread_re
 WRITES = re.compile(r"chat\.postMessage|files\.completeUploadExternal")
 REPLY_SCRIPT = re.compile(r"(?:^|[\s/;&|])reply\.sh\b")
 TS = re.compile(r"(?<![\d.])\d{10}\.\d{6}(?![\d.])")
+STEP = re.compile(r"&&|\|\||;|\n|\\n")  # a lone | or & stays: a pipe or a URL query belongs to its reader
 THREAD_TS = re.compile(r"thread_ts\W{0,8}(\d{10}\.\d{6})(?![\d.])")
 # 댓글 only with 아무도: alone it was mostly GitHub comments and test tables in the 14-day replay.
 NO_ANSWER = re.compile(r"아무도[^\n.,]{0,12}(?:답|회신|댓글)"
@@ -61,12 +62,17 @@ def calls(path: str):
                         yield at, f"{block.get('name')} {json.dumps(block.get('input'), ensure_ascii=False)}"
 
 
+def read_targets(text: str) -> set:
+    """The threads a call reads: ts named in the same shell step as a reader.
+    ponytail: a ts in a variable set one step earlier is missed, and that read is asked about once."""
+    return {ts for step in STEP.split(text) if READS.search(step) for ts in TS.findall(step)}
+
+
 def last_reads(path: str) -> dict:
     """{thread ts: epoch seconds of its newest read}."""
     reads = {}
     for at, text in calls(path):
-        if READS.search(text):
-            reads.update((ts, at) for ts in TS.findall(text))
+        reads.update((ts, at) for ts in read_targets(text))
     return reads
 
 
@@ -84,12 +90,12 @@ def post_thread(payload: dict, env: dict) -> str | None:
     if tool.endswith("slack_reply_to_thread"):
         return str(inp.get("thread_ts") or "") or None
     command = str(inp.get("command") or "") if tool == "Bash" else ""
-    if READS.search(command):
-        return None  # it reads in the same call
     if REPLY_SCRIPT.search(command) and env.get("MUNICE_AMBIENT_THREAD"):
-        return env["MUNICE_AMBIENT_THREAD"].rsplit("/", 1)[-1]
-    found = THREAD_TS.search(command) if WRITES.search(command) else None
-    return found[1] if found else None
+        thread = env["MUNICE_AMBIENT_THREAD"].rsplit("/", 1)[-1]
+    else:
+        found = THREAD_TS.search(command) if WRITES.search(command) else None
+        thread = found[1] if found else None
+    return None if thread and thread in read_targets(command) else thread  # it reads in the same call
 
 
 def check(payload: dict, env: dict) -> str | None:
@@ -201,6 +207,12 @@ EOF"""
         assert check(bash(post, fresh, "s6"), env) is None
         assert check(bash(post.replace(thread, "${TS}"), stale, "s7"), env) is None, "ponytail: a ts in a variable is not seen"
         assert check(bash(f"{curl}; {post}", stale, "s8"), env) is None, "the same command reads first"
+        reader = "bash /x/watch/slack-thread.sh C1 "
+        assert check(bash(f"{reader}{other}; {post}", stale, "s18"), env), "reading another thread in the same command does not cover this one"
+        assert check(bash(f"{reader}{thread} | tail -1 && {post}", stale, "s19"), env) is None, "a pipe stays with its reader"
+        mixed = log(claude_call(1, "Bash", command=f"{reader}{other}; {post}"), claude_call(2, "Bash", command=f"{reader}{other}\n{post}"))
+        assert list(last_reads(mixed)) == [other], "the thread posted to is not recorded as read"
+        assert check(bash(post, mixed, "s30"), env), "so the next post is still asked"
         assert check(bash("git commit -m 'post with chat.postMessage and thread_ts'", stale, "s9"), env) is None, "no thread named"
         assert check(bash("curl https://slack.com/api/chat.postMessage -d channel=C1 -d text=t", stale, "s10"), env) is None, "a new post, no thread"
         ambient = {**env, "MUNICE_AMBIENT_THREAD": f"C01TESTCHAN/{thread}"}
