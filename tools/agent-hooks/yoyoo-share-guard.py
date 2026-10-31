@@ -4,7 +4,8 @@
 The global rule ends every finished report with `남은 것: 요유 몫: … · 유요 몫: … · 세션: …`. 요유 said "너가 해" /
 "알아서 해" 9 times in 6 sessions on 10/22-10/23: each new skill or report slot brought the old "shall I?" step back,
 filed under 요유 몫. This asks once, before the turn ends, whether every item there is truly 요유's. In the same block it asks for the
-missing `무엇을:` when a reply carries more `왜:` labels than `무엇을:` labels (the rule pairs them).
+missing `무엇을:` when a reply carries more `왜:` labels than `무엇을:` labels (the rule pairs them), and for the missing line
+when `원인:`, `조치:` and `재발 방지:` do not come in equal numbers.
 Only the `요유 몫:` value counts, up to `·` or the end of its line; `없음` passes, and so does a reply without the line.
 Code, quotes and blockquotes are ignored (a report about the format is not a report). Skipped for headless Claude runs
 (claude -p / SDK) and on the second stop of a turn (stop_hook_active), so it blocks at most once. Fails open.
@@ -48,6 +49,11 @@ WHY = re.compile(r"(?<![가-힣])왜[ \t]*\**[ \t]*[:：]")
 WHAT = re.compile(r"무엇을[ \t]*\**[ \t]*[:：]")
 WHAT_REASON = ("yoyoo-share-guard: 보고에 '왜:'는 있는데 짝이 되는 '무엇을:'이 없습니다. '왜:' 줄마다 바로 위에 "
                "'무엇을:' 줄(무엇이 바뀌었거나 바뀌는지, 파일·함수 이름 없이 쉬운 한국어)을 붙여 보고를 다시 쓰세요.")
+# 요유 2026-11-01: a problem is reported with all three lines. This sees a report that dropped one, not one that used none:
+# telling a problem report from any other needs a word list, and that kind of check is what made this hook noisy.
+PROBLEM_LABELS = tuple(re.compile(r"(?<![가-힣])" + label + r"[ \t]*\**[ \t]*[:：]") for label in ("원인", "조치", r"재발[ \t]*방지"))
+PROBLEM_REASON = ("yoyoo-share-guard: 문제 보고에 '원인:', '조치:', '재발 방지:' 중 빠진 줄이 있습니다. 문제마다 세 줄을 모두 쓰세요. "
+                  "막을 방법이 없으면 '재발 방지: 없음'과 그 이유를 쓰세요.")
 # Whole value of 요유 몫, for only_decisions. SHARE stops at the first `·` and auto-tab-close relies on it as it is.
 SHARE_FULL = re.compile(r"요유[ \t]*몫[ \t]*\**[ \t]*[:：][ \t]*\**(.*?)[ \t]*(?=·[ \t]*\**(?:유요[ \t]*몫|세션)|$)", re.M)
 ITEM = re.compile(r",|，|·|\s그리고\s")
@@ -100,6 +106,11 @@ def prose(text: str) -> str:
 def misses_what(text: str) -> bool:
     text = prose(text)
     return len(WHY.findall(text)) > len(WHAT.findall(text))
+
+
+def misses_problem_line(text: str) -> bool:
+    text = prose(text)
+    return len({len(label.findall(text)) for label in PROBLEM_LABELS}) > 1
 
 
 def leaves_yoyoo_work(text: str) -> bool:
@@ -221,7 +232,8 @@ def decide(payload: dict, env) -> str | None:
         text = final_text(payload["transcript_path"])  # unreadable transcript raises: fail open
     if not isinstance(text, str):
         return None
-    checks = (names_reason(text, env), WHAT_REASON if misses_what(text) else None, temp_reason(payload, text, env),
+    checks = (names_reason(text, env), WHAT_REASON if misses_what(text) else None,
+              PROBLEM_REASON if misses_problem_line(text) else None, temp_reason(payload, text, env),
               explain_reason(payload, text, env))
     rewrites = [r for r in checks if r]
     if leaves_yoyoo_work(text) and not only_decisions(text):
@@ -306,6 +318,15 @@ def selftest():
         assert decide(p(t), cli) is None, f"should allow: {t[:60]!r}"
     both = "왜: 막혀서\n남은 것: 요유 몫: PR 머지 · 유요 몫: 없음"
     assert decide(p(both), cli) == f"{WHAT_REASON} {DO_REASON}", "both checks in one block"
+    for t in ("원인: 경로 오류\n조치: 경로 수정",  # 재발 방지 missing
+              "**원인:** 경로 오류\n**재발 방지:** 테스트 추가",  # 조치 missing
+              "조치：전각 콜론\n재발방지: 붙여 쓴 형태",  # 원인 missing
+              "원인: a\n조치: b\n재발 방지: c\n\n원인: d\n조치: e"):  # the second problem is one line short
+        assert decide(p(t), cli) == PROBLEM_REASON, f"should ask for the missing line: {t[:60]!r}"
+    for t in ("원인: a\n조치: b\n재발 방지: c", "**원인:** a\n**조치:** b\n**재발 방지:** 없음 (외부 장애)",
+              "- 원인: a · 조치: b · 재발방지: c", "`원인:` 줄을 쓰세요.", '"조치:" 줄만 쓰면 훅이 되묻습니다.',
+              "장애 원인을 찾았고 조치했습니다.", "주요원인: 표의 머리글"):
+        assert decide(p(t), cli) is None, f"should allow: {t[:60]!r}"
     # A report that left a decision is not rewritten: the question ends without a word when nothing changes.
     assert "쓰지 말고" in REASON and "다시 써" not in REASON, "the report stays where it is"
 
