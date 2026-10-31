@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SUBJECT="$(cd "$(dirname "$0")" && pwd)/pane-label"
-unset MUNICE_AUTO_DISPATCH MUNICE_AMBIENT PANE_CLOSE_REPORTED  # a test run inside such a pane must not inherit them
+unset MUNICE_AUTO_DISPATCH MUNICE_AMBIENT PANE_CLOSE_REPORTED HERDR_SOCKET_PATH  # a test run inside such a pane must not inherit them
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -15,6 +15,7 @@ fail() {
 # `pane get <id>` prints it, `pane rename <id> <text>` sets it, `pane rename <id> --clear` removes it.
 cat > "$SANDBOX/herdr" <<EOF
 #!/usr/bin/env bash
+s=\${HERDR_SOCKET_PATH:-}
 case "\$1 \$2" in
   "pane get")
     st=\$(cat "$SANDBOX/status" 2>/dev/null || echo idle)
@@ -24,8 +25,15 @@ case "\$1 \$2" in
   "pane rename")
     echo "\$3 \$4" >> "$SANDBOX/renames"
     if [ "\$4" = "--clear" ]; then rm -f "$SANDBOX/label"; else printf '%s' "\$4" > "$SANDBOX/label"; fi ;;
-  "pane list") cat "$SANDBOX/panes.json" ;;
-  "tab list") cat "$SANDBOX/tabs.json" ;;
+  "pane list") cat "$SANDBOX/panes\${s##*/}.json" ;;
+  "tab list") cat "$SANDBOX/tabs\${s##*/}.json" ;;
+  "tab get")
+    if [ -f "$SANDBOX/tab-changed" ]; then jq -n '{result: {tab: {label: "요유가 방금 바꾼 이름"}}}'
+    else jq --arg t "\$3" '{result: {tab: (.result.tabs[] | select(.tab_id == \$t))}}' "$SANDBOX/tabs\${s##*/}.json"; fi ;;
+  "tab rename")
+    [ "\$3" != "\$(cat "$SANDBOX/tab-rename-fails" 2>/dev/null)" ] || exit 1
+    echo "\${s##*/} \$3 \$4" >> "$SANDBOX/tab-renames" ;;
+  "session list") cat "$SANDBOX/sessions.json" ;;
   "agent list") cat "$SANDBOX/agents.json" ;;
   "pane close") touch "$SANDBOX/closed" ;;
   "agent get")
@@ -154,5 +162,62 @@ jq -n '{result: {agents: [{pane_id: "p1", name: "a", tab_id: "t1"}, {pane_id: "p
   {pane_id: "p4", name: "c", tab_id: "t3"}, {pane_id: "p5", name: "d", tab_id: "t1"}, {pane_id: "p6", name: "e", tab_id: "t1"}]}}' > "$SANDBOX/agents.json"
 ( export MUNICE_AMBIENT=1; pl --mark-subs >/dev/null )
 [ "$(cat "$SANDBOX/renames")" = "p1 🔴 🫡 일" ] || fail "mark-subs renamed: $(cat "$SANDBOX/renames")"
+
+# --sync-tabs: a tab name follows its panes. 👑 outranks 🫡, job tabs and 요유's own tabs stay as they are.
+rm -f "$SANDBOX/name" "$SANDBOX/label" "$SANDBOX/renames" "$SANDBOX/tabs.json" "$SANDBOX/panes.json"
+jq -n '{sessions: [{running: true, socket_path: "/s/a"}, {running: true, socket_path: "/s/b"}, {running: false, socket_path: "/s/c"}]}' > "$SANDBOX/sessions.json"
+jq -n '{result: {tabs: [
+  {tab_id: "t1", label: "리드 일"}, {tab_id: "t2", label: "부하 일"}, {tab_id: "t3", label: "요유 칸"},
+  {tab_id: "t4", label: "자동 api#1"}, {tab_id: "t5", label: "알아서 #1-dev x"},
+  {tab_id: "t6", label: "👑 리드 떠남"}, {tab_id: "t7", label: "👑 강등"}, {tab_id: "t8", label: "🫡 승격"},
+  {tab_id: "t9", label: "👑 이미 맞음"}, {tab_id: "t10", label: "👑 🫡 👑 쌓임"},
+  {tab_id: "t11", label: "👑 자동 표시 묻음"}, {tab_id: "t12", label: "🫡알아서 붙음"},
+  {tab_id: "t13", label: "이름 속 표시"}, {tab_id: "t14", label: "👑"}, {tab_id: "t15", label: "칸 없음"},
+  {tab_id: "t16", label: "👑 표시 없는 🔴 칸"}, {tab_id: "t17", label: "빈 이름 칸"}]}}' > "$SANDBOX/tabsa.json"
+jq -n '{result: {panes: [
+  {tab_id: "t1", label: "🟢 🫡 부하"}, {tab_id: "t1", label: "🔴 👑 리드"}, {tab_id: "t2", label: "🔴 🫡 x"},
+  {tab_id: "t3", label: "🟢 요유"}, {tab_id: "t4", label: "🟢 👑 x"}, {tab_id: "t5", label: "🟢 🫡 x"},
+  {tab_id: "t6", label: "🟢 일"}, {tab_id: "t7", label: "🟢 🫡 x"}, {tab_id: "t8", label: "🟢 👑 x"},
+  {tab_id: "t9", label: "🟢 👑 x"}, {tab_id: "t10", label: "👑 표시만"}, {tab_id: "t11", label: "🟢 👑 x"},
+  {tab_id: "t13", label: "🟢 왕관 👑 고르기"}, {tab_id: "t14", label: "🟢 일"}, {tab_id: "t16", label: "🔴 일"},
+  {tab_id: "t17"}]}}' > "$SANDBOX/panesa.json"
+jq -n '{result: {tabs: [{tab_id: "t1", label: "다른 세션"}]}}' > "$SANDBOX/tabsb.json"
+jq -n '{result: {panes: [{tab_id: "t1", label: "🟢 👑 x"}]}}' > "$SANDBOX/panesb.json"
+want_renames='a t1 👑 리드 일
+a t2 🫡 부하 일
+a t6 리드 떠남
+a t7 🫡 강등
+a t8 👑 승격
+a t10 👑 쌓임
+a t11 자동 표시 묻음
+a t12 알아서 붙음
+a t16 표시 없는 🔴 칸
+b t1 👑 다른 세션'
+renamed() { cat "$SANDBOX/tab-renames" 2>/dev/null || true; }
+sync_ok() { rm -f "$SANDBOX/tab-renames"; "$@" || fail "should exit 0: $*"; }
+
+# Launchd runs it outside any pane, so it needs no pane of its own, and it covers every running herdr session.
+sync_ok env -u HERDR_PANE_ID HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" --sync-tabs
+[ "$(renamed)" = "$want_renames" ] || fail "sync-tabs renamed: $(renamed)"
+
+# A name changed after the list was read is 요유's: it stays, and the next run looks again.
+touch "$SANDBOX/tab-changed"; sync_ok pl --sync-tabs; rm "$SANDBOX/tab-changed"
+[ "$(renamed)" = "" ] || fail "a name changed since the list was read was overwritten: $(renamed)"
+
+# Every rename of a pane syncs at once: --lead and a plain name reach the tab without waiting for launchd.
+sync_ok pl --lead; [ "$(renamed)" = "$want_renames" ] || fail "--lead did not sync the tabs: $(renamed)"
+sync_ok pl "일 이름"; [ "$(renamed)" = "$want_renames" ] || fail "a rename did not sync the tabs: $(renamed)"
+
+# Failure flow: herdr refusing any of it leaves the pane work whole, and one bad tab does not stop the others.
+echo t1 > "$SANDBOX/tab-rename-fails"
+sync_ok pl "탭 하나 실패"; expect "🟢 👑 탭 하나 실패" "a failed tab rename leaves the pane rename"
+[ "$(renamed)" = "$(grep -v '^a t1 ' <<<"$want_renames" | grep -v '^b t1 ')" ] || fail "a failed tab stopped the others: $(renamed)"
+rm "$SANDBOX/tab-rename-fails" "$SANDBOX/tabsa.json"
+sync_ok pl "탭 목록 실패"; expect "🟢 👑 탭 목록 실패" "a failed tab list leaves the pane rename"
+[ "$(renamed)" = "b t1 👑 다른 세션" ] || fail "one broken session stopped the next: $(renamed)"
+rm "$SANDBOX/sessions.json"
+sync_ok pl "세션 목록 실패"; expect "🟢 👑 세션 목록 실패" "a failed session list leaves the pane rename"
+[ "$(renamed)" = "" ] || fail "nothing to sync without a session list: $(renamed)"
+sync_ok env HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH=/nonexistent/herdr bash "$SUBJECT" --sync-tabs
 
 echo "ok: pane-label"

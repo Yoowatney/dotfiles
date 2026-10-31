@@ -48,6 +48,8 @@ has "agent start spawn-65f21913323dc21-" "the agent's name records the caller's 
 hasnt "pane split" "no split by default"
 has "pane rename w1:new 🟢 🫡 api#1 설계" "the first name carries 🫡"
 before "pane rename w1:new" "agent start"
+before "pane rename w1:new" "pane-label --sync-tabs"
+before "pane-label --sync-tabs" "agent start"
 has "--kind claude --pane w1:new" "claude by default"
 has "agent prompt w1:new 할 일입니다" "instruction delivered"
 before "agent get w1:new" "agent prompt"

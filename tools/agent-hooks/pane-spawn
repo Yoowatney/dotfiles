@@ -49,6 +49,7 @@ else
 fi
 [ -n "$pane" ] || die "herdr opened no pane"
 "$H" pane rename "$pane" "🟢 🫡 $name" >/dev/null
+pane-label --sync-tabs
 
 give_up() { "$H" pane close "$pane" >/dev/null 2>&1; echo "pane-spawn: $1" >&2; exit 1; }
 agent="spawn-$term-$RANDOM" # herdr allows 32 characters; terminal ids run about 15

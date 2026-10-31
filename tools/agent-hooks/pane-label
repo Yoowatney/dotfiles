@@ -14,6 +14,13 @@
 #                                             it (`herdr agent start`), it is outside the job tabs, and it is not 👑. It
 #                                             comes by itself from the first name on, and marks and renames keep it.
 #   pane-label --mark-subs                    add 🫡 to the panes already running; new ones need no call
+#   pane-label --sync-tabs                    make every tab name follow its panes, in every running herdr session (요유
+#                                             2026-10-31): `👑 ` when a pane in it is a lead, else `🫡 ` when one is under a
+#                                             lead, no mark otherwise. Job tabs (자동·알아서) never get one: other code reads
+#                                             those names by their first word. Every rename here runs it. launchd
+#                                             (com.yoyoo.herdr-tab-marks, every 10 s) runs it for what no session sees: a pane
+#                                             closed or moved, a tab renamed by hand. It polls because herdr sends no event
+#                                             when a pane is renamed, so nothing could listen for a new 👑.
 #   pane-label --clear                        remove it
 #   pane-label --clear-if-prefix "api#736 "   remove it only if it still names that item
 #   pane-label --close                        close this pane once the agent's turn ends, only in a tab a job opened
@@ -27,7 +34,7 @@
 #                                             it opened are gone, and sets PANE_CLOSE_REPORTED=1: the report would go
 #                                             with the pane
 H=${HERDR_BIN_PATH:-herdr}
-[ -n "${HERDR_PANE_ID:-}" ] && command -v "$H" >/dev/null 2>&1 || exit 0
+{ [ -n "${HERDR_PANE_ID:-}" ] || [ "${1:-}" = --sync-tabs ]; } && command -v "$H" >/dev/null 2>&1 || exit 0
 HOLD=🔴
 FREE=🟢
 LEAD=👑
@@ -58,7 +65,34 @@ sub_of() {
   [ -z "${MUNICE_AUTO_DISPATCH:-}${MUNICE_AMBIENT:-}" ] || return 0
   if [[ "$(name_of "$1")" == "$SUB"* ]] || [ -n "$(agent_name)" ]; then echo "$SUB"; fi
 }
-rename() { "$H" pane rename "$HERDR_PANE_ID" "$@" >/dev/null 2>&1; }
+# One herdr session, named by HERDR_SOCKET_PATH. A name 요유 changed after the list was read stays; the next run looks again.
+sync_session() {
+  local tabs panes id old new
+  tabs=$("$H" tab list 2>/dev/null) && panes=$("$H" pane list 2>/dev/null) || return 0
+  jq -rn --argjson t "$tabs" --argjson p "$panes" '
+    ($p.result.panes | group_by(.tab_id)
+      | map({key: .[0].tab_id, value: map((.label // "") | ltrimstr("🔴") | ltrimstr("🟢") | ltrimstr(" "))})
+      | from_entries) as $names
+    | $t.result.tabs[]
+    | (.label | sub("^((👑|🫡) ?)+"; "")) as $base
+    | ($names[.tab_id] // []) as $in
+    | (if ($base | test("^(자동|알아서) ")) then ""
+       elif any($in[]; startswith("👑")) then "👑 "
+       elif any($in[]; startswith("🫡")) then "🫡 "
+       else "" end + $base) as $want
+    | select($want != .label and $want != "")
+    | [.tab_id, .label, $want] | join("\u001f")' 2>/dev/null |
+    while IFS=$'\x1f' read -r id old new; do
+      [ "$("$H" tab get "$id" 2>/dev/null | jq -r '.result.tab.label' 2>/dev/null)" = "$old" ] || continue
+      "$H" tab rename "$id" "$new" >/dev/null 2>&1
+    done
+}
+sync_tabs() {
+  local sock
+  "$H" session list --json 2>/dev/null | jq -r '.sessions[] | select(.running) | .socket_path' 2>/dev/null |
+    while IFS= read -r sock; do HERDR_SOCKET_PATH=$sock sync_session; done
+}
+rename() { "$H" pane rename "$HERDR_PANE_ID" "$@" >/dev/null 2>&1; sync_tabs; }
 mark() { # mark name
   if [ -n "$2" ]; then rename "$1 $2"; else rename "$1"; fi
 }
@@ -69,7 +103,8 @@ lead() { # lead|"" label: rewrite the label with or without 👑, keeping mark a
 }
 
 case "${1:-}" in
-  "") echo 'usage: pane-label "<text>" | --hold | --free | --lead | --unlead | --mark-subs | --clear | --clear-if-prefix "<prefix>" | --close' >&2; exit 2 ;;
+  "") echo 'usage: pane-label "<text>" | --hold | --free | --lead | --unlead | --mark-subs | --sync-tabs | --clear | --clear-if-prefix "<prefix>" | --close' >&2; exit 2 ;;
+  --sync-tabs) sync_tabs ;;
   --clear) rename --clear ;;
   --lead) lead 1 "$(current)" ;;
   --unlead) lead "" "$(current)" ;;
