@@ -535,6 +535,15 @@ esac''')
     time.sleep(0.4)
     assert taken() == "tell w1:p1\n", "a sent-back reply without a report leaves the report held before it"
     assert keep[0] in saved()
+    # The session said it was done, and the hook only asked for one more step: the report stands and the pane closes, by choice.
+    # A line after it cannot be told from the "확인했습니다." that Claude Code's prompt draws; the transcript keeps it.
+    herdr_says({"name": "spawned"}, [crown, busy])
+    stop(json.dumps({"last_assistant_message": full}), slow)
+    stop(json.dumps({"stop_hook_active": True, "last_assistant_message": "보드 항목을 만들었습니다."}), slow)
+    herdr_says({"name": "spawned"}, [crown, me])
+    time.sleep(0.4)
+    assert taken() == "tell w1:p1\n" + closed, "the closing report held before a sent-back line still closes"
+    assert full in saved()
     herdr_says({"name": "spawned"}, [crown, me])
     stop(json.dumps({"last_assistant_message": full}), {**slow, "AUTO_TAB_CLOSE_SETTLE": "0.5"})
     herdr_says({"name": "spawned"}, [crown, busy])
