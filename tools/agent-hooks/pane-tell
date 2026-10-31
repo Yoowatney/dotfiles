@@ -14,8 +14,10 @@
 # ~/.local/state/pane-tell/undelivered/; `log` beside it says what became of each one. A message that waits PANE_TELL_ALERT
 # seconds (10 minutes) or ends up in that folder is announced, since a one-letter leftover in a box once held a report back
 # with nobody knowing (10/31): a herdr notification for 요유, the only one who can clear the box, and a note to the sender,
-# who would take it as delivered. Nothing here ever touches the box: what is in it may be 요유's.
-#   pane-tell --raw <pane id> "<message>"       the same door for a prompt a machine types as it is, into any pane
+# who would take it as delivered, unless the sender is an auto session, for the reason above. Nothing here ever touches the
+# box: what is in it may be 요유's.
+#   pane-tell --raw <pane id> "<message>"       the same door for a prompt a machine types as it is, into any pane; one that
+#                                               has to wait stays for the session in the pane now, like every queued message
 #   pane-tell --box-ready <pane id> <kind>      exit 0 when the box is empty and in view (ambient/deliver.py asks this)
 H=${HERDR_BIN_PATH:-herdr}
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}/pane-tell
@@ -79,14 +81,39 @@ tell() { # pane, kind, message, receiver's terminal, its session, sender's termi
   return 1
 }
 
+# Prints why no prompt may be typed into this pane, nothing when one may. The dispatch job names its tabs "자동 <tag>", the
+# Slack ambient poll "알아서 <#channel> <title>". The tab holds even when herdr gives no session id to look up, which let
+# board.sh unwatch type into an auto pane and lift its guard (Claude review 10/21). The first human prompt catches a session
+# moved or renamed out of its tab.
+auto_reason() { # tab id, session id
+  local tabs t first
+  tabs=$("$H" tab list 2>/dev/null) || { echo "could not be checked: herdr tab list failed"; return; }
+  case "$(jq -r --arg t "$1" '.result.tabs[] | select(.tab_id == $t) | .label // ""' <<<"$tabs")" in
+    "자동 "*) echo "is in an auto-dispatch tab; comment on its board item instead"; return ;;
+    "알아서 "*) echo "is in a Slack ambient tab; it takes rounds only from the ambient poll"; return ;;
+  esac
+  for t in "$HOME"/.claude/projects/*/"$2".jsonl; do
+    [ -n "$2" ] && [ -f "$t" ] || continue
+    # -a: a NUL byte would make grep print "Binary file ... matches" instead of the line
+    first=$(grep -a -m1 -F '"origin":{"kind":"human"}' "$t")
+    [[ $first == *auto-dispatch* ]] && { echo "is an auto-dispatch session; comment on its board item instead"; return; }
+    # only a session the ambient poll started: its first prompt opens with the marker ("[" may be eaten), so a session
+    # that merely talks about the marker is still told
+    [[ $first =~ \"content\":\"\[?ambient-round\] ]] &&
+      { echo "is a Slack ambient session; it takes rounds only from the ambient poll"; return; }
+  done
+}
+
 warn() { # what happened, sender's terminal
   local row
   "$H" notification show "칸 전달 대기" --body "$1" >/dev/null 2>&1
   echo "$(date '+%F %T') announced: $1" >> "$STATE/log"
   [ -n "$2" ] || return 0
-  row=$("$H" pane list 2>/dev/null | jq -r --arg t "$2" '.result.panes[] | select(.terminal_id == $t) | [.pane_id, (.agent // "")] | @tsv')
+  row=$("$H" pane list 2>/dev/null | jq -r --arg t "$2" '.result.panes[] | select(.terminal_id == $t)
+    | [.pane_id, (.agent // ""), (.tab_id // ""), (.agent_session.value // "")] | @tsv')
+  [ -n "$row" ] && [ -z "$(auto_reason "$(cut -f3 <<<"$row")" "$(cut -f4 <<<"$row")")" ] || return 0
   # One try, never queued: a note about a stuck message must not get stuck itself, and the notification has already gone out.
-  [ -z "$row" ] || send "$(cut -f1 <<<"$row")" "$(cut -f2 <<<"$row")" "[pane-tell: 자동 안내입니다. 요유가 직접 친 글이 아닙니다] $1"
+  send "$(cut -f1 <<<"$row")" "$(cut -f2 <<<"$row")" "[pane-tell: 자동 안내입니다. 요유가 직접 친 글이 아닙니다] $1"
 }
 
 deliver() { # message file, receiver's terminal (a moved pane gets a new pane id), its session when queued, sender's terminal
@@ -119,9 +146,9 @@ command -v "$H" >/dev/null 2>&1 || die "herdr not found"
 command -v jq >/dev/null 2>&1 || die "jq not found"
 if [ "${1:-}" = --raw ]; then
   [ $# -eq 3 ] && [ -n "$2" ] && [ -n "$3" ] || die 'usage: pane-tell --raw <pane id> "<message>"'
-  row=$("$H" pane get "$2" 2>/dev/null | jq -r '.result.pane | [(.pane_id // ""), (.agent // ""), (.terminal_id // "")] | @tsv')
+  row=$("$H" pane get "$2" 2>/dev/null | jq -r '.result.pane | [(.pane_id // ""), (.agent // ""), (.terminal_id // ""), (.agent_session.value // "")] | @tsv')
   [ -n "$(cut -f1 <<<"$row")" ] || { echo "pane-tell: no pane \"$2\"" >&2; exit 3; }
-  tell "$(cut -f1 <<<"$row")" "$(cut -f2 <<<"$row")" "$3" "$(cut -f3 <<<"$row")" "" ""
+  tell "$(cut -f1 <<<"$row")" "$(cut -f2 <<<"$row")" "$3" "$(cut -f3 <<<"$row")" "$(cut -f4 <<<"$row")" ""
   exit 0
 fi
 panes=$("$H" pane list 2>/dev/null | jq -r '.result.panes[]
@@ -152,24 +179,8 @@ kind=$(cut -f6 <<<"$hits"); terminal=$(cut -f7 <<<"$hits")
 me=$("$H" pane get "${HERDR_PANE_ID:-}" 2>/dev/null | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
 me=${me:-${HERDR_PANE_ID:-}}
 [ "$pane" != "$me" ] || die "\"$1\" is this pane"
-# The dispatch job names its tabs "자동 <tag>", the Slack ambient poll "알아서 <#channel> <title>". This holds even when
-# herdr gives no session id to look up, which let board.sh unwatch type into an auto pane and lift its guard (Claude
-# review 10/21). The first human prompt catches a session moved or renamed out of its tab.
-tabs=$("$H" tab list 2>/dev/null | jq -r '.result.tabs[] | [.tab_id, (.label // "")] | @tsv') || die "herdr tab list failed"
-case "$(awk -F'\t' -v t="$tab" '$1 == t {print $2; exit}' <<<"$tabs")" in
-  "자동 "*) die "$pane ($name) is in an auto-dispatch tab; comment on its board item instead" ;;
-  "알아서 "*) die "$pane ($name) is in a Slack ambient tab; it takes rounds only from the ambient poll" ;;
-esac
-for t in "$HOME"/.claude/projects/*/"$sid".jsonl; do
-  [ -n "$sid" ] && [ -f "$t" ] || continue
-  # -a: a NUL byte would make grep print "Binary file ... matches" instead of the line
-  first=$(grep -a -m1 -F '"origin":{"kind":"human"}' "$t")
-  [[ $first == *auto-dispatch* ]] && die "$pane ($name) is an auto-dispatch session; comment on its board item instead"
-  # only a session the ambient poll started: its first prompt opens with the marker ("[" may be eaten), so a session
-  # that merely talks about the marker is still told
-  [[ $first =~ \"content\":\"\[?ambient-round\] ]] &&
-    die "$pane ($name) is a Slack ambient session; it takes rounds only from the ambient poll"
-done
+why=$(auto_reason "$tab" "$sid")
+[ -z "$why" ] || die "$pane ($name) $why"
 case "$kind" in claude | codex) ;; *) die "$pane ($name) runs no Claude or Codex, so its input box cannot be read" ;; esac
 from=$(awk -F'\t' -v me="$me" '$1 == me {print $2}' <<<"$panes")
 msg="[pane-tell: '${from:-자동 작업}' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] $2"

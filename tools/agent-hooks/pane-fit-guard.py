@@ -31,7 +31,8 @@ EDITORS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"}
 READ_ONLY_AGENTS = {"Explore", "researcher", "code-reviewer", "claude-code-guide", "Plan", "statusline-setup"}
 NOTES = re.compile(r"/scratchpad/|/\.claude/projects/[^/]+/memory/|^/private/tmp/|^/tmp/|/explain/|/work-logs/")
 AT_COMMAND = r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*"
-GIT_WORK = re.compile(AT_COMMAND + r"(?:git(?:\s+-\S+(?:\s+[^\s-]\S*)?)*\s+(?:commit|push)\b(?!-)|gh pr (?:create|merge)\b)")
+GIT_WORK = re.compile(AT_COMMAND + r"(?:(?:(?:command|exec|env)\s+)?(?:\S*/)?git(?:\s+-\S+(?:\s+(?:\"[^\"]*\"|'[^']*'|[^\s-]\S*))?)*"
+                      r"\s+(?:commit|push)\b(?!-)|gh pr (?:create|merge)\b)")
 # PreToolUse runs once before a long foreground command, so the 5-minute check never sees it: ask at the start.
 LONG_RUN = re.compile(AT_COMMAND + r"(?:(?:uv run|npx|bash|sh)\s+)?(?:\S*/)?(?:npm (?:run )?(?:test|build)|yarn (?:test|build)|pytest"
                       r"|vitest|jest|docker build|terraform (?:plan|apply)|gradlew|xcodebuild|deploy-release|gcloud\b[^|;&\n]*\bdeploy)\b")
@@ -130,6 +131,8 @@ def selftest():
                         p("NotebookEdit", notebook_path="/repo/a.ipynb"), p("Agent", subagent_type="general-purpose"),
                         p("Agent", prompt="x"), p("Task", subagent_type="fork"), p("Workflow", script="x"),
                         p("Bash", command="git commit -m x"), p("Bash", command="git -C /repo push origin main"),
+                        p("Bash", command="command git push origin main"), p("Bash", command="/usr/bin/git commit -m fix"),
+                        p("Bash", command='git -C "/tmp/my repo" commit -m fix'),
                         p("Bash", command="gh pr create --fill"), p("Bash", command="ls && gh pr merge 1"),
                         p("Bash", command="npm test"), p("Bash", command="npm run build"), p("Bash", command="uv run pytest -q"),
                         p("Bash", command="gcloud run deploy api --image x"), p("Bash", command="terraform apply"),

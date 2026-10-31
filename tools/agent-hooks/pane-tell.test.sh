@@ -177,6 +177,20 @@ rm -f "$SANDBOX"/state/pane-tell/undelivered/* "$SANDBOX/screen-w1:p9" "$SANDBOX
 panes "w1:p1|🟢 👑 리드|s1"; PANE_TELL_ALERT=0 pt "w1:p1" "보고" >/dev/null; alerted
 check "a sender already closed: the notification alone" "$(wc -l < "$SANDBOX/alerts" | tr -d ' ')|$(sent)" "1|"
 claude_screen > "$SANDBOX/screen"; settled
+# A note typed into an auto pane counts as 요유 speaking and lifts its guard, so an auto sender gets the notification alone.
+rm -f "$SANDBOX/alerts"; echo '{"result":{"tabs":[{"tab_id":"w1:t7","label":"자동 api#8"},{"tab_id":"w1:t9","label":"알아서 #1-dev 전환"}]}}' > "$SANDBOX/tabs"
+panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9|w1:t7"; claude_screen "E" > "$SANDBOX/screen"; claude_screen > "$SANDBOX/screen-w1:p9"
+PANE_TELL_ALERT=0 pt "w1:p1" "보고" >/dev/null; alerted; sleep 0.2
+check "an auto-tab sender gets no note" "$(wc -l < "$SANDBOX/alerts" | tr -d ' ')|$(sent)" "1|"
+claude_screen > "$SANDBOX/screen"; settled; check "and its message still goes in" "$(sent)" "w1:p1 "
+rm -f "$SANDBOX/alerts"; panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9|w1:t9"; claude_screen "E" > "$SANDBOX/screen"
+PANE_TELL_ALERT=0 pt "w1:p1" "보고" >/dev/null; alerted; sleep 0.2
+check "an ambient-tab sender gets no note" "$(wc -l < "$SANDBOX/alerts" | tr -d ' ')|$(sent)" "1|"
+claude_screen > "$SANDBOX/screen"; settled
+rm -f "$SANDBOX/alerts"; panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s5|w1:t1"; claude_screen "E" > "$SANDBOX/screen"
+PANE_TELL_ALERT=0 pt "w1:p1" "보고" >/dev/null; alerted; sleep 0.2
+check "an auto session moved out of its tab gets no note" "$(wc -l < "$SANDBOX/alerts" | tr -d ' ')|$(sent)" "1|"
+claude_screen > "$SANDBOX/screen"; settled; rm -f "$SANDBOX/screen-w1:p9" "$SANDBOX/alerts" "$SANDBOX/tabs"
 
 # --raw is the same door for a machine's own prompt: no sender line, and it may be its own pane.
 panes "w1:p1|🟢 일|s1" "w1:p9|🟢 일 둘|s9"
@@ -184,6 +198,10 @@ pt --raw w1:p9 "[handoff: 자동] 이어서"; check "raw: an empty box takes it 
 claude_screen "치던 글" > "$SANDBOX/screen"
 pt --raw w1:p1 "[handoff: 자동] 이어서"; check "raw: words in the box hold it back" "$?|$(sent)" "0|"
 claude_screen > "$SANDBOX/screen"; settled; check "raw: delivered once empty" "$(cut -d'|' -f2 "$SANDBOX/log")" "[handoff: 자동] 이어서"
+claude_screen "치던 글" > "$SANDBOX/screen"; pt --raw w1:p1 "[handoff: 자동] 이어서"
+panes "w1:p1|🟢 일|later" "w1:p9|🟢 일 둘|s9"; claude_screen > "$SANDBOX/screen"; settled
+check "raw: a later session does not get the old session's prompt" "$(sent)|$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')" "|1"
+rm -f "$SANDBOX"/state/pane-tell/undelivered/* "$SANDBOX/alerts"
 pt --raw w1:zz "x" 2>/dev/null; check "raw: no such pane" "$?" 3
 pt --raw w1:p1 2>/dev/null; check "raw: bad usage" "$?" 2
 
