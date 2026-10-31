@@ -1,6 +1,6 @@
 #!/bin/bash
-# Checks statusline-command.sh: the env line sits above the HUD, the PROD warning keeps its red background, and the old
-# output comes back when the HUD is missing or prints nothing. Run: bash tools/claude/statusline-command.test.sh
+# Checks statusline-command.sh: the HUD alone on a dev project, a red PROD warning above it otherwise, nothing left of
+# the old status line. Run: bash tools/claude/statusline-command.test.sh
 set -u
 
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/statusline-command.sh"
@@ -8,6 +8,7 @@ T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 INPUT='{"model":{"display_name":"Opus"},"workspace":{"current_dir":"'"$T"'"},"context_window":{"used_percentage":12,"context_window_size":200000}}'
 fails=0
+export CLOUDSDK_CORE_PROJECT=test-dev   # a dev project, whatever this machine's gcloud points at
 
 run() { printf '%s' "$INPUT" | bash "$SCRIPT" 2>&1; }
 fake_hud() {   # <config dir> <launcher source>
@@ -25,20 +26,31 @@ check() {   # <name> <output> <must match> [<must not match>]
 }
 
 out=$(run)
-check "installed HUD prints its lines" "$out" 'Context' '5h '
-check "env line comes first" "$(head -1 <<<"$out")" '👤'
+check "installed HUD prints its lines" "$out" 'Context'
+check "HUD is the first line on a dev project" "$(head -1 <<<"$out")" '\[Opus\]'
+check "old env line is gone" "$out" 'Context' '👤|로그인필요|미설정'
 
 out=$(CLOUDSDK_CORE_PROJECT=test-f06c6 run)
-check "PROD warning stays beside the HUD" "$out" 'PROD:test-f06c6'
+check "gcloud PROD warning comes first" "$(head -1 <<<"$out")" 'PROD:test-f06c6'
 check "PROD warning keeps its red background" "$out" '41m'
 check "HUD still drawn on PROD" "$out" 'Context'
 
+mkdir "$T/bin" "$T/fb"
+printf '#!/bin/bash\necho test-f06c6\n' >"$T/bin/firebase"
+chmod +x "$T/bin/firebase"
+echo '{}' >"$T/fb/.firebaserc"
+out=$(INPUT=${INPUT//$T/$T/fb} PATH="$T/bin:$PATH" run)
+check "Firebase PROD warning shows without a login" "$(head -1 <<<"$out")" '🔥 PROD:test-f06c6'
+
 out=$(CLAUDE_CONFIG_DIR="$T/empty" run)
-check "missing HUD falls back to the old lines" "$out" 'Opus' 'Context'
+check "missing HUD prints no old lines" "$out" '^$' 'Opus|👤'
 
 fake_hud "$T/broken" 'process.exit(1)'
 out=$(CLAUDE_CONFIG_DIR="$T/broken" run)
-check "HUD that prints nothing falls back" "$out" 'Opus' 'Context'
+check "HUD that prints nothing leaves no old lines" "$out" '^$' 'Opus|👤'
+
+out=$(CLOUDSDK_CORE_PROJECT=test-f06c6 CLAUDE_CONFIG_DIR="$T/empty" run)
+check "PROD warning survives a missing HUD" "$out" 'PROD:test-f06c6'
 
 # bun loads .env from the session folder unless told not to, and these repos keep secrets there
 fake_hud "$T/leak" 'console.log("leak=" + process.env.STATUSLINE_TEST_SECRET)'
