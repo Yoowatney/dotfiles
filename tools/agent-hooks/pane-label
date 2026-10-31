@@ -66,6 +66,8 @@ sub_of() {
   if [[ "$(name_of "$1")" == "$SUB"* ]] || [ -n "$(agent_name)" ]; then echo "$SUB"; fi
 }
 # One herdr session, named by HERDR_SOCKET_PATH. A name 요유 changed after the list was read stays; the next run looks again.
+# ponytail: a tab with no name shows its position; once marked, that number stays as a fixed name, since herdr cannot clear a
+# name. No such tab holds a mark today (session.json); skip tabs whose label equals their number if one ever does.
 sync_session() {
   local tabs panes id old new
   tabs=$("$H" tab list 2>/dev/null) && panes=$("$H" pane list 2>/dev/null) || return 0
