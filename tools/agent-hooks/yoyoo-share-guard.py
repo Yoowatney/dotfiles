@@ -13,7 +13,8 @@ A report whose 요유 몫 holds only decisions is not asked at all (only_decisio
 It also sends back names 요유 cannot read: a pane's herdr id (`w5:pKR`, 27 reports in 14 days; the reason carries the
 pane's name) and the machine names the global rule bans. A last report (it has `남은 것:`) also comes back while a test pane
 this session opened (`임시 …`) is open: 4 of them stayed idle after this hook's own tests (10/31). A report after an explainer
-page Claude had to write itself because Codex failed comes back unless it says so (요유 2026-10-31).
+page Claude had to write itself because Codex failed comes back unless it says so (요유 2026-10-31). In a Claude session a
+long reply with no page comes back and goes to Codex (요유 2026-11-01); a Codex session writes its own.
 A report with nothing left to do ends without a word: the question used to demand a rewrite. Of 102 fires on 10/28-10/31,
 25 went on to a tool call and 69 only wrote text, most of it the same report again.
 Claude runs it with --claude: the question goes back as Stop additionalContext, which Claude shows as "Stop hook feedback"
@@ -71,6 +72,14 @@ TEST_PANE = "임시 "  # with the space: `임시저장 API 수정` is a work nam
 OPENED_BY = re.compile(r"^spawn-([0-9A-Za-z]+)-")  # pane-spawn's agent name: spawn-<caller's terminal>-<random>
 WROTE_IT = re.compile(r"(?:Claude|유요).{0,12}(?:썼|작성)")
 EXPLAIN_REASON = "yoyoo-share-guard: 이번 설명 페이지는 Codex가 실패해 Claude가 썼습니다. 보고에 'Claude가 썼습니다'와 실패 이유를 넣어 다시 쓰세요."
+# 요유 2026-11-01: most reports go to Codex, as the pages do, since they could not follow Claude's. The rule to use a page was
+# there and nothing held it: in the 14 days to 11/1, 13% of 1,248 reports had a page and the median ran 738 characters outside
+# the labeled lines. At 500 about 7 in 10 of those go to Codex; a conclusion, three points and a path fit under it.
+LONG_REPLY = 500
+LABEL_LINE = re.compile(r"^\W*(?:무엇을|왜|남은[ \t]*것|원인|조치|재발[ \t]*방지)\W*[:：]")
+PAGE = re.compile(r"/explain/\S+\.html")
+LONG_REASON = ("yoyoo-share-guard: 답이 깁니다. 긴 보고는 Codex가 씁니다. html-explainer 스킬대로 사실을 파일에 적어 explain-page로 맡기고, "
+               "터미널에는 publish가 출력한 Codex의 글과 페이지 경로, 라벨 줄(무엇을, 왜, 남은 것 등)만 남기세요.")
 
 
 def final_text(path: str) -> str:
@@ -196,6 +205,19 @@ def explain_reason(payload: dict, text: str, env) -> str | None:
     return None if WROTE_IT.search(unicodedata.normalize("NFC", text)) else EXPLAIN_REASON
 
 
+def job_session(env) -> bool:
+    """A job's report goes to the board and Slack, and no one reads it in the terminal."""
+    return bool(env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT"))
+
+
+def too_long(text: str) -> bool:
+    """More prose than a conclusion, a few points and a path, with no page yet. The labeled closing lines stay in the terminal."""
+    if PAGE.search(text):
+        return False
+    lines = (line.strip() for line in prose(text).splitlines())
+    return sum(len(line) for line in lines if not LABEL_LINE.match(line)) > LONG_REPLY
+
+
 def asks_which(item: str) -> bool:
     """The question ending of `둘지`, `돌릴지`, `있는지`. Nouns end in 지 too (공지, 메시지), but not after a ㄹ final or 는/은/인."""
     before = item[-2:-1]
@@ -224,7 +246,7 @@ def only_decisions(text: str) -> bool:
     return bool(items) and all(is_decision(i) for i in items)
 
 
-def decide(payload: dict, env) -> str | None:
+def decide(payload: dict, env, claude: bool = False) -> str | None:
     if payload.get("stop_hook_active") or env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
         return None
     text = payload.get("last_assistant_message")
@@ -234,7 +256,8 @@ def decide(payload: dict, env) -> str | None:
         return None
     checks = (names_reason(text, env), WHAT_REASON if misses_what(text) else None,
               PROBLEM_REASON if misses_problem_line(text) else None, temp_reason(payload, text, env),
-              explain_reason(payload, text, env))
+              explain_reason(payload, text, env),
+              LONG_REASON if claude and not job_session(env) and too_long(text) else None)
     rewrites = [r for r in checks if r]
     if leaves_yoyoo_work(text) and not only_decisions(text):
         rewrites.append(DO_REASON if rewrites else REASON)  # a rewrite that is due must not be told to stay silent
@@ -459,6 +482,25 @@ def selftest():
     # Claude shows decision:block as a red "Stop hook error"; additionalContext continues the turn as yellow feedback.
     code, out = run(json.dumps(p(block[0])), args=["--claude"])
     assert code == 0 and json.loads(out) == {"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": REASON}}, out
+
+    # 요유 2026-11-01: most reports go to Codex, as the pages do. Only prose outside the labeled closing lines counts.
+    wall, under = "가" * (LONG_REPLY + 1), "가" * LONG_REPLY
+    assert decide(p(wall), cli, claude=True) == LONG_REASON, "a long reply in a Claude session goes to Codex"
+    assert decide(p(under), cli, claude=True) is None, "up to the limit stays in the terminal"
+    assert decide(p(wall), cli) is None, "a Codex session writes its own reports"
+    closing = "\n".join(f"{label}: {under}" for label in ("무엇을", "왜", "원인", "조치", "재발 방지", "남은 것"))
+    assert decide(p("끝났습니다.\n" + closing), cli, claude=True) is None, "the labeled lines stay in the terminal"
+    assert decide(p(f"**무엇을:** {wall}"), cli, claude=True) is None, "a bold label is a label"
+    assert decide(p(f"{wall}\n/Users/yoyoo/explain/2026-11-01-a.html"), cli, claude=True) is None, "a page already went to Codex"
+    assert decide(p(f"```\n{wall}\n```"), cli, claude=True) is None, "code is not prose"
+    for job in ("MUNICE_AUTO_DISPATCH", "MUNICE_AMBIENT"):
+        assert decide(p(wall), {**cli, job: "1"}, claude=True) is None, "a job's report goes to the board and Slack"
+    assert decide(p(wall, stop_hook_active=True), cli, claude=True) is None, "sent back once at most"
+    assert decide(p(f"{wall}\n남은 것: 요유 몫: 값 넣기 · 유요 몫: 없음"), cli, claude=True) == f"{LONG_REASON} {DO_REASON}", \
+        "the rewrite is due, so the 요유 몫 question must not tell it to stay silent"
+    code, out = run(json.dumps(p(wall)), args=["--claude"])
+    assert json.loads(out)["hookSpecificOutput"]["additionalContext"] == LONG_REASON, out
+    assert run(json.dumps(p(wall))) == (0, ""), "without --claude the reply passes"
     print("selftest ok")
 
 
@@ -467,7 +509,7 @@ if __name__ == "__main__":
         selftest()
         sys.exit()
     try:
-        reason = decide(json.load(sys.stdin), os.environ)
+        reason = decide(json.load(sys.stdin), os.environ, "--claude" in sys.argv)
     except Exception:  # never break a session
         sys.exit(0)
     if reason and "--claude" in sys.argv:
