@@ -33,7 +33,8 @@ READS = re.compile(r"slack-thread\.sh|conversations\.replies|slack_get_thread_re
 WRITES = re.compile(r"chat\.postMessage|files\.completeUploadExternal")
 REPLY_SCRIPT = re.compile(r"(?:^|[\s/;&|])reply\.sh\b")
 TS = re.compile(r"(?<![\d.])\d{10}\.\d{6}(?![\d.])")
-STEP = re.compile(r"&&|\|\||;|\n|\\n")  # a lone | or & stays: a pipe or a URL query belongs to its reader
+# A lone | or & stays: a pipe or a URL query belongs to its reader. A newline counts raw and as stored in a record, unless a backslash continues it.
+STEP = re.compile(r"&&|\|\||;|(?<!\\)\n|(?<!\\\\)\\n")
 THREAD_TS = re.compile(r"thread_ts\W{0,8}(\d{10}\.\d{6})(?![\d.])")
 # 댓글 only with 아무도: alone it was mostly GitHub comments and test tables in the 14-day replay.
 NO_ANSWER = re.compile(r"아무도[^\n.,]{0,12}(?:답|회신|댓글)"
@@ -216,6 +217,10 @@ EOF"""
         mixed = log(claude_call(1, "Bash", command=f"{reader}{other}; {post}"), claude_call(2, "Bash", command=f"{reader}{other}\n{post}"))
         assert list(last_reads(mixed)) == [other], "the thread posted to is not recorded as read"
         assert check(bash(post, mixed, "s30"), env), "so the next post is still asked"
+        wrapped = f"bash /x/watch/slack-thread.sh \\\n  C1 {thread}"
+        assert read_targets(wrapped) == {thread}, "a backslash line ending is one command"
+        assert list(last_reads(log(claude_call(1, "Bash", command=wrapped)))) == [thread], "also in the session record"
+        assert check(bash(f"{wrapped}\n{post}", stale, "s33"), env) is None, "and in a post that reads first"
         jq = f"jq -n --arg t {thread} '{{thread_ts:$t}}' | curl https://slack.com/api/chat.postMessage -d @-"
         assert check(bash(jq, stale, "s31"), env), "a ts handed to jq is still this thread"
         assert "production" in check(bash("bash /x/ambient/reply.sh /tmp/reply.txt", stale, "s32"), {**env, "MUNICE_AMBIENT_THREAD": f"C1/{thread}", "MUNICE_AMBIENT": "1"}), \

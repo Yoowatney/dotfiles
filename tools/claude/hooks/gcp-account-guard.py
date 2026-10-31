@@ -22,6 +22,7 @@ import sys
 
 UNLOCK = "prod 허용"
 RELAYED = re.compile(r"\s*(<pasted_content[^>]*>\s*)?\[pane-tell:")
+SPAWNED = "이 칸은 리드 밑 칸입니다."  # pane-spawn ends every instruction with this: a session's words, and they name the unlock phrase
 
 # ponytail: text patterns over the whole command, heredoc bodies included (a script there runs).
 # They stop accidents (a wrong config, a script that grabs the admin ADC), not a session set on
@@ -162,7 +163,7 @@ def latest_prompt(transcript_path: str) -> str:
             # Codex sends its instruction files as user messages too; a person never types these.
             if not text.lstrip().startswith(("# AGENTS.md", "<environment_context>", "<user_instructions>")):
                 # pane-tell lands in the input box, so it reads as human origin. It is another session's words and unlocks nothing.
-                last = "" if RELAYED.match(text) else text
+                last = "" if RELAYED.match(text) or SPAWNED in text else text
     return last
 
 
@@ -331,6 +332,12 @@ def selftest():
     for text in (relayed, f'<pasted_content id="1">\n{relayed}\n</pasted_content id="1">', f'\n\n<pasted_content id="1">\n{relayed}'):
         assert tool_problem({**admin_cmd, "transcript_path": claude_transcript(text)}, {}), f"relayed text unlocks nothing: {text!r}"
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript("prod 허용", relayed)}, {}), "a relayed turn ends the unlock too"
+    spawned = f"로그를 봐 주세요.\n\n{SPAWNED} 요유에게 직접 묻거나 `prod 허용`, `/clear`를 부탁하지 마세요."
+    assert tool_problem({**admin_cmd, "transcript_path": claude_transcript(spawned)}, {}), "pane-spawn's own note is no typed prompt"
+    assert tool_problem({**admin_cmd, "transcript_path": codex_transcript(spawned)}, {}), "the same in Codex"
+    assert tool_problem({**admin_cmd, "transcript_path": claude_transcript("prod 허용", spawned)}, {}), "a spawned turn ends the unlock too"
+    assert SPAWNED in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "agent-hooks", "pane-spawn"), encoding="utf-8").read(), \
+        "this must match what pane-spawn appends"
     # subagent transcript has no human line
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript(tail_tool=True)}, {})
     # an unlocked turn may pick admin for one command, never leave it behind (Codex review P1)
