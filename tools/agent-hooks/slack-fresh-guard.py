@@ -25,7 +25,10 @@ import time
 
 sys.dont_write_bytecode = True  # no __pycache__ in the dotfiles at every tool call
 FRESH = 180
-READER = "/Users/yoyoo/work/munice/.agents/skills/agent-board/watch/slack-thread.sh"
+# Tools that carry a command as text and run nothing: a test file naming the reader is no read. ponytail: a shell heredoc that
+# writes one, or a message sent through a shell command, still counts. Such a post passes instead of being asked once.
+ONLY_TEXT = {"Write", "Edit", "MultiEdit", "NotebookEdit", "Agent", "Task", "apply_patch", "spawn_agent", "followup_task"}
+READER ="/Users/yoyoo/work/munice/.agents/skills/agent-board/watch/slack-thread.sh"
 READS = re.compile(r"slack-thread\.sh|conversations\.replies|slack_get_thread_replies")  # slack-thread-wait.sh only waits
 WRITES = re.compile(r"chat\.postMessage|files\.completeUploadExternal")
 REPLY_SCRIPT = re.compile(r"(?:^|[\s/;&|])reply\.sh\b")
@@ -50,11 +53,11 @@ def calls(path: str):
             except (ValueError, KeyError, TypeError, AttributeError):
                 continue
             payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
-            if payload.get("type") in ("function_call", "custom_tool_call"):
+            if payload.get("type") in ("function_call", "custom_tool_call") and payload.get("name") not in ONLY_TEXT:
                 yield at, f"{payload.get('name')} {payload.get('arguments') or payload.get('input') or ''}"
             elif entry.get("type") == "assistant" and not entry.get("isSidechain"):
                 for block in (entry.get("message") or {}).get("content") or []:
-                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                    if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") not in ONLY_TEXT:
                         yield at, f"{block.get('name')} {json.dumps(block.get('input'), ensure_ascii=False)}"
 
 
@@ -180,6 +183,9 @@ EOF"""
         result = {"timestamp": at(8), "type": "user", "message": {"content": [
             {"type": "tool_result", "tool_use_id": "t", "content": read}]}}
         assert last_reads(log(result)) == {}, "a command printed in a tool result is no read"
+        written = claude_call(8, "Write", file_path="/tmp/t.py", content=read)
+        patched = {"timestamp": at(8), "type": "response_item", "payload": {"type": "custom_tool_call", "name": "apply_patch", "input": read}}
+        assert last_reads(log(written)) == {} and last_reads(log(patched)) == {}, "writing the command into a file is no read"
         assert last_reads(log(claude_call(8, "Bash", command=read), claude_call(1, "Bash", command=read)))[thread] > now - 90, "the newest read counts"
 
         # Before a post (a Slack MCP reply, chat.postMessage in a shell command, ambient's reply.sh).
