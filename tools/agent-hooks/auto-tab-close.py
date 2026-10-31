@@ -100,13 +100,24 @@ def report(text: str) -> str:
     return text[m.start() if m else 0:].strip()
 
 
+def reply_of(payload: dict):
+    text = payload.get("last_assistant_message")
+    if text is None and payload.get("transcript_path"):
+        text = share.final_text(payload["transcript_path"])  # unreadable transcript raises: fail open
+    return text
+
+
+def ended_in_silence(payload: dict) -> bool:
+    """yoyoo-share-guard tells a session with nothing to do to end without a word. That Stop has no reply of its own, so the
+    reply held from the Stop before is the report, and withdrawing it would leave the pane open with no report saved."""
+    return bool(payload.get("stop_hook_active")) and not (reply_of(payload) or "").strip()
+
+
 def decide(payload: dict, env) -> str | None:
     """The reply to close on, or None. The nested claude -p inherits this pane's env but is not its session."""
     if env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
         return None
-    text = payload.get("last_assistant_message")
-    if text is None and payload.get("transcript_path"):
-        text = share.final_text(payload["transcript_path"])  # unreadable transcript raises: fail open
+    text = reply_of(payload)
     if not (isinstance(text, str) and should_close(text)):
         return None
     return text if env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT") or agent_name(env) else None
@@ -305,6 +316,9 @@ def selftest():
     auto, done = {"MUNICE_AUTO_DISPATCH": "1"}, close[0]
     assert decide({"last_assistant_message": done}, auto)
     assert decide({"last_assistant_message": done}, {"MUNICE_AMBIENT": "1"})
+    assert ended_in_silence({"stop_hook_active": True, "last_assistant_message": " \n"}), "the reply held before it is the report"
+    assert not ended_in_silence({"stop_hook_active": True, "last_assistant_message": done}), "a rewrite replaces it"
+    assert not ended_in_silence({"last_assistant_message": ""}), "a first stop with no reply holds nothing"
     assert not decide({"last_assistant_message": done}, {}), "a session 요유 opened is never closed"
     assert not decide({"last_assistant_message": keep[0]}, auto)
     assert not decide({"last_assistant_message": None}, auto)
@@ -561,7 +575,9 @@ if __name__ == "__main__":
         after_turn(sys.argv[2], os.environ)
         sys.exit()
     try:
-        defer(decide(json.load(sys.stdin), os.environ), os.environ)
+        payload = json.load(sys.stdin)
+        if not ended_in_silence(payload):
+            defer(decide(payload, os.environ), os.environ)
     except Exception:  # never break a session
         pass
     sys.exit(0)

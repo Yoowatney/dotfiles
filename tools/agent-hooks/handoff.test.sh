@@ -7,13 +7,24 @@ trap 'rm -rf "$SANDBOX"' EXIT
 fails=0
 check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected [$3] got [$2]"; fails=1; fi; }
 
-# A fake pbcopy for the no-herdr fallback, and a fake herdr that logs `agent prompt <pane> <text>`.
+# A fake pbcopy for the no-herdr fallback, and a fake herdr that shows a Claude box and logs `agent prompt <pane> <text>`.
 mkdir -p "$SANDBOX/bin"
 printf '#!/usr/bin/env bash\ncat > "%s/clip"\n' "$SANDBOX" > "$SANDBOX/bin/pbcopy"
-printf '#!/usr/bin/env bash\nprintf "%%s|%%s\\n" "$3" "$4" >> "%s/prompts"\n' "$SANDBOX" > "$SANDBOX/bin/herdr"
+cat > "$SANDBOX/bin/herdr" <<EOF
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "pane get") jq -n --arg p "\$3" '{result: {pane: {pane_id: \$p, agent: "claude", terminal_id: "t1", scroll: {offset_from_bottom: 0}}}}' ;;
+  "pane list") jq -n '{result: {panes: [{pane_id: "w8:p1", agent: "claude", terminal_id: "t1"}]}}' ;;
+  "pane read") cat "$SANDBOX/screen" ;;
+  "agent prompt") printf '%s|%s\n' "\$3" "\$4" >> "$SANDBOX/prompts" ;;
+esac
+EOF
 chmod +x "$SANDBOX/bin/pbcopy" "$SANDBOX/bin/herdr"
+RULE=$(printf '─%.0s' $(seq 1 40))
+claude_screen() { printf '%s\n\xe2\x9d\xaf\xc2\xa0%s\n%s\n  footer\n' "$RULE" "${1:-}" "$RULE" > "$SANDBOX/screen"; }
+claude_screen
 ho() { local pane="$1"; shift; env XDG_STATE_HOME="$SANDBOX/state" HERDR_PANE_ID="$pane" HERDR_BIN_PATH="$SANDBOX/bin/herdr" \
-  HANDOFF_KICK_DELAY=0 CLAUDE_CODE_ENTRYPOINT="${EP:-cli}" PATH="$SANDBOX/bin:$PATH" bash "$SUBJECT" "$@"; }
+  HANDOFF_KICK_DELAY=0 PANE_TELL_SETTLE=0 PANE_TELL_POLL=0.05 CLAUDE_CODE_ENTRYPOINT="${EP:-cli}" PATH="$SANDBOX/bin:$PATH" bash "$SUBJECT" "$@"; }
 # The kick runs detached, so give it a moment to land.
 prompts() { local i; for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$SANDBOX/prompts" ] && break; sleep 0.2; done; cut -d'|' -f1 "$SANDBOX/prompts" 2>/dev/null | tr '\n' ' '; }
 dir="$SANDBOX/state/agent-handoff"
@@ -35,6 +46,12 @@ check "the kick says it was not typed by 요유" "$(grep -c '요유가 직접 �
 rm -f "$SANDBOX/prompts"
 check "load consumes it" "$(ho w1:p1 load)" ""
 check "nothing to load types nothing" "$(prompts)" ""
+# 요유 began typing after /clear: the kick waits for an empty box instead of merging with it.
+claude_screen "치던 글"; printf '이어서\n' | ho w8:p1 save >/dev/null; ho w8:p1 load >/dev/null
+check "words in the box hold the kick back" "$(prompts)" ""
+claude_screen
+check "the kick goes in once the box is empty" "$(prompts)" "w8:p1 "
+rm -f "$SANDBOX/prompts"
 
 echo "file arg" > "$SANDBOX/h.md"
 ho w1:p3 save "$SANDBOX/h.md" >/dev/null

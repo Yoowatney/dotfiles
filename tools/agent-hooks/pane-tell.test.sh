@@ -14,10 +14,13 @@ case "\$1 \$2" in
   "pane list") [ ! -f "$SANDBOX/herdr-down" ] || exit 1; cat "$SANDBOX/panes" ;;
   "tab list") cat "$SANDBOX/tabs" 2>/dev/null || echo '{"result":{"tabs":[]}}' ;;
   "pane get") jq -n --arg i "\$(cat "$SANDBOX/new-id" 2>/dev/null)" --argjson o "\$(cat "$SANDBOX/scrolled" 2>/dev/null || echo 0)" \
-    '{result: {pane: ({scroll: {offset_from_bottom: \$o}} + (if \$i == "" then {} else {pane_id: \$i} end))}}' ;;
+    --arg p "\$3" --slurpfile all "$SANDBOX/panes" \
+    '{result: {pane: ((\$all[0].result.panes | map(select(.pane_id == \$p)) | .[0] // {}) + {scroll: {offset_from_bottom: \$o}} + (if \$i == "" then {} else {pane_id: \$i} end))}}' ;;
   "pane read") n=\$((\$(cat "$SANDBOX/reads" 2>/dev/null || echo 0) + 1)); echo "\$n" > "$SANDBOX/reads"
-    if [ -f "$SANDBOX/screen.\$n" ]; then cat "$SANDBOX/screen.\$n"; else cat "$SANDBOX/screen"; fi ;;
+    if [ -f "$SANDBOX/screen-\$3" ]; then cat "$SANDBOX/screen-\$3"
+    elif [ -f "$SANDBOX/screen.\$n" ]; then cat "$SANDBOX/screen.\$n"; else cat "$SANDBOX/screen"; fi ;;
   "agent prompt") [ ! -f "$SANDBOX/refuse" ] || exit 1; printf '%s|%s\n' "\$3" "\$4" >> "$SANDBOX/log" ;;
+  "notification show") printf '%s\n' "\$5" >> "$SANDBOX/alerts" ;;
   *) exit 2 ;;
 esac
 EOF
@@ -142,7 +145,7 @@ check "receiver closed: nothing sent, the message stays in a file" "$(sent)|$(ls
 rm -f "$SANDBOX"/state/pane-tell/undelivered/*
 panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9"; pt "리드" "보고" >/dev/null
 panes "w1:p1|🟢 👑 리드|other" "w1:p9|🟢 일|s9"; claude_screen > "$SANDBOX/screen"; settled
-check "another session took the pane: not its message" "$(sent)|$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')" "|1"
+check "another session took the pane: not its message" "$(sent | grep -c w1:p1)|$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')" "0|1"
 rm -f "$SANDBOX"/state/pane-tell/undelivered/*
 panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9"; claude_screen "야" > "$SANDBOX/screen"; pt "리드" "보고" >/dev/null
 jq '(.result.panes[] | select(.pane_id == "w1:p1") | .pane_id) = "w2:p5"' "$SANDBOX/panes" > "$SANDBOX/panes.new"; mv "$SANDBOX/panes.new" "$SANDBOX/panes"
@@ -155,5 +158,36 @@ panes "w1:p1|🟢 빈 칸|s1|w1:t1|-" "w1:p9|🟢 일|s9"
 pt "빈 칸" "x" 2>/dev/null; check "no agent in the pane refuses" "$?|$(sent)" "2|"
 panes "w1:p1|🟢 다른 도구|s1|w1:t1|gemini" "w1:p9|🟢 일|s9"
 pt "다른 도구" "x" 2>/dev/null; check "an agent whose box cannot be read refuses" "$?|$(sent)" "2|"
+
+# A box that stays full: 요유 hears about it once, the sender learns it did not arrive, and the words in the box stay.
+alerted() { local i; for i in $(seq 1 60); do [ -s "$SANDBOX/alerts" ] && [ -s "$SANDBOX/log" ] && return; sleep 0.05; done; }
+panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9"; rm -f "$SANDBOX/alerts"
+claude_screen "E" > "$SANDBOX/screen"; claude_screen > "$SANDBOX/screen-w1:p9"
+PANE_TELL_ALERT=0 pt "리드" "보고" >/dev/null; alerted
+check "a stuck box reaches 요유" "$(grep -c '리드 칸 입력창' "$SANDBOX/alerts")" 1
+check "and the sender" "$(sent)" "w1:p9 "
+check "the note to the sender is not 요유's" "$(cut -d'|' -f2 "$SANDBOX/log" | grep -c '^\[pane-tell: 자동 안내입니다')" 1
+sleep 0.2; check "announced once, not on every try" "$(wc -l < "$SANDBOX/alerts" | tr -d ' ')" 1
+rm -f "$SANDBOX/screen-w1:p9"; claude_screen > "$SANDBOX/screen"; settled
+check "the message still goes in once the box is empty" "$(sent)" "w1:p9 w1:p1 "
+rm -f "$SANDBOX/alerts"; claude_screen "E" > "$SANDBOX/screen"; claude_screen > "$SANDBOX/screen-w1:p9"
+PANE_TELL_WAIT=0 pt "리드" "보고" >/dev/null; alerted; settled
+check "kept in a file: announced with where it is" "$(grep -c 'undelivered/' "$SANDBOX/alerts")" 1
+rm -f "$SANDBOX"/state/pane-tell/undelivered/* "$SANDBOX/screen-w1:p9" "$SANDBOX/alerts"
+panes "w1:p1|🟢 👑 리드|s1"; PANE_TELL_ALERT=0 pt "w1:p1" "보고" >/dev/null; alerted
+check "a sender already closed: the notification alone" "$(wc -l < "$SANDBOX/alerts" | tr -d ' ')|$(sent)" "1|"
+claude_screen > "$SANDBOX/screen"; settled
+
+# --raw is the same door for a machine's own prompt: no sender line, and it may be its own pane.
+panes "w1:p1|🟢 일|s1" "w1:p9|🟢 일 둘|s9"
+pt --raw w1:p9 "[handoff: 자동] 이어서"; check "raw: an empty box takes it as it is" "$?|$(cut -d'|' -f2 "$SANDBOX/log")" "0|[handoff: 자동] 이어서"
+claude_screen "치던 글" > "$SANDBOX/screen"
+pt --raw w1:p1 "[handoff: 자동] 이어서"; check "raw: words in the box hold it back" "$?|$(sent)" "0|"
+claude_screen > "$SANDBOX/screen"; settled; check "raw: delivered once empty" "$(cut -d'|' -f2 "$SANDBOX/log")" "[handoff: 자동] 이어서"
+pt --raw w1:zz "x" 2>/dev/null; check "raw: no such pane" "$?" 3
+pt --raw w1:p1 2>/dev/null; check "raw: bad usage" "$?" 2
+
+pt --box-ready w1:p1 claude; check "box-ready: empty" "$?" 0
+claude_screen "치던 글" > "$SANDBOX/screen"; pt --box-ready w1:p1 claude; check "box-ready: words in it" "$?" 1
 
 exit $fails

@@ -12,8 +12,9 @@ f="$dir/${HERDR_PANE_ID:-}.md"
 typed="Any text before the [handoff: marker in that message is 요유's own, typed while the prompt was on its way: answer it first."
 # Context alone waits for a first message, and interactive sessions ignore initialUserMessage (tested 10/21),
 # so type the first prompt into this pane once the session is up (요유 approved 10/21). Detached: the hook returns first.
+# Through pane-tell, so it waits for an empty box instead of merging with what 요유 began typing after /clear.
 kick() {
-  nohup bash -c 'sleep "$1"; "$2" agent prompt "$3" "$4"' _ "${HANDOFF_KICK_DELAY:-3}" "${HERDR_BIN_PATH:-herdr}" "$HERDR_PANE_ID" \
+  nohup bash -c 'sleep "$1"; "$2" --raw "$3" "$4"' _ "${HANDOFF_KICK_DELAY:-3}" "$(dirname "$0")/pane-tell" "$HERDR_PANE_ID" \
     "[handoff: /clear 뒤 자동으로 보낸 글입니다. 요유가 직접 친 글이 아닙니다] $1 되돌리기 어려운 일은 요유에게 확인하세요." >/dev/null 2>&1 &
 }
 case "${1:-}" in

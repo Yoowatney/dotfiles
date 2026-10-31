@@ -11,7 +11,12 @@
 # "z"). So it goes only into an empty box, working agent or not: Claude queues it, Codex takes it into the running turn.
 # Otherwise it prints "queued ...", exits 0, and a detached process tries again until the box is empty, which outlives the
 # sending pane. After PANE_TELL_WAIT seconds, or when the receiver is gone or holds another session, the message stays in
-# ~/.local/state/pane-tell/undelivered/; `log` beside it says what became of each one.
+# ~/.local/state/pane-tell/undelivered/; `log` beside it says what became of each one. A message that waits PANE_TELL_ALERT
+# seconds (10 minutes) or ends up in that folder is announced, since a one-letter leftover in a box once held a report back
+# with nobody knowing (10/31): a herdr notification for 요유, the only one who can clear the box, and a note to the sender,
+# who would take it as delivered. Nothing here ever touches the box: what is in it may be 요유's.
+#   pane-tell --raw <pane id> "<message>"       the same door for a prompt a machine types as it is, into any pane
+#   pane-tell --box-ready <pane id> <kind>      exit 0 when the box is empty and in view (ambient/deliver.py asks this)
 H=${HERDR_BIN_PATH:-herdr}
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}/pane-tell
 die() { echo "pane-tell: $*" >&2; exit 2; }
@@ -63,28 +68,62 @@ box_ready() { # pane kind
 }
 send() { box_ready "$1" "$2" && "$H" agent prompt "$1" "$3" >/dev/null 2>&1; }
 
-deliver() { # message file, receiver's terminal (a moved pane gets a new pane id), its session when queued
-  local list row pane kind sid t0=$SECONDS
+tell() { # pane, kind, message, receiver's terminal, its session, sender's terminal. Returns 1 when it had to queue.
+  send "$1" "$2" "$3" && return 0
+  umask 077 # messages can name customers
+  mkdir -p "$STATE/waiting" "$STATE/undelivered" || die "cannot keep the message"
+  local file
+  file=$(mktemp "$STATE/waiting/$(date +%s).XXXXXX") && printf '%s' "$3" > "$file" || die "cannot keep the message"
+  # Own session so neither the caller's tool runner nor the sending pane's close takes it down.
+  nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' bash "$0" --deliver "$file" "$4" "$5" "$6" </dev/null >/dev/null 2>&1 &
+  return 1
+}
+
+warn() { # what happened, sender's terminal
+  local row
+  "$H" notification show "칸 전달 대기" --body "$1" >/dev/null 2>&1
+  echo "$(date '+%F %T') announced: $1" >> "$STATE/log"
+  [ -n "$2" ] || return 0
+  row=$("$H" pane list 2>/dev/null | jq -r --arg t "$2" '.result.panes[] | select(.terminal_id == $t) | [.pane_id, (.agent // "")] | @tsv')
+  # One try, never queued: a note about a stuck message must not get stuck itself, and the notification has already gone out.
+  [ -z "$row" ] || send "$(cut -f1 <<<"$row")" "$(cut -f2 <<<"$row")" "[pane-tell: 자동 안내입니다. 요유가 직접 친 글이 아닙니다] $1"
+}
+
+deliver() { # message file, receiver's terminal (a moved pane gets a new pane id), its session when queued, sender's terminal
+  local list row pane kind sid label t0=$SECONDS warned=
   while (( SECONDS - t0 < ${PANE_TELL_WAIT:-86400} )); do
     sleep "${PANE_TELL_POLL:-5}"
     list=$("$H" pane list 2>/dev/null) || continue # herdr restarting is not the receiver gone
-    row=$(jq -r --arg t "$2" '.result.panes[]
-      | select(.terminal_id == $t) | [.pane_id, (.agent // ""), (.agent_session.value // "")] | @tsv' <<<"$list") || continue
-    pane=$(cut -f1 <<<"$row"); kind=$(cut -f2 <<<"$row"); sid=$(cut -f3 <<<"$row")
+    row=$(jq -r --arg t "$2" '.result.panes[] | select(.terminal_id == $t)
+      | [.pane_id, (.agent // ""), (.agent_session.value // ""), (.label // "이름 없는 칸")] | @tsv' <<<"$list") || continue
+    pane=$(cut -f1 <<<"$row"); kind=$(cut -f2 <<<"$row"); sid=$(cut -f3 <<<"$row"); label=$(cut -f4 <<<"$row")
     [ -n "$kind" ] && { [ -z "$3" ] || [ "$sid" = "$3" ]; } || break
     if send "$pane" "$kind" "$(cat "$1")"; then
       rm -f "$1"
       echo "$(date '+%F %T') delivered $(basename "$1") to $pane" >> "$STATE/log"
       return
     fi
+    if [ -z "$warned" ] && (( SECONDS - t0 >= ${PANE_TELL_ALERT:-600} )); then
+      warned=1
+      warn "$label 칸 입력창이 비어 있지 않거나 화면이 위로 올라가 있어 다른 칸의 글이 들어가지 못합니다. 입력창을 비우고 맨 아래로 내리면 바로 전달됩니다." "$4"
+    fi
   done
   mv "$1" "$STATE/undelivered/"
   echo "$(date '+%F %T') undelivered $(basename "$1") for $2" >> "$STATE/log"
+  warn "다른 칸에 보낸 글을 전달하지 못해 파일로 남겼습니다: $STATE/undelivered/$(basename "$1")" "$4"
 }
-if [ "${1:-}" = --deliver ]; then deliver "$2" "$3" "${4:-}"; exit; fi
+if [ "${1:-}" = --deliver ]; then deliver "$2" "$3" "${4:-}" "${5:-}"; exit; fi
+if [ "${1:-}" = --box-ready ]; then box_ready "$2" "$3"; exit; fi
 
 command -v "$H" >/dev/null 2>&1 || die "herdr not found"
 command -v jq >/dev/null 2>&1 || die "jq not found"
+if [ "${1:-}" = --raw ]; then
+  [ $# -eq 3 ] && [ -n "$2" ] && [ -n "$3" ] || die 'usage: pane-tell --raw <pane id> "<message>"'
+  row=$("$H" pane get "$2" 2>/dev/null | jq -r '.result.pane | [(.pane_id // ""), (.agent // ""), (.terminal_id // "")] | @tsv')
+  [ -n "$(cut -f1 <<<"$row")" ] || { echo "pane-tell: no pane \"$2\"" >&2; exit 3; }
+  tell "$(cut -f1 <<<"$row")" "$(cut -f2 <<<"$row")" "$3" "$(cut -f3 <<<"$row")" "" ""
+  exit 0
+fi
 panes=$("$H" pane list 2>/dev/null | jq -r '.result.panes[]
   | [.pane_id, ((.label // "") | ltrimstr("🔴 ") | ltrimstr("🟢 ")), (.agent_session.value // ""), (.cwd // ""), (.tab_id // ""), (.agent // ""), (.terminal_id // "")] | @tsv') ||
   die "herdr pane list failed"
@@ -134,10 +173,6 @@ done
 case "$kind" in claude | codex) ;; *) die "$pane ($name) runs no Claude or Codex, so its input box cannot be read" ;; esac
 from=$(awk -F'\t' -v me="$me" '$1 == me {print $2}' <<<"$panes")
 msg="[pane-tell: '${from:-자동 작업}' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] $2"
-if send "$pane" "$kind" "$msg"; then echo "told $pane ($name)"; exit 0; fi
-umask 077 # messages can name customers
-mkdir -p "$STATE/waiting" "$STATE/undelivered" || die "cannot keep the message"
-file=$(mktemp "$STATE/waiting/$(date +%s).XXXXXX") && printf '%s' "$msg" > "$file" || die "cannot keep the message"
-# Own session so neither the caller's tool runner nor the sending pane's close takes it down.
-nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' bash "$0" --deliver "$file" "$terminal" "$sid" </dev/null >/dev/null 2>&1 &
+sender=$(awk -F'\t' -v me="$me" '$1 == me {print $7}' <<<"$panes")
+if tell "$pane" "$kind" "$msg" "$terminal" "$sid" "$sender"; then echo "told $pane ($name)"; exit 0; fi
 echo "queued for $pane ($name): its input box is not empty, so this goes in once it is"
