@@ -70,11 +70,13 @@ DECISION = re.compile(r"(?:결정(?:하기| 입력)?|정하기|고르기|선택|
 DELEGATED = re.compile(r"머지|맡기|공유|리뷰|검토|댓글")  # standing permission: these are 유요's own steps, however they are worded
 # A step worded as a decision: `프로덕션 승격 승인` is 유요's step, or one bounce from it (요유 2026-11-01, api#975). A real 요유 call
 # ends quietly at the question. `설계 승인` names no step and stays a decision.
-STEP = re.compile(r"(?:배포|승격|실행|재시작|설치|적용|전환|삭제|게시|전송|공지|로그인|진행)(?:할지|될지)?"
+STEP = re.compile(r"(?:배포|승격|반영|롤백|실행|재시작|설치|적용|전환|삭제|게시|전송|공지|로그인|진행)(?:할지|될지|을|를)?"
                   r"(?:[ \t]*(?:승인|결정(?:하기)?|정하기|고르기|선택|판단|여부|답하기))*$")
 ONLY_YOYOO = re.compile(r"`/clear`|`prod 허용`")  # typed by 요유 alone: the handoff rule and the production unlock
 ASK_BACK = re.compile(r"([가-힣])까요[ \t]*[?？]\**$")
-CHOICE = re.compile(r"아니면|어떻게|어느|어떤|어디|언제|누구|무엇|뭐|뭘|괜찮|(?:있|없|좋|맞|나)을까요|까요[^?？]*까요")  # asks what to do or whether it is right, not leave to do it
+PERMIT = re.compile(r"(?:해도[ \t]*(?:되나요|좋을까요|괜찮을까요)|하시겠습니까)[ \t]*[?？]\**$")
+WHICH = re.compile(r"아니면|어떻게|어느|어떤|어디|언제|누구|무엇|뭐|뭘|까요[^?？]*까요")  # asks what to do, not leave to do it
+CHOICE = re.compile(WHICH.pattern + r"|괜찮|(?:있|없|좋|맞|나)을까요")  # or whether it is right
 PANE_ID = re.compile(r"(?<![A-Za-z0-9_:/.-])w[0-9A-Z]+:p[0-9A-Z]+(?![0-9A-Za-z])")  # ASCII edges: 에 may follow directly
 PANE_MARKS = re.compile(r"^[\s🟢🔴👑🫡]+")
 # The global rule's names for the three Macs: a bare 서버 맥 leaves 요유 guessing which one (요유 2026-10-24).
@@ -271,7 +273,7 @@ def asks_back(text: str) -> bool:
     lines = (line.strip() for line in reversed(prose(text).splitlines()))
     last = next((line for line in lines if line and not LABEL_LINE.match(line)), "")
     m = ASK_BACK.search(last)
-    return bool(m) and ends_in_rieul(m[1]) and not CHOICE.search(last)
+    return (bool(PERMIT.search(last)) and not WHICH.search(last)) or (bool(m) and ends_in_rieul(m[1]) and not CHOICE.search(last))
 
 
 def is_decision(item: str) -> bool:
@@ -339,6 +341,9 @@ def selftest():
         "남은 것: 요유 몫: prod 배포 결정하기 · 유요 몫: 없음",
         "남은 것: 요유 몫: 재시작할지 답하기 · 유요 몫: 없음",
         "남은 것: 요유 몫: 승격 여부 선택 · 유요 몫: 없음",
+        "남은 것: 요유 몫: 프로덕션 승격을 승인 · 유요 몫: 없음",
+        "남은 것: 요유 몫: 프로덕션 반영 승인 · 유요 몫: 없음",
+        "남은 것: 요유 몫: prod 롤백 승인 · 유요 몫: 없음",
         "남은 것: 요유 몫: 재시작 여부 답하기 · 유요 몫: 없음",
         "남은 것: 요유 몫: 오늘 15시 진행 여부 답하기 · 유요 몫: 없음",
         "남은 것: 요유 몫: 합의한 Slack 공지 · 유요 몫: 없음",  # 지 in a noun is not a question ending
@@ -416,12 +421,14 @@ def selftest():
     assert "쓰지 말고" in REASON and "다시 써" not in REASON, "the report stays where it is"
     # 요유 2026-11-01 (api#975): "shall I?" hands the step back as much as a 요유 몫 line does.
     for t in ("PR을 올렸습니다. 머지할까요?", "고쳤습니다.\n\n이대로 만들까요?", "진행해도 될까요?\n\n무엇을: 훅 수정\n왜: 막혀서",
-              "스레드에 올려 둘까요？", "그렇게 할까요?\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨"):
+              "스레드에 올려 둘까요？", "그렇게 할까요?\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨",
+              "머지해도 되나요?", "머지해도 좋을까요?", "머지하시겠습니까?", "진행해도 괜찮을까요?"):
         assert decide(p(t), cli) == ASK_REASON, f"should ask back: {t[:40]!r}"
     for t in ("A로 갈까요, 아니면 B로 갈까요?", "어떻게 할까요?", "틀리거나 빠진 부분이 있을까요?", "어느 쪽이 좋을까요?",
               "`머지할까요?`라고 묻지 않습니다.", '"머지할까요?"처럼 쓰면 훅이 되묻습니다.', "머지할까요? 이 질문은 쓰지 않습니다.",
               "> 머지할까요?\n인용입니다.", "마지막 줄은 그냥 까요?", "머지했습니다.",
-              "PR을 나눌까요, 합칠까요?", "A로 할까요 B로 할까요?", "어디에 둘까요?", "언제 배포할까요?", "뭐로 할까요?", "이대로 괜찮을까요?"):
+              "PR을 나눌까요, 합칠까요?", "A로 할까요 B로 할까요?", "어디에 둘까요?", "언제 배포할까요?", "뭐로 할까요?", "이대로 괜찮을까요?",
+              "어떻게 하시겠습니까?", "어디에 배포하시겠습니까?"):
         assert decide(p(t), cli) is None, f"not a shall-I question: {t[:40]!r}"
     assert "prod에 닿는" in REASON, "a real production step is not something to go and do"
     assert decide(p("머지할까요?\n남은 것: 요유 몫: 세 길 중 하나 고르기 · 유요 몫: 없음"), cli) is None, "a decision on the 요유 몫 line is the handoff format"

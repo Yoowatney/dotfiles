@@ -33,8 +33,8 @@ READS = re.compile(r"slack-thread\.sh|conversations\.replies|slack_get_thread_re
 WRITES = re.compile(r"chat\.postMessage|files\.completeUploadExternal")
 REPLY_SCRIPT = re.compile(r"(?:^|[\s/;&|])reply\.sh\b")
 TS = re.compile(r"(?<![\d.])\d{10}\.\d{6}(?![\d.])")
-# A lone | or & stays: a pipe or a URL query belongs to its reader. A newline counts raw and as stored in a record, unless a backslash continues it.
-STEP = re.compile(r"&&|\|\||;|(?<!\\)\n|(?<!\\\\)\\n")
+# A lone & stays: it sits in a URL query. A newline counts raw and as stored in a record, unless a backslash continues it.
+STEP = re.compile(r"&&|\|\|?|;|(?<!\\)\n|(?<!\\\\)\\n")
 THREAD_TS = re.compile(r"thread_ts\W{0,8}(\d{10}\.\d{6})(?![\d.])")
 # 댓글 only with 아무도: alone it was mostly GitHub comments and test tables in the 14-day replay.
 NO_ANSWER = re.compile(r"아무도[^\n.,]{0,12}(?:답|회신|댓글)"
@@ -56,7 +56,9 @@ def calls(path: str):
                 continue
             payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
             if payload.get("type") in ("function_call", "custom_tool_call") and payload.get("name") not in ONLY_TEXT:
-                yield at, f"{payload.get('name')} {payload.get('arguments') or payload.get('input') or ''}"
+                text = f"{payload.get('name')} {payload.get('arguments') or payload.get('input') or ''}"
+                if "tools.apply_patch(" not in text:  # how Codex records a patch: inside exec, not under its own name
+                    yield at, text
             elif entry.get("type") == "assistant" and not entry.get("isSidechain"):
                 for block in (entry.get("message") or {}).get("content") or []:
                     if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") not in ONLY_TEXT:
@@ -196,6 +198,8 @@ EOF"""
         written = claude_call(8, "Write", file_path="/tmp/t.py", content=read)
         patched = {"timestamp": at(8), "type": "response_item", "payload": {"type": "custom_tool_call", "name": "apply_patch", "input": read}}
         assert last_reads(log(written)) == {} and last_reads(log(patched)) == {}, "writing the command into a file is no read"
+        exec_patch = {"timestamp": at(8), "type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "input": f'text(await tools.apply_patch("{read}"));'}}
+        assert last_reads(log(exec_patch)) == {}, "Codex records a patch inside exec"
         assert last_reads(log(claude_call(8, "Bash", command=read), claude_call(1, "Bash", command=read)))[thread] > now - 90, "the newest read counts"
 
         # Before a post (a Slack MCP reply, chat.postMessage in a shell command, ambient's reply.sh).
@@ -214,6 +218,7 @@ EOF"""
         reader = "bash /x/watch/slack-thread.sh C1 "
         assert check(bash(f"{reader}{other}; {post}", stale, "s18"), env), "reading another thread in the same command does not cover this one"
         assert check(bash(f"{reader}{thread} | tail -1 && {post}", stale, "s19"), env) is None, "a pipe stays with its reader"
+        assert check(bash(f"{reader}{other} | {post}", stale, "s34"), env), "a pipe into the post covers no other thread"
         mixed = log(claude_call(1, "Bash", command=f"{reader}{other}; {post}"), claude_call(2, "Bash", command=f"{reader}{other}\n{post}"))
         assert list(last_reads(mixed)) == [other], "the thread posted to is not recorded as read"
         assert check(bash(post, mixed, "s30"), env), "so the next post is still asked"
