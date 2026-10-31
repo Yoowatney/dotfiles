@@ -206,12 +206,12 @@ def tool_problem(payload: dict, env: dict) -> str | None:
             "할 수 있다'고 말할 것. 처음부터 prod 작업 세션이면 요유가 `cla`로 띄움. terraform#1005")
 
 
-def pane_fit(hook_input: dict) -> str | None:
-    """The pane question rides on this hook: see pane-fit-guard.py for why. It can never change a GCP verdict."""
+def rider(name: str, hook_input: dict) -> str | None:
+    """A check that rides on this hook: see pane-fit-guard.py for why. It can never change a GCP verdict."""
     sys.dont_write_bytecode = True
     try:
-        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "agent-hooks", "pane-fit-guard.py")
-        spec = importlib.util.spec_from_file_location("pane_fit", path)
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "agent-hooks", name)
+        spec = importlib.util.spec_from_file_location("rider", path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module.check(hook_input, dict(os.environ))
@@ -472,7 +472,8 @@ if __name__ == "__main__":
         sys.exit()
     hook_input = json.load(sys.stdin)
     reason = tool_problem(hook_input, dict(os.environ))
-    reason = f"gcp-account-guard: {reason}" if reason else pane_fit(hook_input)
+    reason = (f"gcp-account-guard: {reason}" if reason else
+              rider("pane-fit-guard.py", hook_input) or rider("job-host-guard.py", hook_input))
     if reason:  # JSON deny: Claude Code and Codex both read it
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
