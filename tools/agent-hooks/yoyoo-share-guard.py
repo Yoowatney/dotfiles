@@ -3,7 +3,8 @@
 
 The global rule ends every finished report with `남은 것: 요유 몫: … · 유요 몫: … · 세션: …`. 요유 said "너가 해" /
 "알아서 해" 9 times in 6 sessions on 10/22-10/23: each new skill or report slot brought the old "shall I?" step back,
-filed under 요유 몫. This asks once, before the turn ends, whether every item there is truly 요유's. In the same block it asks for the
+filed under 요유 몫. This asks once, before the turn ends, whether every item there is truly 요유's, and the same of a reply that
+ends by asking leave with no such line (`머지할까요?`). In the same block it asks for the
 missing `무엇을:` when a reply carries more `왜:` labels than `무엇을:` labels (the rule pairs them), and for the missing line
 when `원인:`, `조치:` and `재발 방지:` do not come in equal numbers.
 Only the `요유 몫:` value counts, up to `·` or the end of its line; `없음` passes, and so does a reply without the line.
@@ -42,9 +43,14 @@ SHARE = re.compile(r"요유[ \t]*몫[ \t]*\**[ \t]*[:：][ \t]*\**([^·\n]*)")  
 NONE = re.compile(r"^(?:없음|없습니다|none)\b", re.I)
 # Short, since Claude prints it under the report. A note such as "그대로 둡니다" would bury the report (요유 2026-10-28),
 # and a rewrite prints it twice (요유 2026-10-31), so a turn with nothing to do ends without a word.
-DO_REASON = "yoyoo-share-guard: 요유 몫 가운데 유요가 지금 할 수 있는 일(명령 실행, Slack 글, 합의된 단계)은 지금 하세요."
-REASON = (f"{DO_REASON} 그래서 보고가 바뀌면 바뀐 보고를 쓰세요. 그런 일이 없으면 응답 없이 턴을 끝내세요: 다시 쓰지 말고, "
-          "다시 쓰지 않았다는 말이나 이유도 쓰지 마세요. 보고는 이미 화면 맨 아래에 있습니다.")
+# The aside: on 10/29 a session answered this question by adding why only 요유 could do it, and 유요 had another way (api#975).
+DO_REASON = ("yoyoo-share-guard: 요유 몫 가운데 유요가 지금 할 수 있는 일(명령 실행, Slack 글, 합의된 단계)은 지금 하세요. "
+             "막혔다는 사유를 붙여 남기지 말고 다른 경로를 찾으세요.")
+END_QUIETLY = ("그런 일이 없으면 응답 없이 턴을 끝내세요: 다시 쓰지 말고, 다시 쓰지 않았다는 말이나 이유도 쓰지 마세요. "
+               "보고는 이미 화면 맨 아래에 있습니다.")
+REASON = f"{DO_REASON} 그래서 보고가 바뀌면 바뀐 보고를 쓰세요. {END_QUIETLY}"
+ASK_REASON = ("yoyoo-share-guard: 답이 허락을 묻는 말로 끝났습니다. 뜻이 분명하고 방법만 남았으면 추천안대로 지금 하세요. "
+              f"prod에 닿는 배포·머지, 데이터, 외부 설정, 과금이거나 요청의 뜻이 모호해서 요유의 답이 꼭 필요한 경우가 아니면 묻지 않습니다. {END_QUIETLY}")
 # 요유 2026-10-28 ("왜는 쓰는데 무엇을을 왜 안쓰지, 모든 세션이 다그러네"): every `왜:` label comes with a `무엇을:` label
 WHY = re.compile(r"(?<![가-힣])왜[ \t]*\**[ \t]*[:：]")
 WHAT = re.compile(r"무엇을[ \t]*\**[ \t]*[:：]")
@@ -61,7 +67,12 @@ ITEM = re.compile(r",|，|·|\s그리고\s")
 ASIDE = re.compile(r"\([^)]*\)|（[^）]*）")  # the reason a session gives, and its commas, are not items
 DECISION = re.compile(r"(?:결정(?:하기| 입력)?|정하기|고르기|선택|승인|답하기|판단|여부)$")
 DELEGATED = re.compile(r"머지|맡기|공유|리뷰|검토|댓글")  # standing permission: these are 유요's own steps, however they are worded
+# A step worded as a decision: `프로덕션 승격 승인` is 유요's step, or one bounce from it (요유 2026-11-01, api#975). A real 요유 call
+# ends quietly at the question. `설계 승인` names no step and stays a decision.
+STEP = re.compile(r"(?:배포|승격|실행|재시작|설치|적용|전환|삭제|게시|전송|공지|로그인|진행)(?:[ \t]*(?:승인|결정|판단|여부|답하기))*$")
 ONLY_YOYOO = re.compile(r"`/clear`|`prod 허용`")  # typed by 요유 alone: the handoff rule and the production unlock
+ASK_BACK = re.compile(r"([가-힣])까요[ \t]*[?？]\**$")
+CHOICE = re.compile(r"아니면|어떻게|어느|어떤|무엇|뭘|(?:있|없|좋|맞|나)을까요")  # asks what to do or whether it is right, not leave to do it
 PANE_ID = re.compile(r"(?<![A-Za-z0-9_:/.-])w[0-9A-Z]+:p[0-9A-Z]+(?![0-9A-Za-z])")  # ASCII edges: 에 may follow directly
 PANE_MARKS = re.compile(r"^[\s🟢🔴👑🫡]+")
 # The global rule's names for the three Macs: a bare 서버 맥 leaves 요유 guessing which one (요유 2026-10-24).
@@ -231,10 +242,22 @@ def too_long(text: str) -> bool:
     return sum(len(line) for line in lines if not LABEL_LINE.match(line)) > LONG_REPLY
 
 
+def ends_in_rieul(syllable: str) -> bool:
+    return "가" <= syllable <= "힣" and (ord(syllable) - 0xAC00) % 28 == 8
+
+
 def asks_which(item: str) -> bool:
     """The question ending of `둘지`, `돌릴지`, `있는지`. Nouns end in 지 too (공지, 메시지), but not after a ㄹ final or 는/은/인."""
     before = item[-2:-1]
-    return item.endswith("지") and (before in ("는", "은", "인") or ("가" <= before <= "힣" and (ord(before) - 0xAC00) % 28 == 8))
+    return item.endswith("지") and (before in ("는", "은", "인") or ends_in_rieul(before))
+
+
+def asks_back(text: str) -> bool:
+    """The reply's last line outside the labeled ones asks leave for one step: `머지할까요?`, `진행해도 될까요?`."""
+    lines = (line.strip() for line in reversed(prose(text).splitlines()))
+    last = next((line for line in lines if line and not LABEL_LINE.match(line)), "")
+    m = ASK_BACK.search(last)
+    return bool(m) and ends_in_rieul(m[1]) and not CHOICE.search(last)
 
 
 def is_decision(item: str) -> bool:
@@ -243,7 +266,7 @@ def is_decision(item: str) -> bool:
     for pat in STRIP:
         item = pat.sub(" ", item)
     item = item.strip(" \t*_.,;")
-    return (bool(DECISION.search(item)) or asks_which(item)) and not DELEGATED.search(item)
+    return (bool(DECISION.search(item)) or asks_which(item)) and not DELEGATED.search(item) and not STEP.search(item)
 
 
 def only_decisions(text: str) -> bool:
@@ -272,8 +295,11 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
               explain_reason(payload, text, env),
               LONG_REASON if claude and not job_session(env) and too_long(text) else None)
     rewrites = [r for r in checks if r]
-    if leaves_yoyoo_work(text) and not only_decisions(text):
+    left = leaves_yoyoo_work(text)
+    if left and not only_decisions(text):
         rewrites.append(DO_REASON if rewrites else REASON)  # a rewrite that is due must not be told to stay silent
+    elif not left and asks_back(text):
+        rewrites.append(DO_REASON if rewrites else ASK_REASON)
     return " ".join(rewrites) or None
 
 
@@ -293,6 +319,10 @@ def selftest():
         "남은 것: 요유 몫: 결정 하나, 위 스크립트 실행 · 유요 몫: 없음",  # one step 유요 could take is enough
         "남은 것: 요유 몫: #12 머지 승인 · 유요 몫: 없음",  # 유요 merges its own PRs
         "남은 것: 요유 몫: 저에게 맡기실지 답하기 · 유요 몫: 없음",
+        "남은 것: 요유 몫: 프로덕션 승격 승인 · 유요 몫: 없음",  # a step worded as an approval (api#975)
+        "남은 것: 요유 몫: prod 배포 승인 결정 · 유요 몫: 없음 · 세션: 닫아도 됨",
+        "남은 것: 요유 몫: 재시작 여부 답하기 · 유요 몫: 없음",
+        "남은 것: 요유 몫: 오늘 15시 진행 여부 답하기 · 유요 몫: 없음",
         "남은 것: 요유 몫: 합의한 Slack 공지 · 유요 몫: 없음",  # 지 in a noun is not a question ending
         "남은 것: 요유 몫: 팀원에게 보낼 메시지 · 유요 몫: 없음",
         "요유 몫: 없음 · 유요 몫: 없음\n\n남은 것: 요유 몫: 값 넣기 · 유요 몫: 없음",  # the last line counts too
@@ -302,12 +332,12 @@ def selftest():
     allow = [
         "남은 것: 요유 몫: 없음 · 유요 몫: watch 대기 · 세션: 닫아도 됨",
         "남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨",
-        "남은 것: 요유 몫: prod 배포 승인 결정 · 유요 몫: 없음 · 세션: 닫아도 됨",  # decisions alone: nothing to ask
         "남은 것: 요유 몫: 페이지를 보고 훅을 만들지 결정 · 유요 몫: 페이지 작성 · 세션: 닫아도 됨",
         "남은 것: 요유 몫: 둘지, 지울지 결정(그대로 둬도 됨, 급하지 않음) · 유요 몫: 없음",
         "남은 것: 요유 몫: 지금 돌릴지(기본은 계속), 그리고 계정 결정 · 유요 몫: 없음",
         '남은 것: 요유 몫: "켜도 된다"고 답하기 · 유요 몫: 없음',
         "남은 것: 요유 몫: 세 길 중 하나 고르기 · 유요 몫: 없음",
+        "남은 것: 요유 몫: 설계 승인 · 유요 몫: 구현 대기",  # a decision with no step in it
         "남은 것: 요유 몫: 이 칸에서 `/clear` 입력 · 유요 몫: 없음",
         "남은 것: 요유 몫: 끌 때 `prod 허용` 한 번 · 유요 몫: 없음",
         "남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨",
@@ -365,6 +395,18 @@ def selftest():
         assert decide(p(t), cli) is None, f"should allow: {t[:60]!r}"
     # A report that left a decision is not rewritten: the question ends without a word when nothing changes.
     assert "쓰지 말고" in REASON and "다시 써" not in REASON, "the report stays where it is"
+    # 요유 2026-11-01 (api#975): "shall I?" hands the step back as much as a 요유 몫 line does.
+    for t in ("PR을 올렸습니다. 머지할까요?", "고쳤습니다.\n\n이대로 만들까요?", "진행해도 될까요?\n\n무엇을: 훅 수정\n왜: 막혀서",
+              "스레드에 올려 둘까요？", "그렇게 할까요?\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨"):
+        assert decide(p(t), cli) == ASK_REASON, f"should ask back: {t[:40]!r}"
+    for t in ("A로 갈까요, 아니면 B로 갈까요?", "어떻게 할까요?", "틀리거나 빠진 부분이 있을까요?", "어느 쪽이 좋을까요?",
+              "`머지할까요?`라고 묻지 않습니다.", '"머지할까요?"처럼 쓰면 훅이 되묻습니다.', "머지할까요? 이 질문은 쓰지 않습니다.",
+              "> 머지할까요?\n인용입니다.", "마지막 줄은 그냥 까요?", "머지했습니다."):
+        assert decide(p(t), cli) is None, f"not a shall-I question: {t[:40]!r}"
+    assert decide(p("머지할까요?\n남은 것: 요유 몫: 세 길 중 하나 고르기 · 유요 몫: 없음"), cli) is None, "a decision on the 요유 몫 line is the handoff format"
+    assert decide(p("머지할까요?\n남은 것: 요유 몫: 값 넣기 · 유요 몫: 없음"), cli) == REASON, "the 요유 몫 question already covers it"
+    assert decide(p("왜: 막혀서\n머지할까요?"), cli) == f"{WHAT_REASON} {DO_REASON}", "a rewrite is due: no telling it to stay silent"
+    assert decide(p("머지할까요?", stop_hook_active=True), cli) is None, "second stop of a turn must pass"
 
     with tempfile.TemporaryDirectory() as d:
         fake = os.path.join(d, "herdr")

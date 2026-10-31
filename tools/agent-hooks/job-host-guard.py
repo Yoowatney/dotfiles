@@ -4,7 +4,7 @@
 Company jobs do not belong on 회사맥, and a memory rule saying so failed twice in October. 회사맥 sleeps with its lid closed and
 goes offline on the commute, so such a job stops with nobody told. A hook cannot know where a job belongs, so it forces the
 judgment: the first launchd, cron or watch-job change of a target in a session is refused with the question. Repeating the
-call passes.
+call passes, except in a job tab nobody has typed in: it stops there and leaves the question on the board.
 
 Reads (`launchctl list`, `crontab -l`) and commands sent to another machine (`ssh server 'launchctl ...'`) are not asked.
 It makes a session stop and think; it is no wall: a job installed from inside a script file or through a variable passes.
@@ -28,6 +28,9 @@ ASK = ("job-host: 회사맥에 정기 잡을 올리거나 바꾸기 직전입니
        "회사서버맥의 launchd에 둡니다. 회사맥에는 요유의 세션이나 회사맥 도구가 꼭 필요한 잡만 둡니다. "
        "요유가 회사맥을 지정했거나 이유가 분명하면 같은 호출을 그대로 다시 실행하고, 보고에 어느 머신에 왜 두었는지 적으세요. "
        "아니면 이 호출을 버리고 회사서버맥에 올리세요. 어디에 둘지 판단할 수 없으면 요유에게 물으세요.")
+# Nobody reads a job tab, so a question it can answer by repeating itself is no stop (요유 2026-11-01, api#975).
+JOB_ASK = ("job-host: 자동 세션은 회사맥의 정기 잡을 올리거나 바꾸지 않습니다. 같은 호출을 반복해도 통과하지 않습니다. 하던 일은 여기서 멈추고, "
+           "어떤 잡을 왜 어느 머신에 둘지 board.sh comment로 남긴 뒤 owner를 yoyoo로 넘기세요. 요유가 이 탭에 직접 입력하면 풀립니다.")
 NAMES = re.compile(r"launchctl|crontab|install-launchd|LaunchAgents")
 HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?([^\n]*)\n(.*?)\n[ \t]*\1\b", re.S)
 QUOTED = re.compile(r"""'[^']*'|"(?:[^"\\]|\\.)*\"""")
@@ -83,15 +86,33 @@ def job_target(payload: dict) -> str | None:
     return "\n".join(sorted(path for path in full if JOB_FILE.search(path))) or None
 
 
+def job_tab(payload: dict, env: dict) -> bool:
+    """A job tab nobody has typed in. The rule is dispatch/guard.sh's: 요유's own prompt lifts a dispatch tab for good and an
+    ambient tab until the next round; an unreadable transcript lifts nothing. A Codex job tab records no such prompt, so it stays on."""
+    ambient, marker = bool(env.get("MUNICE_AMBIENT")), "ambient-round" if env.get("MUNICE_AMBIENT") else "auto-dispatch"
+    if not ambient and not env.get("MUNICE_AUTO_DISPATCH"):
+        return False
+    try:
+        with open(str(payload.get("transcript_path") or ""), encoding="utf-8", errors="replace") as f:
+            prompts = [line for line in f if '"origin":{"kind":"human"}' in line.replace(" ", "")]
+    except OSError:
+        return True
+    return marker in prompts[-1] if ambient and prompts else all(marker in line for line in prompts)
+
+
 def check(payload: dict, env: dict) -> str | None:
     """The question to refuse this call with, or None."""
     target = job_target(payload)
     session = re.sub(r"[^\w-]", "_", str(payload.get("session_id") or ""))
-    if not target or not session:
+    if not target or not (session or env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT")):
         return None
     model = env.get("JOB_HOST_MODEL") or subprocess.run(["sysctl", "-n", "hw.model"], capture_output=True, text=True,
                                                          timeout=2).stdout.strip()
     if model != LAPTOP_MODEL:
+        return None
+    if job_tab(payload, env):
+        return JOB_ASK
+    if not session:
         return None
     folder = env.get("JOB_HOST_DIR") or os.path.expanduser("~/.local/state/job-host")
     os.makedirs(folder, exist_ok=True)
@@ -183,12 +204,41 @@ def selftest():
         assert check(bash("launchctl load /tmp/g.plist"), {**env, "JOB_HOST_MODEL": "Mac14,7"}) is None, "other machines pass"
         assert check({"session_id": "s1", "tool_name": "Bash"}, env) is None, "no input: fail open"
 
+        # 요유 2026-11-01 (api#975): nobody reads a job tab, so its repeat never passes until 요유 types there.
+        def transcript(*prompts):
+            f = tempfile.NamedTemporaryFile("w", suffix=".jsonl", dir=d, delete=False)
+            f.write("".join(json.dumps({"type": "user", "origin": {"kind": "human"}, "message": {"content": p}}) + "\n" for p in prompts))
+            f.close()
+            return f.name
+
+        def job(command, marker_env, path):
+            return check({**bash(command, "job"), "transcript_path": path}, {**env, marker_env: "1"})
+
+        typed_only_by_job = transcript("[auto-dispatch] work on this item")
+        for attempt in (1, 2, 3):
+            assert job("launchctl load /tmp/job1.plist", "MUNICE_AUTO_DISPATCH", typed_only_by_job) == JOB_ASK, f"try {attempt} stops"
+        assert job("launchctl load /tmp/job2.plist", "MUNICE_AUTO_DISPATCH", "/nonexistent/x.jsonl") == JOB_ASK, "no transcript never lifts it"
+        taken_over = transcript("[auto-dispatch] work on this item", "이 잡은 회사맥에 올려")
+        assert job("launchctl load /tmp/job3.plist", "MUNICE_AUTO_DISPATCH", taken_over) == ASK, "요유 typed: asked like any session"
+        assert job("launchctl load /tmp/job3.plist", "MUNICE_AUTO_DISPATCH", taken_over) is None, "and the repeat passes"
+        rounds = transcript("[ambient-round] first", "직접 입력", "[ambient-round] next")
+        assert job("launchctl load /tmp/job4.plist", "MUNICE_AMBIENT", rounds) == JOB_ASK, "an ambient round stops again after 요유 typed"
+        typed = transcript("[ambient-round] first", "직접 입력")
+        assert job("launchctl load /tmp/job5.plist", "MUNICE_AMBIENT", typed) == ASK, "요유 typed in this round"
+        assert check({**bash("launchctl load /tmp/job6.plist", "job"), "transcript_path": typed_only_by_job},
+                     {**env, "JOB_HOST_MODEL": "Mac14,7", "MUNICE_AUTO_DISPATCH": "1"}) is None, "other machines pass"
+        assert job("launchctl list", "MUNICE_AUTO_DISPATCH", typed_only_by_job) is None, "a read is no job change"
+
         # Through the real entry point, the way both tools call it.
         guard = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "claude", "hooks", "gcp-account-guard.py")
 
         def run(payload, **extra):
             return subprocess.run([sys.executable, "-I", guard], input=json.dumps(payload), capture_output=True, text=True,
                                   env={**os.environ, **env, "PANE_FIT_DIR": d, **extra}, timeout=10)
+
+        for attempt in (1, 2):
+            out = run({**bash("launchctl load /tmp/entry-job.plist", "job"), "transcript_path": typed_only_by_job}, MUNICE_AUTO_DISPATCH="1")
+            assert json.loads(out.stdout)["hookSpecificOutput"]["permissionDecisionReason"] == JOB_ASK, f"entry try {attempt}: {out.stdout!r}"
 
         out = run(bash("launchctl load /tmp/entry.plist"))
         assert out.returncode == 0, out.stderr
