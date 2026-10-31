@@ -110,10 +110,11 @@ def reply_of(payload: dict):
     return text
 
 
-def ended_in_silence(payload: dict) -> bool:
-    """yoyoo-share-guard tells a session with nothing to do to end without a word. That Stop has no reply of its own, so the
-    reply held from the Stop before is the report, and withdrawing it would leave the pane open with no report saved."""
-    return bool(payload.get("stop_hook_active")) and not (reply_of(payload) or "").strip()
+def no_new_report(payload: dict) -> bool:
+    """yoyoo-share-guard tells a session with nothing to do to end without a word, and Claude Code then asks it for a visible
+    reply: one line with no `남은 것`. Such a Stop brings no report, so the reply held from the Stop before is the report, and
+    withdrawing it would leave the pane open with no report saved or sent (요유 2026-11-01)."""
+    return bool(payload.get("stop_hook_active")) and not LEFT.search(share.prose(reply_of(payload) or ""))
 
 
 def decide(payload: dict, env) -> str | None:
@@ -327,9 +328,12 @@ def selftest():
     auto, done = {"MUNICE_AUTO_DISPATCH": "1"}, close[0]
     assert decide({"last_assistant_message": done}, auto)
     assert decide({"last_assistant_message": done}, {"MUNICE_AMBIENT": "1"})
-    assert ended_in_silence({"stop_hook_active": True, "last_assistant_message": " \n"}), "the reply held before it is the report"
-    assert not ended_in_silence({"stop_hook_active": True, "last_assistant_message": done}), "a rewrite replaces it"
-    assert not ended_in_silence({"last_assistant_message": ""}), "a first stop with no reply holds nothing"
+    assert no_new_report({"stop_hook_active": True, "last_assistant_message": " \n"}), "the reply held before it is the report"
+    assert no_new_report({"stop_hook_active": True, "last_assistant_message": "위 보고가 최종입니다."}), \
+        "Claude Code refuses a silent ending, so a sent-back session writes a line like this one"
+    assert not no_new_report({"stop_hook_active": True, "last_assistant_message": done}), "a rewrite replaces it"
+    assert not no_new_report({"last_assistant_message": ""}), "a first stop with no reply holds nothing"
+    assert not no_new_report({"last_assistant_message": "위 보고가 최종입니다."}), "not sent back: a new reply and no report"
     assert not decide({"last_assistant_message": done}, {}), "a session 요유 opened is never closed"
     assert not decide({"last_assistant_message": keep[0]}, auto)
     assert not decide({"last_assistant_message": None}, auto)
@@ -523,6 +527,14 @@ esac''')
     herdr_says({"name": "spawned"}, [crown, me])
     time.sleep(0.4)
     assert taken() == "" and saved() == "", "the rewrite is no report: it withdraws the first"
+    # 요유 2026-11-01: share-guard sent an implementer's report back, it answered one line without `남은 것`, and its lead never heard.
+    herdr_says({"name": "spawned"}, [crown, busy])
+    stop(json.dumps({"last_assistant_message": keep[0]}), slow)
+    stop(json.dumps({"stop_hook_active": True, "last_assistant_message": "위 보고가 최종입니다."}), slow)
+    herdr_says({"name": "spawned"}, [crown, me])
+    time.sleep(0.4)
+    assert taken() == "tell w1:p1\n", "a sent-back reply without a report leaves the report held before it"
+    assert keep[0] in saved()
     herdr_says({"name": "spawned"}, [crown, me])
     stop(json.dumps({"last_assistant_message": full}), {**slow, "AUTO_TAB_CLOSE_SETTLE": "0.5"})
     herdr_says({"name": "spawned"}, [crown, busy])
@@ -617,7 +629,7 @@ if __name__ == "__main__":
         sys.exit()
     try:
         payload = json.load(sys.stdin)
-        if not ended_in_silence(payload):
+        if not no_new_report(payload):
             defer(decide(payload, os.environ), os.environ)
     except Exception:  # never break a session
         pass
