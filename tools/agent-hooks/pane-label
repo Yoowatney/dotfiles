@@ -14,9 +14,13 @@
 #   pane-label --clear-if-prefix "api#736 "   remove it only if it still names that item
 #   pane-label --close                        close this pane once the agent's turn ends, only in a tab a job opened
 #                                             (the dispatch job: MUNICE_AUTO_DISPATCH=1, the Slack ambient poll:
-#                                             MUNICE_AMBIENT=1); detached, so it outlives the tool call. Skips a 🔴
-#                                             pane, and cancels if the agent works again within the grace period
-#                                             (요유 typed a new message, or the next ambient round arrived)
+#                                             MUNICE_AMBIENT=1) or a pane `herdr agent start` opened (herdr's agent name
+#                                             is set; a session started by hand has none); detached, so it outlives the
+#                                             tool call. Skips a 🔴 or 👑 pane, and cancels if the agent works again within
+#                                             the grace period (요유 typed a new message, or the next ambient round
+#                                             arrived). An agent-started pane closes only through the Stop hook
+#                                             auto-tab-close.py, which saves the report first and sets
+#                                             PANE_CLOSE_REPORTED=1: its report would go with the pane
 H=${HERDR_BIN_PATH:-herdr}
 [ -n "${HERDR_PANE_ID:-}" ] && command -v "$H" >/dev/null 2>&1 || exit 0
 HOLD=🔴
@@ -25,6 +29,7 @@ LEAD=👑
 
 current() { "$H" pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.label // ""' 2>/dev/null; }
 status() { "$H" pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.agent_status // ""' 2>/dev/null; }
+agent_name() { "$H" agent get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.agent.name // ""' 2>/dev/null; }
 close_when_idle() {
   local wait=${PANE_CLOSE_WAIT:-600} grace=${PANE_CLOSE_GRACE:-20} poll=${PANE_CLOSE_POLL:-2} t0=$SECONDS
   while [ "$(status)" = working ]; do (( SECONDS - t0 < wait )) || return 0; sleep "$poll"; done
@@ -60,9 +65,15 @@ case "${1:-}" in
   --hold) mark "$HOLD" "$(name_of "$(current)")" ;;
   --free) mark "$FREE" "$(name_of "$(current)")" ;;
   --close)
-    # Only a tab a job opened (dispatch, Slack ambient) closes itself; 요유 closes the sessions they started (요유 2026-10-21).
-    if [ -z "${MUNICE_AUTO_DISPATCH:-}" ] && [ -z "${MUNICE_AMBIENT:-}" ]; then
-      echo "pane-label: 요유가 연 세션이라 닫지 않음 (자동·알아서 탭만 닫힘)" >&2; exit 0
+    # Only a tab a job opened (dispatch, Slack ambient) or a pane `herdr agent start` opened closes itself; 요유 closes the
+    # sessions they started (요유 2026-10-21).
+    job="${MUNICE_AUTO_DISPATCH:-}${MUNICE_AMBIENT:-}"
+    if [ -z "$job" ] && [ -z "$(agent_name)" ]; then
+      echo "pane-label: 요유가 연 세션이라 닫지 않음 (자동·알아서 탭과 herdr agent start로 연 칸만 닫힘)" >&2; exit 0
+    fi
+    if is_lead "$(current)"; then echo "pane-label: 👑 pane, not closing" >&2; exit 0; fi
+    if [ -z "$job" ] && [ -z "${PANE_CLOSE_REPORTED:-}" ]; then
+      echo "pane-label: 보고 끝에 '세션: 닫음'을 쓰면 Stop 훅이 보고를 남기고 닫음" >&2; exit 0
     fi
     if [ "$(mark_of "$(current)")" = "$HOLD" ]; then echo "pane-label: 🔴 pane, not closing" >&2; exit 0; fi
     # Own session so the agent's tool runner does not kill it with the command's process group.

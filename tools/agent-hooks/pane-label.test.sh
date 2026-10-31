@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SUBJECT="$(cd "$(dirname "$0")" && pwd)/pane-label"
+unset MUNICE_AUTO_DISPATCH MUNICE_AMBIENT PANE_CLOSE_REPORTED  # a test run inside such a pane must not inherit them
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -22,6 +23,9 @@ case "\$1 \$2" in
   "pane rename")
     if [ "\$4" = "--clear" ]; then rm -f "$SANDBOX/label"; else printf '%s' "\$4" > "$SANDBOX/label"; fi ;;
   "pane close") touch "$SANDBOX/closed" ;;
+  "agent get")
+    if [ -f "$SANDBOX/name" ]; then jq -n --rawfile n "$SANDBOX/name" '{result: {agent: {name: \$n}}}'
+    else jq -n '{result: {agent: {name: null}}}'; fi ;;
   *) exit 2 ;;
 esac
 EOF
@@ -93,5 +97,20 @@ sleep 2; [ -f "$SANDBOX/closed" ] || fail "an auto-dispatch tab should close its
 rm -f "$SANDBOX/closed"
 ( unset MUNICE_AUTO_DISPATCH; export MUNICE_AMBIENT=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close >/dev/null 2>&1 )
 sleep 2; [ -f "$SANDBOX/closed" ] || fail "close_allowed_in_ambient: an ambient tab should close itself"
+
+# A pane `herdr agent start` opened has a name in herdr, whoever ran it and whether or not that session still lives.
+# It closes only after the Stop hook has saved its report (PANE_CLOSE_REPORTED=1); a session that calls --close on its
+# own must not lose the report. A 👑 pane stays: 요유 runs other panes from it.
+rm -f "$SANDBOX/closed"; printf 'spawned' > "$SANDBOX/name"
+( PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close 2>/dev/null )
+sleep 2; [ ! -f "$SANDBOX/closed" ] || fail "an agent-started pane should wait for the report"
+( export PANE_CLOSE_REPORTED=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close >/dev/null )
+sleep 2; [ -f "$SANDBOX/closed" ] || fail "an agent-started pane should close after its report"
+rm -f "$SANDBOX/closed"; pl --lead
+( export PANE_CLOSE_REPORTED=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close 2>/dev/null )
+sleep 2; [ ! -f "$SANDBOX/closed" ] || fail "a 👑 pane should not close"
+pl --unlead; rm -f "$SANDBOX/name"
+( export PANE_CLOSE_REPORTED=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close 2>/dev/null )
+sleep 2; [ ! -f "$SANDBOX/closed" ] || fail "a pane with no agent name is 요유's, even with the flag"
 
 echo "ok: pane-label"
