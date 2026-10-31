@@ -8,6 +8,8 @@ scripts parse, and on the second stop of a turn (stop_hook_active), so it rewrit
 
     korean-reply-guard.py --selftest
 """
+from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
+
 import json
 import os
 import re

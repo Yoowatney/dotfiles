@@ -7,12 +7,16 @@ was broken 45 times in 30 days (2026-10-17), because bypass mode's own instructi
 sed edits. Reading with `sed -n` stays allowed.
 
 Also holds the other Bash ban that must work in Claude and Codex alike: agents open panes with `pane-spawn`, never
-`herdr agent start` or `herdr pane split`, so every new job gets its own named tab and a lead mark (요유 2026-10-31). It lives
+`herdr agent start`, `herdr pane split` or `herdr tab create`, so every new job gets its own named tab and a lead mark
+(요유 2026-10-31). Typing an agent into a pane (`herdr pane run`, `send-text`) is refused too: such a pane has no herdr name, so
+it reads as a session 요유 opened and never closes. A test that needs one uses `pane-temp`, which closes itself. It lives
 here because Codex runs a new hook only after 요유 trusts it, and this command is already trusted. Jobs that run outside an
 agent's Bash tool (the dispatch job) never reach this hook.
 
     no-sed-inplace.py --selftest
 """
+from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
+
 import importlib.util
 import json
 import os
@@ -37,8 +41,12 @@ INPLACE = {
 }
 LAUNCHERS = {"xargs", "-exec", "-execdir"}  # sed reached through `xargs sed` or `find -exec sed`
 # A regex, unlike the sed check: `pane=$(herdr pane split ...)` is the usual form, and strip_captures would hide it.
-SPAWN = re.compile(r"(?:^|[;&|(`]|\$\()\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?herdr(?:\s+-\S+(?:\s+[^\s-]\S*)?)*"
-                   r"\s+(?:agent\s+start|pane\s+split)\b(?![^\n;|&]*--help)", re.M)
+HERDR = r"(?:^|[;&|(`]|\$\()\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?herdr(?:\s+-\S+(?:\s+[^\s-]\S*)?)*"
+SPAWN = re.compile(HERDR + r"\s+(?:agent\s+start|pane\s+split|tab\s+create)\b(?![^\n;|&]*--help)", re.M)
+# An agent typed into a pane gets no herdr name, so nothing closes it. This one reads the raw command: the agent word sits
+# inside the quotes code_only blanks. A word after it means text or a one-shot subcommand (`claude mcp list`), not a session.
+LAUNCH = re.compile(HERDR + r"""\s+pane\s+(?:run|send-text)\s+\S+\s+['"]?(?:cd\s+\S+\s*&&\s*|[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?"""
+                    r"""(?:claude|codex)(?=\s*(?:$|['";&|]|-|resume\b))(?!\s+(?:-p|--print|--version|-v|--help|-h)\b)""", re.M)
 QUOTED = re.compile(r"""'[^']*'|"(?:[^"\\]|\\.)*\"""")
 CAPTURE = re.compile(r"\$\([^)]*\)|`[^`]*`")
 
@@ -50,9 +58,10 @@ def code_only(cmd: str) -> str:
 
 
 def bash_problem(cmd: str) -> str | None:
-    if SPAWN.search(code_only(cmd)):
+    if SPAWN.search(code_only(cmd)) or LAUNCH.search(_guard.HEREDOC.sub("<<heredoc", cmd)):
         return ('pane-spawn: 칸을 직접 띄우지 말 것. `pane-spawn "<일 이름>" "<지시>"`로 띄울 것: 일 이름을 붙인 새 탭에서 시작하고, '
-                '호출한 칸을 👑로 표시하고, 세션을 기다려 지시까지 전달함. 같은 일의 칸(설계·구현·리뷰)만 `--same-tab`')
+                '호출한 칸을 👑로 표시하고, 세션을 기다려 지시까지 전달함. 같은 일의 칸(설계·구현·리뷰)만 `--same-tab`. '
+                '요유가 연 세션처럼 이름 없는 칸이 꼭 필요한 시험은 `pane-temp "<이름>"`: 일이 끝나거나 1시간이 지나면 스스로 닫힘')
     visible = _guard.strip_captures(_guard.HEREDOC.sub("<<heredoc", cmd))  # heredoc bodies are text
     for seg in _guard.segments(visible):
         w = _guard.words(seg)
@@ -105,9 +114,29 @@ def selftest():
         "ls && herdr agent start tmp --kind claude --pane w1:p2",
         "FOO=1 herdr pane split --current",
         "herdr pane split --pane w1:p1\nherdr agent prompt w1:p2 hi",
+        'tab=$(herdr tab create --workspace w5 --label x --no-focus)',
+        "herdr tab create --cwd /tmp",
+        """herdr pane run "$pane" 'claude --model haiku'""",
+        'herdr pane run w5:pDC "claude --model haiku --dangerously-skip-permissions" >/dev/null 2>&1; sleep 8',
+        'herdr pane run "$pane" "codex; echo CODEX_EXIT=\\$?"',
+        'herdr pane run "$p" claude',
+        'herdr pane run "$p" "cd /tmp && claude"',
+        'herdr pane run "$p" "FOO=1 /opt/homebrew/bin/codex"',
+        'herdr pane run "$p" "codex resume x"',
+        'herdr pane send-text "$p" "claude --model haiku"',
     ]
     allow = [
         "pane-spawn '설계' '지시'",
+        "pane-temp '시험' --kind codex",
+        "herdr tab create --help | head",
+        "herdr tab close w1:t2",
+        'herdr pane run "$pane" "claude mcp list > /tmp/x"',
+        'herdr pane run "$p" "claude -p hi"',
+        'herdr pane run "$p" "npm test"',
+        """herdr pane send-text "$c" '중간 글'""",
+        'herdr pane send-text "$p" "/exit"',
+        'herdr pane send-text "$p" "claude 쪽 결과입니다"',
+        "herdr agent prompt w1:p2 'herdr pane run x claude'",
         "herdr agent prompt w1:p2 'herdr pane split 금지'",
         "herdr agent get w1:p2 | jq .",
         "herdr pane list",

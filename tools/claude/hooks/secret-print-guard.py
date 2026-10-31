@@ -9,6 +9,8 @@ and the Read/Grep tools on a secret file.
 
     secret-print-guard.py --selftest
 """
+from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
+
 import json
 import re
 import shlex

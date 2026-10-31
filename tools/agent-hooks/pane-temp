@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Opens an agent test pane with no herdr agent name, for the one thing pane-spawn cannot test: how a session 요유 started by
+# hand behaves (the name is what tells the two apart). Every other pane comes from pane-spawn.
+# A pane with no name never closes itself, and 4 of them sat idle after a test on 10/31. So this pane goes on its own: when
+# its agent exits, or PANE_TEMP_TTL seconds (1 hour) after it started, whoever forgets. Nothing runs outside the pane, so
+# nothing is left to die first. Label `임시 …`: yoyoo-share-guard.py sends a last report back while one is open.
+#   pane-temp [--kind claude|codex] [--cwd <dir>] [--env KEY=VALUE]... "<name>" [-- <agent arguments>]
+#   pane-temp --kind codex "손세션 시험" -- --model gpt-5
+# Prints the new pane id. Exit 2: bad usage.
+H=${HERDR_BIN_PATH:-herdr}
+USAGE='usage: pane-temp [--kind claude|codex] [--cwd <dir>] [--env KEY=VALUE]... "<name>" [-- <agent arguments>]'
+die() { echo "pane-temp: $*" >&2; exit 2; }
+
+kind=claude cwd=$PWD envs=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --kind | --cwd | --env)
+      [ $# -ge 2 ] || die "$USAGE"
+      case "$1" in
+        --kind) kind=$2 ;;
+        --cwd) cwd=$2 ;;
+        --env) envs+=(--env "$2") ;;
+      esac
+      shift 2 ;;
+    --*) die "$USAGE" ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 1 ] && [ -n "$1" ] || die "$USAGE"
+name=$1
+shift
+[ "${1:-}" != -- ] || shift
+case "$kind" in claude | codex) ;; *) die "$USAGE" ;; esac
+[ -n "${HERDR_PANE_ID:-}" ] || die "run this inside a herdr pane"
+command -v jq >/dev/null 2>&1 || die "jq not found"
+
+ws=$("$H" pane get "$HERDR_PANE_ID" | jq -r '.result.pane.workspace_id // empty') # HERDR_* go stale when a pane moves
+[ -n "$ws" ] || die "herdr does not know this pane"
+pane=$("$H" tab create --workspace "$ws" --cwd "$cwd" --label "임시 $name" ${envs[@]+"${envs[@]}"} --no-focus | jq -r '.result.root_pane.pane_id // empty')
+[ -n "$pane" ] || die "herdr opened no pane"
+"$H" pane rename "$pane" "🟢 임시 $name" >/dev/null
+
+# alarm survives exec and SIGALRM ends either agent. The pane resolves its own id at the end: a move changes it.
+agent=$(printf '%q ' "$kind" "$@")
+"$H" pane run "$pane" "perl -e 'alarm shift; exec @ARGV' ${PANE_TEMP_TTL:-3600} $agent; $H pane close \"\$($H pane get \"\$HERDR_PANE_ID\" | jq -r .result.pane.pane_id)\"" >/dev/null
+echo "$pane"
