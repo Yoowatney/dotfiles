@@ -19,6 +19,7 @@ A JSON deny blocks the call and tells the model why.
 """
 from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
 
+import importlib.util
 import json
 import os
 import re
@@ -196,6 +197,19 @@ def code_problems(tool: str, inp: dict, cwd: str) -> list[str]:
     ]
 
 
+def fresh_reason(payload: dict) -> str | None:
+    """A check that rides on this hook, for its registration in both tools: see slack-fresh-guard.py. Its own crash passes."""
+    sys.dont_write_bytecode = True
+    try:
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "agent-hooks", "slack-fresh-guard.py")
+        spec = importlib.util.spec_from_file_location("slack_fresh", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.check(payload, dict(os.environ))
+    except Exception:
+        return None
+
+
 def selftest():
     assert problems("• 항목") and problems("    ◦ 하위")
     assert problems("- item") and problems("1. step") and problems("  * x")
@@ -276,9 +290,10 @@ if __name__ == "__main__":
         found, fix = code_problems(tool, inp, payload.get("cwd") or os.getcwd()), CODE_FIX
         if not found and "slackcopy" in (inp.get("command") or ""):  # a markdown file headed for the clipboard
             found, fix = slackcopy_problems(inp["command"], load_members()), MENTION_FIX
-    if found:  # JSON deny: Claude Code and Codex both read it
+    reason = "Slack 형식 검사에 걸렸습니다.\n- " + "\n- ".join(found) + "\n" + fix if found else fresh_reason(payload)
+    if reason:  # JSON deny: Claude Code and Codex both read it
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": "Slack 형식 검사에 걸렸습니다.\n- " + "\n- ".join(found) + "\n" + fix,
+            "permissionDecisionReason": reason,
         }}, ensure_ascii=False))

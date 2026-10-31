@@ -26,6 +26,7 @@ explicit because CLAUDE_CODE_ENTRYPOINT leaks into commands Claude runs, Codex i
 """
 from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
 
+import importlib.util
 import json
 import os
 import re
@@ -229,6 +230,19 @@ def explain_reason(payload: dict, text: str, env) -> str | None:
     return None if WROTE_IT.search(unicodedata.normalize("NFC", text)) else EXPLAIN_REASON
 
 
+def stale_thread_reason(payload: dict, text: str, env) -> str | None:
+    """The question for a report that says nobody answered on an old thread read: see slack-fresh-guard.py. Its own crash passes."""
+    sys.dont_write_bytecode = True
+    try:
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "slack-fresh-guard.py")
+        spec = importlib.util.spec_from_file_location("slack_fresh", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.report_reason(payload, prose(text), dict(env))
+    except Exception:
+        return None
+
+
 def job_session(env) -> bool:
     """A job's report goes to the board and Slack, and no one reads it in the terminal."""
     return bool(env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT"))
@@ -292,7 +306,7 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
         return None
     checks = (names_reason(text, env), WHAT_REASON if misses_what(text) else None,
               PROBLEM_REASON if misses_problem_line(text) else None, left_open_reason(payload, text, env),
-              explain_reason(payload, text, env),
+              explain_reason(payload, text, env), stale_thread_reason(payload, text, env),
               LONG_REASON if claude and not job_session(env) and too_long(text) else None)
     rewrites = [r for r in checks if r]
     left = leaves_yoyoo_work(text)
