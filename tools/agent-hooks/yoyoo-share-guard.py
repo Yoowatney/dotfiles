@@ -73,8 +73,8 @@ OPENED_BY = re.compile(r"^spawn-([0-9A-Za-z]+)-")  # pane-spawn's agent name: sp
 WROTE_IT = re.compile(r"(?:Claude|유요).{0,12}(?:썼|작성)")
 EXPLAIN_REASON = "yoyoo-share-guard: 이번 설명 페이지는 Codex가 실패해 Claude가 썼습니다. 보고에 'Claude가 썼습니다'와 실패 이유를 넣어 다시 쓰세요."
 # 요유 2026-11-01: most reports go to Codex, as the pages do, since they could not follow Claude's. The rule to use a page was
-# there and nothing held it: in the 14 days to 11/1, 13% of 1,248 reports had a page and the median ran 738 characters outside
-# the labeled lines. At 500 about 7 in 10 of those go to Codex; a conclusion, three points and a path fit under it.
+# there and nothing held it: in the 14 days to 11/1, 13% of about 1,200 reports had a page and the median ran 621 characters of
+# prose outside the labeled lines. At 500 about half go to Codex, 29 to 41 a day; a conclusion, three points and a path fit under it.
 LONG_REPLY = 500
 LABEL_LINE = re.compile(r"^\W*(?:무엇을|왜|남은[ \t]*것|원인|조치|재발[ \t]*방지)\W*[:：]")
 PAGE = re.compile(r"/explain/\S+\.html")
