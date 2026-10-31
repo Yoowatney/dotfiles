@@ -7,6 +7,7 @@ judgment: the first launchd, cron or watch-job change of a target in a session i
 call passes.
 
 Reads (`launchctl list`, `crontab -l`) and commands sent to another machine (`ssh server 'launchctl ...'`) are not asked.
+It makes a session stop and think; it is no wall: a job installed from inside a script file or through a variable passes.
 gcp-account-guard.py calls check(), for the reason pane-fit-guard.py gives: that hook is already registered in both tools with
 the widest matcher, so this reaches open sessions and needs no new approval in Codex. Fails open.
 
@@ -28,11 +29,13 @@ ASK = ("job-host: 회사맥에 정기 잡을 올리거나 바꾸기 직전입니
        "요유가 회사맥을 지정했거나 이유가 분명하면 같은 호출을 그대로 다시 실행하고, 보고에 어느 머신에 왜 두었는지 적으세요. "
        "아니면 이 호출을 버리고 회사서버맥에 올리세요. 어디에 둘지 판단할 수 없으면 요유에게 물으세요.")
 NAMES = re.compile(r"launchctl|crontab|install-launchd|LaunchAgents")
-HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?([^\n]*)\n.*?\n[ \t]*\1\b", re.S)
+HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?([^\n]*)\n(.*?)\n[ \t]*\1\b", re.S)
 QUOTED = re.compile(r"""'[^']*'|"(?:[^"\\]|\\.)*\"""")
 AT_COMMAND = (r"(?:^|[;&|({\n])\s*(?:(?:[A-Za-z_]\w*=\S*|sudo|command|exec|env|nohup|time|xargs|if|elif|while|until|then|do|else|!)"
               r"(?:\s+-\S+)*\s+)*")
 LOCAL_SHELL = re.compile(AT_COMMAND + r"(?:\S*/)?(?:ba|z)?sh\s+-\w*c\s+$")
+SHELL_STDIN = re.compile(AT_COMMAND + r"(?:\S*/)?(?:ba|z)?sh(?:\s+-\S+)*\s*$")
+SUBSTITUTION = re.compile(r"\$\(([^()]*)\)")
 # cp, mv and ln count only with LaunchAgents as the last argument: copying a job out of there is a read.
 JOB = re.compile(AT_COMMAND + r"(?:\S*/)?(?:launchctl\s+(?:-\S+\s+)*(?:bootstrap|load|enable)\b"
                  r"|crontab\s+(?![^;&|\n]*(?<!\S)-[lr]\b)[^\s>]|(?:(?:ba|z)?sh\s+(?:\S*/)?)?install-launchd\b"
@@ -44,19 +47,26 @@ PATCH_PATH = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$"
 
 
 def run_here(command: str) -> str:
-    """The command without what the shell here does not run: heredoc bodies and quoted arguments with a space in them.
+    """The command without what the shell here does not run: heredoc bodies and quoted text that is not a plain path.
 
-    A quoted path with no space stays, so `cp a "$HOME/Library/LaunchAgents/b"` is still seen, and so does the text of a local
-    `bash -c '...'`. `ssh server 'a; b'` is gone.
+    What stays: a quoted plain path, so `cp a "$HOME/Library/LaunchAgents/b"` is still seen; the text a local shell is given
+    (`bash -c '...'`, `bash <<EOF`); and `$(...)` in double quotes, which runs here whatever the quotes go to.
+    `ssh server 'a; b'` and `rg 'a|b'` are gone.
     """
-    command = HEREDOC.sub(r"\2", command.replace("\\\n", " "))
+
+    def heredoc(m):
+        return f"{m.group(2)}\n{m.group(3)}\n" if SHELL_STDIN.search(m.string, 0, m.start()) else m.group(2)
 
     def quoted(m):
-        if LOCAL_SHELL.search(command, 0, m.start()):
-            return "; " + m.group()[1:-1]
-        return "''" if re.search(r"\s", m.group()) else m.group()
+        text = m.group()
+        if LOCAL_SHELL.search(m.string, 0, m.start()):
+            return f"; {text[1:-1]} ;"
+        ran = SUBSTITUTION.findall(text) if text[0] == '"' else []
+        if ran:
+            return "".join(f"; {inner} ;" for inner in ran)
+        return "''" if re.search(r"[\s;&|()]", text) else text
 
-    return QUOTED.sub(quoted, command)
+    return QUOTED.sub(quoted, HEREDOC.sub(heredoc, command.replace("\\\n", " ")))
 
 
 def job_target(payload: dict) -> str | None:
@@ -69,7 +79,9 @@ def job_target(payload: dict) -> str | None:
         paths = PATCH_PATH.findall(str(inp.get("command") or inp.get("input") or inp.get("patch") or ""))
     else:
         paths = [str(inp.get("file_path") or "")] if tool in EDITORS else []
-    return next((path for path in map(str.strip, paths) if JOB_FILE.search(path)), None)
+    cwd = str(payload.get("cwd") or "")
+    full = (os.path.normpath(os.path.join(cwd, os.path.expanduser(path.strip()))) for path in paths if path.strip())
+    return "\n".join(sorted(path for path in full if JOB_FILE.search(path))) or None
 
 
 def check(payload: dict, env: dict) -> str | None:
@@ -116,7 +128,9 @@ def selftest():
                  'ln -sf /x/c.plist "$HOME/Library/LaunchAgents"', "cp d ~/Library/LaunchAgents/e 2> /dev/null",
                  "bash -c 'launchctl load /tmp/k.plist'", "zsh -lc 'crontab /tmp/jobs2'",
                  "sudo sh -c 'cat > /Library/LaunchAgents/r.plist'", "if ! launchctl load /tmp/i.plist; then echo x; fi",
-                 "nohup launchctl load /tmp/n.plist", "ls *.plist | xargs -n1 launchctl load", "launchctl \\\n  load /tmp/j.plist"]
+                 "nohup launchctl load /tmp/n.plist", "ls *.plist | xargs -n1 launchctl load", "launchctl \\\n  load /tmp/j.plist",
+                 "bash <<'SCRIPT'\nlaunchctl load /tmp/l.plist\nSCRIPT", 'output="$(launchctl load /tmp/v.plist 2>&1)"',
+                 'ssh server "echo $(launchctl load /tmp/w.plist)"', 'cp f "$HOME/Library/LaunchAgents/${NAME}.plist"']
         for command in asked:
             assert check(bash(command), env) == ASK, command
             assert check(bash(command), env) is None, f"the repeat passes: {command}"
@@ -135,7 +149,8 @@ def selftest():
                         'git commit -m "fix: launchctl load; crontab x"', 'rg "launchctl load" tools', "crontab -l | grep x",
                         "scp a.plist server:~/Library/LaunchAgents/", "launchctl list | grep yoyoo", "command -v crontab >/dev/null 2>&1",
                         "crontab -u yoyoo -l", "ssh server \\\n  launchctl load /tmp/a", "ssh server bash -c 'launchctl load /tmp/a'",
-                        "cp ~/Library/LaunchAgents/a.plist ~/backup/LaunchAgents/a.plist", "cat a > /tmp/x/LaunchAgents/a.plist"):
+                        "cp ~/Library/LaunchAgents/a.plist ~/backup/LaunchAgents/a.plist", "cat a > /tmp/x/LaunchAgents/a.plist", "rg -n 'launchctl|crontab|install-launchd|LaunchAgents' /repo",
+                        "ssh server 'true;install-launchd'", "ssh server bash <<'EOF'\nlaunchctl load /tmp/a\nEOF"):
             assert check(bash(command), env) is None, command
         for payload in (edit("/repo/a.py"), edit("/Users/y/Library/LaunchAgents/a.plist", "Read"),
                         edit("/repo/watch/run.sh.bak")):
@@ -152,6 +167,13 @@ def selftest():
         assert check(patch("/repo/a.py"), env) is None, "another patched file"
         moved = patch("/tmp/m.plist\n*** Move to: /Users/y/Library/LaunchAgents/m.plist")
         assert check(moved, env) == ASK, "a patch that moves a file there"
+        for payload in ({**patch("job.plist"), "cwd": "/Users/y/Library/LaunchAgents"},
+                        {**patch("run.sh"), "cwd": "/y/.agents/skills/agent-board/watch"}):
+            assert check(payload, env) == ASK, f"a relative path counts from cwd: {payload}"
+        first, both = "/Users/y/Library/LaunchAgents/a1.plist", "\n*** Add File: /Users/y/Library/LaunchAgents/b1.plist"
+        assert check(patch(first), env) == ASK and check(patch(first), env) is None
+        assert check(patch(first + both), env) == ASK, "a new target beside an answered one is asked"
+        assert check(patch(first + both), env) is None, "and the same patch again passes"
 
         assert check(bash("launchctl load /tmp/d.plist", "s2"), env) == ASK, "another session is asked again"
         assert check(bash("launchctl load /tmp/e.plist", "s2"), env) == ASK, "another target is asked again"
