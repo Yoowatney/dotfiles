@@ -9,7 +9,7 @@
     <array>
         <string>/bin/bash</string>
         <string>/Users/yoyoo/.dotfiles/tools/agent-hooks/pane-label</string>
-        <string>--sync-tabs</string>
+        <string>--sync-all-tabs</string>
     </array>
 
     <key>StartInterval</key>

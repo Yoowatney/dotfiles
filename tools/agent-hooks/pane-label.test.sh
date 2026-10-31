@@ -196,28 +196,34 @@ b t1 👑 다른 세션'
 renamed() { cat "$SANDBOX/tab-renames" 2>/dev/null || true; }
 sync_ok() { rm -f "$SANDBOX/tab-renames"; "$@" || fail "should exit 0: $*"; }
 
-# Launchd runs it outside any pane, so it needs no pane of its own, and it covers every running herdr session.
-sync_ok env -u HERDR_PANE_ID HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" --sync-tabs
-[ "$(renamed)" = "$want_renames" ] || fail "sync-tabs renamed: $(renamed)"
+# Launchd runs --sync-all-tabs outside any pane, so it needs no pane of its own, and it covers every running herdr session.
+all() { env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" --sync-all-tabs; }
+sync_ok all
+[ "$(renamed)" = "$want_renames" ] || fail "sync-all-tabs renamed: $(renamed)"
+
+# A pane works in its own session: every pane rename reaches its tab at once and touches no other session, so a herdr
+# session that is stuck elsewhere cannot stall pane-label, its hook callers or pane-spawn.
+export HERDR_SOCKET_PATH=/s/a
+here_renames=$(grep '^a ' <<<"$want_renames")
+sync_ok pl --sync-tabs; [ "$(renamed)" = "$here_renames" ] || fail "--sync-tabs renamed: $(renamed)"
+sync_ok pl --lead; [ "$(renamed)" = "$here_renames" ] || fail "--lead synced: $(renamed)"
+sync_ok pl "일 이름"; [ "$(renamed)" = "$here_renames" ] || fail "a rename synced: $(renamed)"
 
 # A name changed after the list was read is 요유's: it stays, and the next run looks again.
 touch "$SANDBOX/tab-changed"; sync_ok pl --sync-tabs; rm "$SANDBOX/tab-changed"
 [ "$(renamed)" = "" ] || fail "a name changed since the list was read was overwritten: $(renamed)"
 
-# Every rename of a pane syncs at once: --lead and a plain name reach the tab without waiting for launchd.
-sync_ok pl --lead; [ "$(renamed)" = "$want_renames" ] || fail "--lead did not sync the tabs: $(renamed)"
-sync_ok pl "일 이름"; [ "$(renamed)" = "$want_renames" ] || fail "a rename did not sync the tabs: $(renamed)"
-
 # Failure flow: herdr refusing any of it leaves the pane work whole, and one bad tab does not stop the others.
 echo t1 > "$SANDBOX/tab-rename-fails"
 sync_ok pl "탭 하나 실패"; expect "🟢 👑 탭 하나 실패" "a failed tab rename leaves the pane rename"
-[ "$(renamed)" = "$(grep -v '^a t1 ' <<<"$want_renames" | grep -v '^b t1 ')" ] || fail "a failed tab stopped the others: $(renamed)"
+[ "$(renamed)" = "$(grep -v '^a t1 ' <<<"$here_renames")" ] || fail "a failed tab stopped the others: $(renamed)"
 rm "$SANDBOX/tab-rename-fails" "$SANDBOX/tabsa.json"
 sync_ok pl "탭 목록 실패"; expect "🟢 👑 탭 목록 실패" "a failed tab list leaves the pane rename"
-[ "$(renamed)" = "b t1 👑 다른 세션" ] || fail "one broken session stopped the next: $(renamed)"
+[ "$(renamed)" = "" ] || fail "nothing to sync without a tab list: $(renamed)"
+unset HERDR_SOCKET_PATH
+sync_ok all; [ "$(renamed)" = "b t1 👑 다른 세션" ] || fail "one broken session stopped the next: $(renamed)"
 rm "$SANDBOX/sessions.json"
-sync_ok pl "세션 목록 실패"; expect "🟢 👑 세션 목록 실패" "a failed session list leaves the pane rename"
-[ "$(renamed)" = "" ] || fail "nothing to sync without a session list: $(renamed)"
+sync_ok all; [ "$(renamed)" = "" ] || fail "nothing to sync without a session list: $(renamed)"
 sync_ok env HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH=/nonexistent/herdr bash "$SUBJECT" --sync-tabs
 
 echo "ok: pane-label"

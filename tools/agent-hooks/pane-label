@@ -14,13 +14,15 @@
 #                                             it (`herdr agent start`), it is outside the job tabs, and it is not 👑. It
 #                                             comes by itself from the first name on, and marks and renames keep it.
 #   pane-label --mark-subs                    add 🫡 to the panes already running; new ones need no call
-#   pane-label --sync-tabs                    make every tab name follow its panes, in every running herdr session (요유
-#                                             2026-10-31): `👑 ` when a pane in it is a lead, else `🫡 ` when one is under a
-#                                             lead, no mark otherwise. Job tabs (자동·알아서) never get one: other code reads
-#                                             those names by their first word. Every rename here runs it. launchd
+#   pane-label --sync-tabs                    make every tab name in this herdr session follow its panes (요유 2026-10-31):
+#                                             `👑 ` when a pane in it is a lead, else `🫡 ` when one is under a lead, no mark
+#                                             otherwise. Job tabs (자동·알아서) never get one: other code reads those names by
+#                                             their first word. Every rename here runs it.
+#   pane-label --sync-all-tabs                the same in every running herdr session, with no pane needed. launchd
 #                                             (com.yoyoo.herdr-tab-marks, every 10 s) runs it for what no session sees: a pane
 #                                             closed or moved, a tab renamed by hand. It polls because herdr sends no event
-#                                             when a pane is renamed, so nothing could listen for a new 👑.
+#                                             when a pane is renamed, so nothing could listen for a new 👑. Only this one
+#                                             visits other sessions, so a stuck session cannot stall a pane rename.
 #   pane-label --clear                        remove it
 #   pane-label --clear-if-prefix "api#736 "   remove it only if it still names that item
 #   pane-label --close                        close this pane once the agent's turn ends, only in a tab a job opened
@@ -34,7 +36,7 @@
 #                                             it opened are gone, and sets PANE_CLOSE_REPORTED=1: the report would go
 #                                             with the pane
 H=${HERDR_BIN_PATH:-herdr}
-{ [ -n "${HERDR_PANE_ID:-}" ] || [ "${1:-}" = --sync-tabs ]; } && command -v "$H" >/dev/null 2>&1 || exit 0
+{ [ -n "${HERDR_PANE_ID:-}" ] || [ "${1:-}" = --sync-all-tabs ]; } && command -v "$H" >/dev/null 2>&1 || exit 0
 HOLD=🔴
 FREE=🟢
 LEAD=👑
@@ -65,10 +67,11 @@ sub_of() {
   [ -z "${MUNICE_AUTO_DISPATCH:-}${MUNICE_AMBIENT:-}" ] || return 0
   if [[ "$(name_of "$1")" == "$SUB"* ]] || [ -n "$(agent_name)" ]; then echo "$SUB"; fi
 }
-# One herdr session, named by HERDR_SOCKET_PATH. A name 요유 changed after the list was read stays; the next run looks again.
+# The herdr session HERDR_SOCKET_PATH names. A name 요유 changed after the list was read stays; the next run looks again.
 # ponytail: a tab with no name shows its position; once marked, that number stays as a fixed name, since herdr cannot clear a
-# name. No such tab holds a mark today (session.json); skip tabs whose label equals their number if one ever does.
-sync_session() {
+# name. No such tab holds a mark today (session.json); skip tabs whose label is only digits if one ever does (`.number` in
+# `tab list` is a creation count, not the position).
+sync_tabs() {
   local tabs panes id old new
   tabs=$("$H" tab list 2>/dev/null) && panes=$("$H" pane list 2>/dev/null) || return 0
   jq -rn --argjson t "$tabs" --argjson p "$panes" '
@@ -89,10 +92,10 @@ sync_session() {
       "$H" tab rename "$id" "$new" >/dev/null 2>&1
     done
 }
-sync_tabs() {
+sync_all_tabs() {
   local sock
   "$H" session list --json 2>/dev/null | jq -r '.sessions[] | select(.running) | .socket_path' 2>/dev/null |
-    while IFS= read -r sock; do HERDR_SOCKET_PATH=$sock sync_session; done
+    while IFS= read -r sock; do HERDR_SOCKET_PATH=$sock sync_tabs; done
 }
 rename() { "$H" pane rename "$HERDR_PANE_ID" "$@" >/dev/null 2>&1; sync_tabs; }
 mark() { # mark name
@@ -105,8 +108,9 @@ lead() { # lead|"" label: rewrite the label with or without 👑, keeping mark a
 }
 
 case "${1:-}" in
-  "") echo 'usage: pane-label "<text>" | --hold | --free | --lead | --unlead | --mark-subs | --sync-tabs | --clear | --clear-if-prefix "<prefix>" | --close' >&2; exit 2 ;;
+  "") echo 'usage: pane-label "<text>" | --hold | --free | --lead | --unlead | --mark-subs | --sync-tabs | --sync-all-tabs | --clear | --clear-if-prefix "<prefix>" | --close' >&2; exit 2 ;;
   --sync-tabs) sync_tabs ;;
+  --sync-all-tabs) sync_all_tabs ;;
   --clear) rename --clear ;;
   --lead) lead 1 "$(current)" ;;
   --unlead) lead "" "$(current)" ;;
