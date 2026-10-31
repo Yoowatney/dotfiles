@@ -37,9 +37,9 @@ STEP = re.compile(r"&&|\|\||;|\n|\\n")  # a lone | or & stays: a pipe or a URL q
 THREAD_TS = re.compile(r"thread_ts\W{0,8}(\d{10}\.\d{6})(?![\d.])")
 # 댓글 only with 아무도: alone it was mostly GitHub comments and test tables in the 14-day replay.
 NO_ANSWER = re.compile(r"아무도[^\n.,]{0,12}(?:답|회신|댓글)"
-                       r"|(?<![정해])(?:답|답글|답변|회신)(?:이|은|는|도|가)?[ \t]*(?:아직[ \t]*)?"
-                       r"(?:없(?!이|으면|을|다면|어도|는지|는데)|안[ \t]*(?:왔|달렸|옴)|오지[ \t]*않|달리지[ \t]*않)"
-                       r"|(?<![정해대])답하지[ \t]*(?:않았|않음)")
+                       r"|(?<![정해응])(?:답|답글|답변|회신)(?:이|은|는|도|가)?[ \t]*(?:아직[ \t]*)?"
+                       r"(?:없(?!이|으면|을|다면|어도|는지|는데|는[ \t]*(?:경우|때))|안[ \t]*(?:왔|달렸|옴)|오지[ \t]*않|달리지[ \t]*않)"
+                       r"|(?<![정해대응])답하지[ \t]*(?:않았|않음)")
 
 
 def calls(path: str):
@@ -93,8 +93,9 @@ def post_thread(payload: dict, env: dict) -> str | None:
     if REPLY_SCRIPT.search(command) and env.get("MUNICE_AMBIENT_THREAD"):
         thread = env["MUNICE_AMBIENT_THREAD"].rsplit("/", 1)[-1]
     else:
-        found = THREAD_TS.search(command) if WRITES.search(command) else None
-        thread = found[1] if found else None
+        posts = WRITES.search(command) and "thread_ts" in command
+        named, loose = THREAD_TS.search(command), TS.search(command)  # loose: `jq --arg t <ts> '{thread_ts:$t}'`
+        thread = named[1] if posts and named else loose[0] if posts and loose else None
     return None if thread and thread in read_targets(command) else thread  # it reads in the same call
 
 
@@ -115,8 +116,10 @@ def check(payload: dict, env: dict) -> str | None:
         return None
     open(mark, "w").close()
     when = "이 세션에서 읽은 기록이 없습니다" if age is None else f"{minutes(age)}분 전에 읽었습니다"
+    # ambient/work.md stops the round at a denial unless the reason says it is not production and to go on.
+    round_note = " production 일이 아니니 다시 읽고 라운드를 이어 가세요." if env.get("MUNICE_AMBIENT") else ""
     return (f"slack-fresh: 이 스레드({thread})는 {when}. 그사이에 달린 답글을 놓친 채 쓰면 안 되니, `bash {READER} <채널 ID> {thread}`로 "
-            "최신 글을 다시 읽고, 그에 맞게 글을 고친 뒤 보내세요. 이 방법으로 읽을 수 없는 스레드(DM 등)면 같은 호출을 그대로 다시 실행하세요.")
+            f"최신 글을 다시 읽고, 그에 맞게 글을 고친 뒤 보내세요. 이 방법으로 읽을 수 없는 스레드(DM 등)면 같은 호출을 그대로 다시 실행하세요.{round_note}")
 
 
 def report_reason(payload: dict, text: str, env: dict) -> str | None:
@@ -213,6 +216,12 @@ EOF"""
         mixed = log(claude_call(1, "Bash", command=f"{reader}{other}; {post}"), claude_call(2, "Bash", command=f"{reader}{other}\n{post}"))
         assert list(last_reads(mixed)) == [other], "the thread posted to is not recorded as read"
         assert check(bash(post, mixed, "s30"), env), "so the next post is still asked"
+        jq = f"jq -n --arg t {thread} '{{thread_ts:$t}}' | curl https://slack.com/api/chat.postMessage -d @-"
+        assert check(bash(jq, stale, "s31"), env), "a ts handed to jq is still this thread"
+        assert "production" in check(bash("bash /x/ambient/reply.sh /tmp/reply.txt", stale, "s32"), {**env, "MUNICE_AMBIENT_THREAD": f"C1/{thread}", "MUNICE_AMBIENT": "1"}), \
+            "ambient work.md stops at a denial unless its reason says it is not production"
+        for t in ("답이 없는 경우 추천안대로 진행합니다.", "서버 응답이 없습니다.", "응답 없음", "서버가 응답하지 않았습니다."):
+            assert not NO_ANSWER.search(t), f"not about a thread: {t}"
         assert check(bash("git commit -m 'post with chat.postMessage and thread_ts'", stale, "s9"), env) is None, "no thread named"
         assert check(bash("curl https://slack.com/api/chat.postMessage -d channel=C1 -d text=t", stale, "s10"), env) is None, "a new post, no thread"
         ambient = {**env, "MUNICE_AMBIENT_THREAD": f"C01TESTCHAN/{thread}"}

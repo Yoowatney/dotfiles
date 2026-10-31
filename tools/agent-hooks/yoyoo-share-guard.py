@@ -46,7 +46,7 @@ NONE = re.compile(r"^(?:없음|없습니다|none)\b", re.I)
 # and a rewrite prints it twice (요유 2026-10-31), so a turn with nothing to do ends without a word.
 # The aside: on 10/29 a session answered this question by adding why only 요유 could do it, and 유요 had another way (api#975).
 DO_REASON = ("yoyoo-share-guard: 요유 몫 가운데 유요가 지금 할 수 있는 일(명령 실행, Slack 글, 합의된 단계)은 지금 하세요. "
-             "막혔다는 사유를 붙여 남기지 말고 다른 경로를 찾으세요.")
+             "막혔다는 사유를 붙여 남기지 말고 다른 경로를 찾으세요. prod에 닿는 배포·머지, 데이터, 외부 설정, 과금은 요유의 확인이 있어야 하니 하지 말고 그대로 두세요.")
 END_QUIETLY = ("그런 일이 없으면 응답 없이 턴을 끝내세요: 다시 쓰지 말고, 다시 쓰지 않았다는 말이나 이유도 쓰지 마세요. "
                "보고는 이미 화면 맨 아래에 있습니다.")
 REASON = f"{DO_REASON} 그래서 보고가 바뀌면 바뀐 보고를 쓰세요. {END_QUIETLY}"
@@ -70,10 +70,11 @@ DECISION = re.compile(r"(?:결정(?:하기| 입력)?|정하기|고르기|선택|
 DELEGATED = re.compile(r"머지|맡기|공유|리뷰|검토|댓글")  # standing permission: these are 유요's own steps, however they are worded
 # A step worded as a decision: `프로덕션 승격 승인` is 유요's step, or one bounce from it (요유 2026-11-01, api#975). A real 요유 call
 # ends quietly at the question. `설계 승인` names no step and stays a decision.
-STEP = re.compile(r"(?:배포|승격|실행|재시작|설치|적용|전환|삭제|게시|전송|공지|로그인|진행)(?:[ \t]*(?:승인|결정|판단|여부|답하기))*$")
+STEP = re.compile(r"(?:배포|승격|실행|재시작|설치|적용|전환|삭제|게시|전송|공지|로그인|진행)(?:할지|될지)?"
+                  r"(?:[ \t]*(?:승인|결정(?:하기)?|정하기|고르기|선택|판단|여부|답하기))*$")
 ONLY_YOYOO = re.compile(r"`/clear`|`prod 허용`")  # typed by 요유 alone: the handoff rule and the production unlock
 ASK_BACK = re.compile(r"([가-힣])까요[ \t]*[?？]\**$")
-CHOICE = re.compile(r"아니면|어떻게|어느|어떤|무엇|뭘|(?:있|없|좋|맞|나)을까요")  # asks what to do or whether it is right, not leave to do it
+CHOICE = re.compile(r"아니면|어떻게|어느|어떤|어디|언제|누구|무엇|뭐|뭘|괜찮|(?:있|없|좋|맞|나)을까요|까요[^?？]*까요")  # asks what to do or whether it is right, not leave to do it
 PANE_ID = re.compile(r"(?<![A-Za-z0-9_:/.-])w[0-9A-Z]+:p[0-9A-Z]+(?![0-9A-Za-z])")  # ASCII edges: 에 may follow directly
 PANE_MARKS = re.compile(r"^[\s🟢🔴👑🫡]+")
 # The global rule's names for the three Macs: a bare 서버 맥 leaves 요유 guessing which one (요유 2026-10-24).
@@ -334,6 +335,10 @@ def selftest():
         "남은 것: 요유 몫: 저에게 맡기실지 답하기 · 유요 몫: 없음",
         "남은 것: 요유 몫: 프로덕션 승격 승인 · 유요 몫: 없음",  # a step worded as an approval (api#975)
         "남은 것: 요유 몫: prod 배포 승인 결정 · 유요 몫: 없음 · 세션: 닫아도 됨",
+        "남은 것: 요유 몫: 프로덕션에 배포할지 결정 · 유요 몫: 없음",
+        "남은 것: 요유 몫: prod 배포 결정하기 · 유요 몫: 없음",
+        "남은 것: 요유 몫: 재시작할지 답하기 · 유요 몫: 없음",
+        "남은 것: 요유 몫: 승격 여부 선택 · 유요 몫: 없음",
         "남은 것: 요유 몫: 재시작 여부 답하기 · 유요 몫: 없음",
         "남은 것: 요유 몫: 오늘 15시 진행 여부 답하기 · 유요 몫: 없음",
         "남은 것: 요유 몫: 합의한 Slack 공지 · 유요 몫: 없음",  # 지 in a noun is not a question ending
@@ -351,6 +356,7 @@ def selftest():
         '남은 것: 요유 몫: "켜도 된다"고 답하기 · 유요 몫: 없음',
         "남은 것: 요유 몫: 세 길 중 하나 고르기 · 유요 몫: 없음",
         "남은 것: 요유 몫: 설계 승인 · 유요 몫: 구현 대기",  # a decision with no step in it
+        "남은 것: 요유 몫: 훅을 만들지 결정 · 유요 몫: 없음",
         "남은 것: 요유 몫: 이 칸에서 `/clear` 입력 · 유요 몫: 없음",
         "남은 것: 요유 몫: 끌 때 `prod 허용` 한 번 · 유요 몫: 없음",
         "남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨",
@@ -414,8 +420,10 @@ def selftest():
         assert decide(p(t), cli) == ASK_REASON, f"should ask back: {t[:40]!r}"
     for t in ("A로 갈까요, 아니면 B로 갈까요?", "어떻게 할까요?", "틀리거나 빠진 부분이 있을까요?", "어느 쪽이 좋을까요?",
               "`머지할까요?`라고 묻지 않습니다.", '"머지할까요?"처럼 쓰면 훅이 되묻습니다.', "머지할까요? 이 질문은 쓰지 않습니다.",
-              "> 머지할까요?\n인용입니다.", "마지막 줄은 그냥 까요?", "머지했습니다."):
+              "> 머지할까요?\n인용입니다.", "마지막 줄은 그냥 까요?", "머지했습니다.",
+              "PR을 나눌까요, 합칠까요?", "A로 할까요 B로 할까요?", "어디에 둘까요?", "언제 배포할까요?", "뭐로 할까요?", "이대로 괜찮을까요?"):
         assert decide(p(t), cli) is None, f"not a shall-I question: {t[:40]!r}"
+    assert "prod에 닿는" in REASON, "a real production step is not something to go and do"
     assert decide(p("머지할까요?\n남은 것: 요유 몫: 세 길 중 하나 고르기 · 유요 몫: 없음"), cli) is None, "a decision on the 요유 몫 line is the handoff format"
     assert decide(p("머지할까요?\n남은 것: 요유 몫: 값 넣기 · 유요 몫: 없음"), cli) == REASON, "the 요유 몫 question already covers it"
     assert decide(p("왜: 막혀서\n머지할까요?"), cli) == f"{WHAT_REASON} {DO_REASON}", "a rewrite is due: no telling it to stay silent"

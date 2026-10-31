@@ -30,7 +30,7 @@ ASK = ("job-host: 회사맥에 정기 잡을 올리거나 바꾸기 직전입니
        "아니면 이 호출을 버리고 회사서버맥에 올리세요. 어디에 둘지 판단할 수 없으면 요유에게 물으세요.")
 # Nobody reads a job tab, so a question it can answer by repeating itself is no stop (요유 2026-11-01, api#975).
 JOB_ASK = ("job-host: 자동 세션은 회사맥의 정기 잡을 올리거나 바꾸지 않습니다. 같은 호출을 반복해도 통과하지 않습니다. 하던 일은 여기서 멈추고, "
-           "어떤 잡을 왜 어느 머신에 둘지 board.sh comment로 남긴 뒤 owner를 yoyoo로 넘기세요. 요유가 이 탭에 직접 입력하면 풀립니다.")
+           "어떤 잡을 왜 어느 머신에 둘지 board.sh comment로 남긴 뒤 owner를 yoyoo로 넘기세요. Claude 탭은 요유가 직접 입력하면 풀립니다.")
 NAMES = re.compile(r"launchctl|crontab|install-launchd|LaunchAgents")
 HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?([^\n]*)\n(.*?)\n[ \t]*\1\b", re.S)
 QUOTED = re.compile(r"""'[^']*'|"(?:[^"\\]|\\.)*\"""")
