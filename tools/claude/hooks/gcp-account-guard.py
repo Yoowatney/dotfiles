@@ -14,6 +14,7 @@ terraform#1005.
 """
 from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
 
+import importlib.util
 import json
 import os
 import re
@@ -203,6 +204,19 @@ def tool_problem(payload: dict, env: dict) -> str | None:
     return (f"{what}: AI 세션은 에이전트 계정(staging 쓰기, prod 읽기)으로만 GCP를 씁니다. prod 쓰기가 꼭 필요하면 "
             f"여기서 멈추고, 무엇을 왜 바꾸는지 적은 뒤 요유에게 '`{UNLOCK}`이라고 입력하면 이번 턴만 요유 계정으로 "
             "할 수 있다'고 말할 것. 처음부터 prod 작업 세션이면 요유가 `cla`로 띄움. terraform#1005")
+
+
+def pane_fit(hook_input: dict) -> str | None:
+    """The pane question rides on this hook: see pane-fit-guard.py for why. It can never change a GCP verdict."""
+    sys.dont_write_bytecode = True
+    try:
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "agent-hooks", "pane-fit-guard.py")
+        spec = importlib.util.spec_from_file_location("pane_fit", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.check(hook_input, dict(os.environ))
+    except Exception:
+        return None
 
 
 def selftest():
@@ -456,10 +470,12 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:
         selftest()
         sys.exit()
-    reason = tool_problem(json.load(sys.stdin), dict(os.environ))
+    hook_input = json.load(sys.stdin)
+    reason = tool_problem(hook_input, dict(os.environ))
+    reason = f"gcp-account-guard: {reason}" if reason else pane_fit(hook_input)
     if reason:  # JSON deny: Claude Code and Codex both read it
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": f"gcp-account-guard: {reason}",
+            "permissionDecisionReason": reason,
         }}, ensure_ascii=False))

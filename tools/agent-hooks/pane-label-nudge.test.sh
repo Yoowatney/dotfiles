@@ -54,6 +54,25 @@ ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 api#819 배포" | context)
 [[ "$ctx" == *"pane-label --hold"* ]] || fail "🟢 should say how to hold: $ctx"
 [[ "$ctx" != *"pane-label --free"* ]] || fail "🟢 should not ask to free: $ctx"
 
+# A correction gets its reminder, inside herdr and outside it (Codex or a plain terminal), and a plain request does not.
+ask() { # <prompt> <env...>
+    local prompt=$1; shift
+    jq -n --arg p "$prompt" '{hook_event_name: "UserPromptSubmit", session_id: "s/1", prompt: $p}' |
+        env -u HERDR_PANE_ID -u FAKE_LABEL -u FAKE_HERDR_FAIL HERDR_BIN_PATH="$SANDBOX/herdr" PANE_FIT_DIR="$SANDBOX/fit" "$@" "$SUBJECT" ||
+        fail "hook exited non-zero ($*)"
+}
+ctx=$(ask "왜 또 그렇게 했어" | context)
+[[ "$ctx" == *"같은 종류"* ]] || fail "outside herdr a correction still reminds: $ctx"
+[ -z "$(ask "로그 봐 줘")" ] || fail "outside herdr a plain request prints nothing"
+[ ! -e "$SANDBOX/fit" ] || fail "outside herdr nothing is armed"
+ctx=$(ask "왜 또 그렇게 했어" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 일" | context)
+[[ "$ctx" == *"같은 종류"* && "$ctx" == *"pane-label"* ]] || fail "both reminders in one message: $ctx"
+ctx=$(ask "로그 봐 줘" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 일" | context)
+[[ "$ctx" != *"같은 종류"* ]] || fail "a plain request gets no reminder: $ctx"
+
+# Each message arms the pane question, under a name that cannot leave the folder.
+[ -f "$SANDBOX/fit/s_1" ] || fail "message did not arm pane-fit"
+
 # Inside herdr without a label: say there is none.
 ctx=$(run_hook HERDR_PANE_ID=w1:p1 | context)
 [[ "$ctx" == *"no label"* ]] || fail "missing-label case not stated: $ctx"

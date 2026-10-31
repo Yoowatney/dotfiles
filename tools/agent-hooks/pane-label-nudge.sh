@@ -5,12 +5,23 @@
 # the session's first-topic title, which is how 요유 tells panes apart (2026-10-08).
 # `pane-label-nudge.sh session` is the SessionStart side: a pane with no name gets "새 세션 <folder>",
 # so a new session never sits as a bare "Claude Code" title until its first message (요유 2026-10-17).
-# No-op outside herdr. Always exits 0: a reminder must never block a prompt.
+# Both tools already run this on every message, so what is added here reaches open sessions at once and needs no new Codex
+# hook trust: correction-nudge.py (the only part that also runs outside herdr) and the arming of pane-fit-guard.py.
+# Otherwise a no-op outside herdr. Always exits 0: a reminder must never block a prompt.
 input=$(cat 2>/dev/null)
 PLACEHOLDER="새 세션"
 
-[ -n "${HERDR_PANE_ID:-}" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
+emit() {
+    jq -n --arg ctx "$1" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $ctx}}' 2>/dev/null
+    exit 0
+}
+correction=
+[ "${1:-}" = session ] || correction=$(python3 -I "$(dirname "$0")/correction-nudge.py" <<<"$input" 2>/dev/null)
+if [ -z "${HERDR_PANE_ID:-}" ]; then
+    [ -z "$correction" ] || emit "$correction"
+    exit 0
+fi
 
 label=$("${HERDR_BIN_PATH:-herdr}" pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.label // empty' 2>/dev/null)
 
@@ -22,6 +33,14 @@ if [ "${1:-}" = session ]; then
         bash "$(dirname "$0")/pane-label" "$PLACEHOLDER ${dir##*/}"
     fi
     exit 0
+fi
+
+# A new message: the next working tool asks whether this work belongs in a pane (pane-fit-guard.py).
+session=$(jq -r '.session_id // empty' <<<"$input" 2>/dev/null)
+if [ -n "$session" ]; then
+    armed=${PANE_FIT_DIR:-$HOME/.local/state/pane-fit}
+    mkdir -p "$armed" && touch "$armed/${session//[^A-Za-z0-9_-]/_}" 2>/dev/null
+    find "$armed" -type f -mtime +7 -delete 2>/dev/null
 fi
 
 name=${label#🔴}; name=${name#🟢}; name=${name# }; name=${name#👑}; name=${name#🫡}
@@ -49,5 +68,4 @@ if [ -n "$transcript" ] && [ -r "$transcript" ]; then
     fi
 fi
 
-jq -n --arg ctx "$msg" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $ctx}}' 2>/dev/null
-exit 0
+emit "$msg${correction:+ $correction}"
