@@ -21,7 +21,11 @@ case "\$1 \$2" in
     if [ -f "$SANDBOX/label" ]; then jq -n --rawfile l "$SANDBOX/label" --arg s "\$st" '{result: {pane: {label: \$l, agent_status: \$s}}}'
     else jq -n --arg s "\$st" '{result: {pane: {agent_status: \$s}}}'; fi ;;
   "pane rename")
+    echo "\$3 \$4" >> "$SANDBOX/renames"
     if [ "\$4" = "--clear" ]; then rm -f "$SANDBOX/label"; else printf '%s' "\$4" > "$SANDBOX/label"; fi ;;
+  "pane list") cat "$SANDBOX/panes.json" ;;
+  "tab list") cat "$SANDBOX/tabs.json" ;;
+  "agent list") cat "$SANDBOX/agents.json" ;;
   "pane close") touch "$SANDBOX/closed" ;;
   "agent get")
     if [ -f "$SANDBOX/name" ]; then jq -n --rawfile n "$SANDBOX/name" '{result: {agent: {name: \$n}}}'
@@ -112,5 +116,36 @@ sleep 2; [ ! -f "$SANDBOX/closed" ] || fail "a 👑 pane should not close"
 pl --unlead; rm -f "$SANDBOX/name"
 ( export PANE_CLOSE_REPORTED=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close 2>/dev/null )
 sleep 2; [ ! -f "$SANDBOX/closed" ] || fail "a pane with no agent name is 요유's, even with the flag"
+
+# 🫡 marks a pane under a lead: herdr has an agent name for it, outside job tabs, and 👑 outranks it.
+rm -f "$SANDBOX/label"; printf 'spawned' > "$SANDBOX/name"
+pl "새 세션 munice"; expect "🟢 🫡 새 세션 munice" "the first name already carries 🫡"
+pl "api#8 구현"; expect "🟢 🫡 api#8 구현" "rename keeps 🫡"
+pl --hold; expect "🔴 🫡 api#8 구현" "hold keeps 🫡"
+pl "api#8 감시"; expect "🔴 🫡 api#8 감시" "rename under 🔴 keeps 🫡"
+pl --free; expect "🟢 🫡 api#8 감시" "free keeps 🫡"
+pl "🫡 api#8 끝"; expect "🟢 🫡 api#8 끝" "a caller that writes 🫡 is not doubled"
+pl --clear-if-prefix "api#9 "; expect "🟢 🫡 api#8 끝" "clear-if-prefix compares the task"
+pl --lead; expect "🟢 👑 api#8 끝" "--lead leaves only 👑"
+pl "api#8 리드"; expect "🟢 👑 api#8 리드" "a lead stays a lead on rename"
+pl --unlead; expect "🟢 🫡 api#8 리드" "--unlead gives 🫡 back"
+pl --clear-if-prefix "api#8 "; expect "" "own prefix clears past 🫡"
+( export MUNICE_AUTO_DISPATCH=1; pl "api#8 자동" ); expect "🟢 api#8 자동" "no 🫡 in a dispatch tab"
+( export MUNICE_AMBIENT=1; pl "알아서 일" ); expect "🟢 알아서 일" "no 🫡 in an ambient tab"
+pl --clear
+printf '🟢 🫡 시작' > "$SANDBOX/label"; rm -f "$SANDBOX/name"
+pl "일 이름"; expect "🟢 🫡 일 이름" "a pane pane-spawn named keeps 🫡 until herdr has its agent"
+pl --clear
+pl "요유 칸"; expect "🟢 요유 칸" "no 🫡 without an agent name"
+
+# --mark-subs gives already running panes the same mark, once.
+printf 'spawned' > "$SANDBOX/name"; rm -f "$SANDBOX/renames" "$SANDBOX/label"
+jq -n '{result: {tabs: [{tab_id: "t1", label: "일"}, {tab_id: "t2", label: "자동 api#1"}, {tab_id: "t3", label: "알아서 #1-dev x"}]}}' > "$SANDBOX/tabs.json"
+jq -n '{result: {panes: [{pane_id: "p1", label: "🔴 일"}, {pane_id: "p2", label: "🟢 요유"}, {pane_id: "p3", label: "🟢 자동"},
+  {pane_id: "p4", label: "🟢 알아서"}, {pane_id: "p5", label: "🟢 👑 리드"}, {pane_id: "p6", label: "🟢 🫡 이미"}]}}' > "$SANDBOX/panes.json"
+jq -n '{result: {agents: [{pane_id: "p1", name: "a", tab_id: "t1"}, {pane_id: "p2", name: null, tab_id: "t1"}, {pane_id: "p3", name: "b", tab_id: "t2"},
+  {pane_id: "p4", name: "c", tab_id: "t3"}, {pane_id: "p5", name: "d", tab_id: "t1"}, {pane_id: "p6", name: "e", tab_id: "t1"}]}}' > "$SANDBOX/agents.json"
+( export MUNICE_AMBIENT=1; pl --mark-subs >/dev/null )
+[ "$(cat "$SANDBOX/renames")" = "p1 🔴 🫡 일" ] || fail "mark-subs renamed: $(cat "$SANDBOX/renames")"
 
 echo "ok: pane-label"

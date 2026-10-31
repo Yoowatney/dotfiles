@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Opens a pane for another agent, in one command (Claude and Codex both use it). One tab holds one job (요유 2026-10-31):
+# new work starts in a new tab named for it, and only one job's design, build and review share a tab (--same-tab).
+# It marks the calling pane 👑, opens the tab or split, names the pane 🫡, starts the agent, waits for its session and
+# hands over the instruction. The agent's herdr name is what lets the pane close itself when its work ends (pane-label).
+# Agents cannot run `herdr agent start` or `herdr pane split` themselves: the hook no-sed-inplace.py sends them here.
+#   pane-spawn [--same-tab] [--kind claude|codex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
+#   pane-spawn "api#1 설계" "지시" -- --model opus --effort high
+# Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
+H=${HERDR_BIN_PATH:-herdr}
+USAGE='usage: pane-spawn [--same-tab] [--kind claude|codex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]'
+die() { echo "pane-spawn: $*" >&2; exit 2; }
+
+same= kind=claude cwd=$PWD
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --same-tab) same=1; shift ;;
+    --kind | --cwd)
+      [ $# -ge 2 ] || die "$USAGE"
+      if [ "$1" = --kind ]; then kind=$2; else cwd=$2; fi
+      shift 2 ;;
+    --*) die "$USAGE" ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 2 ] && [ -n "$1" ] && [ -n "$2" ] || die "$USAGE"
+name=$1 prompt=$2
+shift 2
+[ "${1:-}" != -- ] || shift
+case "$kind" in
+  claude) ready='.result.agent.agent_session.value' ;;
+  codex) ready='.result.agent.interactive_ready' ;; # Codex reports no session id before its first prompt
+  *) die "$USAGE" ;;
+esac
+[ -n "${HERDR_PANE_ID:-}" ] || die "run this inside a herdr pane"
+command -v jq >/dev/null 2>&1 || die "jq not found"
+
+pane-label --lead
+if [ -n "$same" ]; then
+  pane=$("$H" pane split --pane "$HERDR_PANE_ID" --direction right --cwd "$cwd" --no-focus | jq -r '.result.pane.pane_id // empty')
+else
+  ws=$("$H" pane get "$HERDR_PANE_ID" | jq -r '.result.pane.workspace_id // empty')
+  pane=$("$H" tab create --workspace "$ws" --cwd "$cwd" --label "$name" --no-focus | jq -r '.result.root_pane.pane_id // empty')
+fi
+[ -n "$pane" ] || die "herdr opened no pane"
+"$H" pane rename "$pane" "🟢 🫡 $name" >/dev/null
+
+give_up() { "$H" pane close "$pane" >/dev/null 2>&1; echo "pane-spawn: $1" >&2; exit 1; }
+agent="spawn-$(date +%H%M%S)-$RANDOM"
+for try in 1 2 3; do # a pane opened a moment ago may not be at its shell prompt yet
+  "$H" agent start "$agent" --kind "$kind" --pane "$pane" --timeout 120000 ${1+--} "$@" >/dev/null 2>&1 && break
+  [ "$try" != 3 ] || give_up "$kind did not start"
+  sleep "${PANE_SPAWN_RETRY_WAIT:-3}"
+done
+for _ in $(seq 1 60); do # `agent start` can return while a wrapper still runs in the pane (dispatch/run.sh)
+  "$H" agent get "$pane" 2>/dev/null | jq -e "$ready" >/dev/null && break
+  [ "$_" != 60 ] || give_up "$kind never became ready"
+  sleep "${PANE_SPAWN_POLL:-2}"
+done
+"$H" agent prompt "$pane" "$prompt" >/dev/null || give_up "the instruction was not delivered"
+echo "$pane"

@@ -10,6 +10,10 @@
 #                                             no per-pane border or background colour, and the collapsed sidebar shows
 #                                             no text, so the name in the pane border is the one place it can show.
 #                                             Renames keep it.
+#                                             🫡 sits in the same place on a pane under a lead: herdr has an agent name for
+#                                             it (`herdr agent start`), it is outside the job tabs, and it is not 👑. It
+#                                             comes by itself from the first name on, and marks and renames keep it.
+#   pane-label --mark-subs                    add 🫡 to the panes already running; new ones need no call
 #   pane-label --clear                        remove it
 #   pane-label --clear-if-prefix "api#736 "   remove it only if it still names that item
 #   pane-label --close                        close this pane once the agent's turn ends, only in a tab a job opened
@@ -26,6 +30,7 @@ H=${HERDR_BIN_PATH:-herdr}
 HOLD=🔴
 FREE=🟢
 LEAD=👑
+SUB=🫡
 
 current() { "$H" pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.label // ""' 2>/dev/null; }
 status() { "$H" pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.agent_status // ""' 2>/dev/null; }
@@ -43,22 +48,39 @@ close_when_idle() {
 }
 mark_of() { case "$1" in "$HOLD"*) echo "$HOLD" ;; "$FREE"*) echo "$FREE" ;; esac; }
 name_of() { local t=${1#"$HOLD"}; t=${t#"$FREE"}; echo "${t# }"; }
-task_of() { local t; t=$(name_of "$1"); t=${t#"$LEAD"}; echo "${t# }"; }
+task_of() { local t; t=$(name_of "$1"); t=${t#"$LEAD"}; t=${t#"$SUB"}; echo "${t# }"; }
 is_lead() { [[ "$(name_of "$1")" == "$LEAD"* ]]; }
+# $1 the current label. A pane already 🫡 stays so: pane-spawn names it before herdr has its agent.
+sub_of() {
+  [ -z "${MUNICE_AUTO_DISPATCH:-}${MUNICE_AMBIENT:-}" ] || return 0
+  if [[ "$(name_of "$1")" == "$SUB"* ]] || [ -n "$(agent_name)" ]; then echo "$SUB"; fi
+}
 rename() { "$H" pane rename "$HERDR_PANE_ID" "$@" >/dev/null 2>&1; }
 mark() { # mark name
   if [ -n "$2" ]; then rename "$1 $2"; else rename "$1"; fi
 }
-lead() { # lead|"" label: rewrite the label with or without 👑, keeping mark and task
-  local m t; m=$(mark_of "$2"); t=$(task_of "$2")
-  if [ -n "$1" ]; then mark "${m:-$FREE}" "$LEAD${t:+ $t}"; else mark "${m:-$FREE}" "$t"; fi
+lead() { # lead|"" label: rewrite the label with or without 👑, keeping mark and task; 👑 replaces 🫡 and gives it back
+  local m t s; m=$(mark_of "$2"); t=$(task_of "$2")
+  if [ -n "$1" ]; then mark "${m:-$FREE}" "$LEAD${t:+ $t}"
+  else s=$(sub_of "$2"); mark "${m:-$FREE}" "$s${s:+${t:+ }}$t"; fi
 }
 
 case "${1:-}" in
-  "") echo 'usage: pane-label "<text>" | --hold | --free | --lead | --unlead | --clear | --clear-if-prefix "<prefix>" | --close' >&2; exit 2 ;;
+  "") echo 'usage: pane-label "<text>" | --hold | --free | --lead | --unlead | --mark-subs | --clear | --clear-if-prefix "<prefix>" | --close' >&2; exit 2 ;;
   --clear) rename --clear ;;
   --lead) lead 1 "$(current)" ;;
   --unlead) lead "" "$(current)" ;;
+  --mark-subs)
+    labels=$("$H" pane list 2>/dev/null | jq -c '[.result.panes[] | {key: .pane_id, value: (.label // "")}] | from_entries')
+    jobs=$("$H" tab list 2>/dev/null | jq -c '[.result.tabs[] | select((.label // "") | test("^(자동|알아서) ")) | .tab_id]')
+    "$H" agent list 2>/dev/null |
+      jq -r --argjson l "${labels:-{\}}" --argjson j "${jobs:-[]}" \
+        '.result.agents[] | select(.name != null and (.tab_id as $t | $j | index($t) | not)) | [.pane_id, ($l[.pane_id] // "")] | @tsv' |
+      while IFS=$'\t' read -r pane label; do
+        case "$label" in *"$LEAD"* | *"$SUB"*) continue ;; esac
+        env -u MUNICE_AUTO_DISPATCH -u MUNICE_AMBIENT HERDR_PANE_ID="$pane" bash "$0" "${label:-$FREE}"
+        echo "$pane $label"
+      done ;;
   --clear-if-prefix)
     cur=$(task_of "$(current)")
     [ -n "${2:-}" ] && [[ "$cur" == "$2"* ]] && rename --clear ;;
@@ -85,6 +107,6 @@ case "${1:-}" in
     m=$(mark_of "$*")
     [ -n "$m" ] || m=$(mark_of "$cur")
     if is_lead "$cur" || is_lead "$*"; then lead 1 "${m:-$FREE} $(task_of "$*")"
-    else mark "${m:-$FREE}" "$(name_of "$*")"; fi ;;
+    else s=$(sub_of "$cur"); t=$(task_of "$*"); mark "${m:-$FREE}" "$s${s:+${t:+ }}$t"; fi ;;
 esac
 exit 0

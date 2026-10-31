@@ -24,7 +24,7 @@ if [ "${1:-}" = session ]; then
     exit 0
 fi
 
-name=${label#🔴}; name=${name#🟢}
+name=${label#🔴}; name=${name#🟢}; name=${name# }; name=${name#👑}; name=${name#🫡}
 case "${name# }" in "$PLACEHOLDER"*) label= ;; esac # the session-start name is no name yet
 
 # The mark tells 요유 whether closing this session stops something (요유 2026-10-17): see pane-label.
