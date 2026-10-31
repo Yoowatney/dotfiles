@@ -16,6 +16,10 @@ closing lines go to the pane that opened it, else a 👑 it can be sure of. A re
 nobody, and so does a 👑 while a pane it opened is alive; a named 👑 whose panes are gone closes like the rest.
 A pane moved to another workspace gets a new id, and only `herdr pane get` still knows the old one from its env, so the
 current pane comes from there, and pane-spawn records its caller by terminal id, which a move does not change.
+A Stop hook runs beside the other Stop hooks, and any of them can send the reply back to be rewritten, so a Stop is not the
+end of a turn: a draft went to the lead, then its rewrite (2026-10-31, share-guard asked for pane names). The hook only leaves
+the reply in a per-pane file and detaches. That step waits until the agent has stopped working, and each Stop of the pane
+replaces or withdraws the file, so the last reply of the turn is the only one acted on.
 Never blocks; prints nothing. Fails open.
 
 --sweep lists the panes that already finished, which no Stop hook will visit again: named, idle, not held as above, and a
@@ -32,6 +36,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import unicodedata
 
 sys.dont_write_bytecode = True  # no __pycache__ in the dotfiles at every stop
@@ -159,6 +164,64 @@ def finish(reply: str, env):
     subprocess.run([pl, "--close"], env={**env, "PANE_CLOSE_REPORTED": "1"}, timeout=3, **quiet)
 
 
+def pending_file(env) -> str:
+    folder = env.get("PANE_REPORT_DIR") or os.path.expanduser("~/.local/state/pane-reports")
+    return os.path.join(folder, ".pending-" + env["HERDR_PANE_ID"])
+
+
+def defer(reply, env):
+    """Hold this Stop's reply until the turn ends, in place of any earlier Stop's; None withdraws. A claude -p inside the
+    pane inherits its id but is not its session, so its Stop leaves the pane's reply alone."""
+    if not env.get("HERDR_PANE_ID") or env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
+        return
+    path = pending_file(env)
+    if reply is None:
+        if os.path.exists(path):
+            os.unlink(path)
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    token = str(time.time_ns())
+    with open(f"{path}.{token}", "w", encoding="utf-8") as f:
+        json.dump({"token": token, "reply": reply}, f, ensure_ascii=False)
+    os.replace(f"{path}.{token}", path)  # the step of an earlier Stop may be reading it
+    # Own session, as `pane-label --close`: it outlives this hook and the pane it closes.
+    subprocess.Popen([sys.executable, "-I", os.path.realpath(__file__), "--after-turn", token], env=dict(env), start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def held_reply(token: str, env) -> str | None:
+    """The reply left for this step, unless a later Stop replaced or withdrew it."""
+    try:
+        with open(pending_file(env), encoding="utf-8") as f:
+            held = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return held["reply"] if held.get("token") == token else None
+
+
+def after_turn(token: str, env):
+    """herdr keeps an agent `working` through a sent-back reply. A short quiet spell after it covers the gap before a turn
+    starts again; 요유 typing in that spell restarts it, and that turn's own Stop then decides."""
+    settle = float(env.get("AUTO_TAB_CLOSE_SETTLE", 3))
+    deadline = time.monotonic() + float(env.get("AUTO_TAB_CLOSE_WAIT", 600))
+    quiet_from = time.monotonic()
+    while time.monotonic() < deadline:
+        reply = held_reply(token, env)
+        if reply is None:
+            return
+        if here(env).get("agent_status") == "working":
+            quiet_from = time.monotonic()
+        elif time.monotonic() - quiet_from >= settle:
+            try:
+                finish(reply, env)
+            finally:
+                os.unlink(pending_file(env))
+            return
+        time.sleep(float(env.get("AUTO_TAB_CLOSE_POLL", 0.5)))
+    if held_reply(token, env) is not None:
+        os.unlink(pending_file(env))
+
+
 def last_reply(session: str) -> str:
     """The last reply of a finished session, from its Claude transcript or its Codex log."""
     home = os.path.expanduser("~")
@@ -274,16 +337,30 @@ esac''')
 
     reports = f"{sandbox}/reports"
 
-    def run(payload, env, args=()):
-        r = subprocess.run([sys.executable, "-I", os.path.realpath(__file__), *args], input=payload, capture_output=True,
-                           text=True, env={"PATH": os.environ.get("PATH", ""), "HOME": sandbox, "HERDR_BIN_PATH": fake_herdr,
-                                           "PANE_REPORT_DIR": reports, "AUTO_TAB_CLOSE_PANE_LABEL": fake,
-                                           "AUTO_TAB_CLOSE_PANE_TELL": fake_tell, **env},
-                           timeout=10)
+    def stop(payload, env, args=()):
+        return subprocess.run([sys.executable, "-I", os.path.realpath(__file__), *args], input=payload, capture_output=True,
+                              text=True, env={"PATH": os.environ.get("PATH", ""), "HOME": sandbox, "HERDR_BIN_PATH": fake_herdr,
+                                              "PANE_REPORT_DIR": reports, "AUTO_TAB_CLOSE_PANE_LABEL": fake,
+                                              "AUTO_TAB_CLOSE_PANE_TELL": fake_tell, "AUTO_TAB_CLOSE_SETTLE": "0",
+                                              "AUTO_TAB_CLOSE_POLL": "0.02", **env},
+                              timeout=10)
+
+    def taken():
+        """What ran, once the detached step has finished."""
+        for _ in range(250):
+            if not (os.path.isdir(reports) and any(n.startswith(".pending") for n in os.listdir(reports))):
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError("the step after the turn never finished")
         calls = open(f"{sandbox}/calls").read() if os.path.exists(f"{sandbox}/calls") else ""
         if os.path.exists(f"{sandbox}/calls"):
             os.unlink(f"{sandbox}/calls")
-        return r.returncode, r.stdout, calls
+        return calls
+
+    def run(payload, env, args=()):
+        r = stop(payload, env, args)
+        return r.returncode, r.stdout, taken()
 
     def saved():
         text = "".join(open(os.path.join(reports, n)).read() for n in os.listdir(reports)) if os.path.isdir(reports) else ""
@@ -352,6 +429,35 @@ esac''')
     herdr_says({"name": "spawned"}, [crown, {**me, "label": "🟢 👑 끝난 리드"}])
     assert run(reported, pane2) == (0, "", "tell w1:p1\n" + closed), "a named 👑 whose panes are gone closes like the rest"
     saved()
+    # A Stop hook can send a reply back while this one runs (10/31: share-guard asked for pane names): the draft and the
+    # rewrite both went out, the draft first.
+    draft, slow = full.replace("닫기 규칙", "초안"), {**pane2, "AUTO_TAB_CLOSE_SETTLE": "0.1"}
+    busy = {**me, "agent_status": "working"}
+    herdr_says({"name": "spawned"}, [crown, busy])
+    stop(json.dumps({"last_assistant_message": draft}), slow)
+    stop(json.dumps({"last_assistant_message": full}), slow)
+    time.sleep(0.4)
+    assert not os.path.exists(f"{sandbox}/calls"), "nothing goes out while the turn runs"
+    herdr_says({"name": "spawned"}, [crown, me])
+    assert taken() == "tell w1:p1\n" + closed, "one turn, one report"
+    told, text = open(f"{sandbox}/told").read(), saved()
+    assert "닫기 규칙" in told and "초안" not in told, f"the lead hears the last version: {told!r}"
+    assert text.count("칸이 남습니다") == 1 and "초안" not in text, f"one copy, the last version: {text!r}"
+    herdr_says({"name": "spawned"}, [crown, busy])
+    stop(json.dumps({"last_assistant_message": full}), slow)
+    stop(json.dumps({"last_assistant_message": keep[0]}), slow)
+    herdr_says({"name": "spawned"}, [crown, me])
+    time.sleep(0.4)
+    assert taken() == "" and saved() == "", "the rewrite left work for 요유: the first reply no longer closes anything"
+    herdr_says({"name": "spawned"}, [crown, me])
+    stop(json.dumps({"last_assistant_message": full}), {**slow, "AUTO_TAB_CLOSE_SETTLE": "0.5"})
+    herdr_says({"name": "spawned"}, [crown, busy])
+    time.sleep(0.6)
+    assert not os.path.exists(f"{sandbox}/calls"), "요유 typed before it settled: the pane is in use again"
+    herdr_says({"name": "spawned"}, [crown, me])
+    stop(json.dumps({"last_assistant_message": full}), {**pane2, "CLAUDE_CODE_ENTRYPOINT": "sdk-cli"})
+    assert taken() == "tell w1:p1\n" + closed, "a claude -p inside the pane withdraws nothing"
+    saved()
     herdr_says({"name": "spawned"}, [crown, me])
     open(reports, "w").close()
     assert run(reported, pane2) == (0, "", ""), "report not saved: the pane stays, it holds the only copy"
@@ -405,10 +511,11 @@ if __name__ == "__main__":
     if "--sweep" in sys.argv:
         sweep(os.environ, "--apply" in sys.argv)
         sys.exit()
+    if "--after-turn" in sys.argv:
+        after_turn(sys.argv[2], os.environ)
+        sys.exit()
     try:
-        reply = decide(json.load(sys.stdin), os.environ)
-        if reply:
-            finish(reply, os.environ)
+        defer(decide(json.load(sys.stdin), os.environ), os.environ)
     except Exception:  # never break a session
         pass
     sys.exit(0)

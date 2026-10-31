@@ -7,12 +7,85 @@
 # auto-dispatch or Slack ambient session: a prompt typed there counts as 요유 speaking and lifts the board's
 # dispatch/guard.sh (for good in a dispatch session, for that round in an ambient one).
 # The message arrives marked as coming from another session, since the receiver would otherwise read it as 요유's.
+# A prompt typed into a box that holds 요유's half-typed words is sent along with them, cut short (요유 2026-10-31: "야 리드야",
+# "z"). So it goes only into an empty box, working agent or not: Claude queues it, Codex takes it into the running turn.
+# Otherwise it prints "queued ...", exits 0, and a detached process tries again until the box is empty, which outlives the
+# sending pane. After PANE_TELL_WAIT seconds, or when the receiver is gone or holds another session, the message stays in
+# ~/.local/state/pane-tell/undelivered/; `log` beside it says what became of each one.
 H=${HERDR_BIN_PATH:-herdr}
+STATE=${XDG_STATE_HOME:-$HOME/.local/state}/pane-tell
 die() { echo "pane-tell: $*" >&2; exit 2; }
+
+# Exit 0 when the ansi screen on stdin shows the agent's input box empty. Any screen it cannot place is "not empty", and
+# dim text is a placeholder, never typed words.
+# ponytail: reads the TUI's drawing, so a redesign of either box stops delivery (messages wait, nothing merges); a key typed
+# in the moment after the second read, or a Korean syllable still composing in the IME, does not show on the screen.
+BOX=$(cat <<'PY'
+import re, sys
+kind = sys.argv[1]
+SGR = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+DIM = re.compile(r"\x1b\[2m.*?(?:\x1b\[0m|$)")
+plain = lambda line: SGR.sub("", line).strip()
+typed = lambda line: plain(DIM.sub("", line))
+lines = sys.stdin.read().replace("\r", "").split("\n")
+box = []
+if kind == "claude":  # the last two rules, the upper one may carry the session name; ❯ elsewhere is history or a picker
+    rules = [i for i, l in enumerate(lines) if re.fullmatch(r"─{3,}( .* ─+)?", plain(l)) and len(plain(l)) >= 10]
+    if len(rules) >= 2:
+        box = lines[rules[-2] + 1:rules[-1]]
+    if not box or not SGR.sub("", box[0]).startswith("❯\xa0"):
+        sys.exit(1)
+    box[0] = SGR.sub("", box[0])[1:]
+elif kind == "codex":  # the last › line unless its mark is dim (an old prompt), then the block of lines with its background
+    marks = [i for i, l in enumerate(lines) if plain(l).startswith("›")]
+    if not marks or not typed(lines[marks[-1]]).startswith("›"):
+        sys.exit(1)
+    i = marks[-1] + 1
+    box = [typed(lines[marks[-1]])[1:]]
+    while i < len(lines) and "\x1b[48;" in lines[i]:
+        box.append(lines[i])
+        i += 1
+else:
+    sys.exit(1)
+sys.exit(1 if any(typed(line) for line in box) else 0)
+PY
+)
+if [ "${1:-}" = --box-empty ]; then python3 -I -c "$BOX" "$2"; exit; fi
+
+# In view, and empty on two reads: what is typed between them holds the message back.
+box_ready() { # pane kind
+  "$H" pane get "$1" 2>/dev/null | jq -e '(.result.pane.scroll.offset_from_bottom // 0) == 0' >/dev/null || return 1
+  local i
+  for i in 1 2; do
+    [ "$i" = 1 ] || sleep "${PANE_TELL_SETTLE:-0.7}"
+    "$H" pane read "$1" --source recent --lines 60 --format ansi 2>/dev/null | python3 -I -c "$BOX" "$2" || return 1
+  done
+}
+send() { box_ready "$1" "$2" && "$H" agent prompt "$1" "$3" >/dev/null 2>&1; }
+
+deliver() { # message file, receiver's terminal (a moved pane gets a new pane id), its session when queued
+  local row pane kind sid t0=$SECONDS
+  while (( SECONDS - t0 < ${PANE_TELL_WAIT:-86400} )); do
+    sleep "${PANE_TELL_POLL:-5}"
+    row=$("$H" pane list 2>/dev/null | jq -r --arg t "$2" '.result.panes[]
+      | select(.terminal_id == $t) | [.pane_id, (.agent // ""), (.agent_session.value // "")] | @tsv') || continue
+    pane=$(cut -f1 <<<"$row"); kind=$(cut -f2 <<<"$row"); sid=$(cut -f3 <<<"$row")
+    [ -n "$kind" ] && { [ -z "$3" ] || [ "$sid" = "$3" ]; } || break
+    if send "$pane" "$kind" "$(cat "$1")"; then
+      rm -f "$1"
+      echo "$(date '+%F %T') delivered $(basename "$1") to $pane" >> "$STATE/log"
+      return
+    fi
+  done
+  mv "$1" "$STATE/undelivered/"
+  echo "$(date '+%F %T') undelivered $(basename "$1") for $2" >> "$STATE/log"
+}
+if [ "${1:-}" = --deliver ]; then deliver "$2" "$3" "${4:-}"; exit; fi
+
 command -v "$H" >/dev/null 2>&1 || die "herdr not found"
 command -v jq >/dev/null 2>&1 || die "jq not found"
 panes=$("$H" pane list 2>/dev/null | jq -r '.result.panes[]
-  | [.pane_id, ((.label // "") | ltrimstr("🔴 ") | ltrimstr("🟢 ")), (.agent_session.value // ""), (.cwd // ""), (.tab_id // "")] | @tsv') ||
+  | [.pane_id, ((.label // "") | ltrimstr("🔴 ") | ltrimstr("🟢 ")), (.agent_session.value // ""), (.cwd // ""), (.tab_id // ""), (.agent // ""), (.terminal_id // "")] | @tsv') ||
   die "herdr pane list failed"
 
 if [ "${1:-}" = --list ]; then
@@ -34,6 +107,7 @@ if [ "$(wc -l <<<"$hits" | tr -d ' ')" -gt 1 ]; then
 fi
 # cut, not `IFS=$'\t' read`: read merges the tabs around an empty session id and shifts every later field
 pane=$(cut -f1 <<<"$hits"); name=$(cut -f2 <<<"$hits"); sid=$(cut -f3 <<<"$hits"); tab=$(cut -f5 <<<"$hits")
+kind=$(cut -f6 <<<"$hits"); terminal=$(cut -f7 <<<"$hits")
 # a moved pane keeps its old id in the env; `pane get` still resolves it
 me=$("$H" pane get "${HERDR_PANE_ID:-}" 2>/dev/null | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
 me=${me:-${HERDR_PANE_ID:-}}
@@ -56,7 +130,13 @@ for t in "$HOME"/.claude/projects/*/"$sid".jsonl; do
   [[ $first =~ \"content\":\"\[?ambient-round\] ]] &&
     die "$pane ($name) is a Slack ambient session; it takes rounds only from the ambient poll"
 done
+case "$kind" in claude | codex) ;; *) die "$pane ($name) runs no Claude or Codex, so its input box cannot be read" ;; esac
 from=$(awk -F'\t' -v me="$me" '$1 == me {print $2}' <<<"$panes")
-"$H" agent prompt "$pane" "[pane-tell: '${from:-자동 작업}' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] $2" >/dev/null ||
-  die "herdr agent prompt failed"
-echo "told $pane ($name)"
+msg="[pane-tell: '${from:-자동 작업}' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] $2"
+if send "$pane" "$kind" "$msg"; then echo "told $pane ($name)"; exit 0; fi
+umask 077 # messages can name customers
+mkdir -p "$STATE/waiting" "$STATE/undelivered" || die "cannot keep the message"
+file=$(mktemp "$STATE/waiting/$(date +%s).XXXXXX") && printf '%s' "$msg" > "$file" || die "cannot keep the message"
+# Own session so neither the caller's tool runner nor the sending pane's close takes it down.
+nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' bash "$0" --deliver "$file" "$terminal" "$sid" </dev/null >/dev/null 2>&1 &
+echo "queued for $pane ($name): its input box is not empty, so this goes in once it is"

@@ -13,19 +13,29 @@ cat > "$SANDBOX/herdr" <<EOF
 case "\$1 \$2" in
   "pane list") cat "$SANDBOX/panes" ;;
   "tab list") cat "$SANDBOX/tabs" 2>/dev/null || echo '{"result":{"tabs":[]}}' ;;
-  "pane get") [ -f "$SANDBOX/new-id" ] && jq -n --arg i "\$(cat "$SANDBOX/new-id")" '{result: {pane: {pane_id: \$i}}}' ;;
-  "agent prompt") printf '%s|%s\n' "\$3" "\$4" >> "$SANDBOX/log" ;;
+  "pane get") jq -n --arg i "\$(cat "$SANDBOX/new-id" 2>/dev/null)" --argjson o "\$(cat "$SANDBOX/scrolled" 2>/dev/null || echo 0)" \
+    '{result: {pane: ({scroll: {offset_from_bottom: \$o}} + (if \$i == "" then {} else {pane_id: \$i} end))}}' ;;
+  "pane read") n=\$((\$(cat "$SANDBOX/reads" 2>/dev/null || echo 0) + 1)); echo "\$n" > "$SANDBOX/reads"
+    if [ -f "$SANDBOX/screen.\$n" ]; then cat "$SANDBOX/screen.\$n"; else cat "$SANDBOX/screen"; fi ;;
+  "agent prompt") [ ! -f "$SANDBOX/refuse" ] || exit 1; printf '%s|%s\n' "\$3" "\$4" >> "$SANDBOX/log" ;;
   *) exit 2 ;;
 esac
 EOF
 chmod +x "$SANDBOX/herdr"
-panes() { # "<id>|<label>|<session>[|<tab id>]" ...
-  local p; for p in "$@"; do IFS='|' read -r id label sid tab <<<"$p"; jq -nc --arg i "$id" --arg l "$label" --arg s "$sid" --arg t "${tab:-w1:t1}" '{pane_id: $i, label: $l, agent_session: {value: $s}, cwd: "/w", tab_id: $t}'; done \
+panes() { # "<id>|<label>|<session>[|<tab id>[|<agent>]]" ...
+  local p; for p in "$@"; do IFS='|' read -r id label sid tab kind <<<"$p"; jq -nc --arg i "$id" --arg l "$label" --arg s "$sid" --arg t "${tab:-w1:t1}" --arg k "${kind:-claude}" --arg term "term_${id##*:}" '{pane_id: $i, label: $l, agent_session: {value: $s}, cwd: "/w", tab_id: $t, agent: ($k | if . == "-" then null else . end), terminal_id: $term}'; done \
     | jq -s '{result: {panes: .}}' > "$SANDBOX/panes"
   rm -f "$SANDBOX/log"
 }
-pt() { rm -f "$SANDBOX/log"; env HOME="$SANDBOX/home" HERDR_PANE_ID=w1:p9 HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "$@"; }
+RULE=$(printf '─%.0s' $(seq 1 40))
+claude_screen() { printf '%s\n\xe2\x9d\xaf\xc2\xa0%s\n%s\n  footer\n' "$RULE" "${1:-}" "$RULE"; } # ❯ and a no-break space
+claude_screen > "$SANDBOX/screen"
+export PANE_TELL_POLL=0.05 PANE_TELL_SETTLE=0
+pt() { rm -f "$SANDBOX/log" "$SANDBOX/reads"; env HOME="$SANDBOX/home" XDG_STATE_HOME="$SANDBOX/state" HERDR_PANE_ID=w1:p9 HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "$@"; }
 sent() { cut -d'|' -f1 "$SANDBOX/log" 2>/dev/null | tr '\n' ' '; }
+# Waits for the detached delivery to finish: nothing is left waiting.
+settled() { local i; for i in $(seq 1 100); do [ -z "$(ls "$SANDBOX/state/pane-tell/waiting" 2>/dev/null)" ] && return; sleep 0.05; done; echo "FAIL a delivery never finished"; fails=1; }
+box() { printf '%b' "$2" | HERDR_BIN_PATH=/nonexistent bash "$SUBJECT" --box-empty "$1"; echo $?; }
 
 panes "w1:p1|🟢 회고 KPI 표|s1" "w1:p2|🔴 #1-marketing 자동화 조사|s2" "w1:p3|🟢 api#7 시험|s3" "w1:p4|🟢 api#70 다른|s4" "w1:p9|🟢 와우포인트 정리|s9"
 check "list shows names without the mark" "$(pt --list | cut -f2 | tr '\n' ',')" "회고 KPI 표,#1-marketing 자동화 조사,api#7 시험,api#70 다른,와우포인트 정리,"
@@ -80,5 +90,63 @@ echo wA:p3 > "$SANDBOX/new-id"
 pt wA:p7 "보고" >/dev/null 2>&1; check "moved caller signs with its name" "$(grep -c "'🫡 일' 세션" "$SANDBOX/log")" "1"
 pt wA:p3 "나" >/dev/null 2>&1; check "moved caller is not told itself" "$(sent)" ""
 rm -f "$SANDBOX/new-id"
+
+# What the input box holds, read from the screen. Hand-built screens: real captures hold paths and addresses.
+P='\xe2\x9d\xaf\xc2\xa0' R="$RULE\n" DIM='\033[2m' OFF='\033[0m' BG='\033[48;2;30;30;30m' C='\xe2\x80\xba'
+check "claude: empty" "$(box claude "$R$P\n$R  footer\n")" 0
+check "claude: typed" "$(box claude "$R${P}야 리드야\n$R  footer\n")" 1
+check "claude: the grey prompt of a working agent is empty" "$(box claude "$R\033[38;2;153;153;153m$P$OFF\n$R")" 0
+check "claude: a rule that carries the session name" "$(box claude "──────── 세션 이름 ─\n$P\n$R")" 0
+check "claude: only a wrapped or pasted line holds text" "$(box claude "$R$P\n  [Pasted text #1 +11 lines]\n$R")" 1
+check "claude: an old prompt above the box is not the box" "$(box claude "${P}지난 글\n$R$P\n$R")" 0
+check "claude: a task picker below the box is not the box" "$(box claude "$R$P\n$R\n\xe2\x9d\xaf \xe2\x8f\xba main\n")" 0
+check "claude: a question dialog in place of the box" "$(box claude "$R\xe2\x9d\xaf 1. Yes\n  2. No\n$R")" 1
+check "claude: no box on the screen" "$(box claude "그냥 출력\n")" 1
+check "codex: the dim placeholder is empty" "$(box codex "$BG  $OFF\n$C$OFF$BG $OFF$DIM${BG}Ask Codex to do anything$OFF$BG   $OFF\n$BG  $OFF\n  status\n")" 0
+check "codex: typed" "$(box codex "$BG  $OFF\n$C$OFF$BG 야 리드야   $OFF\n$BG  $OFF\n  status\n")" 1
+check "codex: only a wrapped line holds text" "$(box codex "$C$OFF$BG $OFF$DIM${BG}x$OFF\n$BG  둘째 줄$OFF\n$BG  $OFF\n  status\n")" 1
+check "codex: status text under the box is not typed" "$(box codex "$C$OFF$BG $OFF$DIM${BG}x$OFF\n$BG  $OFF\n  status\n")" 0
+check "codex: an old prompt above the box is not the box" "$(box codex "\033[2m$C ${OFF}지난 글\n$C$OFF$BG $OFF$DIM${BG}x$OFF\n$BG  $OFF\n")" 0
+check "codex: only old prompts on the screen, no box" "$(box codex "\033[2m$C ${OFF}지난 글\n  status\n")" 1
+check "an agent whose box cannot be read" "$(box gemini "$R$P\n$R")" 1
+
+# Delivery: 요유's half-typed text decides when, never the sender.
+panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9"
+msg="[pane-tell: '일' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] 보고"
+claude_screen "야 리드야" > "$SANDBOX/screen"
+out=$(pt "리드" "보고"); check "text in the box: no merge, exit 0" "$?|$(sent)" "0|"
+check "text in the box: says it is queued" "${out%%: *}" "queued for w1:p1 (👑 리드)"
+sleep 0.3; check "still typed: still waiting" "$(sent)" ""
+claude_screen > "$SANDBOX/screen"; settled
+check "box empty: delivered once" "$(sent)|$(cut -d'|' -f2- "$SANDBOX/log")" "w1:p1 |$msg"
+claude_screen "야" > "$SANDBOX/screen"
+PANE_TELL_WAIT=0 pt "리드" "보고" >/dev/null; settled
+check "too long: 요유's text untouched, nothing sent" "$(sent)" ""
+check "too long: the message stays in a file" "$(cat "$SANDBOX"/state/pane-tell/undelivered/*)" "$msg"
+rm -f "$SANDBOX"/state/pane-tell/undelivered/*
+claude_screen "" > "$SANDBOX/screen"; claude_screen "z" > "$SANDBOX/screen.2"
+out=$(pt "리드" "보고"); check "typed between the two reads: held back" "${out%%: *}|$(sent)" "queued for w1:p1 (👑 리드)|"
+rm -f "$SANDBOX/screen.2"; settled; check "typed between the two reads: goes later" "$(sent)" "w1:p1 "
+echo 3 > "$SANDBOX/scrolled"
+out=$(pt "리드" "보고"); check "receiver scrolled up: the box is out of sight" "${out%%: *}|$(sent)" "queued for w1:p1 (👑 리드)|"
+rm -f "$SANDBOX/scrolled"; settled
+touch "$SANDBOX/refuse"
+out=$(pt "리드" "보고"); check "herdr refuses (a dialog is open): queued" "${out%%: *}" "queued for w1:p1 (👑 리드)"
+rm -f "$SANDBOX/refuse"; settled; check "herdr refuses: goes later" "$(sent)" "w1:p1 "
+claude_screen "야" > "$SANDBOX/screen"; pt "리드" "보고" >/dev/null
+panes "w1:p9|🟢 일|s9"; settled
+check "receiver closed: nothing sent, the message stays in a file" "$(sent)|$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')" "|1"
+rm -f "$SANDBOX"/state/pane-tell/undelivered/*
+panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9"; pt "리드" "보고" >/dev/null
+panes "w1:p1|🟢 👑 리드|other" "w1:p9|🟢 일|s9"; claude_screen > "$SANDBOX/screen"; settled
+check "another session took the pane: not its message" "$(sent)|$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')" "|1"
+rm -f "$SANDBOX"/state/pane-tell/undelivered/*
+panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9"; claude_screen "야" > "$SANDBOX/screen"; pt "리드" "보고" >/dev/null
+jq '(.result.panes[] | select(.pane_id == "w1:p1") | .pane_id) = "w2:p5"' "$SANDBOX/panes" > "$SANDBOX/panes.new"; mv "$SANDBOX/panes.new" "$SANDBOX/panes"
+claude_screen > "$SANDBOX/screen"; settled; check "receiver moved: found by its terminal" "$(sent)" "w2:p5 "
+panes "w1:p1|🟢 빈 칸|s1|w1:t1|-" "w1:p9|🟢 일|s9"
+pt "빈 칸" "x" 2>/dev/null; check "no agent in the pane refuses" "$?|$(sent)" "2|"
+panes "w1:p1|🟢 다른 도구|s1|w1:t1|gemini" "w1:p9|🟢 일|s9"
+pt "다른 도구" "x" 2>/dev/null; check "an agent whose box cannot be read refuses" "$?|$(sent)" "2|"
 
 exit $fails
