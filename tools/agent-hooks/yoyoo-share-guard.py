@@ -46,7 +46,8 @@ NONE = re.compile(r"^(?:없음|없습니다|none)\b", re.I)
 # and a rewrite prints it twice (요유 2026-10-31), so a turn with nothing to do ends without a word.
 # The aside: on 10/29 a session answered this question by adding why only 요유 could do it, and 유요 had another way (api#975).
 DO_REASON = ("yoyoo-share-guard: 요유 몫 가운데 유요가 지금 할 수 있는 일(명령 실행, Slack 글, 합의된 단계)은 지금 하세요. "
-             "막혔다는 사유를 붙여 남기지 말고 다른 경로를 찾으세요. prod에 닿는 배포·머지, 데이터, 외부 설정, 과금은 요유의 확인이 있어야 하니 하지 말고 그대로 두세요.")
+             "막혔다는 사유를 붙여 남기지 말고 다른 경로를 찾으세요. 다만 권한 규칙이 거부한 명령은 형태를 바꿔 다시 실행하지 말고 그대로 보고한다. "
+             "prod에 닿는 배포·머지, 데이터, 외부 설정, 과금은 요유의 확인이 있어야 하니 하지 말고 그대로 두세요.")
 END_QUIETLY = ("그런 일이 없으면 응답 없이 턴을 끝내세요: 다시 쓰지 말고, 다시 쓰지 않았다는 말이나 이유도 쓰지 마세요. "
                "보고는 이미 화면 맨 아래에 있습니다.")
 REASON = f"{DO_REASON} 그래서 보고가 바뀌면 바뀐 보고를 쓰세요. {END_QUIETLY}"
@@ -322,6 +323,9 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
 def selftest():
     import tempfile
 
+    denied = "권한 규칙이 거부한 명령은 형태를 바꿔 다시 실행하지 말고 그대로 보고한다"
+    assert denied in DO_REASON and DO_REASON.index("다른 경로를 찾으세요") < DO_REASON.index(denied), \
+        "the push to find another way must not cover a command a permission rule refused"
     cli = {"CLAUDE_CODE_ENTRYPOINT": "cli", "HERDR_BIN_PATH": "/nonexistent/herdr"}  # never the live herdr of the pane running this
 
     def p(text, **kw):
