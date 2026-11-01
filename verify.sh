@@ -193,6 +193,7 @@ check "statusline symlink" "[[ -L '$HOME/.claude/statusline-command.sh' ]]"
 check "stop-notification.sh symlink" "[[ -L '$HOME/.claude/hooks/stop-notification.sh' ]]"
 check "permission-notification.sh symlink" "[[ -L '$HOME/.claude/hooks/permission-notification.sh' ]]"
 check "session-env.sh symlink" "[[ -L '$HOME/.claude/hooks/session-env.sh' ]]"
+check "dotfiles pre-push on" "[[ \$(git -C '$DOTFILES' config core.hooksPath) == tools/git-hooks ]]"
 
 # ===========================================
 # 12. macOS App Settings

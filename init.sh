@@ -272,6 +272,9 @@ create_symlinks() {
         info "Git config applied (run: git config --global user.name/email)"
     fi
 
+    # Git 은 훅 설정을 클론하지 않는다. 이 줄이 없으면 새 클론은 시험 없이 push 된다.
+    git -C "$DOTFILES" config core.hooksPath tools/git-hooks
+
     # GitHub CLI credential helper
     if command -v gh &> /dev/null; then
         gh auth setup-git 2>/dev/null || true
