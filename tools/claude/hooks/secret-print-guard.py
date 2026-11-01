@@ -33,8 +33,8 @@ PRINTS_SECRET = re.compile(
 )
 # Reads whose answer is a stored credential, as words in order: flags, `beta`, `timeout` or `do` around them
 # change nothing, and a quoted mention (a commit message, a prompt) stays one word and never matches.
-# Left out on purpose: `run`/`functions describe` (env holds only secret refs here), `apps:sdkconfig` (a public
-# id), `get-credentials` (writes a file), and create/reset commands (not reads).
+# Left out on purpose: `run`/`functions describe` (350 uses in three weeks, and env is meant to hold secret refs),
+# `apps:sdkconfig` (a public id), `get-credentials` (writes a file), and create/reset commands (not reads).
 CREDENTIAL_READS = [c.split() for c in (
     "gcloud auth describe",  # credential JSON, refresh token included
     "gcloud config config-helper",  # carries an access token
@@ -46,25 +46,34 @@ CREDENTIAL_READS = [c.split() for c in (
     "gcloud container clusters describe",  # masterAuth.clientKey
     "gcloud runtime-config variables get-value",  # the store behind functions:config
     "gcloud runtime-config variables list --values",
-    "functions:secrets:access",  # firebase's words alone, so `npx firebase-tools` counts too
-    "apphosting:secrets:access",
-    "functions:config:get",
-    "login:ci",
+    "gcloud parametermanager render",  # renderedPayload fills in Secret Manager values
+    "gcloud iam oauth-clients credentials",  # clientSecret
+    "gcloud compute interconnects macsec get-config",  # cak
+    "gcloud vmware credentials describe",  # password
+    "firebase functions:secrets:access",
+    "firebase apphosting:secrets:access",
+    "firebase functions:config:get",
+    "firebase login:ci",
 )]
-TOKEN_VERB = re.compile(r"(?:print|generate)-(?:[a-z]+-)*token$")  # auth print-refresh-token, sql generate-login-token
+TOKEN_VERB = re.compile(r"(?:print|generate|fetch)-(?:[a-z]+-)*token$")  # auth print-refresh-token, sql generate-login-token
+HELP = {"help", "--help", "-h"}
+SCHEDULER = "gcloud scheduler jobs".split()
+NARROW_FORMAT = re.compile(r"--format=(?:value|csv|table|get)\((?!.*headers)")
 CREDENTIAL_URL = re.compile(
     r"secretmanager\.googleapis\.com\S*:access|apikeys\.googleapis\.com\S*/keyString"
     r"|redis\.googleapis\.com\S*/authString"
 )
 # TransferConfig and TransferRun both answer with `params`, where an S3 transfer keeps its secret key.
-TRANSFER_FLAG = re.compile(r"--?transfer[_-](?:config|run)\b")
+TRANSFER_FLAG = re.compile(r"--?transfer[_-](config|run)\b")
 TRANSFER_HOST = "bigquerydatatransfer.googleapis.com"
 FIELDS = re.compile(r"(?:^|[?&'\"\s])fields=([^&'\"\n]*)", re.M)
-WIDE_FIELDS = re.compile(r"^\s*$|params|[*$]|transfer(?:Configs|Runs)(?![(/\w])")  # a bare collection name selects all of it
+WIDE_FIELDS = re.compile(r"^\s*$|params|[*$]|\b(?:transferConfigs|transferRuns|runs)(?![(/\w])")  # a bare collection selects all of it
 CLIENTS = {"curl", "wget", "http", "https", "xh"}  # print the answer unless told otherwise
-FETCHERS = CLIENTS | {"python", "python3", "node", "ruby", "perl", "deno", "bun"}
+FETCHERS = CLIENTS | {"python", "node", "ruby", "perl", "deno", "bun"}  # compared without a version, so python3.12 counts
 CAPTURE = re.compile(r"(?<!\\)\$\(((?:[^()]|\([^()]*\))*)\)|(?<!\\)`([^`]*)(?<!\\)`")
-SINGLE_QUOTED = re.compile(r"'[^']*'")  # nothing runs in there: commit messages put commands in backticks
+QUOTED = re.compile(r"""'[^']*'|"(?:[^"\\]|\\.)*\"""")  # double quotes are matched so an apostrophe in them opens nothing
+SHELLS = {"bash", "sh", "zsh"}
+SHELL_C = re.compile(r"-[a-zA-Z]*c[a-zA-Z]*")
 # ponytail: a list of commands that dump file contents; an unlisted dumper slips through,
 # add it here when one does. Deny-by-default flagged every `git commit -m "...path..."`.
 READERS = {
@@ -129,27 +138,58 @@ def words(w: list[str]) -> list[str]:
 
 
 def names(w: list[str]) -> list[str]:
-    return [x.strip("()").rsplit("/", 1)[-1] for x in w]
+    """Program names of a word list. A word with a space in it is quoted text, not a path."""
+    return [x if re.search(r"\s", x) else x.strip("<>()").rsplit("/", 1)[-1] for x in w]
+
+
+def in_order(n: list[str], seq) -> bool:
+    it = iter(n)
+    return all(s in it for s in seq)
 
 
 def reads_credential(n: list[str]) -> bool:
-    def in_order(seq) -> bool:
-        it = iter(n)
-        return all(s in it for s in seq)
-    if {"help", "--help", "-h"} & set(n):
+    n = [re.sub(r"^firebase-tools.*", "firebase", x) for x in n]  # `npx firebase-tools` is the same program
+    if HELP & set(n):
         return False
-    return any(in_order(r) for r in CREDENTIAL_READS) or ("gcloud" in n and any(TOKEN_VERB.match(x) for x in n))
+    return any(in_order(n, r) for r in CREDENTIAL_READS) or ("gcloud" in n and any(TOKEN_VERB.match(x) for x in n))
 
 
-def rest_problem(cmd: str, shown: set[str], ran: set[str]) -> str | None:
+def dumps_scheduler_job(w: list[str]) -> bool:
+    """A job comes back with its custom HTTP headers as they are, and a shared secret can sit in one."""
+    n, fmt = names(w), next((x for x in w if x.startswith("--format=")), "")
+    if HELP & set(n):
+        return False
+    if in_order(n, SCHEDULER + ["describe"]):
+        return not NARROW_FORMAT.match(fmt)
+    return in_order(n, SCHEDULER + ["list"]) and re.match(r"--format=(?:json|yaml)", fmt) is not None
+
+
+def reads_transfer(seg: list[str]) -> bool:
+    n, flags = names(seg), {m[1] for m in map(TRANSFER_FLAG.match, seg) if m}
+    return "bq" in n and bool(({"ls", "show"} & set(n) and flags) or ("mk" in n and "run" in flags))
+
+
+def shell_text(w: list[str]) -> str | None:
+    """What `bash -c` and `eval` are handed. A short copy of no-sed-inplace's walk, since that file imports this one."""
+    n = names(w)
+    if n and n[0] == "eval":
+        return " ".join(w[1:])
+    for k, x in enumerate(n[:-2]):
+        if x in SHELLS and SHELL_C.fullmatch(w[k + 1]):
+            return w[k + 2]
+    return None
+
+
+def rest_problem(cmd: str, shown: set[str], ran: list[str]) -> str | None:
     """The API calls behind the same reads. Takes the raw command: the URL can sit in a variable or a Python heredoc."""
     # ponytail: a script file or client library doing the same call is not seen here.
     if CLIENTS & shown and CREDENTIAL_URL.search(cmd):  # a capture or a script may only use the value
         return "이 REST 호출은 비밀값을 그대로 돌려줌. 응답은 `VAR=$(...)`로 변수에 담아서만 쓸 것"
-    if FETCHERS & ran and TRANSFER_HOST in cmd and "transferConfigs" in cmd:
+    if TRANSFER_HOST in cmd and "transferConfigs" in cmd and any(x.rstrip("0123456789.") in FETCHERS for x in ran):
         fields = [unquote(f) for f in FIELDS.findall(cmd)]
-        # One `fields=` per host mention, so a second call can't lean on the first's. A host in a variable counts once.
-        if len(fields) < cmd.count(TRANSFER_HOST) or any(WIDE_FIELDS.search(f) for f in fields):
+        # One `fields=` per call, so a second call can't lean on the first's, even with the URL in a variable.
+        calls = max(cmd.count(TRANSFER_HOST), sum(x in CLIENTS for x in ran))
+        if len(fields) < calls or any(WIDE_FIELDS.search(f) for f in fields):
             return ("전송 구성 응답의 `params`에는 저장된 자격 증명이 들어 있음. "
                     "`fields=transferConfigs(name,displayName,schedule)`처럼 `params`를 뺀 필드만 고를 것")
     return None
@@ -160,14 +200,13 @@ def bash_problem(cmd: str) -> str | None:
     visible = strip_captures(text)
     seen = segments(visible)
     # A capture keeps one value out of the chat, but a transfer config is a whole answer read in order to print it.
-    captured = [s for pair in CAPTURE.findall(SINGLE_QUOTED.sub("''", text)) for s in segments("".join(pair))]
+    runs = QUOTED.sub(lambda m: "''" if m[0][0] == "'" else m[0], text)  # nothing runs in single quotes
+    captured = [s for pair in CAPTURE.findall(runs) for s in segments("".join(pair))]
     shown = {x for seg in seen for x in names(seg)}
-    ran = shown | {x for seg in captured for x in names(seg)}
-    for seg in seen + captured:
-        n = names(seg)
-        if "bq" in n and {"ls", "show"} & set(n) and any(TRANSFER_FLAG.match(x) for x in seg):
-            return ("`bq ls/show --transfer_config`와 `--transfer_run`은 저장된 자격 증명을 `params`째 돌려줌. "
-                    "Data Transfer REST API에 `fields=`로 `params`를 빼고 읽을 것")
+    ran = [x for seg in seen + captured for x in names(seg)]
+    if any(reads_transfer(seg) for seg in seen + captured):
+        return ("`bq`의 `--transfer_config`, `--transfer_run` 응답에는 저장된 자격 증명이 `params`째 들어 있음. "
+                "Data Transfer REST API에 `fields=`로 `params`를 빼고 읽을 것")
     problem = rest_problem(cmd, shown, ran)
     if problem:
         return problem
@@ -175,9 +214,15 @@ def bash_problem(cmd: str) -> str | None:
         w = words(seg_words)
         if not w:
             continue
+        inner = shell_text(w)
+        problem = bash_problem(inner) if inner else None
+        if problem:
+            return problem
         segment = " ".join(w)
         if PRINTS_SECRET.match(segment) or reads_credential(names(w)):
             return "토큰이나 비밀값을 출력하는 명령은 `VAR=$(...)`로 변수에 담아서만 쓸 것"
+        if dumps_scheduler_job(w):
+            return "Scheduler 잡 응답의 HTTP 헤더에 비밀값이 있을 수 있음. `--format='value(name,schedule,state)'`처럼 필드를 골라 읽을 것"
         verb = w[0].rsplit("/", 1)[-1]
         if verb == "printenv" or (verb == "env" and all(a.startswith("-") for a in w[1:])):
             return "printenv/env는 환경변수의 비밀값을 그대로 출력함"
@@ -294,6 +339,24 @@ def selftest():
         "\"https://secretmanager.googleapis.com/v1/projects/p/secrets/s/versions/latest:access\"",
         "curl -s \"https://apikeys.googleapis.com/v2/projects/p/locations/global/keys/k/keyString\"",
         "curl -s \"https://redis.googleapis.com/v1/projects/p/locations/l/instances/i/authString\"",
+        # found by the refutation pass
+        "gcloud parametermanager parameters versions render v --parameter=p --location=global",
+        "gcloud developer-connect connections git-repository-links fetch-read-token l --connection=c --region=r",
+        "gcloud iam oauth-clients credentials describe c --oauth-client=o --location=global",
+        "gcloud compute interconnects macsec get-config i",
+        "gcloud vmware private-clouds vcenter credentials describe --private-cloud=p --location=l",
+        "gcloud scheduler jobs describe j --location=l",
+        "gcloud scheduler jobs describe j --location=l --format=json",
+        "gcloud scheduler jobs describe j --format='value(httpTarget.headers)'",
+        "gcloud scheduler jobs list --location=l --format=json",
+        "bq mk --transfer_run --run_time=t projects/p/locations/l/transferConfigs/c",
+        "diff <(bq show --transfer_config a) <(bq show --transfer_config b)",
+        "bash -c \"bq ls --transfer_config\"",
+        "timeout 30 zsh -lc 'gcloud auth print-access-token'",
+        "eval \"bq ls --transfer_config\"",
+        f"curl \"{TC}/c:startManualRuns?fields=runs\"",
+        f"B={TC}; curl \"$B?fields=transferConfigs(name)\"; curl \"$B/c\"",
+        f"python3.12 - <<'PY'\nprint('{TC}')\nPY",
     ]
     allow = [
         "T=$(python3 -I -c 'import re,os;print(open(os.path.expanduser(\"~/.codex/config.toml\")).read())')",
@@ -359,6 +422,15 @@ def selftest():
         "firebase help login:ci",
         "V=$(curl -s \"https://secretmanager.googleapis.com/v1/projects/p/secrets/s/versions/latest:access\" | jq -r .x)",
         "python3 - <<'PY'\nu = 'https://secretmanager.googleapis.com/v1/projects/p/secrets/s/versions/latest:access'\nPY",
+        "rg \"functions:config:get\" src",
+        "git commit -m \"functions:secrets:access\"",
+        "git commit -m \"dont't\" -m 'use `bq ls --transfer_config`'",
+        f"git commit -m \"see /usr/bin/curl\" -m \"{TC}\"",
+        "gcloud scheduler jobs list --location=l",
+        "gcloud scheduler jobs describe j --format='value(schedule,state)'",
+        f"curl \"{TC}/c:startManualRuns?fields=runs(name,state)\"",
+        "bash -c \"ls -la\"",
+        "zsh -lc 'gcloud auth list'",
     ]
     for c in deny:
         assert bash_problem(c), f"should deny: {c}"
