@@ -13,8 +13,8 @@ it reads as a session 요유 opened and never closes. A test that needs one uses
 here because Codex runs a new hook only after 요유 trusts it, and this command is already trusted. Jobs that run outside an
 agent's Bash tool (the dispatch job) never reach this hook.
 
-Recursive `rm` and `git push --no-verify` live here for the same reason. Claude's deny list matches only how a command starts
-and Codex does not read it, and a session whose `rm -rf` was refused went on with `rm -r -f` and then one file at a time.
+Recursive `rm` and `git push --no-verify` live here for the same reason. Claude's deny list is a list of spellings and Codex
+does not read it, and a session whose `rm -rf` was refused went on with `rm -r -f` and then one file at a time.
 Scripts a command runs and `trap` cleanups are not seen, so hooks and jobs that clean up after themselves keep working.
 ponytail: `$(rm -r x)`, a heredoc fed to bash, `case` arms, function bodies, `find -exec sudo rm`, `find -delete`, `ssh host rm`
 and `git -c core.hooksPath=` get past it. Add one when a session reaches for it; a determined caller beats any command check.
@@ -141,8 +141,9 @@ def bash_problem(cmd: str) -> str | None:
                         "(같은 치환을 한 파일 여러 곳에 하면 Edit의 replace_all). 읽기용 `sed -n`은 괜찮음")
     for w in simple_commands(cmd):
         if removes_recursively(w):
-            return ("no-recursive-rm: 재귀 삭제(`rm -r`)는 막혀 있음. 형태를 바꿔 다시 실행하지 말고 그대로 보고할 것. "
-                    "지워도 되는 임시 파일이면 되돌릴 수 있는 `trash <경로>`로 휴지통에 옮길 것")
+            return ("no-recursive-rm: 재귀 삭제(`rm -r`)는 막혀 있음. production 일이 아니라 명령 형식 문제라 멈추지 않아도 됨. "
+                    "지워도 되는 임시 파일이나 다시 만들어지는 산출물이면 `trash <경로>`로 휴지통에 옮기고 하던 일을 그대로 이어 갈 것. "
+                    "휴지통으로 옮길 수 없거나 지워도 되는지 모르면 형태를 바꿔 다시 실행하지 말고 그대로 보고할 것")
         if skips_push_hook(w):
             return "no-push-bypass: `git push --no-verify`는 막혀 있음. push 전 시험이 실패하면 고치거나 그대로 보고할 것"
     return None
@@ -326,7 +327,8 @@ def selftest():
     ]
     for c in deny:
         reason = bash_problem(c) or ""
-        assert "그대로 보고" in reason and "trash" in reason, f"should deny: {c}"
+        # An unattended session stops on a refusal unless the reason says to go on: 4 of 4 did on the first wording.
+        assert "멈추지 않아도" in reason and "trash" in reason and "그대로 보고" in reason, f"should deny: {c}"
     for c in allow:
         assert bash_problem(c) is None, f"should allow: {c} -> {bash_problem(c)}"
 
