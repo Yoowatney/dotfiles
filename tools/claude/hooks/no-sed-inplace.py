@@ -16,8 +16,8 @@ agent's Bash tool (the dispatch job) never reach this hook.
 Recursive `rm` and `git push --no-verify` live here for the same reason. Claude's deny list matches only how a command starts
 and Codex does not read it, and a session whose `rm -rf` was refused went on with `rm -r -f` and then one file at a time.
 Scripts a command runs and `trap` cleanups are not seen, so hooks and jobs that clean up after themselves keep working.
-ponytail: `$(rm -r x)`, a heredoc fed to bash, `find -delete` and `git -c core.hooksPath=` get past it. Add one when a session
-reaches for it; a determined caller can always get past a command check.
+ponytail: `$(rm -r x)`, a heredoc fed to bash, `case` arms, function bodies, `find -exec sudo rm`, `find -delete`, `ssh host rm`
+and `git -c core.hooksPath=` get past it. Add one when a session reaches for it; a determined caller beats any command check.
 
     no-sed-inplace.py --selftest
 """
@@ -63,9 +63,11 @@ LAUNCH = re.compile(HERDR + r"\s+pane\s+(?:run" + AGENT + ONE_SHOT + "|send-text
 QUOTED = re.compile(r"""'[^']*'|"(?:[^"\\]|\\.)*\"""")
 CAPTURE = re.compile(r"\$\([^)]*\)|`[^`]*`")
 RECURSIVE = re.compile(r"^(?:-[a-zA-Z]*[rR][a-zA-Z]*|--r[a-z]*)$")  # -r, -R, a cluster (-rf, -vR), --recursive
-SHELL_WORDS = {"then", "do", "else", "elif", "if", "while", "until", "!", "{"}
-RUNNERS = {"env", "nohup", "nice", "sudo", "command", "timeout", "gtimeout", "xargs", "caffeinate"}  # run the words after them
+SHELL_WORDS = {"then", "do", "else", "elif", "if", "while", "until", "!", "{", ""}  # "" is a lone `(` after name()
+RUNNERS = {"env", "nohup", "nice", "timeout", "gtimeout", "xargs", "caffeinate"}  # run the words after them
+NOT_COMMAND = re.compile(r"-|[A-Za-z_]\w*=|\{\}$|[\d.]+[smhd]?$")  # a runner's own words: options, A=1, {}, a count, a duration
 SHELLS = {"bash", "sh", "zsh"}
+WATCHED = {"rm", "git", "eval"} | SHELLS
 
 
 def name(tok: str) -> str:
@@ -78,6 +80,10 @@ def simple_commands(cmd: str, depth: int = 0):
         w = _guard.words(seg)
         while w and name(w[0]) in SHELL_WORDS:
             w = _guard.words(w[1:])
+        if w and name(w[0]) in RUNNERS:
+            w = _guard.words(next((w[k:] for k in range(1, len(w)) if not NOT_COMMAND.match(w[k])), w))
+        elif w and w[0].startswith("-"):  # `words` drops sudo and leaves `sudo -u root`'s options
+            w = next((w[k:] for k, tok in enumerate(w) if name(tok) in WATCHED), w)
         if not w:
             continue
         yield w
@@ -94,7 +100,7 @@ def simple_commands(cmd: str, depth: int = 0):
 
 def removes_recursively(w: list[str]) -> bool:
     for k, tok in enumerate(w):
-        if name(tok) == "rm" and (k == 0 or w[k - 1] in LAUNCHERS or name(w[0]) in RUNNERS):
+        if name(tok) == "rm" and (k == 0 or w[k - 1] in LAUNCHERS):
             args = w[k + 1:]
             args = args[:args.index("--")] if "--" in args else args  # after `--` a word is a file name
             return any(RECURSIVE.match(a) for a in args)
@@ -106,7 +112,7 @@ def skips_push_hook(w: list[str]) -> bool:
         return False
     k = 1
     while k < len(w) and w[k].startswith("-"):
-        k += 2 if w[k] in ("-C", "-c") else 1
+        k += 2 if w[k] in ("-C", "-c", "--git-dir", "--work-tree") else 1
     return k < len(w) and w[k] == "push" and "--no-verify" in w[k + 1:]
 
 
@@ -154,6 +160,8 @@ def selftest():
         "rg -l foo | xargs sed -i '' 's/foo/bar/'",
         "perl -pi -e 's/a/b/' f",
         "perl -i.bak -pe 's/a/b/' f",
+        "cd repo  # go there\nsed -i '' 's/a/b/' f",
+        "sed \\\n  -i '' 's/a/b/' f",
     ]
     allow = [
         "sed -n '1,40p' file.txt",
@@ -273,8 +281,29 @@ def selftest():
         "zsh -lc 'cd x && rm -r build'",
         "eval 'rm -r build'",
         "bash -c \"bash -c 'rm -r build'\"",
+        "sudo -u root rm -r build",
+        "env bash -c 'rm -r build'",
+        "ls | xargs -I{} sh -c 'rm -r {}'",
+        "sudo -n rm -rf build",
+        "env sudo rm -r build",
+        "ls | xargs -I {} rm -r {}",
+        "ls | xargs -n 1 rm -r",
+        "( rm -rf build )",
+        "cd repo  # go there\nrm -rf build",
+        "rm \\\n  -rf build",
+        "# it's a note\nrm -r build",
     ]
     allow = [
+        "env LC_ALL=C git rm -r --cached build",
+        "nohup git rm -r build",
+        "ls | xargs git rm -r",
+        "find . -name build -exec git rm -r {} +",
+        "timeout 60 gsutil rm -r gs://x/y",
+        "timeout 60 gcloud storage rm -r gs://x/y",
+        "ls | xargs -I{} gsutil rm -r {}",
+        "cat > notes.md <<'MY-EOF'\nrm -rf build\nMY-EOF",
+        "# rm -r build",
+        "echo hi # rm -r build",
         "rm build.log",
         "rm -f a.tar b.bar",
         "rm -f report.txt",
@@ -309,6 +338,11 @@ def selftest():
         "git -c x=y push --no-verify",
         "cd repo && git push --no-verify",
         "bash -c 'git push --no-verify'",
+        "env LC_ALL=C git push --no-verify",
+        "timeout 30 git push --no-verify",
+        "git --git-dir .git push --no-verify",
+        "git --work-tree . push --no-verify",
+        "git push \\\n  --no-verify",
     ]
     allow = [
         "git push",
