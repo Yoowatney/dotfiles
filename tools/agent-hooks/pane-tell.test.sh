@@ -36,8 +36,9 @@ claude_screen > "$SANDBOX/screen"
 export PANE_TELL_POLL=0.05 PANE_TELL_SETTLE=0
 pt() { rm -f "$SANDBOX/log" "$SANDBOX/reads"; env HOME="$SANDBOX/home" XDG_STATE_HOME="$SANDBOX/state" HERDR_PANE_ID=w1:p9 HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "$@"; }
 sent() { cut -d'|' -f1 "$SANDBOX/log" 2>/dev/null | tr '\n' ' '; }
-# Waits for the detached delivery to finish: nothing is left waiting.
-settled() { local i; for i in $(seq 1 100); do [ -z "$(ls "$SANDBOX/state/pane-tell/waiting" 2>/dev/null)" ] && return; sleep 0.05; done; echo "FAIL a delivery never finished"; fails=1; }
+# Waits for the detached delivery to finish: nothing is left waiting and the process itself is gone. It outlives its file while
+# it warns the sender, and those pane reads would land on the next check's counter ("typed between the two reads" failed 5 of 6).
+settled() { local i; for i in $(seq 1 100); do [ -z "$(ls "$SANDBOX/state/pane-tell/waiting" 2>/dev/null)" ] && ! pgrep -f "$SANDBOX/state/pane-tell/waiting/" >/dev/null && return; sleep 0.05; done; echo "FAIL a delivery never finished"; fails=1; }
 box() { printf '%b' "$2" | HERDR_BIN_PATH=/nonexistent bash "$SUBJECT" --box-empty "$1"; echo $?; }
 
 panes "w1:p1|🟢 회고 KPI 표|s1" "w1:p2|🔴 #1-marketing 자동화 조사|s2" "w1:p3|🟢 api#7 시험|s3" "w1:p4|🟢 api#70 다른|s4" "w1:p9|🟢 와우포인트 정리|s9"
