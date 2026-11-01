@@ -273,7 +273,7 @@ create_symlinks() {
     fi
 
     # Git 은 훅 설정을 클론하지 않는다. 이 줄이 없으면 새 클론은 시험 없이 push 된다.
-    git -C "$DOTFILES" config core.hooksPath tools/git-hooks
+    git -C "$DOTFILES" config core.hooksPath "$DOTFILES/tools/git-hooks"
 
     # GitHub CLI credential helper
     if command -v gh &> /dev/null; then

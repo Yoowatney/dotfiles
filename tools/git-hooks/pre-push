@@ -3,8 +3,9 @@
 #
 # It tests the commit, not the working tree: a half-edited file or an untracked test must not decide what goes out.
 # Tests are every tools/**/*.test.sh and every tools/**/*.py that mentions --selftest, so a new one needs no list.
-# Git does not clone hook settings. Each clone turns this on with `git config core.hooksPath tools/git-hooks`:
-# init.sh does that and verify.sh checks it.
+# Git does not clone hook settings. Each clone turns this on with `git config core.hooksPath <clone>/tools/git-hooks`:
+# init.sh does that and verify.sh checks it. The path is absolute because a relative one resolves inside each worktree,
+# and a worktree on a branch older than this file would skip the hook without a word.
 #
 # ponytail: `git push --no-verify` and `git -c core.hooksPath=` skip it. Agents are refused the first by the shared Bash
 # hook; a determined caller gets past any local check, and only a server-side check would stop one.
@@ -15,8 +16,9 @@ JOBS=6   # one after another takes over 2 minutes, and an agent's Bash call give
 
 T=$(mktemp -d) || exit 1
 trap 'rm -rf "$T"' EXIT
+export TMPDIR="$T"   # the selftests leave temp folders behind
 
-shas=$(awk '$2 !~ /^0+$/ { print $2 }' | sort -u)   # a deletion (all zeros) sends no commit
+shas=$(awk '$(NF-2) !~ /^0+$/ { print $(NF-2) }' | sort -u)   # a deletion (all zeros) sends no commit
 [ -n "$shas" ] || exit 0
 
 for sha in $shas; do
@@ -32,7 +34,7 @@ run() {
   local log="$OUT/${1//\//_}.log" cmd=(bash "$1") rc=0
   [[ $1 != *.py ]] || cmd=(python3 -I "$1" --selftest)
   # alarm survives exec and SIGALRM ends the test with exit 142. macOS has no `timeout` of its own.
-  perl -e 'alarm shift; exec @ARGV' "$PRE_PUSH_LIMIT" "${cmd[@]}" </dev/null >"$log" 2>&1 || rc=$?
+  perl -e 'alarm shift; exec @ARGV or die "cannot start $ARGV[0]: $!\n"' "$PRE_PUSH_LIMIT" "${cmd[@]}" </dev/null >"$log" 2>&1 || rc=$?
   [ "$rc" = 0 ] && return
   [ "$rc" = 142 ] && echo "stopped after ${PRE_PUSH_LIMIT}s" >>"$log"
   echo "$1" >>"$OUT/failed"
@@ -49,7 +51,11 @@ for sha in $shas; do
     exit 1
   fi
   echo "pre-push: running $(wc -l <<<"$list" | tr -d ' ') tests on ${sha:0:7}" >&2
-  xargs -P "$JOBS" -I{} bash -c 'run "$1"' _ {} <<<"$list"
+  # `run` itself always exits 0, so anything else here means tests never ran: no failed list would show that.
+  xargs -P "$JOBS" -I{} bash -c 'run "$1"' _ {} <<<"$list" || {
+    echo "pre-push: the tests of ${sha:0:7} did not all run; refusing rather than passing untested" >&2
+    exit 1
+  }
   if [ -s "$OUT/failed" ]; then
     echo "pre-push: push refused, these tests failed on ${sha:0:7}:" >&2
     while read -r f; do

@@ -25,12 +25,13 @@ check() {   # <name> <output> <must match> [<must not match>]
 	fi
 }
 
-out=$(run)
+fake_hud "$T/hud" 'console.log("[Opus] Context 12%")'   # a machine without the real HUD plugin must pass too
+out=$(CLAUDE_CONFIG_DIR="$T/hud" run)
 check "installed HUD prints its lines" "$out" 'Context'
 check "HUD is the first line on a dev project" "$(head -1 <<<"$out")" '\[Opus\]'
 check "old env line is gone" "$out" 'Context' '👤|로그인필요|미설정'
 
-out=$(CLOUDSDK_CORE_PROJECT=test-f06c6 run)
+out=$(CLOUDSDK_CORE_PROJECT=test-f06c6 CLAUDE_CONFIG_DIR="$T/hud" run)
 check "gcloud PROD warning comes first" "$(head -1 <<<"$out")" 'PROD:test-f06c6'
 check "PROD warning keeps its red background" "$out" '41m'
 check "HUD still drawn on PROD" "$out" 'Context'

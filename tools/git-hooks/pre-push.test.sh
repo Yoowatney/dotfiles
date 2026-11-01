@@ -4,6 +4,7 @@
 set -uo pipefail
 
 HOOK="$(cd "$(dirname "$0")" && pwd)/pre-push"
+INIT_LINE=$(grep 'config core.hooksPath' "$(dirname "$0")/../../init.sh")
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 fails=0
@@ -12,19 +13,19 @@ has() { case "$2" in *"$3"*) echo "ok   $1" ;; *) echo "FAIL $1: [$3] not in [$2
 
 W="$T/w" R="$T/r.git"
 fresh() {
-  rm -rf "$W" "$R" "$T/ran"
+  rm -rf "$W" "$R" "$T/ran" "$T/old"
   git init -q --bare "$R"
   git init -q -b main "$W"
   git -C "$W" config user.name t
   git -C "$W" config user.email t@example.com
-  git -C "$W" config core.hooksPath hooks
   git -C "$W" remote add origin "$R"
-  mkdir -p "$W/hooks" "$W/tools"
-  cp "$HOOK" "$W/hooks/pre-push"
+  mkdir -p "$W/tools/git-hooks"
+  cp "$HOOK" "$W/tools/git-hooks/pre-push"
+  DOTFILES="$W" eval "$INIT_LINE"   # the line a new clone gets
 }
 put() { printf '%s\n' "$2" > "$W/$1"; }
 ci() { git -C "$W" add -A && git -C "$W" commit -q -m "$1"; }
-head_of() { git -C "$1" rev-parse "${2:-main}" 2>/dev/null; }
+head_of() { git -C "$1" rev-parse -q --verify "${2:-main}" 2>/dev/null; }
 push() { out=$(git -C "$W" push "$@" 2>&1 </dev/null); rc=$?; }
 GOOD=':'
 BAD='echo boom; exit 1'
@@ -100,7 +101,7 @@ git -C "$W" checkout -q -b zz
 put tools/bad.test.sh "$BAD"; ci bad
 git -C "$W" checkout -q main
 push origin main zz
-check "every ref is tested, whatever a test does with stdin" "$([ "$rc" != 0 ] && echo refused)" refused
+check "every ref is tested" "$([ "$rc" != 0 ] && echo refused)" refused
 has "every ref is tested: the second one named" "$out" "tools/bad.test.sh"
 
 fresh
@@ -120,6 +121,53 @@ fresh
 put tools/env.test.sh '[ -z "${HERDR_PANE_ID:-}${CLAUDECODE:-}${CODEX_THREAD_ID:-}${MUNICE_AUTO_DISPATCH:-}" ]'; ci env
 out=$(HERDR_PANE_ID=w1:p1 CLAUDECODE=1 CODEX_THREAD_ID=x MUNICE_AUTO_DISPATCH=1 git -C "$W" push origin main 2>&1 </dev/null); rc=$?
 check "the session's own variables never reach a test" "$rc" 0
+
+fresh
+put tools/ok.test.sh "$GOOD"; ci good
+mkdir -p "$T/bin"
+printf '#!/bin/sh\nexit 123\n' > "$T/bin/xargs"
+chmod +x "$T/bin/xargs"
+out=$(PATH="$T/bin:$PATH" git -C "$W" push origin main 2>&1 </dev/null); rc=$?
+check "tests that never started refuse the push" "$([ "$rc" != 0 ] && echo refused)" refused
+check "tests that never started: the remote stays" "$(head_of "$R")" ""
+
+fresh
+put tools/ok.test.sh "$GOOD"
+put tools/guard.py "# handles --selftest"; ci nopython
+mkdir -p "$T/nopy"
+for t in git bash awk sort mktemp tar find grep perl xargs wc tr tail mkdir rm cat env; do
+  ln -sf "$(command -v "$t")" "$T/nopy/$t"
+done
+out=$(PATH="$T/nopy" git -C "$W" push origin main 2>&1 </dev/null); rc=$?
+check "a selftest that cannot start is a failure" "$([ "$rc" != 0 ] && echo refused)" refused
+has "a selftest that cannot start: named" "$out" "tools/guard.py"
+
+fresh
+put tools/ok.test.sh "$GOOD"; ci good
+git -C "$W" push -q origin main 2>/dev/null </dev/null
+old=$(git -C "$W" commit-tree -m old "$(git -C "$W" mktree </dev/null)")
+git -C "$W" worktree add -q -b old "$T/old" "$old"
+mkdir -p "$T/old/tools"
+printf '%s\n' "$BAD" > "$T/old/tools/bad.test.sh"
+git -C "$T/old" add -A && git -C "$T/old" commit -q -m bad
+out=$(git -C "$T/old" push origin old 2>&1 </dev/null); rc=$?
+check "a worktree on a branch older than the hook is still tested" "$([ "$rc" != 0 ] && echo refused)" refused
+
+fresh
+put 'tools/say"hi.test.sh' "$BAD"; ci quoted
+push origin main
+check "a quote in a test's name: refused, not skipped" "$([ "$rc" != 0 ] && echo refused)" refused
+
+fresh
+put tools/ok.test.sh "python3 -c 'import tempfile; tempfile.mkdtemp()'"; ci temp   # macOS mktemp -d ignores TMPDIR
+mkdir -p "$T/tmpd"
+out=$(TMPDIR="$T/tmpd" git -C "$W" push origin main 2>&1 </dev/null); rc=$?
+check "nothing is left in the temp folder" "$rc|$(ls -A "$T/tmpd")" "0|"
+
+fresh
+put tools/ok.test.sh "$GOOD"; ci good
+push origin 'HEAD@{0 seconds ago}:refs/heads/x'
+check "a ref written with spaces is read correctly" "$rc" 0
 
 [ "$fails" = 0 ] && echo "all passed"
 exit "$fails"
