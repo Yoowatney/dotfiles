@@ -13,6 +13,12 @@ it reads as a session 요유 opened and never closes. A test that needs one uses
 here because Codex runs a new hook only after 요유 trusts it, and this command is already trusted. Jobs that run outside an
 agent's Bash tool (the dispatch job) never reach this hook.
 
+Recursive `rm` and `git push --no-verify` live here for the same reason. Claude's deny list matches only how a command starts
+and Codex does not read it, and a session whose `rm -rf` was refused went on with `rm -r -f` and then one file at a time.
+Scripts a command runs and `trap` cleanups are not seen, so hooks and jobs that clean up after themselves keep working.
+ponytail: `$(rm -r x)`, a heredoc fed to bash, `find -delete` and `git -c core.hooksPath=` get past it. Add one when a session
+reaches for it; a determined caller can always get past a command check.
+
     no-sed-inplace.py --selftest
 """
 from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
@@ -56,6 +62,52 @@ LAUNCH = re.compile(HERDR + r"\s+pane\s+(?:run" + AGENT + ONE_SHOT + "|send-text
                     + r"""(?=\s+-|\s*(?:$|['";&|]|resume\b))""" + ONE_SHOT + ")", re.M)
 QUOTED = re.compile(r"""'[^']*'|"(?:[^"\\]|\\.)*\"""")
 CAPTURE = re.compile(r"\$\([^)]*\)|`[^`]*`")
+RECURSIVE = re.compile(r"^(?:-[a-zA-Z]*[rR][a-zA-Z]*|--r[a-z]*)$")  # -r, -R, a cluster (-rf, -vR), --recursive
+SHELL_WORDS = {"then", "do", "else", "elif", "if", "while", "until", "!", "{"}
+RUNNERS = {"env", "nohup", "nice", "sudo", "command", "timeout", "gtimeout", "xargs", "caffeinate"}  # run the words after them
+SHELLS = {"bash", "sh", "zsh"}
+
+
+def name(tok: str) -> str:
+    return tok.lstrip("(").rsplit("/", 1)[-1]
+
+
+def simple_commands(cmd: str, depth: int = 0):
+    """Word lists of the commands `cmd` runs, with what `bash -c` and `eval` are handed read as commands too."""
+    for seg in _guard.segments(_guard.strip_captures(_guard.HEREDOC.sub("<<heredoc", cmd))):
+        w = _guard.words(seg)
+        while w and name(w[0]) in SHELL_WORDS:
+            w = _guard.words(w[1:])
+        if not w:
+            continue
+        yield w
+        if depth >= 3:
+            continue
+        if name(w[0]) == "eval":
+            yield from simple_commands(" ".join(w[1:]), depth + 1)
+        elif name(w[0]) in SHELLS:
+            for k, tok in enumerate(w[1:-1], 1):
+                if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", tok):
+                    yield from simple_commands(w[k + 1], depth + 1)
+                    break
+
+
+def removes_recursively(w: list[str]) -> bool:
+    for k, tok in enumerate(w):
+        if name(tok) == "rm" and (k == 0 or w[k - 1] in LAUNCHERS or name(w[0]) in RUNNERS):
+            args = w[k + 1:]
+            args = args[:args.index("--")] if "--" in args else args  # after `--` a word is a file name
+            return any(RECURSIVE.match(a) for a in args)
+    return False
+
+
+def skips_push_hook(w: list[str]) -> bool:
+    if name(w[0]) != "git":
+        return False
+    k = 1
+    while k < len(w) and w[k].startswith("-"):
+        k += 2 if w[k] in ("-C", "-c") else 1
+    return k < len(w) and w[k] == "push" and "--no-verify" in w[k + 1:]
 
 
 def code_only(cmd: str) -> str:
@@ -81,6 +133,12 @@ def bash_problem(cmd: str) -> str | None:
             if any(flag.match(a) for a in w[k + 1:]):
                 return ("no-sed-inplace: `sed -i`/`perl -i`로 파일을 고치지 말 것. Read로 읽은 뒤 Edit 도구로 고칠 것"
                         "(같은 치환을 한 파일 여러 곳에 하면 Edit의 replace_all). 읽기용 `sed -n`은 괜찮음")
+    for w in simple_commands(cmd):
+        if removes_recursively(w):
+            return ("no-recursive-rm: 재귀 삭제(`rm -r`)는 막혀 있음. 형태를 바꿔 다시 실행하지 말고 그대로 보고할 것. "
+                    "지워도 되는 임시 파일이면 되돌릴 수 있는 `trash <경로>`로 휴지통에 옮길 것")
+        if skips_push_hook(w):
+            return "no-push-bypass: `git push --no-verify`는 막혀 있음. push 전 시험이 실패하면 고치거나 그대로 보고할 것"
     return None
 
 
@@ -176,6 +234,92 @@ def selftest():
     ]
     for c in deny:
         assert "pane-spawn" in (bash_problem(c) or ""), f"should deny: {c}"
+    for c in allow:
+        assert bash_problem(c) is None, f"should allow: {c} -> {bash_problem(c)}"
+
+    deny = [
+        "rm -r build",
+        "rm -R build",
+        "rm -rf build",
+        "rm -fr build",
+        "rm -Rf build",
+        "rm -fR build",
+        "rm -vr build",
+        "rm -rfv build",
+        "rm -r -f build",
+        "rm -f -r build",
+        "rm -v -r build",
+        "rm --recursive build",
+        "rm build -r",
+        "/bin/rm -r build",
+        "command rm -r build",
+        "sudo rm -r build",
+        "FOO=1 rm -r build",
+        "env FOO=1 rm -r build",
+        "nohup rm -r build",
+        "timeout 5 rm -r build",
+        "cd repo && rm -r build",
+        "ls; rm -r build",
+        "(rm -r build)",
+        "if [ -d build ]; then rm -r build; fi",
+        "for d in a b; do rm -r \"$d\"; done",
+        "find . -name build -exec rm -r {} +",
+        "find . -name build -exec rm -rf {} \\;",
+        "ls | xargs rm -r",
+        "ls | xargs -0 rm -rf",
+        "ls | xargs -I{} rm -r {}",
+        "bash -c 'rm -r build'",
+        "sh -c \"rm -rf build\"",
+        "zsh -lc 'cd x && rm -r build'",
+        "eval 'rm -r build'",
+        "bash -c \"bash -c 'rm -r build'\"",
+    ]
+    allow = [
+        "rm build.log",
+        "rm -f a.tar b.bar",
+        "rm -f report.txt",
+        "rm -- -r",
+        "rm --force old.log",
+        "trash build",
+        "git rm -r build",
+        "git rm -rf build",
+        "gsutil rm -r gs://x/y",
+        "docker rm -f box",
+        "git commit -m 'rm -r build'",
+        "git commit -m 'docs: why\n\nrm -r build\n'",
+        "echo 'rm -rf build'",
+        "for i in 1; do echo rm -r build; done",
+        "grep -rn 'rm -r' tools",
+        "cat > notes.md <<'EOF'\nrm -rf build\nEOF",
+        "T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; ls",
+        "bash -c 'ls -r'",
+        "bash script.sh rm -r",
+    ]
+    for c in deny:
+        reason = bash_problem(c) or ""
+        assert "그대로 보고" in reason and "trash" in reason, f"should deny: {c}"
+    for c in allow:
+        assert bash_problem(c) is None, f"should allow: {c} -> {bash_problem(c)}"
+
+    deny = [
+        "git push --no-verify",
+        "git push origin main --no-verify",
+        "git push --no-verify origin main",
+        "git -C ~/.dotfiles push --no-verify",
+        "git -c x=y push --no-verify",
+        "cd repo && git push --no-verify",
+        "bash -c 'git push --no-verify'",
+    ]
+    allow = [
+        "git push",
+        "git push origin main",
+        "git push --dry-run origin HEAD:refs/heads/x",
+        "git commit -m 'git push --no-verify'",
+        "echo git push --no-verify",
+        "git -C repo log --grep=push --no-verify",
+    ]
+    for c in deny:
+        assert "no-verify" in (bash_problem(c) or ""), f"should deny: {c}"
     for c in allow:
         assert bash_problem(c) is None, f"should allow: {c} -> {bash_problem(c)}"
     print("selftest ok")
