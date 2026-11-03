@@ -96,7 +96,7 @@ def still_running(path: str, claim: bool = True) -> bool:
     ponytail: a one-shot cron or a /loop that ends without stop=True, and a Monitor that expires without a notice, stay 🔴."""
     running: set = set()
     task_of: dict = {}
-    undo: dict = {}  # a cron or wakeup call: the state to put back if it is refused
+    undo: dict = {}  # a cron, wakeup or hand-mark call: its own change, taken back if the call fails
     crons, wake, hold, closes = 0, False, False, False
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -110,23 +110,29 @@ def still_running(path: str, claim: bool = True) -> bool:
                 elif b.get("type") == "tool_use":
                     name, inp, i = b.get("name"), b.get("input") or {}, b.get("id")
                     flags = BY_HAND.findall(inp.get("command") or "") if name == "Bash" else []
-                    hold = flags[-1] == "--hold" if flags else hold
+                    if flags:  # `cleanup && pane-label --free` that failed never freed
+                        undo[i] = ("hold", hold)
+                        hold = flags[-1] == "--hold"
                     if (name == "Bash" and inp.get("run_in_background")) or name in STARTS:
                         running.add(i)
                         if inp.get("name"):  # an agent's name, for SendMessage
                             task_of[inp["name"]] = i
                     if name == "SendMessage" and task_of.get(inp.get("to")):
                         running.add(task_of[inp.get("to")])  # wakes an agent that had finished
-                    if name in ("CronCreate", "CronDelete", "ScheduleWakeup"):
-                        undo[i] = (crons, wake)
-                        crons += (name == "CronCreate") - (name == "CronDelete")
-                        wake = inp.get("stop") is not True if name == "ScheduleWakeup" else wake
+                    if name in ("CronCreate", "CronDelete"):
+                        undo[i] = ("cron", 1 if name == "CronCreate" else -1)
+                        crons += undo[i][1]
+                    if name == "ScheduleWakeup":
+                        undo[i] = ("wake", wake)
+                        wake = inp.get("stop") is not True
                 elif b.get("type") == "tool_result":
                     i = b.get("tool_use_id")
                     if b.get("is_error"):
                         running.discard(i)  # refused, so it never started
-                        if i in undo:  # ponytail: puts back the state from before it, not only its own step
-                            crons, wake = undo[i]
+                        kind, change = undo.pop(i, (None, None))
+                        crons -= change if kind == "cron" else 0
+                        wake = change if kind == "wake" else wake  # ponytail: wakeups come one at a time
+                        hold = change if kind == "hold" else hold
                     for kind, task in TASK.findall(json.dumps(b.get("content"), ensure_ascii=False)):
                         if kind == "stopped task: ":
                             running.discard(task_of.get(task))
@@ -781,6 +787,11 @@ esac''')
         "a search for --hold is no hold": ([use("Bash", "toolu_r", command='grep -n "pane-label --hold" pane-hold.sh')], False),
         "a free by its path after &&": ([use("Bash", "toolu_l", command="pane-label --hold"),
                                          use("Bash", "toolu_f", command="cd /w && ~/.dotfiles/tools/agent-hooks/pane-label --free")], False),
+        "one of two crons refused": ([use("CronCreate", "toolu_c", cron="*/30 * * * *"), use("CronCreate", "toolu_e", cron="0 * * * *"),
+                                      result("toolu_c", "refused", error=True), result("toolu_e", "c2")], True),
+        "a free that never ran": ([use("Bash", "toolu_l", command="pane-label --hold"),
+                                   use("Bash", "toolu_f", command="cleanup && pane-label --free"),
+                                   result("toolu_f", "Exit code 1", error=True)], True),
         "the last report says 닫으면": ([say(keep[1])], True),
         "a later report replaced it": ([say(keep[1]), say(done)], False),
         "a 닫으면 inside code is no report": ([say("형식은 `세션: 닫으면 Monitor 멈춤` 입니다.")], False),
