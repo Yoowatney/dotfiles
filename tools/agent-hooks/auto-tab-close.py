@@ -25,6 +25,8 @@ the reply in a per-pane file and detaches. That step waits until the agent has s
 replaces or withdraws the file, so the last reply of the turn is the only one acted on.
 Never blocks; prints nothing. Fails open.
 
+Before all that, every Stop of every pane (요유's own too) keeps its 🔴/🟢 mark true: see sync_mark.
+
 --sweep lists the panes that already finished, which no Stop hook will visit again: named, idle, not held as above, and a
 last reply that passes the same test. --sweep --apply closes them the same way.
 
@@ -56,17 +58,102 @@ LEFT = re.compile(r"남은[ \t]*것[ \t]*\**[ \t]*[:：]")
 OPENER = re.compile(r"^spawn-([0-9A-Za-z]+)-")  # pane-spawn's agent name: spawn-<caller's terminal>-<random>
 
 
-def should_close(text: str) -> bool:
-    """The last `세션:` value says 닫음, or 닫아도 됨 with nothing in 요유 몫. Code and quotes are not a report."""
+def plain(text: str) -> str:
+    """Code and quotes are not a report."""
     text = unicodedata.normalize("NFC", text)
     for pat in share.STRIP:
         text = pat.sub(" ", text)
-    values = [m.group(1).strip(" \t*_.,;") for m in SESSION.finditer(text)]
-    if not values:
-        return False
-    if values[-1].startswith("닫음"):
+    return text
+
+
+def session_value(text: str) -> str:
+    """The last `세션:` value, or ""."""
+    values = [m.group(1).strip(" \t*_.,;") for m in SESSION.finditer(plain(text))]
+    return values[-1] if values else ""
+
+
+def should_close(text: str) -> bool:
+    """The last `세션:` value says 닫음, or 닫아도 됨 with nothing in 요유 몫."""
+    value = session_value(text)
+    if value.startswith("닫음"):
         return True
-    return values[-1].startswith("닫아도 됨") and not share.leaves_yoyoo_work(text)
+    return value.startswith("닫아도 됨") and not share.leaves_yoyoo_work(plain(text))
+
+
+STARTS = ("Monitor", "Agent", "Workflow")  # with a background Bash, CronCreate and ScheduleWakeup: what pane-hold.sh marks 🔴
+TASK = re.compile(r"(with ID: |\(task |agentId: |stopped task: )(\w+)")
+NOTICE = re.compile(r"<tool-use-id>(toolu_\w+)</tool-use-id>")
+BY_HAND = re.compile(r"\bpane-label\s+(--hold|--free)\b")
+
+
+def still_running(path: str) -> bool:
+    """Whether a Claude transcript shows something pane-hold.sh marked 🔴 that may still run: a background command, Monitor,
+    agent or workflow without its end notice or a TaskStop, a session cron with no CronDelete, a wakeup not stopped, a
+    `pane-label --hold` with no `--free` after it. A line it cannot read raises. Shapes it does not know count as running,
+    so a doubt keeps 🔴, which only keeps a session open (the old behaviour).
+    ponytail: a one-shot cron or a /loop that ends without stop=True, and a Monitor that expires without a notice, stay 🔴."""
+    running: set = set()
+    task_of: dict = {}
+    crons, wake, hold = 0, False, False
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            d = json.loads(line)
+            content = (d.get("message") or {}).get("content")
+            blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+            for b in blocks:
+                if b.get("type") == "tool_use":
+                    name, inp, i = b.get("name"), b.get("input") or {}, b.get("id")
+                    flags = BY_HAND.findall(inp.get("command") or "") if name == "Bash" else []
+                    hold = flags[-1] == "--hold" if flags else hold
+                    if (name == "Bash" and inp.get("run_in_background")) or name in STARTS:
+                        running.add(i)
+                        if inp.get("name"):  # an agent's name, for SendMessage
+                            task_of[inp["name"]] = i
+                    if name == "SendMessage" and task_of.get(inp.get("to")):
+                        running.add(task_of[inp.get("to")])  # wakes an agent that had finished
+                    crons += (name == "CronCreate") - (name == "CronDelete")
+                    if name == "ScheduleWakeup":
+                        wake = inp.get("stop") is not True
+                elif b.get("type") == "tool_result":
+                    i = b.get("tool_use_id")
+                    if b.get("is_error"):
+                        running.discard(i)  # refused, so it never started
+                    for kind, task in TASK.findall(json.dumps(b.get("content"), ensure_ascii=False)):
+                        if kind == "stopped task: ":
+                            running.discard(task_of.get(task))
+                        elif i in running:
+                            task_of[task] = i
+            # An end notice comes as its own user message or queued mid-turn; one printed inside a tool's output is not one.
+            if d.get("type") in ("user", "queue-operation", "attachment") and not any(b.get("type") == "tool_result" for b in blocks):
+                running -= set(NOTICE.findall(line))
+    return bool(running) or crons > 0 or wake or hold
+
+
+def sync_mark(payload: dict, env):
+    """Keep the pane mark true at every Stop: a report saying `세션: 닫으면 …` holds 🔴; otherwise a 🔴 goes back to 🟢 once
+    the Claude transcript shows nothing still running. pane-hold.sh sets 🔴 at every background start and only the agent's
+    own `--free` took it off, so finished sessions stayed 🔴, under a report that said they could close or under no report
+    (요유 2026-11-03: "왜 자꾸 빨간색으로 되어있냐이거"; 14 of 21 sessions left 🔴 that week had nothing running). Codex has
+    no reader here, so it is held but never freed. An agent's own `--free` over a running watch stays: this never re-holds
+    for running work. Any doubt changes nothing."""
+    if not env.get("HERDR_PANE_ID") or env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
+        return
+    try:
+        red = (here(env).get("label") or "").startswith("🔴")  # the mark leads; a name may hold 🔴 too
+        path = payload.get("transcript_path") or ""
+        if session_value(reply_of(payload) or "").startswith("닫으면"):
+            flag = "--hold"
+            if red:
+                return
+        elif red and f"{os.sep}.claude{os.sep}projects{os.sep}" in path and not still_running(path):
+            flag = "--free"
+        else:
+            return
+        pl = env.get("AUTO_TAB_CLOSE_PANE_LABEL") or os.path.join(HERE, "pane-label")
+        subprocess.run([pl, flag], env=dict(env), timeout=3, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 
 def herdr(env, *args) -> dict:
@@ -94,7 +181,7 @@ def opener(name) -> str:
 
 def held(label: str, terminal, agents: list) -> bool:
     """🔴 stops something; a pane waits for the panes it opened. 요유's own leads never get here: they have no agent name."""
-    return "🔴" in label or any(opener(a.get("name")) == terminal for a in agents)
+    return label.startswith("🔴") or any(opener(a.get("name")) == terminal for a in agents)
 
 
 def report(text: str) -> str:
@@ -624,6 +711,92 @@ esac''')
     assert calls.count("--close") == 3 and "pane=w1:p2 --close" in calls and "pane=w1:p3 --close" in calls, calls
     assert calls.count("tell w1:p1") == 3, calls
     assert saved().count(done) == 3, "swept panes keep their reports too"
+
+    # The 🔴/🟢 mark follows the report's `세션:` line, freed only when the Claude transcript shows nothing still running.
+    logs = os.path.join(sandbox, ".claude", "projects", "p")
+    os.makedirs(logs, exist_ok=True)
+
+    def claude_log(*records, name="s.jsonl"):
+        path = os.path.join(logs, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
+        return path
+
+    def use(tool, i, **inp):
+        return {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": i, "name": tool, "input": inp}]}}
+
+    def result(i, text, error=False):
+        return {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": i, "is_error": error,
+                                                         "content": [{"type": "text", "text": text}]}]}}
+
+    def notice(i, kind="user"):
+        text = f"<task-notification>\n<task-id>t</task-id>\n<tool-use-id>{i}</tool-use-id>\n<status>completed</status>"
+        return {"type": "user", "message": {"content": text}} if kind == "user" else \
+            {"type": "queue-operation", "operation": "enqueue", "content": text}
+
+    bg = [use("Bash", "toolu_a", command="sleep 5", run_in_background=True),
+          result("toolu_a", "Command running in background with ID: ba1. Output is being written to: /tmp/ba1.output")]
+    agent_up = [use("Agent", "toolu_g", prompt="리뷰", name="rev"), result("toolu_g", "Async agent launched successfully.\nagentId: ag1")]
+    cases = {
+        "nothing started": ([use("Bash", "toolu_n", command="ls")], False),
+        "a background command still running": (bg, True),
+        "its end notice": (bg + [notice("toolu_a")], False),
+        "its end notice queued mid-turn": (bg + [notice("toolu_a", "queue")], False),
+        "a notice printed in some output is not its end": (bg + [result("toolu_z", "<tool-use-id>toolu_a</tool-use-id>")], True),
+        "TaskStop ends it": (bg + [use("TaskStop", "toolu_s", task_id="ba1"),
+                                   result("toolu_s", '{"message":"Successfully stopped task: ba1 (sleep 5)"}')], False),
+        "a Monitor running": ([use("Monitor", "toolu_m", command="x"), result("toolu_m", "Monitor started (task bm1, ...)")], True),
+        "an agent that finished": (agent_up + [notice("toolu_g")], False),
+        "an agent woken again by SendMessage": (agent_up + [notice("toolu_g"), use("SendMessage", "toolu_q", to="rev")], True),
+        "an agent a hook refused never started": ([use("Agent", "toolu_h", prompt="x"),
+                                                   result("toolu_h", "PreToolUse:Agent hook error", error=True)], False),
+        "a session cron": ([use("CronCreate", "toolu_c", cron="*/30 * * * *")], True),
+        "a cron deleted": ([use("CronCreate", "toolu_c", cron="*/30 * * * *"), use("CronDelete", "toolu_d", id="c1")], False),
+        "a wakeup pending": ([use("ScheduleWakeup", "toolu_w", delaySeconds=60)], True),
+        "a loop stopped": ([use("ScheduleWakeup", "toolu_w", delaySeconds=60), use("ScheduleWakeup", "toolu_x", stop=True)], False),
+        "a hand-set hold": ([use("Bash", "toolu_l", command="pane-label --hold")], True),
+        "a hold freed by hand": ([use("Bash", "toolu_l", command="pane-label --hold"), use("Bash", "toolu_f", command="pane-label --free")], False),
+    }
+    for label, (records, running) in cases.items():
+        assert still_running(claude_log(*records)) == running, label
+    with open(claude_log(*bg), "a") as f:
+        f.write('{"type": "assistant", "mess')  # a line still being written
+    try:
+        still_running(os.path.join(logs, "s.jsonl"))
+        raise AssertionError("a line it cannot read must not count as nothing running")
+    except ValueError:
+        pass
+
+    finished = claude_log(*bg, notice("toolu_a"), name="done.jsonl")
+    busy = claude_log(*bg, name="busy.jsonl")
+    codex = os.path.join(sandbox, ".codex", "sessions", "rollout.jsonl")
+    os.makedirs(os.path.dirname(codex), exist_ok=True)
+    open(codex, "w").close()
+    mine = {"HERDR_PANE_ID": "w1:p2"}
+
+    def mark(text, path, label, env=mine):
+        herdr_says({"name": None}, [{**me, "label": label}])  # a session 요유 opened: no close step, only the mark
+        return run(json.dumps({"last_assistant_message": text, "transcript_path": path}), env)[2]
+
+    freed, held_ = "reported= pane=w1:p2 --free\n", "reported= pane=w1:p2 --hold\n"
+    assert mark(done, finished, "🔴 일") == freed, "닫아도 됨 and nothing running: 🟢"
+    assert mark(keep[3], finished, "🔴 일") == freed, "a reply with no report frees too: the mark says what runs"
+    assert mark(done, busy, "🔴 일") == "", "a command still running keeps 🔴 whatever the report says"
+    assert mark(keep[3], busy, "🟢 일") == "", "a watch the agent freed by hand stays 🟢: never re-held for running work"
+    assert mark(done, finished, "🟢 일") == "", "already 🟢: no call"
+    assert mark(done, os.path.join(logs, "gone.jsonl"), "🔴 일") == "", "a transcript it cannot read changes nothing"
+    assert mark(done, codex, "🔴 일") == "", "Codex: its log is not read, so it is never freed"
+    assert mark(keep[2], finished, "🟢 일") == held_, "닫으면 … : 🔴"
+    assert mark(keep[2], codex, "🟢 일") == held_, "Codex holds by its report too"
+    assert mark(keep[2], finished, "🔴 일") == "", "already 🔴: no call"
+    assert mark(keep[2], finished, "🟢 칸 🔴 자동 해제") == held_, "the mark leads the label; 🔴 inside the name is not one"
+    assert mark(done, finished, "🟢 칸 🔴 자동 해제") == "", "nor is it a 🔴 to free"
+    assert not held("🟢 칸 🔴 자동 해제", "term_2", []), "a 🔴 inside the name does not keep a finished pane open"
+    assert mark(done, finished, "🔴 일", {**mine, "CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}) == "", "a claude -p in the pane is not its session"
+    assert mark(done, finished, "🔴 일", {}) == "", "outside herdr"
+    open(f"{sandbox}/herdr-bad", "w").close()
+    assert mark(done, finished, "🔴 일") == "", "herdr not answering changes nothing"
+    os.unlink(f"{sandbox}/herdr-bad")
     print("selftest ok")
 
 
@@ -639,6 +812,7 @@ if __name__ == "__main__":
         sys.exit()
     try:
         payload = json.load(sys.stdin)
+        sync_mark(payload, os.environ)  # first: a stale 🔴 would also keep a finished job pane from closing
         if not no_new_report(payload):
             defer(decide(payload, os.environ), os.environ)
     except Exception:  # never break a session

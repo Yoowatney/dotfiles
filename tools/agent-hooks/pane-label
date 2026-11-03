@@ -2,7 +2,8 @@
 # Names the herdr pane this agent runs in, so 요유 can tell panes apart (Claude and Codex both use it).
 # The name starts with a mark (요유 2026-10-17): 🟢 요유 may close this session, 🔴 something here stops when
 # it closes (a background command, a Monitor, a loop or wakeup, a session cron, a background agent).
-# Claude's pane-hold.sh hook sets 🔴 by itself; going back to 🟢 is the agent's `--free`.
+# Claude's pane-hold.sh hook sets 🔴 by itself; going back to 🟢 is the agent's `--free`, or in Claude the Stop hook
+# auto-tab-close.py once nothing still runs.
 # No-op outside herdr. Display only: always exits 0 except on bad usage.
 #   pane-label "api#736 Dependabot 정리"      set the name, keeping the mark (🟢 when there is none)
 #   pane-label --hold | --free                set the mark to 🔴 / 🟢, keeping the name
