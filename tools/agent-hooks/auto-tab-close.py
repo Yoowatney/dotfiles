@@ -98,8 +98,8 @@ def still_running(path: str, claim: bool = True) -> bool:
     """Whether a Claude transcript shows something pane-hold.sh marked 🔴 that may still run: a background command, Monitor,
     agent or workflow without its end notice or a TaskStop, a session cron with no CronDelete, a wakeup not stopped, a
     `pane-label --hold` with no `--free` after it, or (with claim) a last report saying `세션: 닫으면 …`, which holds until
-    a later report replaces it. A failed or refused call counts for nothing, and of the ones left the last wakeup and the
-    last hand mark decide. A line it cannot read raises. Shapes it does not know count as running, so a doubt keeps 🔴,
+    a later report replaces it. A failed or refused call counts for nothing (a --hold in a failed command still counts), and
+    of the ones left the last wakeup and the last hand mark decide. A line it cannot read raises. Shapes it does not know count as running, so a doubt keeps 🔴,
     which only keeps a session open (the old behaviour).
     ponytail: a one-shot cron or a /loop that ends without stop=True, and a Monitor that expires without a notice, stay 🔴."""
     running: set = set()
@@ -136,6 +136,10 @@ def still_running(path: str, claim: bool = True) -> bool:
                     if b.get("is_error"):
                         running.discard(i)  # refused, so it never started
                         failed.add(i)
+                    out = b.get("content")
+                    out = out if isinstance(out, str) else " ".join(x.get("text") or "" for x in out or [] if isinstance(x, dict))
+                    if out.startswith("Command running in background with ID:"):
+                        running.add(i)  # a command moved to the background without run_in_background
                     for kind, task in TASK.findall(json.dumps(b.get("content"), ensure_ascii=False)):
                         if kind == "stopped task: ":
                             running.discard(task_of.get(task))
@@ -144,7 +148,8 @@ def still_running(path: str, claim: bool = True) -> bool:
             # An end notice comes as its own user message or queued mid-turn; one printed inside a tool's output is not one.
             if d.get("type") in ("user", "queue-operation", "attachment") and not any(b.get("type") == "tool_result" for b in blocks):
                 running -= set(NOTICE.findall(line))
-    done = [(kind, value) for kind, i, value in calls if i not in failed]
+    # A failed Bash call may still have run its --hold (`pane-label --hold; false`), so only its --free is in doubt.
+    done = [(kind, value) for kind, i, value in calls if i not in failed or (kind == "hold" and value)]
     crons = sum(value for kind, value in done if kind == "cron")
     wake = next((value for kind, value in reversed(done) if kind == "wake"), False)
     hold = next((value for kind, value in reversed(done) if kind == "hold"), False)
@@ -805,6 +810,10 @@ esac''')
                                      use("Bash", "toolu_p", command="cat > notes.md <<'EOF'\npane-label --free\nEOF")], True),
         "a free after a heredoc": ([use("Bash", "toolu_l", command="pane-label --hold"),
                                     use("Bash", "toolu_p", command="cat > n <<EOF\nx\nEOF\necho ok; pane-label --free")], False),
+        "a hold in a command that failed after it": ([use("Bash", "toolu_l", command="pane-label --hold; false"),
+                                                      result("toolu_l", "Exit code 1", error=True)], True),
+        "a command moved to the background on its own": ([use("Bash", "toolu_o", command="npm test"),
+                                                           result("toolu_o", "Command running in background with ID: bo1. Output ...")], True),
         "the later of two wakeups held": ([use("ScheduleWakeup", "toolu_w", delaySeconds=60), use("ScheduleWakeup", "toolu_x", delaySeconds=90),
                                            result("toolu_w", "failed", error=True), result("toolu_x", "ok")], True),
         "the later of two holds held": ([use("Bash", "toolu_l", command="pane-label --hold"), use("Bash", "toolu_m", command="pane-label --hold"),
