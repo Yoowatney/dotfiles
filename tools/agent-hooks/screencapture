@@ -1,0 +1,29 @@
+#!/bin/zsh
+# Agent sessions run under the herdr server, which has no Screen Recording
+# permission, so /usr/sbin/screencapture fails with "could not create image
+# from display". iTerm2 has the permission: retry the same command in a
+# short-lived iTerm2 window. Installed as ~/.local/bin/screencapture so every
+# agent (Claude, Codex) gets it without knowing.
+# ponytail: opens and closes an iTerm2 window per fallback capture.
+
+/usr/sbin/screencapture "$@" 2>/dev/null && exit 0
+
+dir=$(mktemp -d)
+{
+  print -r -- '#!/bin/zsh'
+  print -r -- "cd ${(q)PWD}"
+  print -r -- "/usr/sbin/screencapture ${(q)@} 2> ${(q)dir}/err; print \$? > ${(q)dir}/rc"
+  print -r -- 'exit'
+} > "$dir/cap.command"
+chmod +x "$dir/cap.command"
+open -a iTerm "$dir/cap.command" || { print -u2 "screencapture: no permission and iTerm2 fallback failed"; exit 1; }
+
+for _ in {1..60}; do
+  [[ -f $dir/rc ]] && break
+  sleep 0.25
+done
+[[ -f $dir/rc ]] || { print -u2 "screencapture: iTerm2 fallback timed out"; exit 1; }
+cat "$dir/err" >&2
+rc=$(<"$dir/rc")
+rm -rf "$dir"
+exit $rc
