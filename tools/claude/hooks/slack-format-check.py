@@ -13,6 +13,11 @@ they touch Slack-posting code: adding a typed bullet there is denied. Only
 added bullets count, so editing a file that already has some still works.
 A line with `slack-format: ok` opts out.
 
+The same file writes also get the munice work-log check: the Obsidian work-log takes munice work only, so a write there
+that names gomgom, or comes from a gomgom or household session, is denied (요유 2026-11-03: "곰곰 작업은 넣으면 안된다
+절대", after 66 gomgom entries went in). It lives here because Codex runs a new hook only after 요유 trusts it, and this
+one is trusted for apply_patch already.
+
 A JSON deny blocks the call and tells the model why.
 
     slack-format-check.py --selftest
@@ -24,6 +29,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 
 FAKE_BULLET = re.compile(r"^\s*[•◦▪‣●○∙·]\s")
 MD_LIST = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
@@ -174,6 +180,33 @@ def patch_changes(patch: str, cwd: str):
         yield path, "\n".join(removed), "\n".join(added)
 
 
+WORKLOGS = "/obsidian-munice/work-logs/"
+NOT_MUNICE = re.compile(r"gomgom|곰곰", re.I)
+WORKLOG_FIX = (
+    "munice 업무 일지에는 munice 일만 적는다. gomgom(곰곰)과 집안일은 어떤 라벨로도 넣지 않는다 "
+    "(요유 2026-11-03, 전역 AGENTS.md Work Log). 이 기록은 일지에 남기지 말 것."
+)
+
+
+def worklog_problems(tool: str, inp: dict, cwd: str, home: str = os.path.expanduser("~")) -> list[str]:
+    """Where a write to the munice work-log names gomgom or comes from a gomgom or household session."""
+    other = cwd.startswith((home + "/work/gomgom", home + "/home"))
+    command = inp.get("command") or ""
+    if tool == "Write":
+        changes = [(inp.get("file_path") or "", inp.get("content") or "")]
+    elif tool in ("Edit", "MultiEdit"):
+        changes = [(inp.get("file_path") or "", e.get("new_string") or "") for e in inp.get("edits") or [inp]]
+    elif "*** Begin Patch" in command:  # Codex apply_patch
+        changes = [(path, new) for path, _, new in patch_changes(command, cwd)]
+    else:
+        changes = []
+    return [
+        f"{os.path.basename(path)}: munice 업무 일지에 다른 프로젝트 기록"
+        for path, new in changes
+        if WORKLOGS in path and (other or NOT_MUNICE.search(unicodedata.normalize("NFC", new)))
+    ]
+
+
 def code_problems(tool: str, inp: dict, cwd: str) -> list[str]:
     """Where a file write or command adds typed bullets to Slack-bound code."""
     command = inp.get("command") or ""
@@ -274,6 +307,21 @@ def selftest():
     finally:
         os.remove(md)
     assert problems("*[ a ]* @홍길동", members)  # Slack MCP text too
+
+    # The munice work-log takes munice work only (요유 2026-11-03)
+    wl = "/Users/x/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-munice/work-logs/2026-11-03.md"
+    mun, home = "/Users/x/work/munice", "/Users/x"
+    assert worklog_problems("Edit", {"file_path": wl, "new_string": "- **프로젝트:** gomgom"}, mun, home)
+    assert worklog_problems("Write", {"file_path": wl, "content": unicodedata.normalize("NFD", "## 곰곰 배치")}, mun, home)
+    assert worklog_problems("MultiEdit", {"file_path": wl, "edits": [{"new_string": "GomGom"}]}, mun, home)
+    assert worklog_problems("Edit", {"file_path": wl, "new_string": "- **프로젝트:** personal"}, home + "/work/gomgom/GomGomBot", home)
+    assert worklog_problems("Edit", {"file_path": wl, "new_string": "가계부"}, home + "/home", home)
+    assert worklog_problems("Edit", {"file_path": wl, "new_string": "- **프로젝트:** munice"}, mun, home) == []
+    assert worklog_problems("Edit", {"file_path": wl, "new_string": "munice"}, home + "/work/munice-wt/api-1", home) == []
+    assert worklog_problems("Edit", {"file_path": "/Users/x/notes.md", "new_string": "gomgom"}, mun, home) == []
+    patch = "*** Begin Patch\n*** Update File: " + wl + "\n@@\n+## 곰곰 배포\n*** End Patch"
+    assert worklog_problems("apply_patch", {"command": patch}, mun, home)
+    assert worklog_problems("apply_patch", {"command": patch.replace("곰곰", "api")}, mun, home) == []
     print("selftest ok")
 
 
@@ -284,13 +332,17 @@ if __name__ == "__main__":
     payload = json.load(sys.stdin)
     tool = payload.get("tool_name") or ""
     inp = payload.get("tool_input") or {}
+    title = "Slack 형식 검사에 걸렸습니다."
     if "slack" in tool.lower() and "text" in inp:  # the Slack MCP post tools
         found, fix = problems(inp.get("text") or ""), FIX + "\n" + MENTION_FIX
     else:
-        found, fix = code_problems(tool, inp, payload.get("cwd") or os.getcwd()), CODE_FIX
+        cwd = payload.get("cwd") or os.getcwd()
+        found, fix, title = worklog_problems(tool, inp, cwd), WORKLOG_FIX, "munice 업무 일지 검사에 걸렸습니다."
+        if not found:
+            found, fix, title = code_problems(tool, inp, cwd), CODE_FIX, "Slack 형식 검사에 걸렸습니다."
         if not found and "slackcopy" in (inp.get("command") or ""):  # a markdown file headed for the clipboard
             found, fix = slackcopy_problems(inp["command"], load_members()), MENTION_FIX
-    reason = "Slack 형식 검사에 걸렸습니다.\n- " + "\n- ".join(found) + "\n" + fix if found else fresh_reason(payload)
+    reason = title + "\n- " + "\n- ".join(found) + "\n" + fix if found else fresh_reason(payload)
     if reason:  # JSON deny: Claude Code and Codex both read it
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
