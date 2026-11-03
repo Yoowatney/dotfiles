@@ -73,7 +73,7 @@ DELEGATED = re.compile(r"머지|맡기|공유|리뷰|검토|댓글")  # standing
 # ends quietly at the question. `설계 승인` names no step and stays a decision.
 STEP = re.compile(r"(?:배포|승격|반영|롤백|실행|재시작|설치|적용|전환|삭제|게시|전송|공지|로그인|진행)(?:할지|될지|을|를)?"
                   r"(?:[ \t]*(?:승인|결정(?:하기)?|정하기|고르기|선택|판단|여부|답하기))*$")
-ONLY_YOYOO = re.compile(r"`/clear`|`prod 허용`")  # typed by 요유 alone: the handoff rule and the production unlock
+ONLY_YOYOO = re.compile(r"`/clear`|`prod 허용`|`staging 허용`")  # typed by 요유 alone: the handoff rule and the GCP unlocks
 ASK_BACK = re.compile(r"([가-힣])까요[ \t]*[?？]\**$")
 PERMIT = re.compile(r"(?:해도[ \t]*(?:되나요|좋을까요|괜찮을까요)|하시겠습니까)[ \t]*[?？]\**$")
 WHICH = re.compile(r"아니면|어떻게|어느|어떤|어디|언제|누구|무엇|뭐|뭘|까요[^?？]*까요")  # asks what to do, not leave to do it

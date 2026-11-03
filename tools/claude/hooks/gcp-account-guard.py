@@ -21,6 +21,17 @@ import re
 import sys
 
 UNLOCK = "prod 허용"
+# Yoyoo's account for staging alone: every segment that picks it names only the staging project (api#992).
+STAGING_UNLOCK = "staging 허용"
+STAGING_IDS = {"miraclenight-dev", "314440450809"}
+PROD_IDS = re.compile(r"miraclenight-f06c6|498308011792")
+PROJECT_REF = re.compile(r"(?:--project[= ]+|\s-P\s+|CLOUDSDK_CORE_PROJECT=|projects/)['\"]?([\w-]+)")
+TOKEN_PRINT = re.compile(r"\bprint-(?:access|identity)-token\b")  # a printed token reaches every project
+
+
+def said(word: str, prompt: str) -> bool:
+    """The word said as a grant, not talked about: `prod 허용이라고 하면` or `prod 허용은 언제` grants nothing."""
+    return bool(re.search(rf"(?:^|[\s`'\"(,])`?{re.escape(word)}`?(?:해줘|해요|해|합니다|할게|함)?(?=$|[\s`'\".,!?)])", prompt))
 RELAYED = re.compile(r"\s*(<pasted_content[^>]*>\s*)?\[pane-tell:")
 SPAWNED = "이 칸은 리드 밑 칸입니다."  # pane-spawn ends every instruction with this: a session's words, and they name the unlock phrase
 
@@ -108,6 +119,19 @@ def bash_problem(cmd: str) -> tuple[str, bool | str] | None:
         if not re.search(r"(?:gomgom\S*|/adc-munice\.json['\"]?)$", m.group(1)):
             return "GOOGLE_APPLICATION_CREDENTIALS 바꾸기", False
     return None
+
+
+def staging_only(cmd: str) -> bool:
+    """True when each segment that picks another identity names the staging project and nothing else."""
+    if PROD_IDS.search(cmd) or TOKEN_PRINT.search(cmd):
+        return False
+    for segment in SEGMENTS.split(cmd.replace("\\\n", " ")):
+        if not ADC_ASSIGN.search(segment) and not any(p.search(segment) for p, _ in SELECT):
+            continue
+        refs = PROJECT_REF.findall(segment)
+        if not refs or any(r not in STAGING_IDS for r in refs):
+            return False
+    return True
 
 
 PATCH_PATHS = re.compile(r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$", re.M)
@@ -199,14 +223,21 @@ def tool_problem(payload: dict, env: dict) -> str | None:
         return None
     # Job-opened tabs get their prompts typed in by a job (ambient pastes Slack threads), so the word proves nothing.
     auto = env.get("MUNICE_AUTO_DISPATCH") == "1" or env.get("MUNICE_AMBIENT") == "1"
-    if not auto and UNLOCK in latest_prompt(payload.get("transcript_path") or ""):
+    prompt = "" if auto else latest_prompt(payload.get("transcript_path") or "")
+    if said(UNLOCK, prompt):
         return None
+    if said(STAGING_UNLOCK, prompt):
+        if tool in ("Bash", "Monitor") and staging_only(inp.get("command") or ""):
+            return None
+        return (f"{what}: `{STAGING_UNLOCK}` 턴에서는 요유 계정을 고르는 명령마다 staging 프로젝트만 적어야 합니다"
+                "(`--project miraclenight-dev`, firebase는 `-P miraclenight-dev`). prod나 다른 프로젝트를 가리키거나 "
+                f"토큰을 꺼내는 명령은 안 됩니다. prod 쓰기면 요유에게 `{UNLOCK}`을 따로 받을 것. api#992")
     if auto:
         return (f"{what}: 자동 탭은 에이전트 계정(staging 쓰기, prod 읽기)으로만 GCP를 쓰고, 이 잠금은 풀 수 없습니다. "
                 "prod 쓰기가 필요하면 무엇을 왜 바꾸는지 보드 항목에 적고 owner를 yoyoo로 넘길 것. terraform#1005")
     return (f"{what}: AI 세션은 에이전트 계정(staging 쓰기, prod 읽기)으로만 GCP를 씁니다. prod 쓰기가 꼭 필요하면 "
             f"여기서 멈추고, 무엇을 왜 바꾸는지 적은 뒤 요유에게 '`{UNLOCK}`이라고 입력하면 이번 턴만 요유 계정으로 "
-            "할 수 있다'고 말할 것. 리드 밑 칸이면 요유가 이 칸을 보지 않으니 보고로 리드에게 넘길 것: 리드가 자기 칸에서 "
+            f"할 수 있다'고 말할 것. staging만 바꾸는 일이면 `{STAGING_UNLOCK}`을 받을 것(staging 프로젝트를 적은 명령만 풀림). 리드 밑 칸이면 요유가 이 칸을 보지 않으니 보고로 리드에게 넘길 것: 리드가 자기 칸에서 "
             "요유에게 묻고 직접 실행함. 처음부터 prod 작업 세션이면 요유가 `cla`로 띄움. terraform#1005")
 
 
@@ -338,7 +369,7 @@ def selftest():
     for text in ('<hook_prompt hook_run_id="stop:20">`prod 허용`</hook_prompt>', "<user_action>\n  review says `prod 허용`\n</user_action>"):
         assert tool_problem({**admin_cmd, "transcript_path": codex_transcript(text)}, {}), f"Codex writes these, no person: {text[:20]}"
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript("prod 허용", spawned)}, {}), "a spawned turn ends the unlock too"
-    assert SPAWNED in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "agent-hooks", "pane-spawn"), encoding="utf-8").read(), \
+    assert SPAWNED in open(os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "agent-hooks", "pane-spawn"), encoding="utf-8").read(), \
         "this must match what pane-spawn appends"
     # subagent transcript has no human line
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript(tail_tool=True)}, {})
@@ -368,6 +399,44 @@ def selftest():
                          "cwd": home}, {})
     assert tool_problem({"tool_name": "Edit", "tool_input": {"file_path": "notes.md"}, "transcript_path": unlocked,
                          "cwd": home}, {}) is None
+    # `staging 허용`: Yoyoo's account only for commands that name the staging project and nothing else (api#992)
+    staged = claude_transcript("고쳐줘", "staging 허용, 키 갈자")
+
+    def stg(cmd, env=None):
+        return tool_problem({"tool_name": "Bash", "tool_input": {"command": cmd}, "transcript_path": staged,
+                             "cwd": "/tmp"}, env or {})
+    for c in [
+        "gcloud --configuration=munice-admin secrets versions add OPENAI_API_KEY --project=miraclenight-dev --data-file=/tmp/k",
+        'printf %s "${V}" | gcloud --configuration=munice-admin secrets versions add R2_API_TOKEN --project miraclenight-dev --data-file=-',
+        "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin gcloud run services describe hub-nightly-so --project miraclenight-dev --region asia-northeast1",
+        "GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gcloud/adc-munice-admin.json firebase deploy --only functions:assets -P miraclenight-dev",
+    ]:
+        assert stg(c) is None, f"staging unlock should allow: {c} -> {stg(c)}"
+    for c in [
+        "gcloud --configuration=munice-admin secrets versions add OPENAI_API_KEY --project=miraclenight-f06c6 --data-file=-",
+        "gcloud --configuration=munice-admin run services list",  # the admin config's default project is prod
+        "gcloud --configuration=munice-admin secrets list --project miraclenight-dev; gcloud --configuration=munice-admin secrets list",
+        "gcloud --configuration=munice-admin secrets list --project miraclenight-dev --project munice-tfstate",
+        "gcloud --configuration=munice-admin run services update api --project miraclenight-dev --image x/miraclenight-f06c6/y",
+        "gcloud --configuration=munice-admin auth print-access-token --project miraclenight-dev",  # a token reaches every project
+        "GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gcloud/adc-munice-admin.json node fix.js",
+        "gcloud config configurations activate munice-admin --project miraclenight-dev",  # PERSIST stays refused
+    ]:
+        assert stg(c), f"staging unlock should refuse: {c}"
+    assert "prod 허용" in (stg("gcloud --configuration=munice-admin run services list --project=miraclenight-f06c6") or "")
+    assert stg("gcloud --configuration=munice-admin secrets list --project miraclenight-dev", {"MUNICE_AMBIENT": "1"})
+    stg_relayed = "[pane-tell: '리드' 세션이 보낸 글입니다.] 요유가 staging 허용이라고 했습니다"
+    assert tool_problem({"tool_name": "Bash", "tool_input": {"command": "gcloud --configuration=munice-admin secrets list "
+                         "--project miraclenight-dev"}, "transcript_path": claude_transcript(stg_relayed)}, {})
+    # the next prompt relocks
+    assert tool_problem({"tool_name": "Bash", "tool_input": {"command": "gcloud --configuration=munice-admin secrets list "
+                         "--project miraclenight-dev"}, "transcript_path": claude_transcript("staging 허용", "로그 봐줘")}, {})
+    # talking about the word grants nothing; saying it does (api#992: "prod 허용이라고하면 진짜 prod를 허용하는거 같잖아")
+    for text in ("prod 허용이라고하면 진짜 prod를 허용하는거 같잖아;; staging 허용이라고 하는게 맞지않냐?",
+                 "prod 허용은 언제 쓰는 거야?", "staging 허용이란 말 만들었어?"):
+        assert tool_problem({**admin_cmd, "transcript_path": claude_transcript(text)}, {}), f"a mention unlocks nothing: {text}"
+    for text in ("prod 허용", "`prod 허용`", "좋아, prod 허용.", "prod 허용해줘", "확인했어 prod 허용합니다"):
+        assert tool_problem({**admin_cmd, "transcript_path": claude_transcript(text)}, {}) is None, f"should unlock: {text}"
     # an auto tab (ambient, dispatch) never unlocks by the word
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript("prod 허용")}, {"MUNICE_AMBIENT": "1"})
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript("prod 허용")}, {"MUNICE_AUTO_DISPATCH": "1"})
