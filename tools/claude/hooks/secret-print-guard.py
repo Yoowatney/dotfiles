@@ -180,6 +180,29 @@ def shell_text(w: list[str]) -> str | None:
     return None
 
 
+def reads_secret(body: str) -> bool:
+    """A capture body whose output is a secret: the same reads this guard blocks when printed."""
+    if CREDENTIAL_URL.search(body):
+        return True
+    for seg in segments(body):
+        w = words(seg)
+        n = names(w)
+        if PRINTS_SECRET.match(" ".join(w)) or reads_credential(n) or (
+            READERS & set(n) and SECRET_PATH.search(" ".join(w))
+        ):
+            return True
+    return False
+
+
+def secret_vars(runs: str) -> set[str]:
+    """Names assigned from a secret read: `S=$(...)`, `export S="$(...)"`, `S=`...``."""
+    # ponytail: a second hop (`T=$S`), `read S < <(...)` and `for S in $(...)` are not followed.
+    return {
+        v[1] for m in CAPTURE.finditer(runs)
+        if (v := re.search(r"(?<![\w$])([A-Za-z_]\w*)=\"?$", runs[:m.start()])) and reads_secret(m[1] or m[2])
+    }
+
+
 def rest_problem(cmd: str, shown: set[str], ran: list[str]) -> str | None:
     """The API calls behind the same reads. Takes the raw command: the URL can sit in a variable or a Python heredoc."""
     # ponytail: a script file or client library doing the same call is not seen here.
@@ -202,6 +225,8 @@ def bash_problem(cmd: str) -> str | None:
     # A capture keeps one value out of the chat, but a transfer config is a whole answer read in order to print it.
     runs = QUOTED.sub(lambda m: "''" if m[0][0] == "'" else m[0], text)  # nothing runs in single quotes
     captured = [s for pair in CAPTURE.findall(runs) for s in segments("".join(pair))]
+    # `${#S}` prints only the length; every other expansion of S prints some of the value.
+    tainted = [re.compile(rf"\$(?:{v}\b|\{{(?!#){v}\b)") for v in secret_vars(runs)]
     shown = {x for seg in seen for x in names(seg)}
     ran = [x for seg in seen + captured for x in names(seg)]
     if any(reads_transfer(seg) for seg in seen + captured):
@@ -226,8 +251,11 @@ def bash_problem(cmd: str) -> str | None:
         verb = w[0].rsplit("/", 1)[-1]
         if verb == "printenv" or (verb == "env" and all(a.startswith("-") for a in w[1:])):
             return "printenv/env는 환경변수의 비밀값을 그대로 출력함"
-        if verb in {"echo", "printf"} and SECRET_VAR.search(segment):
-            return "비밀값 변수를 echo/printf로 출력하지 말 것 (존재 확인은 `[ -n \"$VAR\" ] && echo set`)"
+        if verb in {"echo", "printf", "print"} and (
+            SECRET_VAR.search(segment) or any(t.search(segment) for t in tainted)
+        ):
+            return ("비밀값 변수를 echo/printf로 출력하지 말 것. 앞 몇 글자만 찍어도 값이 새어 나감 "
+                    "(존재 확인은 `[ -n \"$VAR\" ] && echo set`, 길이는 `echo ${#VAR}`)")
         if verb == "curl" and re.search(r"\s(?:-v|--verbose|--trace(?:-ascii)?)\b", segment) and (
             SECRET_VAR.search(cmd) or re.search(r"authorization", cmd, re.I)
         ):
@@ -357,6 +385,15 @@ def selftest():
         f"curl \"{TC}/c:startManualRuns?fields=runs\"",
         f"B={TC}; curl \"$B?fields=transferConfigs(name)\"; curl \"$B/c\"",
         f"python3.12 - <<'PY'\nprint('{TC}')\nPY",
+        # 2026-11-03: a secret read into a plain-named variable, then its first characters echoed
+        "S=$(gcloud secrets versions access latest --secret=x); echo \"${S:0:4}\"",
+        "S=$(gcloud secrets versions access latest --secret=x | tr -d '\\n'); printf '%s\\n' \"${S}\"",
+        "export S=\"$(gcloud secrets versions access latest --secret=x)\" && echo $S",
+        "S=`gcloud secrets versions access latest --secret=x`; echo $S",
+        "S=$(security find-generic-password -s x -w); echo ${S:0:4}",
+        "S=$(cat ~/.config/x/.env); echo $S",
+        "S=$(firebase functions:secrets:access X); echo \"len=${#S} head=${S:0:4}\"",
+        "S=$(gcloud secrets versions access latest --secret=x); echo \"${S%????????}\"",
     ]
     allow = [
         "T=$(python3 -I -c 'import re,os;print(open(os.path.expanduser(\"~/.codex/config.toml\")).read())')",
@@ -431,6 +468,12 @@ def selftest():
         f"curl \"{TC}/c:startManualRuns?fields=runs(name,state)\"",
         "bash -c \"ls -la\"",
         "zsh -lc 'gcloud auth list'",
+        "S=$(gcloud secrets versions access latest --secret=x); echo ${#S}",
+        "S=$(gcloud secrets versions access latest --secret=x); echo \"len=${#S}\"",
+        "S=$(gcloud secrets versions access latest --secret=x); curl -s -H \"Authorization: Bearer $S\" https://x",
+        "S=$(gcloud secrets versions list s); echo $S",
+        "S=$(gcloud secrets versions access latest --secret=x); echo $SX ${SX:0:4}",
+        "git commit -m 'S=$(gcloud secrets versions access latest --secret=x); echo ${S:0:4}'",
     ]
     for c in deny:
         assert bash_problem(c), f"should deny: {c}"
