@@ -83,21 +83,30 @@ def should_close(text: str) -> bool:
 STARTS = ("Monitor", "Agent", "Workflow")  # with a background Bash, CronCreate and ScheduleWakeup: what pane-hold.sh marks 🔴
 TASK = re.compile(r"(with ID: |\(task |agentId: |stopped task: )(\w+)")
 NOTICE = re.compile(r"<tool-use-id>(toolu_\w+)</tool-use-id>")
-# Run as a command, not named in one: `rg 'pane-label --free'` is a search (Codex review, 2026-11-03).
+# Run as a command, not named in one: `rg 'pane-label --free'`, a quoted example or a heredoc body is text (Codex review,
+# 2026-11-03). ponytail: a regex reading of shell, not a parser; a miss it makes keeps 🔴 or frees as the agent last asked.
 BY_HAND = re.compile(r"(?:^|[;&|(\n])[ \t]*(?:\S*/)?pane-label[ \t]+(--hold|--free)\b")
+HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1[^\n]*\n.*?^[ \t]*\2[ \t]*$", re.S | re.M)
+QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
+
+
+def hand_flags(command: str) -> list:
+    return BY_HAND.findall(QUOTED.sub("''", HEREDOC.sub("", command)))
 
 
 def still_running(path: str, claim: bool = True) -> bool:
     """Whether a Claude transcript shows something pane-hold.sh marked 🔴 that may still run: a background command, Monitor,
     agent or workflow without its end notice or a TaskStop, a session cron with no CronDelete, a wakeup not stopped, a
     `pane-label --hold` with no `--free` after it, or (with claim) a last report saying `세션: 닫으면 …`, which holds until
-    a later report replaces it. A refused call changes nothing. A line it cannot read raises. Shapes it does not know count
-    as running, so a doubt keeps 🔴, which only keeps a session open (the old behaviour).
+    a later report replaces it. A failed or refused call counts for nothing, and of the ones left the last wakeup and the
+    last hand mark decide. A line it cannot read raises. Shapes it does not know count as running, so a doubt keeps 🔴,
+    which only keeps a session open (the old behaviour).
     ponytail: a one-shot cron or a /loop that ends without stop=True, and a Monitor that expires without a notice, stay 🔴."""
     running: set = set()
     task_of: dict = {}
-    undo: dict = {}  # a cron, wakeup or hand-mark call: its own change, taken back if the call fails
-    crons, wake, hold, closes = 0, False, False, False
+    calls: list = []  # (kind, id, value) of cron, wakeup and hand-mark calls, in the order they were made
+    failed: set = set()
+    closes = False
     with open(path, encoding="utf-8") as f:
         for line in f:
             d = json.loads(line)
@@ -109,10 +118,9 @@ def still_running(path: str, claim: bool = True) -> bool:
                     closes = value.startswith("닫으면") if value else closes
                 elif b.get("type") == "tool_use":
                     name, inp, i = b.get("name"), b.get("input") or {}, b.get("id")
-                    flags = BY_HAND.findall(inp.get("command") or "") if name == "Bash" else []
-                    if flags:  # `cleanup && pane-label --free` that failed never freed
-                        undo[i] = ("hold", hold)
-                        hold = flags[-1] == "--hold"
+                    flags = hand_flags(inp.get("command") or "") if name == "Bash" else []
+                    if flags:  # `cleanup && pane-label --free` that failed never freed: see failed
+                        calls.append(("hold", i, flags[-1] == "--hold"))
                     if (name == "Bash" and inp.get("run_in_background")) or name in STARTS:
                         running.add(i)
                         if inp.get("name"):  # an agent's name, for SendMessage
@@ -120,19 +128,14 @@ def still_running(path: str, claim: bool = True) -> bool:
                     if name == "SendMessage" and task_of.get(inp.get("to")):
                         running.add(task_of[inp.get("to")])  # wakes an agent that had finished
                     if name in ("CronCreate", "CronDelete"):
-                        undo[i] = ("cron", 1 if name == "CronCreate" else -1)
-                        crons += undo[i][1]
+                        calls.append(("cron", i, 1 if name == "CronCreate" else -1))
                     if name == "ScheduleWakeup":
-                        undo[i] = ("wake", wake)
-                        wake = inp.get("stop") is not True
+                        calls.append(("wake", i, inp.get("stop") is not True))
                 elif b.get("type") == "tool_result":
                     i = b.get("tool_use_id")
                     if b.get("is_error"):
                         running.discard(i)  # refused, so it never started
-                        kind, change = undo.pop(i, (None, None))
-                        crons -= change if kind == "cron" else 0
-                        wake = change if kind == "wake" else wake  # ponytail: wakeups come one at a time
-                        hold = change if kind == "hold" else hold
+                        failed.add(i)
                     for kind, task in TASK.findall(json.dumps(b.get("content"), ensure_ascii=False)):
                         if kind == "stopped task: ":
                             running.discard(task_of.get(task))
@@ -141,6 +144,10 @@ def still_running(path: str, claim: bool = True) -> bool:
             # An end notice comes as its own user message or queued mid-turn; one printed inside a tool's output is not one.
             if d.get("type") in ("user", "queue-operation", "attachment") and not any(b.get("type") == "tool_result" for b in blocks):
                 running -= set(NOTICE.findall(line))
+    done = [(kind, value) for kind, i, value in calls if i not in failed]
+    crons = sum(value for kind, value in done if kind == "cron")
+    wake = next((value for kind, value in reversed(done) if kind == "wake"), False)
+    hold = next((value for kind, value in reversed(done) if kind == "hold"), False)
     return bool(running) or crons > 0 or wake or hold or (claim and closes)
 
 
@@ -792,6 +799,16 @@ esac''')
         "a free that never ran": ([use("Bash", "toolu_l", command="pane-label --hold"),
                                    use("Bash", "toolu_f", command="cleanup && pane-label --free"),
                                    result("toolu_f", "Exit code 1", error=True)], True),
+        "a free inside quotes": ([use("Bash", "toolu_l", command="pane-label --hold"),
+                                  use("Bash", "toolu_p", command="printf '%s\\n' 'x; pane-label --free'")], True),
+        "a free inside a heredoc": ([use("Bash", "toolu_l", command="pane-label --hold"),
+                                     use("Bash", "toolu_p", command="cat > notes.md <<'EOF'\npane-label --free\nEOF")], True),
+        "a free after a heredoc": ([use("Bash", "toolu_l", command="pane-label --hold"),
+                                    use("Bash", "toolu_p", command="cat > n <<EOF\nx\nEOF\necho ok; pane-label --free")], False),
+        "the later of two wakeups held": ([use("ScheduleWakeup", "toolu_w", delaySeconds=60), use("ScheduleWakeup", "toolu_x", delaySeconds=90),
+                                           result("toolu_w", "failed", error=True), result("toolu_x", "ok")], True),
+        "the later of two holds held": ([use("Bash", "toolu_l", command="pane-label --hold"), use("Bash", "toolu_m", command="pane-label --hold"),
+                                         result("toolu_l", "Exit code 1", error=True), result("toolu_m", "")], True),
         "the last report says 닫으면": ([say(keep[1])], True),
         "a later report replaced it": ([say(keep[1]), say(done)], False),
         "a 닫으면 inside code is no report": ([say("형식은 `세션: 닫으면 Monitor 멈춤` 입니다.")], False),
