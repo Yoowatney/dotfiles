@@ -91,9 +91,6 @@ case "$MODE" in
     begin)
         transcript_path="$(printf '%s' "$payload" | jq -r '.transcript_path // empty' 2>/dev/null)"
         cwd="$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null)"
-        # The work-log is munice only (요유 2026-11-03): no baseline here, so finish writes nothing for gomgom or
-        # household turns. A prefix, so munice worktrees (munice-wt, munice-workspace) still count.
-        [[ "$cwd" == */work/munice* ]] || exit 0
         worklog="$VAULT/work-logs/$TODAY.md"
         transcript_size="$(file_size "$transcript_path")"
         worklog_size="$(file_size "$worklog")"

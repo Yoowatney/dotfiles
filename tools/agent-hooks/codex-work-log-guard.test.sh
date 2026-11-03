@@ -189,21 +189,4 @@ stop_stdout="$({ stop_payload | HOME="$SANDBOX/home" \
 assert_contains "$worklog" "## Recovered entry" "Stop orchestrator runs recovery first"
 [[ "$(wc -l < "$SANDBOX/home/ingest-runs" | tr -d ' ')" == "1" ]] || fail "Stop orchestrator runs shared ingest once"
 
-# The work-log is munice only (요유 2026-11-03): a gomgom or household turn writes nothing, a munice worktree does.
-for other in /Users/test/work/gomgom/GomGomBot /Users/test/home; do
-    setup_fixture
-    jq -cn --arg t "$SANDBOX/home/transcript.jsonl" --arg cwd "$other" \
-        '{session_id:"session-1",transcript_path:$t,cwd:$cwd,hook_event_name:"UserPromptSubmit"}' | run_guard begin
-    printf 'non-trivial tool work\n' >> "$SANDBOX/home/transcript.jsonl"
-    valid_entry > "$SANDBOX/home/model-result"
-    jq -cn --arg t "$SANDBOX/home/transcript.jsonl" --arg cwd "$other" \
-        '{session_id:"session-1",turn_id:"turn-1",transcript_path:$t,cwd:$cwd,hook_event_name:"Stop"}' | run_guard finish
-    [[ ! -f "$worklog" ]] || fail "a turn in $other must not write the munice work-log"
-    [[ ! -f "$SANDBOX/home/claude-calls" ]] || fail "a turn in $other must not call the recovery model"
-done
-setup_fixture
-jq -cn --arg t "$SANDBOX/home/transcript.jsonl" \
-    '{session_id:"session-1",transcript_path:$t,cwd:"/Users/test/work/munice-wt/api-1",hook_event_name:"UserPromptSubmit"}' | run_guard begin
-[[ -f "$state_file" ]] || fail "a munice worktree turn is still recorded"
-
 echo "OK — codex-work-log-guard checks passed"
