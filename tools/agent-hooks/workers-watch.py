@@ -8,6 +8,8 @@ a report would sit there unseen. This watch sends the main pane one `pane-tell` 
   `{state_dir}/reported/<terminal>` when its report was sent), once per state_change_seq;
 - a pane whose name has 🫡 but no agent in it, once per pane (the unnamed root shell pane is never news): at once when the
   watch saw an agent there, else after 420 s, since pane-spawn names the pane before its agent starts;
+- a pane the watch saw with an agent that is now in neither list and has not reported since its last state (workers
+  restarted between two ticks, or the pane closed), once; then its record goes;
 - the workers server down, once while it stays down.
 No main pane (no file, or its terminal is on no server): nothing is sent. State: `{state_dir}/watch.json`, terminal id ->
 seq, status, since (first tick that saw this state), seen (last tick that saw it), floor (`seen` of the state before:
@@ -57,6 +59,9 @@ def tick(env, now: float) -> list:
             state = json.load(f)
     except (OSError, ValueError):
         state = {}
+    if not isinstance(state, dict):  # `null` or a list would raise every minute and silence the watch for good
+        state = {}
+    state = {k: v for k, v in state.items() if k == "_down" or isinstance(v, dict)}
     told: list = []
 
     def tell(msg) -> bool:
@@ -90,9 +95,9 @@ def tick(env, now: float) -> list:
             old = state.get(term) or {}
             rec = old if old.get("seq") == seq and kind(old.get("status")) == kind(status) else {
                 "seq": seq, "status": status, "since": now, "floor": old.get("seen", 0), "alerted": []}
-            rec["seen"] = now
-            records[term] = rec
             name = p.get("label") or a.get("name") or pane
+            rec.update(seen=now, name=name, pane=pane)  # name and pane: to say which pane it was once it is gone
+            records[term] = rec
             if kind(status) == "blocked" and now - rec["since"] >= 60 and "blocked" not in rec["alerted"]:
                 if tell(f"밑 칸 {name}(workers/{pane})이 질문 창에서 멈춰 있습니다. 화면: `herdr --session workers agent read {pane}`"):
                     rec["alerted"].append("blocked")
@@ -118,6 +123,18 @@ def tick(env, now: float) -> list:
             if (rec["had_agent"] or now - rec["first"] >= 420) and "ended" not in rec["alerted"] \
                     and tell(f"밑 칸 {p.get('label')}의 에이전트가 끝났습니다"):
                 rec["alerted"].append("ended")
+        # A pane that had an agent and is in neither list went without a word: workers restarted between two ticks (launchd
+        # KeepAlive is faster than this watch), or the pane closed. A report it sent since its last state covers it.
+        listed = set(records) | {p.get("terminal_id") for p in panes}
+        for term, old in state.items():
+            if term in listed or "status" not in old:
+                continue
+            try:
+                reported = os.path.getmtime(os.path.join(herdr_peers.state_dir(env), "reported", term)) >= old.get("floor", 0)
+            except OSError:
+                reported = False
+            if not reported and not tell(f"밑 칸 {old.get('name') or term}(workers/{old.get('pane') or '?'})이 보고 없이 사라졌습니다"):
+                records[term] = old  # told nobody: try again next minute
         state = records  # panes that are gone drop out
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path + ".tmp", "w") as f:
@@ -237,6 +254,21 @@ esac
         assert tick(8500) == [] and tick(8600) == [], "the main pane is on no server: nobody to tell"
         result("default-panes", "panes", [{"pane_id": "w5:p3", "terminal_id": "term_M"}])
 
+        # A pane with an agent gone from both lists (workers restarted between two ticks, a pane closed): news once, unless
+        # it reported before it went. A list that cannot be read is no news and keeps the record.
+        watch = lambda: json.load(open(f"{d}/state/orchestrator/watch.json"))
+        panes_on_workers(); os.remove(f"{d}/workers-agents.json")
+        assert tick(9000) == [] and "term_6" in watch(), "a list that cannot be read: no alert, the record is kept"
+        agents(); told = tick(9060)
+        assert len(told) == 1 and told[0] == "w5:p3|밑 칸 🟢 🫡 시험(workers/w1:p6)이 보고 없이 사라졌습니다", told
+        assert tick(9120) == [] and "term_6" not in watch(), "once; then the record is dropped"
+        panes_on_workers(label("w1:p5", "🟢 🫡 보고함")); agents(agent("w1:p5", "term_5", "idle", seq=2)); tick(9200)
+        touch_reported("term_5", 9230); panes_on_workers(); agents()
+        assert tick(9260) == [] and "term_5" not in watch(), "a pane that reported before it went is no news"
+        panes_on_workers(label("w1:p3", "🟢 🫡 재시도")); agents(agent("w1:p3", "term_3", "working", seq=1)); tick(9300)
+        panes_on_workers(); agents()
+        assert tick(9360, TELL_EXIT="1") == [] and len(tick(9420)) == 1, "a pane-tell that failed is sent again next minute"
+
         panes_on_workers(label("w1:p7", "🟢 🫡 시작 중")); agents()
         assert tick(10000) == [] and tick(10419) == [], "pane-spawn may still be starting a 🫡 pane never seen with an agent"
         assert len([t for t in tick(10420) if "에이전트가 끝났" in t]) == 1 and tick(10480) == [], "after the 420 s grace: once"
@@ -250,6 +282,11 @@ esac
         agents(agent("w1:p9", "term_9", "working", seq=2)); tick(12120)
         agents(agent("w1:p9", "term_9", "idle", seq=3)); tick(12180)
         assert tick(13079) == [] and "보고 없이" in tick(13080)[0], "the last stop's report does not cover the next one"
+
+        for bad in ("null", "[1, 2]", '{"term_9": [1]}'):  # a state file that is not a record map must not silence the watch
+            write(f"{d}/state/orchestrator/watch.json", bad)
+            tick(14000)
+            assert isinstance(watch().get("term_9"), dict), bad
 
         # end to end, the way launchd runs it: python3 -I drops the script folder from sys.path
         panes_on_workers(label("w1:p6", "🟢 🫡 시험")); agents(agent("w1:p6", "term_6", "blocked", seq=11))
