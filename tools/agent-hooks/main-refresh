@@ -67,6 +67,7 @@ wait_for "$deadline" rested || skip "메인 칸이 07:00까지 쉬지 않아 건
 late # the Mac may have slept through the first wait
 # A queued request would count as delivered (pane-tell exits 0 on a queue), so the box must be empty first.
 "$TELL" --box-ready "$id" claude >/dev/null 2>&1 || skip "입력창이 비어 있지 않아 건너뜀"
+late # --box-ready takes a moment; the Mac may have slept across it
 
 req=$(date +%s)
 out=$("$TELL" "$id" "[main-refresh] 새벽 정리입니다. 지금 도는 밑 칸과 각 칸의 일, 모아 둔 결정(보드 링크, 개인 결정 파일), 오늘 남은 일을 handoff save로 남기고 '인계 저장함' 한 줄로 끝내세요. 다른 일은 하지 마세요." 2>/dev/null) \
@@ -77,8 +78,8 @@ fresh() { [ -s "$hdir/$key.md" ] && [ "$(stat -f %m "$hdir/$key.md")" -ge "$req"
 wait_for "$HANDOFF_WAIT" fresh || skip "인계가 저장되지 않아 건너뜀"
 
 late
-# Same filter as handoff's fallback: the last real user message must still be our request.
-tail -n 200 "$transcript" 2>/dev/null | jq -rs '[.[] | select(.type == "user" and .isMeta != true and (.message.content | type) == "string") | .message.content][-1] // ""' 2>/dev/null | grep -qF '[main-refresh]' \
+# The last real user message must still be our request. An array that is not only tool results (an image) is a new message.
+tail -n 200 "$transcript" 2>/dev/null | jq -rs '[.[] | select(.type == "user" and .isMeta != true) | .message.content | if type == "string" then . else (map(select(.type != "tool_result")) | select(length > 0) | "array") end][-1] // ""' 2>/dev/null | grep -qF '[main-refresh]' \
   || skip "인계 뒤에 새 대화가 있어 건너뜀"
 "$TELL" --box-ready "$id" claude >/dev/null 2>&1 || skip "입력창이 비어 있지 않아 건너뜀"
 # --box-ready reads the screen twice 0.7 s apart: a sleep or a new turn can land in between.
