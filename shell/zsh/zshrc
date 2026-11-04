@@ -91,7 +91,20 @@ alias cla='MUNICE_GCP_ADMIN=1 CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin GOOGLE_AP
 codex() {
   local bin
   bin=$(cd ~ && mise upgrade npm:@openai/codex >/dev/null 2>&1; mise which codex)
-  "$bin" "$@"
+  # A shared daemon can retain another pane's HERDR_* context. Each herdr TUI
+  # needs its own server so hooks and shell commands address the current pane.
+  local -a launch_args=()
+  [[ ${HERDR_ENV:-} == 1 ]] && launch_args+=(--no-daemon)
+  # `codex exec` with a prompt argument still reads "additional input" from a
+  # non-TTY stdin until EOF, and an agent's background shell can leave that
+  # stdin open: the run then waits forever before it starts (2026-11-04, a
+  # review hung for 10 minutes). A prompt argument needs no stdin, so close it.
+  # `codex exec -` and a trailing option (`review --uncommitted`) keep theirs.
+  if [[ $1 == exec && ! -t 0 && ${@[-1]} != -* ]]; then
+    "$bin" "${launch_args[@]}" "$@" </dev/null
+    return
+  fi
+  "$bin" "${launch_args[@]}" "$@"
 }
 
 # Editor
