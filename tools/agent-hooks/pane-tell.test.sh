@@ -17,12 +17,13 @@ case "\${HERDR_SOCKET_PATH:-}" in */sessions/*) s=\${HERDR_SOCKET_PATH%/herdr.so
 f="$SANDBOX/panes"; [ "\$s" != workers ] || f="$SANDBOX/workers-panes"
 case "\$1 \$2" in
   "session list") cat "$SANDBOX/sessions.json" 2>/dev/null || exit 1 ;;
-  "pane list") [ ! -f "$SANDBOX/herdr-down" ] || exit 1; [ "\$s" = workers ] || [ ! -f "$SANDBOX/default-down" ] || exit 1; cat "\$f" ;;
-  "tab list") cat "$SANDBOX/tabs" 2>/dev/null || echo '{"result":{"tabs":[]}}' ;;
+  "pane list") [ ! -f "$SANDBOX/herdr-down" ] || exit 1; [ "\$s" = workers ] || [ ! -f "$SANDBOX/default-down" ] || exit 1
+    [ "\$s" != workers ] || [ ! -f "$SANDBOX/workers-stuck" ] || exec sleep 8; cat "\$f" ;;
+  "tab list") t="$SANDBOX/tabs"; [ "\$s" != workers ] || t="$SANDBOX/workers-tabs"; cat "\$t" 2>/dev/null || echo '{"result":{"tabs":[]}}' ;;
   "pane get") jq -n --arg i "\$(cat "$SANDBOX/new-id" 2>/dev/null)" --argjson o "\$(cat "$SANDBOX/scrolled" 2>/dev/null || echo 0)" \
     --arg p "\$3" --slurpfile all "\$f" \
     '{result: {pane: ((\$all[0].result.panes | map(select(.pane_id == \$p)) | .[0] // {}) + {scroll: {offset_from_bottom: \$o}} + (if \$i == "" then {} else {pane_id: \$i} end))}}' ;;
-  "pane read") n=\$((\$(cat "$SANDBOX/reads" 2>/dev/null || echo 0) + 1)); echo "\$n" > "$SANDBOX/reads"
+  "pane read") n=\$((\$(cat "$SANDBOX/reads" 2>/dev/null || echo 0) + 1)); echo "\$n" > "$SANDBOX/reads"; echo "\$s" >> "$SANDBOX/read-srv"
     if [ -f "$SANDBOX/screen-\$3" ]; then cat "$SANDBOX/screen-\$3"
     elif [ -f "$SANDBOX/screen.\$n" ]; then cat "$SANDBOX/screen.\$n"; else cat "$SANDBOX/screen"; fi ;;
   "agent prompt") [ ! -f "$SANDBOX/refuse" ] || exit 1; printf '%s|%s\n' "\$3" "\$4" >> "$SANDBOX/log"; echo "\$s" >> "$SANDBOX/log-srv" ;;
@@ -49,6 +50,8 @@ export PANE_TELL_POLL=0.05 PANE_TELL_SETTLE=0
 pt() { rm -f "$SANDBOX/log" "$SANDBOX/log-srv" "$SANDBOX/alerts-srv" "$SANDBOX/reads"; env HOME="$SANDBOX/home" XDG_STATE_HOME="$SANDBOX/state" HERDR_PANE_ID=w1:p9 HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "$@"; }
 # pt from pane w1:p2 of the workers server
 ptw() { rm -f "$SANDBOX/log" "$SANDBOX/log-srv" "$SANDBOX/alerts-srv" "$SANDBOX/reads"; env HOME="$SANDBOX/home" XDG_STATE_HOME="$SANDBOX/state" HERDR_PANE_ID=w1:p2 HERDR_SOCKET_PATH="$SANDBOX/sessions/workers/herdr.sock" HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "$@"; }
+# pt from a launchd job: no pane, no server named
+job() { rm -f "$SANDBOX/log" "$SANDBOX/log-srv" "$SANDBOX/alerts-srv" "$SANDBOX/reads"; env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_SESSION HOME="$SANDBOX/home" XDG_STATE_HOME="$SANDBOX/state" HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "$@"; }
 sent() { cut -d'|' -f1 "$SANDBOX/log" 2>/dev/null | tr '\n' ' '; }
 # Waits for the detached delivery to finish: nothing is left waiting and the process itself is gone. It outlives its file while
 # it warns the sender, and those pane reads would land on the next check's counter ("typed between the two reads" failed 5 of 6).
@@ -236,11 +239,20 @@ pt default/w1:p9 "x" 2>/dev/null; check "its own server named in the address is 
 pt other/w1:p2 "x" 2>/dev/null; check "only default and workers are reachable by name" "$?|$(sent)" "2|"
 sessions_up stopped; pt workers/w1:p2 "x" 2>/dev/null; check "a stopped server has no such pane" "$?|$(sent)" "3|"
 sessions_up
-# main -> workers, the workers box is full: the alert goes where that box is; the note to the sender reaches main on default.
+# main -> workers, the workers box is full: no notification, since 요유 never enters that pane and that server's banners are off;
+# the note to the sender reaches main on default.
 claude_screen "치던 글" > "$SANDBOX/screen-w1:p2"
 PANE_TELL_ALERT=0 PANE_TELL_WAIT=0.3 pt workers/w1:p2 "x" >/dev/null; settled
-check "an alert for a full box goes to the receiver's server" "$(sort -u "$SANDBOX/alerts-srv")" "workers"
+check "a full box on workers sends no notification" "$(cat "$SANDBOX/alerts-srv" 2>/dev/null)" ""
 check "the sender's note reaches the main pane on its server" "$(grep -c '^w1:p9|.*자동 안내' "$SANDBOX/log")|$(grep -c default "$SANDBOX/log-srv")" "1|1"
+# A job has no pane to hear it: the same stuck message would reach nobody, so the main pane hears.
+rm -f "$SANDBOX"/state/pane-tell/undelivered/*; mkdir -p "$SANDBOX/state/orchestrator"; echo term_p9 > "$SANDBOX/state/orchestrator/main"
+PANE_TELL_ALERT=0 PANE_TELL_WAIT=0.3 job workers/w1:p2 "x" >/dev/null; settled
+check "a job's message stuck on workers: the main pane hears, no notification" "$(grep -c '^w1:p9|.*자동 안내' "$SANDBOX/log")|$(cat "$SANDBOX/log-srv")|$(cat "$SANDBOX/alerts-srv" 2>/dev/null)" "1|default|"
+rm -f "$SANDBOX"/state/pane-tell/undelivered/* "$SANDBOX/state/orchestrator/main"
+PANE_TELL_ALERT=0 PANE_TELL_WAIT=0.3 job workers/w1:p2 "x" >/dev/null; settled
+check "no main pane: the message stays in the folder, no error" "$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')|$(cat "$SANDBOX/log-srv" 2>/dev/null)|$(cat "$SANDBOX/alerts-srv" 2>/dev/null)" "1||"
+rm -f "$SANDBOX"/state/pane-tell/undelivered/*
 # workers -> main, 요유's half-typed words fill main's box and the workers pane has already closed: 요유 must see the alert.
 rm -f "$SANDBOX/alerts-srv" "$SANDBOX/screen-w1:p2"; claude_screen "요유가 치던 글" > "$SANDBOX/screen-w1:p9"
 PANE_TELL_ALERT=0 PANE_TELL_WAIT=0.3 ptw default/w1:p9 "보고" >/dev/null
@@ -259,7 +271,10 @@ panes "w1:p9|🟢 👑 메인 오케스트레이터|s9"; wpanes "w1:p2|🟢 🫡
 check "list names a pane on the other server with its session" "$(pt --list | grep '구현' | cut -f1,2)" "$(printf 'workers/w1:p2\t🫡 api#7 구현')"
 check "list marks only this pane, not the same id over there" "$(pt --list | grep '(이 pane)' | cut -f1)" "w1:p9"
 check "list from a workers pane names default" "$(ptw --list | grep '메인' | cut -f1)|$(ptw --list | grep '(이 pane)' | cut -f1)" "default/w1:p9|w1:p2"
-out=$(pt "api#7 " "x"); check "a name only on the other server reaches it" "$?|$(sent)|$(sort -u "$SANDBOX/log-srv")|$out" "0|w1:p2 |workers|told w1:p2 (🫡 api#7 구현)"
+rm -f "$SANDBOX/read-srv"
+# The line names the server: a caller reusing a bare w1:p2 would type into a different pane on its own server.
+out=$(pt "api#7 " "x"); check "a name only on the other server reaches it" "$?|$(sent)|$(sort -u "$SANDBOX/log-srv")|$out" "0|w1:p2 |workers|told workers/w1:p2 (🫡 api#7 구현)"
+check "its box is read on that server" "$(sort -u "$SANDBOX/read-srv")" "workers"
 check "that message names the sender from its own server" "$(cut -d'|' -f2 "$SANDBOX/log")" "[pane-tell: '👑 메인 오케스트레이터' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] x"
 ptw "메인 오케" "x" >/dev/null; check "a name on default reaches it from a workers pane" "$?|$(sent)|$(sort -u "$SANDBOX/log-srv")" "0|w1:p9 |default"
 pt w1:p2 "x" 2>/dev/null; check "a bare id stays on this server" "$?|$(sent)" "3|"
@@ -269,25 +284,33 @@ panes "w1:p9|🟢 👑 메인 오케스트레이터|s9"; wpanes "w1:p2|🟢 🫡
 out=$(pt "api#7 " "x" 2>&1); check "two panes over there are refused, listed with their session" "$?|$(sent)|$(grep -c '^workers/w1:p[23]' <<<"$out")" "2||2"
 wpanes "w1:p2|🟢 🫡 api#7 구현|s2"
 # An auto tab over there is refused like one here: a prompt typed in lifts its guard.
-echo '{"result":{"tabs":[{"tab_id":"w1:t5","label":"자동 api#7"}]}}' > "$SANDBOX/tabs"; wpanes "w1:p2|🟢 api#7 자동|s2|w1:t5"
+echo '{"result":{"tabs":[{"tab_id":"w1:t5","label":"자동 api#7"}]}}' > "$SANDBOX/workers-tabs"; wpanes "w1:p2|🟢 api#7 자동|s2|w1:t5"
 pt "api#7 " "x" 2>/dev/null; check "an auto tab on the other server is refused" "$?|$(sent)" "2|"
+# Tab ids repeat across servers: an auto tab with the same id on this server says nothing about that pane.
+mv "$SANDBOX/workers-tabs" "$SANDBOX/tabs"
+pt "api#7 " "x" >/dev/null; check "the same tab id on this server does not refuse it" "$?|$(sent)" "0|w1:p2 "
 rm -f "$SANDBOX/tabs"; wpanes "w1:p2|🟢 🫡 api#7 구현|s2"
 claude_screen "치던 글" > "$SANDBOX/screen-w1:p2"
 out=$(pt "api#7 " "x"); rm -f "$SANDBOX/screen-w1:p2"; settled
-check "a full box over there queues, and delivers on that server" "$(sed 's/: its input.*//' <<<"$out")|$(sent)|$(sort -u "$SANDBOX/log-srv")" "queued for w1:p2 (🫡 api#7 구현)|w1:p2 |workers"
+check "a full box over there queues, and delivers on that server" "$(sed 's/: its input.*//' <<<"$out")|$(sent)|$(sort -u "$SANDBOX/log-srv")" "queued for workers/w1:p2 (🫡 api#7 구현)|w1:p2 |workers"
 touch "$SANDBOX/default-down"; pt "api#7 " "x" >/dev/null; check "this server down: the name still reaches the other" "$?|$(sent)" "0|w1:p2 "; rm -f "$SANDBOX/default-down"
-# The other server down or absent: as before, with no error.
+# The other server down, absent or stuck: as before, with no error. Stuck: herdr's CLI waits for ever, and a job waiting here would hold its lock.
 OWN=$(printf 'w1:p9\t👑 메인 오케스트레이터\t/w\t(이 pane)')
-for how in stopped absent no-list; do
+export PANE_TELL_OTHER_LIMIT=1
+for how in stopped absent no-list stuck; do
   case $how in
     stopped) sessions_up stopped ;;
     absent) jq -n --arg d "$SANDBOX/herdr.sock" '{sessions: [{name: "default", running: true, socket_path: $d}]}' > "$SANDBOX/sessions.json" ;;
     no-list) rm -f "$SANDBOX/sessions.json" ;;
+    stuck) sessions_up; touch "$SANDBOX/workers-stuck" ;;
   esac
+  t0=$SECONDS
   check "workers $how: list shows this server, no error" "$(pt --list 2>&1)" "$OWN"
+  check "workers $how: list does not wait on it" "$(( SECONDS - t0 < 5 ))" 1
   out=$(pt "api#7 " "x" 2>&1); check "workers $how: a name only over there is no pane" "$?|$(sent)|$out" '3||pane-tell: no pane matches "api#7 " (see pane-tell --list)'
   pt "메인 오케" "x" 2>/dev/null; check "workers $how: this pane is still refused by name" "$?|$(sent)" "2|"
 done
+rm -f "$SANDBOX/workers-stuck"; unset PANE_TELL_OTHER_LIMIT
 sessions_up
 
 exit $fails

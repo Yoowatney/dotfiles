@@ -20,8 +20,9 @@
 # message that waits PANE_TELL_ALERT seconds (10 minutes) or ends up in that folder is announced, since a one-letter leftover
 # in a box once held a report back with nobody knowing (10/31): a herdr notification for 요유, the only one who can clear the
 # box, on the receiver's server where that box is, and a note to the sender on its own server, who would take it as
-# delivered, unless the sender is an auto session, for the reason above. Nothing here ever touches the box: what is in it
-# may be 요유's.
+# delivered, unless the sender is an auto session, for the reason above. A box on the workers server gets no notification:
+# the note goes to the sender, or to the main pane when a job sent it. Nothing here ever touches the box: what is in it may
+# be 요유's.
 #   pane-tell --raw <pane id> "<message>"       the same door for a prompt a machine types as it is, into any pane; one that
 #                                               has to wait stays for the session in the pane now, like every queued message
 #   pane-tell --box-ready <pane id> <kind>      exit 0 when the box is empty and in view (ambient/deliver.py asks this)
@@ -112,9 +113,16 @@ auto_reason() { # tab id, session id
   done
 }
 
+socket_of() { "$H" session list --json 2>/dev/null | jq -r --arg n "$1" '.sessions[] | select(.name == $n and .running) | .socket_path' 2>/dev/null | head -1; }
+
 warn() { # what happened, sender's terminal, sender's socket when on another server
   local row
-  "$H" notification show "칸 전달 대기" --body "$1" >/dev/null 2>&1 # the receiver's server: the full box is there
+  case "${HERDR_SOCKET_PATH:-}" in
+    # 요유 never enters those panes and that server's banners are off. A job has no pane to hear it, so the main pane does.
+    */sessions/workers/herdr.sock)
+      [ -n "$2" ] || set -- "$1" "$(cat "${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main" 2>/dev/null)" "$(socket_of default)" ;;
+    *) "$H" notification show "칸 전달 대기" --body "$1" >/dev/null 2>&1 ;; # the receiver's server: the full box is there
+  esac
   echo "$(date '+%F %T') announced: $1" >> "$STATE/log"
   [ -n "$2" ] || return 0
   ( # the sender's server, for the lookup and the note alone
@@ -163,19 +171,21 @@ if [ "${1:-}" = --raw ]; then
   tell "$(cut -f1 <<<"$row")" "$(cut -f2 <<<"$row")" "$3" "$(cut -f3 <<<"$row")" "$(cut -f4 <<<"$row")" ""
   exit 0
 fi
-list_panes() {
-  "$H" pane list 2>/dev/null | jq -r '.result.panes[]
+pane_rows() {
+  jq -r '.result.panes[]
     | [.pane_id, ((.label // "") | ltrimstr("🔴 ") | ltrimstr("🟢 ")), (.agent_session.value // ""), (.cwd // ""), (.tab_id // ""), (.agent // ""), (.terminal_id // "")] | @tsv'
 }
+list_panes() { "$H" pane list 2>/dev/null | pane_rows; }
 srv() { [[ $1 =~ /sessions/([^/]+)/herdr\.sock$ ]] && echo "${BASH_REMATCH[1]}" || echo default; }
-socket_of() { "$H" session list --json 2>/dev/null | jq -r --arg n "$1" '.sessions[] | select(.name == $n and .running) | .socket_path' 2>/dev/null | head -1; }
-# The panes of the other servers, ids as <session>/<pane id>. One that is down or absent (집맥 has no workers) has none.
+# The panes of the other servers, ids as <session>/<pane id>. One that is down or absent (집맥 has no workers) has none. Nor has
+# a stuck one: herdr's CLI waits on it for ever, and a job waiting here would hold its lock, so it gets PANE_TELL_OTHER_LIMIT seconds.
 other_panes() {
   local n sock
   for n in $PEERS; do
     [ "$n" != "$(srv "$here")" ] || continue
     sock=$(socket_of "$n")
-    [ -z "$sock" ] || HERDR_SOCKET_PATH=$sock list_panes | sed "s|^|$n/|"
+    [ -z "$sock" ] && continue
+    ( HERDR_SOCKET_PATH=$sock perl -e 'alarm shift; exec @ARGV' "${PANE_TELL_OTHER_LIMIT:-5}" "$H" pane list | pane_rows | sed "s|^|$n/|" ) 2>/dev/null
   done
 }
 # <session>/<pane id>: only a server other than this pane's own needs a lookup and a switch.
@@ -236,5 +246,7 @@ case "$kind" in claude | codex) ;; *) die "$pane ($name) runs no Claude or Codex
 from=$(awk -F'\t' -v me="$me" '$1 == me {print $2}' <<<"$mine")
 msg="[pane-tell: '${from:-자동 작업}' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] $2"
 sender=$(awk -F'\t' -v me="$me" '$1 == me {print $7}' <<<"$mine")
-if tell "$pane" "$kind" "$msg" "$terminal" "$sid" "$sender" "${there:+$here}"; then echo "told $pane ($name)"; exit 0; fi
-echo "queued for $pane ($name): its input box is not empty, so this goes in once it is"
+# A pane on another server is named with its server: a caller reusing a bare id would type into a different pane on its own.
+shown=$pane; [ -z "$there" ] || shown=$(srv "$there")/$pane
+if tell "$pane" "$kind" "$msg" "$terminal" "$sid" "$sender" "${there:+$here}"; then echo "told $shown ($name)"; exit 0; fi
+echo "queued for $shown ($name): its input box is not empty, so this goes in once it is"
