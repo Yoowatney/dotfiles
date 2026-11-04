@@ -58,7 +58,7 @@ def read_events() -> list:
     try:
         with open(state_file(), "rb") as f:
             lines = f.read().split(b"\n")  # \n only: U+2028 and friends are data
-    except OSError:
+    except FileNotFoundError:
         return []
     events = []
     for line in lines:
@@ -423,6 +423,14 @@ def selftest() -> int:
         r = run(link, "apply", "merge/w")
         assert r.returncode != 0 and "m" not in r.stdout.split(), r
         os.chmod(state_file(), 0o644)
+        # Only a missing file is an empty log; any other read error must surface.
+        fresh()
+        env["XDG_STATE_HOME"] = os.environ["XDG_STATE_HOME"]
+        os.makedirs(state_file())
+        assert run(link, "apply", "merge/x").returncode not in (0, 3)
+        assert run(link, "ripe").returncode != 0 and run(link, "kinds").returncode != 0
+        r = run(link, "apply", "prod/x")
+        assert r.returncode == 4 and PROTECTED_MSG in r.stdout, r
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print("selftest ok")
