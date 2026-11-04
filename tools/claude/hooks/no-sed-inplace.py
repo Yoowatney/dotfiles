@@ -210,8 +210,15 @@ def selftest():
         "command herdr tab create",
         "env A=1 herdr tab create",
         '"$HERDR_BIN_PATH" tab create --label x',
+        # still only pane-spawn opens panes, on any server
+        "herdr --session workers agent start tmp --kind claude --pane w1:p2",
+        "HERDR_SOCKET_PATH=/x/herdr.sock herdr tab create --label x",
     ]
     allow = [
+        # the main pane answers a dialog in a workers pane
+        "herdr --session workers agent send-keys w1:p2 Enter",
+        'herdr --session workers pane send-text w1:p2 "1"',
+        "herdr --session workers agent read w1:p2",
         "pane-spawn '설계' '지시'",
         "pane-temp --kind codex '시험'",
         'herdr pane send-text "$p" "claude-code 버전 확인해 주세요"',
