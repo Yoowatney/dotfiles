@@ -17,12 +17,15 @@ cat > "$SANDBOX/herdr" <<EOF
 #!/usr/bin/env bash
 case "\$HERDR_SOCKET_PATH" in */sessions/*) s=\${HERDR_SOCKET_PATH%/herdr.sock}; s=\${s##*/} ;; *) s=default ;; esac
 echo "[\$s] \$*" >> "$SANDBOX/log"
+[ "\$s" != workers ] || [ -z "\${STUCK_WORKERS:-}" ] || exec /bin/sleep 30 # herdr's CLI waits on a stuck server for ever
 case "\$1 \$2" in
   "session list") cat "$SANDBOX/sessions.json" ;;
   "workspace list") cat "$SANDBOX/\$s-workspaces.json" 2>/dev/null || echo '{"result":{"workspaces":[]}}' ;;
-  "workspace create") jq -n '{result: {workspace: {workspace_id: "w2"}}}' ;;
-  "pane get") jq -n --arg label "\${CALLER_LABEL:-}" '{result: {pane: {pane_id: "w7:p3", workspace_id: "w7", terminal_id: "term_65f21913323dc21", label: \$label}}}' ;; # moved: env says w1:p1
-  "tab create") jq -n '{result: {root_pane: {pane_id: "w1:new"}, tab: {tab_id: "w1:t9"}}}' ;;
+  "workspace create") [ -z "\${FAIL_WORKSPACE:-}" ] && jq -n '{result: {workspace: {workspace_id: "w2"}}}' ;;
+  "pane get") jq -n --arg label "\${CALLER_LABEL:-}" '{result: {pane: {pane_id: "w7:p3", tab_id: "w7:t1", workspace_id: "w7", terminal_id: "term_65f21913323dc21", label: \$label}}}' ;; # moved: env says w1:p1
+  "agent list") cat "$SANDBOX/\$s-agents.json" 2>/dev/null || echo '{"result":{"agents":[]}}' ;;
+  "tab rename") ;;
+  "tab create") { [ -z "\${FAIL_WORKERS_TAB:-}" ] || [ "\$s" != workers ]; } && jq -n '{result: {root_pane: {pane_id: "w1:new"}, tab: {tab_id: "w1:t9"}}}' ;;
   "pane layout") [ -z "\${FAIL_LAYOUT:-}" ] && cat "$SANDBOX/layout.json" ;;
   "pane split") [ -z "\${FAIL_SPLIT:-}" ] && jq -n '{result: {pane: {pane_id: "w1:new"}}}' ;;
   "pane rename"|"agent prompt"|"pane close") ;;
@@ -35,7 +38,7 @@ case "\$1 \$2" in
     [ "\$n" -ge "\${FAIL_START:-0}" ] ;;
   "agent get")
     if [ -n "\${SESSIONLESS:-}" ]; then jq -n '{result: {agent: {interactive_ready: true}}}'
-    else jq -n '{result: {agent: {interactive_ready: true, agent_session: {value: "sid"}}}}'; fi ;;
+    else jq -n --arg n "\${CALLER_AGENT:-}" '{result: {agent: {name: \$n, interactive_ready: true, agent_session: {value: "sid"}}}}'; fi ;;
   *) exit 2 ;;
 esac
 EOF
@@ -47,7 +50,8 @@ echo "[\$s] pane-label \$*" >> "$SANDBOX/log"
 EOF
 chmod +x "$SANDBOX/pane-label"
 
-ps() { rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits"; env -u HERDR_SOCKET_PATH -u XDG_STATE_HOME HOME="$SANDBOX/home" PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_RETRY_WAIT=0 bash "$SUBJECT" "$@"; }
+run_on() { local sock=$1; shift; rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits"; env -u HERDR_SOCKET_PATH -u XDG_STATE_HOME ${sock:+HERDR_SOCKET_PATH="$sock"} HOME="$SANDBOX/home" PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_RETRY_WAIT=0 bash "$SUBJECT" "$@"; }
+ps() { run_on "" "$@"; }
 log() { cat "$SANDBOX/log" 2>/dev/null || true; }
 has() { grep -qF -- "$1" "$SANDBOX/log" || fail "$2: no [$1] in: $(log)"; }
 hasnt() { if grep -qF -- "$1" "$SANDBOX/log"; then fail "$2: found [$1] in: $(log)"; fi; }
@@ -216,10 +220,114 @@ for state in other stale missing; do
 done
 is_main
 
-not_main; out=$(ps "api#4" "할 일")
-has "[default] pane split --pane w7:p3" "any other caller opens beside itself on its own server"
+# 요유 2026-11-05: an ordinary lead's tab holds only the lead. Its panes run on workers, one tab per lead there.
+not_main; LEAD="🟢 👑 api#1 로그인"
+echo '{"result":{"workspaces":[{"workspace_id":"w1","label":"workers"}]}}' > "$SANDBOX/workers-workspaces.json"
+out=$(CALLER_LABEL=$LEAD ps --cwd /work "설계" "할 일")
+has "[default] pane-label --lead" "the caller is marked on its own server"
+has "[workers] tab create --workspace w1 --cwd /work --label api#1 로그인 --no-focus" "the tab says whose panes these are"
+has "[workers] pane rename w1:new 🟢 🫡 설계" "the pane says what it does"
+has "[workers] pane-label --sync-tabs" "marks are synced where the tab is"
+has "[workers] agent start spawn-65f21913323dc21-" "the name records the lead's terminal"
+hasnt "[default] pane split" "nothing opens beside the lead"
+hasnt "[default] tab create" "nothing opens on the lead's server"
 hasnt "보고 첫 줄에" "only panes under the main pane get the summary line"
 hasnt "확인 칸입니다" "no check pane anywhere else"
-[ "$out" = "w1:new" ] || fail "a bare id as before: $out"
+[ "$out" = "workers/w1:new" ] || fail "an address that names the server: $out"
+
+# Design, build and review of one job share a tab: the lead's newest pane on workers takes the next one. --same-tab is the same.
+jq -n '{result: {agents: [{pane_id: "w1:q2", name: "spawn-65f21913323dc21-7"}, {pane_id: "w1:q3", name: "spawn-65f21913323dc21-8"}, {pane_id: "w1:q9", name: "spawn-OTHER-1"}]}}' > "$SANDBOX/workers-agents.json"
+layout "w1:q3 0 0 41"
+out=$(CALLER_LABEL=$LEAD ps "구현" "지시")
+has "[workers] pane layout --pane w1:q3" "the lead's newest pane, not another lead's"
+has "[workers] pane split --pane w1:q3 --direction right" "the same layout as ever"
+has "[workers] tab rename w7:t1 api#1 로그인" "a lead that moved on renames its tab"
+before "tab rename" "pane-label --sync-tabs"
+hasnt "tab create" "no second tab"
+[ "$out" = "workers/w1:new" ] || fail "an address that names the server: $out"
+CALLER_LABEL=$LEAD ps --same-tab "리뷰" "봐 줘" >/dev/null
+has "[workers] pane split" "--same-tab joins the lead's tab on workers"
+hasnt "tab create" "--same-tab opens no tab"
+layout "w1:q2 0 0 41" "w1:q3 52 0 10" "w1:q4 52 10 10" "w1:q5 52 20 10" "w1:q6 52 30 11"
+CALLER_LABEL=$LEAD ps "여섯째" "지시" >/dev/null
+has "[workers] tab create --workspace w1 --cwd" "a full tab: another tab of the same lead"
+has "--label api#1 로그인 --no-focus" "named for the lead as well"
+layout "w1:q3 0 0 41"
+CALLER_LABEL=$LEAD ps --new-tab "별개 일" "지시" >/dev/null
+has "[workers] tab create --workspace w1" "--new-tab: its own tab on workers"
+hasnt "pane split" "--new-tab splits nothing"
+hasnt "[default] tab create" "--new-tab stays hidden too"
+jq -n '{result: {agents: [{pane_id: "w1:q9", name: "spawn-OTHER-1"}]}}' > "$SANDBOX/workers-agents.json"
+CALLER_LABEL="🔴 👑 다른 일" ps "조사" "지시" >/dev/null
+has "--label 다른 일 --no-focus" "several leads at once: each its own tab"
+hasnt "pane split" "another lead's pane takes nothing"
+CALLER_LABEL="" ps "이름 없는 리드" "지시" >/dev/null
+has "--label 이름 없는 리드 --no-focus" "a lead with no name yet: the work names the tab"
+CALLER_LABEL="🟢 새 세션 munice" ps "이름 없는 리드" "지시" >/dev/null
+has "--label 이름 없는 리드 --no-focus" "the name a new session starts with is no name"
+rm "$SANDBOX/workers-agents.json"
+
+# 요유 2026-11-05: what a Home lead's pane says may reach the main pane once that lead closes, and it stays off company Slack and the
+# board. The agent name says so, since a rename cannot change it and the lead's workspace cannot be read after it closes.
+hasnt "agent start spawn-65f21913323dc21-h" "a pane of any other lead carries no mark"
+echo '{"result":{"workspaces":[{"workspace_id":"w7","label":"Home"}]}}' > "$SANDBOX/default-workspaces.json"
+CALLER_LABEL="🟢 👑 집 일" ps "조사" "지시" >/dev/null
+has "[workers] agent start spawn-65f21913323dc21-h" "a Home lead's pane is marked"
+is_main; ps "메인 일" "지시" >/dev/null; hasnt "agent start spawn-65f21913323dc21-h" "the main pane is no Home lead, wherever it sits"; not_main
+rm "$SANDBOX/default-workspaces.json"
+CALLER_LABEL="🟢 🫡 구현" CALLER_AGENT="spawn-OTHER-h77" ps "조사" "지시" >/dev/null
+has "[default] agent start spawn-65f21913323dc21-h" "a pane under a Home lead passes the mark on"
+CALLER_LABEL="🟢 🫡 구현" CALLER_AGENT="spawn-OTHER-77" ps "조사" "지시" >/dev/null
+hasnt "agent start spawn-65f21913323dc21-h" "any other pane has none to pass on"
+
+# Who stays where it is: a pane under a lead, a job tab (pane-tell refuses a job pane, so a hidden child could reach nobody),
+# and any server but default.
+layout "w7:p3 0 0 46"
+stays() { has "pane split --pane w7:p3" "$1"; hasnt "[workers] tab create" "$1"; hasnt "[workers] agent start" "$1"; [ "$2" = "w1:new" ] || fail "$1: a bare id: $2"; }
+out=$(CALLER_LABEL="🟢 🫡 구현" ps "리뷰" "지시"); stays "a pane under a lead" "$out"
+out=$(CALLER_LABEL=$LEAD MUNICE_AUTO_DISPATCH=1 ps "리뷰" "지시"); stays "a dispatch tab" "$out"
+out=$(CALLER_LABEL=$LEAD MUNICE_AMBIENT=1 ps "리뷰" "지시"); stays "an ambient tab" "$out"
+out=$(CALLER_LABEL=$LEAD run_on "$SANDBOX/sessions/resume/herdr.sock" "리뷰" "지시"); stays "another named server" "$out"
+has "[resume] pane split" "it opens on its own server"
+out=$(CALLER_LABEL=$LEAD run_on "$SANDBOX/sessions/workers/herdr.sock" "리뷰" "지시"); [ "$out" = "w1:new" ] || fail "from workers, a bare id: $out"
+has "[workers] pane split --pane w7:p3" "a lead on workers opens beside itself"
+
+# workers cannot take it: an ordinary lead opens in its own tab as before and says so, with no workers socket left behind.
+falls_back() { # <why> <pane-spawn's stdout>
+  has "[default] pane split --pane w7:p3" "$1: its own tab"
+  has "[default] pane rename w1:new" "$1: on its own server"
+  has "[default] pane-label --sync-tabs" "$1: on its own server"
+  has "[default] agent start" "$1: on its own server"
+  [ "$2" = "w1:new" ] || fail "$1: a bare id: $2"
+  grep -q "workers 서버" "$SANDBOX/err" || fail "$1: says so: $(cat "$SANDBOX/err")"
+}
+workers_up false; out=$(CALLER_LABEL=$LEAD ps "리뷰" "지시" 2>"$SANDBOX/err") || fail "workers down: a lead still gets its pane"; falls_back "workers down" "$out"
+jq -n '{sessions: [{name: "default", running: true, socket_path: "/x/herdr.sock"}]}' > "$SANDBOX/sessions.json"
+out=$(CALLER_LABEL=$LEAD ps "리뷰" "지시" 2>"$SANDBOX/err") || fail "no workers server: a lead still gets its pane"; falls_back "no workers server (집맥)" "$out"
+rm "$SANDBOX/sessions.json"
+out=$(CALLER_LABEL=$LEAD ps "리뷰" "지시" 2>"$SANDBOX/err") || fail "no session list: a lead still gets its pane"; falls_back "no session list" "$out"
+workers_up
+out=$(CALLER_LABEL=$LEAD FAIL_WORKERS_TAB=1 ps "리뷰" "지시" 2>"$SANDBOX/err") || fail "a workers tab that fails: a lead still gets its pane"; falls_back "a workers tab that fails" "$out"
+mv "$SANDBOX/workers-workspaces.json" "$SANDBOX/kept"
+out=$(CALLER_LABEL=$LEAD FAIL_WORKSPACE=1 ps "리뷰" "지시" 2>"$SANDBOX/err") || fail "no workspace there: a lead still gets its pane"; falls_back "no workspace on workers" "$out"
+mv "$SANDBOX/kept" "$SANDBOX/workers-workspaces.json"
+out=$(CALLER_LABEL=$LEAD ps "리뷰" "지시" 2>"$SANDBOX/err"); [ ! -s "$SANDBOX/err" ] || fail "a pane on workers says nothing: $(cat "$SANDBOX/err")"
+# A stuck server still says it runs. The lead falls back in seconds, and a server that may only be slow gets no second workspace.
+started=$SECONDS
+out=$(CALLER_LABEL=$LEAD STUCK_WORKERS=1 PANE_SPAWN_WORKERS_LIMIT=1 ps "리뷰" "지시" 2>"$SANDBOX/err") || fail "a stuck workers: a lead still gets its pane"; falls_back "a stuck workers" "$out"
+[ $((SECONDS - started)) -lt 10 ] || fail "a stuck workers held the lead for $((SECONDS - started)) s"
+hasnt "[workers] workspace create" "nothing is created after a list that timed out"
+# The main pane never falls back: it does no work, and neither does its tab.
+is_main
+if STUCK_WORKERS=1 PANE_SPAWN_WORKERS_LIMIT=1 ps "메인 일" "지시" 2>"$SANDBOX/err"; then fail "the main pane fails on a stuck workers"; fi
+if FAIL_WORKERS_TAB=1 ps "메인 일" "지시" 2>"$SANDBOX/err"; then fail "the main pane fails when workers opens nothing"; fi
+hasnt "[default] pane split" "nothing beside the main pane"
+hasnt "[default] tab create" "nothing beside the main pane"
+grep -q "com.yoyoo.herdr-workers" "$SANDBOX/err" || fail "says how to start it: $(cat "$SANDBOX/err")"
+ps "메인 일" "지시" >/dev/null
+has "--label 메인 일 --no-focus" "the main pane's tabs keep the work's name"
+hasnt "tab rename" "and nothing renames them"
+hasnt "agent list" "the main pane's panes share no tab, so it looks for none"
+not_main
 
 echo "ok: pane-spawn"

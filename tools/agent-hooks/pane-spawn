@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# Opens a pane for another agent, in one command (Claude and Codex both use it). A lead and its panes share one tab (요유 2026-11-04:
-# separate tabs filled the window): the lead keeps the whole left, its panes stack on the right. The tallest pane of the rightmost
-# column takes the new one, which keeps their heights close. Once that pane is too short to read, or for a job this lead does not
-# follow (--new-tab), the work gets its own tab, named for it. --same-tab is the old name of the default, kept for running sessions.
+# Opens a pane for another agent, in one command (Claude and Codex both use it). A lead's tab holds only the lead (요유 2026-11-05): its
+# panes open on the hidden `workers` herdr server, in that server's `workers` workspace, and it prints `workers/<pane id>`. There one
+# tab holds one lead's panes, named for the lead, so `herdr session attach workers` shows whose pane is whose and the steps of one
+# job stay together. Once it is full, or with --new-tab, the lead gets another tab there. --same-tab is the old name of the default.
 # It marks the calling pane 👑 unless it is already 🫡, opens the split or tab, names the pane 🫡, starts the agent, waits for its session and
 # hands over the instruction. The agent's herdr name is what lets the pane close itself when its work ends (pane-label).
 # Agents cannot run `herdr agent start` or `herdr pane split` themselves: the hook no-sed-inplace.py sends them here.
 #   pane-spawn [--new-tab] [--kind claude|codex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
 #   pane-spawn "api#1 설계" "지시" -- --model opus --effort high
-# A new tab opens in the caller's current workspace: HERDR_PANE_ID and HERDR_WORKSPACE_ID go stale when a pane moves, so both
+# Three callers stay where they are and open beside themselves: a pane under a lead (🫡), a job tab (`pane-tell` refuses a job pane,
+# so a hidden child could reach nobody), and a pane on any server but default. So does a lead when workers cannot take the pane
+# (no such server on 집맥, down or stuck): it says so on stderr and exits 0. Beside the caller the tallest pane of the rightmost column
+# takes the new one, which keeps heights close; too short to read, or --new-tab, and the work gets its own tab, named for it, in the
+# caller's current workspace: HERDR_PANE_ID and HERDR_WORKSPACE_ID go stale when a pane moves, so both
 # come from `herdr pane get`. The agent's name records the caller's terminal id, which a move does not change; the pane
-# reports to that caller first (auto-tab-close.py), and a pane stays open while a pane it opened is alive.
-# The main pane (its terminal id is in ${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main) does no work itself: its
-# panes open on the `workers` herdr server, in that server's `workers` workspace, and it prints `workers/<pane id>`.
-# It never splits its own tab (--same-tab is bad usage there), and with `workers` down it opens nothing and fails.
+# reports to that caller first (auto-tab-close.py), and workers-watch.py sends it the alerts about that pane.
+# The main pane (its terminal id is in ${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main) does no work itself: each of its
+# panes gets its own workers tab, named for the work. It never adds a pane to its own tab (--same-tab is bad usage there), and with
+# `workers` unable to take the pane it opens nothing and fails.
 # --check opens a check pane: a fresh pane, not the one that did the job, runs the test or command, or looks at the changed behavior
 # or data, and changes nothing (요유 2026-11-05, api#1002). The agent name carries `chk`, which a rename does not change, so its
 # report asks for no other check (auto-tab-close.py). Only a pane herdr_peers.delegates_checks says yes to may open one (the main
@@ -60,41 +64,78 @@ if [ -n "$check" ]; then
   name="확인 $name"
   prompt+=' 이 칸은 확인 칸입니다. 다른 칸이 다 했다고 보고한 일을 확인만 합니다. 코드나 설정을 고치지 말고, 테스트나 명령을 직접 실행하거나 바뀐 동작과 데이터를 직접 보세요. 다른 칸의 보고를 다시 읽는 것은 확인이 아닙니다. 다른 칸을 열지 마세요. 보고 첫 줄에 실행한 명령, 본 결과, 통과 여부를 모두 쓰세요.'
 fi
-sock= addr=
+main= hidden= sock= addr=
 mainfile="${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main"
+workers_help="start it with: launchctl kickstart gui/$(id -u)/com.yoyoo.herdr-workers"
 if [ "term_$term" = "$(cat "$mainfile" 2>/dev/null)" ]; then
   [ -z "$same" ] || die "the main pane does no work, so it never adds a pane to its own tab"
-  sock=$("$H" session list --json 2>/dev/null | jq -r '.sessions[] | select(.name == "workers" and .running) | .socket_path' 2>/dev/null | head -1)
-  [ -n "$sock" ] || { echo "pane-spawn: the workers herdr server is not running; start it with: launchctl kickstart gui/$(id -u)/com.yoyoo.herdr-workers" >&2; exit 1; }
-  addr=workers/
+  main=1 hidden=1
   prompt+=' 보고 첫 줄에 이 칸에서 한 일을 한 문장으로 쓰세요. 메인 칸에는 그 줄과 `남은 것:` 줄만 가고 전문은 파일로 남습니다.'
+elif [[ "${label:-}" != *🫡* ]] && [ -z "${MUNICE_AUTO_DISPATCH:-}${MUNICE_AMBIENT:-}" ]; then
+  case "${HERDR_SOCKET_PATH:-}" in */sessions/*) ;; *) hidden=1 ;; esac
 fi
+[ -z "$hidden" ] || sock=$("$H" session list --json 2>/dev/null | jq -r '.sessions[] | select(.name == "workers" and .running) | .socket_path' 2>/dev/null | head -1)
+[ -z "$main" ] || [ -n "$sock" ] || { echo "pane-spawn: the workers herdr server is not running; $workers_help" >&2; exit 1; }
 # A job has one lead: a pane under one stays under it, and what it opens reports to it (요유 2026-11-01). Only 요유 promotes it.
 [[ "${label:-}" == *🫡* ]] || pane-label --lead
-if [ -n "$sock" ]; then # every call from here on is about the new pane, so all of them go to workers
+# What a Home lead's pane says may reach the main pane once that lead closes, and stays off company Slack and the board (요유
+# 2026-11-05). The agent name carries that: h before the random part, read by herdr_peers.home_pane. A pane under such a lead sits
+# in the workers workspace, so it passes the mark on from its own name.
+home=
+if [ -z "$main" ]; then
+  [ "$("$H" workspace list 2>/dev/null | jq -r --arg w "$ws" '.result.workspaces[]? | select(.workspace_id == $w) | .label' 2>/dev/null)" != Home ] || home=h
+  case "$("$H" agent get "$me" 2>/dev/null | jq -r '.result.agent.name // empty' 2>/dev/null)" in spawn-*-h[0-9]*) home=h ;; esac
+fi
+
+call=("$H")
+open_pane() { # <a pane whose tab takes the new one, or empty> <workspace> <name of a new tab>: prints the new pane's id, or nothing
+  local target direction pane=
+  if [ -z "$new_tab" ] && [ -n "$1" ]; then
+    # ponytail: only the rightmost column is looked at, so a hand-made layout just grows on its right edge.
+    read -r target direction < <("${call[@]}" pane layout --pane "$1" 2>/dev/null | jq -r --argjson min "$MIN_ROWS" '
+      .result.layout.panes as $all
+      | if ($all | length) == 1 then "\($all[0].pane_id) right"
+        else ($all | map(.rect.x) | max) as $x | ($all | map(select(.rect.x == $x)) | max_by([.rect.height, .rect.y])) as $t
+          | if $t.rect.height < $min then empty else "\($t.pane_id) down" end
+        end' 2>/dev/null)
+    [ -z "$target" ] || pane=$("${call[@]}" pane split --pane "$target" --direction "$direction" --cwd "$cwd" --no-focus | jq -r '.result.pane.pane_id // empty')
+  fi
+  [ -n "$pane" ] || pane=$("${call[@]}" tab create --workspace "$2" --cwd "$cwd" --label "$3" --no-focus | jq -r '.result.root_pane.pane_id // empty')
+  echo "$pane"
+}
+owner=${label#🔴}; owner=${owner#🟢}; owner=${owner# }; owner=${owner#👑}; owner=${owner#🫡}; owner=${owner# }; owner=${owner:-$name}
+case "$owner" in "새 세션 "*) owner=$name ;; esac # what a new session is called until its first task: no name (pane-label-nudge.sh)
+pane=
+if [ -n "$sock" ]; then
+  pane=$( # a subshell, so a workers server that opens nothing leaves its socket nowhere for the fallback below
+    export HERDR_SOCKET_PATH=$sock
+    call=(perl -e 'alarm shift; exec @ARGV' "${PANE_SPAWN_WORKERS_LIMIT:-10}" "$H") # herdr's CLI waits on a stuck server for ever
+    spaces=$("${call[@]}" workspace list) || exit 0 # no answer is not no workspace: creating one on a slow server would make a second
+    w=$(jq -r '[.result.workspaces[] | select(.label == "workers")][0].workspace_id // empty' <<<"$spaces")
+    [ -n "$w" ] || w=$("${call[@]}" workspace create --label workers --no-focus --cwd "$HOME" | jq -r '.result.workspace.workspace_id // empty')
+    [ -n "$w" ] || exit 0
+    if [ -n "$main" ]; then open_pane "" "$w" "$name"; exit 0; fi
+    # ponytail: a pane may join the tab a --new-tab pane opened. Nobody looks here, and the tab still names the right lead.
+    near=$("${call[@]}" agent list 2>/dev/null | jq -r --arg p "spawn-$term-" '[.result.agents[]? | select((.name // "") | startswith($p)) | .pane_id] | last // empty' 2>/dev/null)
+    open_pane "$near" "$w" "$owner"
+  )
+fi
+if [ -n "$pane" ]; then # every call from here on is about the new pane, so all of them go to workers
   export HERDR_SOCKET_PATH=$sock
-  ws=$("$H" workspace list | jq -r '[.result.workspaces[] | select(.label == "workers")][0].workspace_id // empty')
-  [ -n "$ws" ] || ws=$("$H" workspace create --label workers --no-focus --cwd "$HOME" | jq -r '.result.workspace.workspace_id // empty')
-  [ -n "$ws" ] || { echo "pane-spawn: the workers server has no workspace" >&2; exit 1; }
+  addr=workers/
+  [ -n "$main" ] || "$H" tab rename "$("$H" pane get "$pane" 2>/dev/null | jq -r '.result.pane.tab_id // empty' 2>/dev/null)" "$owner" >/dev/null 2>&1 # the lead may have moved on since the tab got its name
+elif [ -n "$main" ]; then
+  echo "pane-spawn: the workers herdr server opened no pane; $workers_help" >&2; exit 1
+else
+  [ -z "$hidden" ] || echo "pane-spawn: workers 서버에 열지 못해 이 탭에 엽니다. 회사맥이면 켜 주세요: ${workers_help#start it with: }" >&2
+  pane=$(open_pane "$me" "$ws" "$name")
 fi
-pane= target= direction=
-if [ -z "$new_tab$sock" ]; then
-  # ponytail: only the rightmost column is looked at, so a hand-made layout just grows on its right edge.
-  read -r target direction < <("$H" pane layout --pane "$me" 2>/dev/null | jq -r --argjson min "$MIN_ROWS" '
-    .result.layout.panes as $all
-    | if ($all | length) == 1 then "\($all[0].pane_id) right"
-      else ($all | map(.rect.x) | max) as $x | ($all | map(select(.rect.x == $x)) | max_by([.rect.height, .rect.y])) as $t
-        | if $t.rect.height < $min then empty else "\($t.pane_id) down" end
-      end' 2>/dev/null)
-  [ -z "$target" ] || pane=$("$H" pane split --pane "$target" --direction "$direction" --cwd "$cwd" --no-focus | jq -r '.result.pane.pane_id // empty')
-fi
-[ -n "$pane" ] || pane=$("$H" tab create --workspace "$ws" --cwd "$cwd" --label "$name" --no-focus | jq -r '.result.root_pane.pane_id // empty')
 [ -n "$pane" ] || die "herdr opened no pane"
 "$H" pane rename "$pane" "🟢 🫡 $name" >/dev/null
 pane-label --sync-tabs
 
 give_up() { "$H" pane close "$pane" >/dev/null 2>&1; echo "pane-spawn: $1" >&2; exit 1; }
-agent="spawn-$term-${check:+chk}$RANDOM" # herdr allows 32 characters; terminal ids run about 15
+agent="spawn-$term-${check:+chk}$home$RANDOM" # herdr allows 32 characters; terminal ids run about 15
 for try in 1 2 3; do # a pane opened a moment ago may not be at its shell prompt yet
   out=$("$H" agent start "$agent" --kind "$kind" --pane "$pane" --timeout 120000 ${1+--} "$@" 2>&1) && break
   [ "$try" != 3 ] || give_up "$kind did not start: $out"

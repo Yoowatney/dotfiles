@@ -22,6 +22,8 @@ import subprocess
 
 PEERS = ("default", "workers")
 SOCKET = re.compile(r"/sessions/([^/]+)/herdr\.sock$")
+OPENER = re.compile(r"^spawn-([0-9A-Za-z]+)-")
+HOME_NOTE = "집 일 칸의 내용입니다. 회사 Slack이나 보드에 올리지 마세요."
 
 
 def state_dir(env) -> str:
@@ -55,7 +57,7 @@ def server_key(env) -> str:
     return m[1] if m else ""
 
 
-def herdr(env, *args, socket: str = "") -> dict:
+def herdr(env, *args, socket: str | None = "") -> dict:
     """`.result` of one herdr call (2 s), {} on any failure. With `socket`, the call goes to that server."""
     try:
         e = {**os.environ, **env, "HERDR_SOCKET_PATH": socket} if socket else {**os.environ, **env}
@@ -65,16 +67,19 @@ def herdr(env, *args, socket: str = "") -> dict:
         return {}
 
 
-def socket_of(env, name: str) -> str:
-    """Socket of a running PEERS session; "" for any other name or a stopped server."""
+def socket_of(env, name: str) -> str | None:
+    """Socket of a running PEERS session; "" for any other name or a stopped server; None (falsy too) when the list could not be
+    read, for a caller to whom "not running" and "cannot tell" mean different things."""
     if name not in PEERS:
         return ""
     try:
         r = subprocess.run([env.get("HERDR_BIN_PATH") or "herdr", "session", "list", "--json"],
                            capture_output=True, text=True, timeout=2, env={**os.environ, **env})
-        rows = (json.loads(r.stdout).get("sessions") or []) if r.returncode == 0 else []  # not wrapped in `result`
+        if r.returncode != 0:
+            return None
+        rows = json.loads(r.stdout).get("sessions") or []  # not wrapped in `result`
     except Exception:
-        return ""
+        return None
     return next((s.get("socket_path") or "" for s in rows if s.get("name") == name and s.get("running")), "")
 
 
@@ -83,16 +88,35 @@ def address(env, pane_id: str) -> str:
     return f"{key}/{pane_id}" if key else pane_id
 
 
-def find_terminal(env, terminal: str):
-    """(address, pane) of a terminal id: this server first, then the other PEERS server. None when not found."""
+def all_panes(env) -> dict | None:
+    """terminal id -> (address, pane) on both servers, for a caller about to say a pane is gone. None when it cannot know:
+    default stopped, or a running server's list unreadable. Workers stopped is an answer: its panes are not there."""
     own = env.get("HERDR_SOCKET_PATH") or socket_of(env, "default")
-    for name, sock in [("", own)] + [(n, socket_of(env, n)) for n in PEERS]:
-        if name and (not sock or sock == own):
+    found: dict = {}
+    for name in PEERS:
+        sock = socket_of(env, name)
+        if sock is None or (not sock and name == "default"):
+            return None
+        if not sock:
             continue
-        for pane in herdr(env, "pane", "list", socket=sock).get("panes") or []:
-            if pane.get("terminal_id") == terminal:
-                return (f"{name}/{pane.get('pane_id')}" if name else pane.get("pane_id") or ""), pane
-    return None
+        panes = herdr(env, "pane", "list", socket=sock).get("panes")
+        if panes is None:
+            return None
+        for pane in panes:
+            found[pane.get("terminal_id")] = (("" if sock == own else f"{name}/") + (pane.get("pane_id") or ""), pane)
+    return found
+
+
+def opener(name) -> str:
+    """The terminal of the pane that opened this agent, from pane-spawn's name: spawn-<caller's terminal>-<random>."""
+    m = OPENER.match(name or "")
+    return f"term_{m[1]}" if m else ""
+
+
+def home_pane(name) -> bool:
+    """Opened from the Home workspace (pane-spawn adds `h` before the random part). The name says so because that lead's
+    workspace cannot be read once it closes, and what the pane says may then reach the main pane (요유 2026-11-05)."""
+    return bool(re.match(r"^spawn-[0-9A-Za-z]+-h", name or ""))
 
 
 def selftest():
@@ -134,12 +158,26 @@ esac
         assert server_key(env_w) == "workers" and server_key(env_d) == "" and server_key({}) == ""
         assert socket_of(env_d, "workers") == W
         assert socket_of(env_d, "stopped") == "" and socket_of(env_d, "nosuch") == ""
+        assert socket_of({"HERDR_BIN_PATH": "/nonexistent"}, "workers") is None, "a list it cannot read is no answer, not a stopped server"
         assert socket_of(env_d, "other") == "", "only default and workers are ever looked up"
-        assert find_terminal(env_d, "term_D2")[0] == "w1:p2", "own server first"
-        assert find_terminal(env_d, "term_W2")[0] == "workers/w1:p2", "the same pane id on the other server keeps its session"
-        assert find_terminal(env_w, "term_D2")[0] == "default/w1:p2"
-        assert find_terminal(env_d, "term_O9") is None, "a session outside PEERS is never searched"
-        assert find_terminal({"HERDR_BIN_PATH": "/nonexistent"}, "term_D2") is None, "herdr down: nothing, no raise"
+        assert all_panes({"HERDR_BIN_PATH": "/nonexistent"}) is None, "herdr down: unknown, no raise"
+        assert opener("spawn-65f2-123") == "term_65f2" and opener("spawn-65f2-chk1") == "term_65f2", "pane-spawn's agent name"
+        assert opener("spawned") == "" and opener("") == "" and opener(None) == "", "any other name has no opener"
+        assert opener("spawn-65f2-h123") == "term_65f2", "a Home lead's pane still names its opener"
+        assert home_pane("spawn-65f2-h123") and not home_pane("spawn-65f2-123") and not home_pane("spawn-65f2-chk1") and not home_pane(None)
+        everywhere = all_panes(env_d)
+        assert everywhere["term_D2"][0] == "w1:p2" and everywhere["term_W2"][0] == "workers/w1:p2", "the address from this server"
+        assert "term_O9" not in everywhere, "a session outside PEERS is never searched"
+        assert all_panes(env_w)["term_D2"][0] == "default/w1:p2" and all_panes(env_w)["term_W2"][0] == "w1:p2"
+        assert all_panes({"HERDR_BIN_PATH": fake})["term_D2"][0] == "w1:p2", "launchd has no socket in its env: default is its own"
+        sessions(default=(DEF, True), workers=(W, False))
+        assert set(all_panes(env_d)) == {"term_D2"}, "workers stopped: its panes are simply not there"
+        sessions(default=(DEF, False), workers=(W, True))
+        assert all_panes(env_w) is None, "default stopped: nothing can be said about a lead there"
+        sessions(default=(DEF, True), workers=(W, True))
+        os.remove(f"{d}/workers-panes.json")
+        assert all_panes(env_d) is None, "a running server whose list cannot be read: unknown, not empty"
+        panes("workers", [{"pane_id": "w1:p2", "terminal_id": "term_W2"}])
         assert main_terminal({"HOME": d}) == ""; write(f"{d}/.local/state/orchestrator/main", "term_M\n"); assert main_terminal({"HOME": d}) == "term_M"
         # The one gate for handing lookups and result checks to panes. Today it is the main pane's terminal and nothing else.
         assert delegates_checks({"HOME": d}, "term_M") is True, "the main pane"

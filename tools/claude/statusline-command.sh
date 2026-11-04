@@ -25,20 +25,32 @@ fi
 
 # Then, in a pane that opened panes with pane-spawn, one steps line per such pane: 요유 reads only the lead's pane
 # (2026-11-01), so the steps of the panes under it show here. pane-spawn names the agent spawn-<opener's terminal>-<n>,
-# which a pane move does not change. Each line is that pane's name and the steps line of its narrowest row.
+# which a pane move does not change. Each line is that pane's name and the steps line of its narrowest row. A lead's panes
+# run on the hidden workers server, where this line is the one view of them; a pane on workers reads no other server.
 # ponytail: a long name plus the 40-cell row can wrap below about 80 columns; cut the name by COLUMNS if that bites.
+spawned_steps() { # <agent list json> <pane list json>
+	jq -r --arg p "spawn-$term-" --argjson panes "${2:-null}" '
+		([$panes.result.panes[]? | {key: .pane_id, value: (.label // "")}] | from_entries) as $label
+		| .result.agents[]? | select((.name // "") | startswith($p)) | select(.agent_session.value)
+		| [.agent_session.value, ($label[.pane_id] // "" | gsub("[🟢🔴🫡👑] *"; "") | .[0:16])] | @tsv' <<<"$1" 2>/dev/null |
+		while IFS=$'\t' read -r sub name; do
+			file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/statusline/task-progress/${sub}.tsv"
+			[ -s "$file" ] && awk -F'\t' -v n="$name" 'END { print "↳ " n "  " $3 }' "$file"
+		done
+}
 if [ -n "$session_id" ] && [ -n "${HERDR_PANE_ID:-}" ] && command -v herdr >/dev/null 2>&1; then
 	agents=$(herdr agent list 2>/dev/null)
 	term=$(jq -r --arg s "$session_id" 'first(.result.agents[]? | select(.agent_session.value == $s) | .terminal_id | ltrimstr("term_")) // empty' <<<"$agents" 2>/dev/null)
 	if [ -n "$term" ]; then
-		jq -r --arg p "spawn-$term-" --argjson panes "$(herdr pane list 2>/dev/null || echo '{}')" '
-			([$panes.result.panes[]? | {key: .pane_id, value: (.label // "")}] | from_entries) as $label
-			| .result.agents[]? | select((.name // "") | startswith($p)) | select(.agent_session.value)
-			| [.agent_session.value, ($label[.pane_id] // "" | gsub("[🟢🔴🫡👑] *"; "") | .[0:16])] | @tsv' <<<"$agents" 2>/dev/null |
-			while IFS=$'\t' read -r sub name; do
-				file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/statusline/task-progress/${sub}.tsv"
-				[ -s "$file" ] && awk -F'\t' -v n="$name" 'END { print "↳ " n "  " $3 }' "$file"
-			done
+		spawned_steps "$agents" "$(herdr pane list 2>/dev/null)"
+		case "${HERDR_SOCKET_PATH:-}" in
+			*/sessions/workers/*) ;;
+			*)
+				# herdr's CLI waits on a stuck server for ever, and this line has to come back, so a stuck workers costs a few seconds and only its own rows.
+				on_workers() { perl -e 'alarm shift; exec @ARGV' "${STATUSLINE_WORKERS_LIMIT:-2}" herdr --session workers "$@" 2>/dev/null; }
+				hidden=$(on_workers agent list) && spawned_steps "$hidden" "$(on_workers pane list)"
+				;;
+		esac
 	fi
 fi
 

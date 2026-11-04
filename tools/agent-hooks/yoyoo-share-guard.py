@@ -286,13 +286,12 @@ def delegates_checks(payload: dict, env) -> bool:
 
 
 def workers_socket(env, me: dict) -> str:
-    """The workers server's socket when this pane is the main pane (its panes live there), else "". Fails open."""
+    """The workers server's socket, where pane-spawn opens a lead's panes, or "". Fails open."""
     try:
-        peers = peers_module()
-        if not me.get("terminal_id") or peers.main_terminal(env) != me["terminal_id"]:
+        if not me.get("terminal_id"):
             return ""
-        sock = peers.socket_of(env, "workers")
-        return "" if sock == env.get("HERDR_SOCKET_PATH") else sock  # the main pane on workers itself: already read
+        sock = peers_module().socket_of(env, "workers")
+        return "" if sock == env.get("HERDR_SOCKET_PATH") else sock  # a pane on workers itself: already read
     except Exception:
         return ""
 
@@ -790,8 +789,12 @@ def selftest():
         herdr_has_on("workers", [{**worker, "label": "🟢 🫡 workers 구현", "terminal_id": "term_ee"}], [{"pane_id": "w1:p3", "name": "spawn-cc-1"}])
         assert "workers/" not in (ends() or ""), "workers agent names decide workers panes, not the same id's name here"
         os.unlink(f"{d}/.local/state/orchestrator/main")
-        open(f"{listing}.calls", "w").close(); ends()
-        assert "workers" not in open(f"{listing}.calls").read(), "a pane that is not the main pane never reads workers"
+        # An ordinary lead's panes run there too (요유 2026-11-05): it hears the same.
+        herdr_has_on("workers", [{**worker, "label": "🟢 🫡 workers 구현", "terminal_id": "term_ee"}], [{"pane_id": "w1:p3", "name": "spawn-aa-2"}])
+        assert "workers 구현(workers/w1:p3)" in (ends() or ""), "a stopped pane on workers comes back to any lead that opened it"
+        json.dump({"sessions": [{"name": "workers", "running": False, "socket_path": f"{d}/sessions/workers/herdr.sock"}]},
+                  open(f"{listing}.session", "w"))
+        assert "workers/" not in (ends() or ""), "workers stopped: only this server's panes"
         # 요유 2026-11-04 ("너희끼리는 그냥 편하게 주고받아"): a pane under a lead reports to that lead, so 요유's formats are not asked for.
         sub, spawned = {**me, "label": "🟢 🫡 설계"}, [{"pane_id": "w1:p1", "name": "spawn-zz-1"}]
         formats = ("변경했습니다.\n\n왜: 막혀서", "고쳤습니다.\n\n원인: 오타\n조치: 수정", "`w1:p9`에 넘겼습니다.", "상시 맥에서 돕니다.",

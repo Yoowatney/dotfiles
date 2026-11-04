@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""launchd, once a minute: tell the main pane when a pane on the hidden `workers` herdr server needs it.
+"""launchd, once a minute: tell a lead when a pane it opened on the hidden `workers` herdr server needs it.
 
-Panes the main pane opens run on the workers server, which nobody looks at, so a pane stuck in a dialog or stopped without
-a report would sit there unseen. This watch sends the main pane one `pane-tell` line for each of these:
+Panes a lead opens run on the workers server, which nobody looks at, so a pane stuck in a dialog or stopped without a report
+would sit there unseen. Each alert goes by `pane-tell` to the pane that opened it (the terminal in its agent name, which is
+how several leads at once each hear only of their own), else the main pane, else a herdr notification on the default server:
 - an agent `blocked` (an approval or question dialog) for 60 s or more, once per state_change_seq;
 - an agent `idle`/`done` for 900 s or more that has not reported since it stopped (auto-tab-close.py touches
   `{state_dir}/reported/<terminal>` when its report was sent), once per state_change_seq;
@@ -10,12 +11,17 @@ a report would sit there unseen. This watch sends the main pane one `pane-tell` 
   watch saw an agent there, else after 420 s, since pane-spawn names the pane before its agent starts;
 - a pane the watch saw with an agent that is now in neither list and has not reported since its last state (workers
   restarted between two ticks, or the pane closed), once; then its record goes;
-- the workers server down, once while it stays down.
-No main pane (no file, or its terminal is on no server): nothing is sent. State: `{state_dir}/watch.json`, terminal id ->
-seq, status, since (first tick that saw this state), seen (last tick that saw it), floor (`seen` of the state before:
-a report touched after it belongs to this stop, since the watch sees a new state up to a minute late), alerted.
+- a pane whose opener is on no server (its lead closed while it runs), once: closing a lead no longer stops its panes;
+- the workers server down, once while it stays down, unless nobody is there and no pane was seen (a Mac with no workers).
+Such a pane is closed, with one alert, once it has been stopped with its report sent for ORPHAN_TTL, counted from the stop or
+the lead's close, whichever came last (요유 2026-11-05). A pane at work, marked 🔴, without a report or with a live child stays.
+An alert about a Home lead's pane that goes to anyone but its lead carries HOME_NOTE.
+A pane list that cannot be read is no news: nothing is sent and every record stays. State: `{state_dir}/watch.json`, terminal
+id -> seq, status, since (first tick that saw this state), seen (last tick that saw it), floor (`seen` of the state before:
+a report touched after it belongs to this stop, since the watch sees a new state up to a minute late), opener, home, orphaned,
+lost_at (first tick that found no opener), alerted.
 By design, two stops inside one tick interval look like one: a report for the first also covers the second.
-A pane-tell that fails marks nothing, so the next minute sends it again. Fails open: any error exits 0 quietly.
+An alert nobody took marks nothing, so the next minute sends it again. Fails open: any error exits 0 quietly.
 
 Test env: WORKERS_WATCH_NOW (seconds), WORKERS_WATCH_PANE_TELL (a fake pane-tell).
 
@@ -39,6 +45,8 @@ herdr_peers = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(herdr_peers)
 
 DOWN = "workers 서버가 꺼져 있습니다: `launchctl kickstart gui/$(id -u)/com.yoyoo.herdr-workers`"
+ORPHAN_TTL = 3600
+UNSENT = "보내지 못한 보고가 있다면 ~/.local/state/pane-reports에 있습니다."  # auto-tab-close.py keeps a report it had nobody to send to
 
 
 def kind(status) -> str:
@@ -46,13 +54,23 @@ def kind(status) -> str:
     return "ready" if status in ("idle", "done") else status or ""
 
 
+def notify(env, msg) -> bool:
+    """The last resort: 요유's own screen, on the server 요유 is attached to."""
+    sock = herdr_peers.socket_of(env, "default")
+    try:
+        return subprocess.run([env.get("HERDR_BIN_PATH") or "herdr", "notification", "show", "밑 칸을 맡을 곳이 없습니다", "--body", msg],
+                              env={**os.environ, **env, **({"HERDR_SOCKET_PATH": sock} if sock else {})}, timeout=5, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def tick(env, now: float) -> list:
-    """One round; returns the alerts pane-tell took."""
-    main = herdr_peers.main_terminal(env)
-    found = herdr_peers.find_terminal(env, main) if main else None
-    if not found:
+    """One round; returns the alerts someone took."""
+    where = herdr_peers.all_panes(env)
+    if where is None:  # no way to know who is there, so no alert and no record changes
         return []
-    to = found[0]
+    main = herdr_peers.main_terminal(env)
     path = os.path.join(herdr_peers.state_dir(env), "watch.json")
     try:
         with open(path) as f:
@@ -64,20 +82,34 @@ def tick(env, now: float) -> list:
     state = {k: v for k, v in state.items() if k == "_down" or isinstance(v, dict)}
     told: list = []
 
-    def tell(msg) -> bool:
+    def tell(msg, opener="", home=False) -> bool:
         pt = env.get("WORKERS_WATCH_PANE_TELL") or os.path.join(HERE, "pane-tell")
-        try:
-            ok = subprocess.run([pt, to, msg], env={**os.environ, **env}, timeout=10, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
-            ok = False
-        if ok:
+        for term in dict.fromkeys(t for t in (opener, main) if t in where):  # a lead that cannot hear (its agent ended) is no stop
+            text = f"{msg} {herdr_peers.HOME_NOTE}" if home and term != opener else msg
+            try:
+                ok = subprocess.run([pt, where[term][0], text], env={**os.environ, **env}, timeout=10, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                ok = False
+            if ok:
+                told.append(text)
+                return True
+        if notify(env, msg):  # 요유's own screen needs no warning about 요유's own matters
             told.append(msg)
-        return ok
+            return True
+        return False
+
+    def reported_since(term, floor) -> bool:
+        try:
+            return os.path.getmtime(os.path.join(herdr_peers.state_dir(env), "reported", term)) >= floor
+        except OSError:
+            return False
 
     sock = herdr_peers.socket_of(env, "workers")
+    if sock is None:  # a list we could not read is no news
+        return []
     if not sock:
-        if not state.get("_down") and tell(DOWN):
+        if (main in where or any(k != "_down" for k in state)) and not state.get("_down") and tell(DOWN):
             state["_down"] = True
     else:
         state.pop("_down", None)
@@ -93,35 +125,55 @@ def tick(env, now: float) -> list:
             term = p.get("terminal_id") or a.get("terminal_id") or pane
             seq, status = a.get("state_change_seq"), a.get("agent_status")
             old = state.get(term) or {}
+            opener = herdr_peers.opener(a.get("name"))
+            home = herdr_peers.home_pane(a.get("name"))
+            same_lead = old.get("opener") == opener
             rec = old if old.get("seq") == seq and kind(old.get("status")) == kind(status) else {
-                "seq": seq, "status": status, "since": now, "floor": old.get("seen", 0), "alerted": []}
+                "seq": seq, "status": status, "since": now, "floor": old.get("seen", 0), "alerted": [],
+                "orphaned": same_lead and bool(old.get("orphaned")),  # a new state of the same pane is no new orphan
+                "lost_at": old.get("lost_at") if same_lead else None}
             name = p.get("label") or a.get("name") or pane
-            rec.update(seen=now, name=name, pane=pane)  # name and pane: to say which pane it was once it is gone
+            rec.update(seen=now, name=name, pane=pane, opener=opener, home=home)  # to say which pane it was once it is gone
             records[term] = rec
+            # A lead whose agent ended leaves its pane at a shell, where nobody hears. Restarted between two ticks it is told once for nothing.
+            lost = bool(opener) and not where.get(opener, ("", {}))[1].get("agent")
+            if not lost:
+                rec.update(orphaned=False, lost_at=None)
+            elif not rec.get("lost_at"):
+                rec["lost_at"] = now
+            if lost and not rec.get("orphaned"):
+                if tell(f"밑 칸 {name}(workers/{pane})을 연 리드가 닫혔습니다. 이 칸을 맡아 주세요. 화면: `herdr --session workers agent read {pane}`, "
+                        f"닫기: `herdr --session workers pane close {pane}`. 멈추고 보고한 뒤 1시간이 지나면 저절로 닫힙니다.", home=home):
+                    rec["orphaned"] = True
             if kind(status) == "blocked" and now - rec["since"] >= 60 and "blocked" not in rec["alerted"]:
-                if tell(f"밑 칸 {name}(workers/{pane})이 질문 창에서 멈춰 있습니다. 화면: `herdr --session workers agent read {pane}`"):
+                if tell(f"밑 칸 {name}(workers/{pane})이 질문 창에서 멈춰 있습니다. 화면: `herdr --session workers agent read {pane}`, "
+                        f"키 입력: `herdr --session workers agent send-keys {pane} Enter`", opener, home):
                     rec["alerted"].append("blocked")
-            if kind(status) == "ready" and now - rec["since"] >= 900 and "idle" not in rec["alerted"]:
-                try:
-                    reported = os.path.getmtime(os.path.join(herdr_peers.state_dir(env), "reported", term)) >= rec["floor"]
-                except OSError:
-                    reported = False
-                if not reported and tell(f"밑 칸 {name}(workers/{pane})이 보고 없이 15분째 멈춰 있습니다"):
-                    rec["alerted"].append("idle")
+            if kind(status) == "ready":
+                reported = reported_since(term, rec["floor"])
+                if not reported and now - rec["since"] >= 900 and "idle" not in rec["alerted"]:
+                    if tell(f"밑 칸 {name}(workers/{pane})이 보고 없이 15분째 멈춰 있습니다. {UNSENT}", opener, home):
+                        rec["alerted"].append("idle")
+                if lost and reported and now - max(rec["since"], rec["lost_at"]) >= ORPHAN_TTL and "🔴" not in name and "👑" not in name \
+                        and not any(herdr_peers.opener(c.get("name")) == term for c in agents):
+                    closed = herdr_peers.herdr(env, "pane", "close", pane, socket=sock)  # {} when it failed: tried again next minute
+                    if closed and "closed" not in rec["alerted"] and tell(f"리드가 닫힌 밑 칸 {name}(workers/{pane})을 보고 1시간 뒤라 닫았습니다", home=home):
+                        rec["alerted"].append("closed")
         with_agent = {a.get("pane_id") for a in agents}
         for p in panes:
             term = p.get("terminal_id") or p.get("pane_id") or ""
             if "🫡" not in (p.get("label") or "") or p.get("pane_id") in with_agent:
                 continue
             old = state.get(term) or {}
+            opener, home = old.get("opener", ""), old.get("home", False)
             if "status" in old:  # the watch held an agent record here: the agent really ended
                 old = {"first": now, "had_agent": True}
             rec = records[term] = {"first": old.get("first", now), "had_agent": old.get("had_agent", False),
-                                   "alerted": old.get("alerted", [])}
+                                   "alerted": old.get("alerted", []), "opener": opener, "home": home}
             # ponytail: pane-spawn names a pane 🫡 before `agent start` (3 tries x 120 s, then it closes the pane), so a 🫡
             # pane never seen with an agent may still be starting: it is news only after a 420 s grace
             if (rec["had_agent"] or now - rec["first"] >= 420) and "ended" not in rec["alerted"] \
-                    and tell(f"밑 칸 {p.get('label')}의 에이전트가 끝났습니다"):
+                    and tell(f"밑 칸 {p.get('label')}의 에이전트가 끝났습니다", opener, home):
                 rec["alerted"].append("ended")
         # A pane that had an agent and is in neither list went without a word: workers restarted between two ticks (launchd
         # KeepAlive is faster than this watch), or the pane closed. A report it sent since its last state covers it.
@@ -129,11 +181,8 @@ def tick(env, now: float) -> list:
         for term, old in state.items():
             if term in listed or "status" not in old:
                 continue
-            try:
-                reported = os.path.getmtime(os.path.join(herdr_peers.state_dir(env), "reported", term)) >= old.get("floor", 0)
-            except OSError:
-                reported = False
-            if not reported and not tell(f"밑 칸 {old.get('name') or term}(workers/{old.get('pane') or '?'})이 보고 없이 사라졌습니다"):
+            if not reported_since(term, old.get("floor", 0)) \
+                    and not tell(f"밑 칸 {old.get('name') or term}(workers/{old.get('pane') or '?'})이 보고 없이 사라졌습니다. {UNSENT}", old.get("opener", ""), old.get("home", False)):
                 records[term] = old  # told nobody: try again next minute
         state = records  # panes that are gone drop out
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -166,10 +215,13 @@ case "$1 $2" in
   "session list") cat {d}/sessions.json ;;
   "pane list") cat {d}/$s-panes.json ;;
   "agent list") cat {d}/$s-agents.json ;;
+  "notification show") [ "${{NOTIFY_EXIT:-0}}" != 0 ] || echo "$s|$3|$5" >> {d}/notified; exit ${{NOTIFY_EXIT:-0}} ;;
+  "pane close") [ -f {d}/close-fails ] && exit 1; echo "$3" >> {d}/closed; echo '{{"result":{{"type":"ok"}}}}' ;;
   *) exit 2 ;;
 esac
 ''')
-        script(f"{d}/pane-tell", f'echo "$1|$2" >> {d}/told\nexit ${{TELL_EXIT:-0}}\n')
+        # A refused or failed pane-tell logs nothing: only what was taken is in `told`.
+        script(f"{d}/pane-tell", f'[ "$1" != "${{TELL_REFUSE:-}}" ] || exit 2\n[ "${{TELL_EXIT:-0}}" != 0 ] || echo "$1|$2" >> {d}/told\nexit ${{TELL_EXIT:-0}}\n')
         env = {"HOME": d, "XDG_STATE_HOME": f"{d}/state", "HERDR_BIN_PATH": f"{d}/herdr", "WORKERS_WATCH_PANE_TELL": f"{d}/pane-tell"}
         main_file = f"{d}/state/orchestrator/main"
 
@@ -183,8 +235,8 @@ esac
         def agents(*rows):
             result("workers-agents", "agents", rows)
 
-        def agent(pane, terminal, status, seq):
-            a = {"pane_id": pane, "name": "spawn-M-1", "terminal_id": terminal, "agent_status": status, "state_change_seq": seq}
+        def agent(pane, terminal, status, seq, name="spawn-M-1"):
+            a = {"pane_id": pane, "name": name, "terminal_id": terminal, "agent_status": status, "state_change_seq": seq}
             agents(a)
             return a
 
@@ -211,15 +263,19 @@ esac
         once = globals()["tick"]
 
         def tick(now, **extra):  # what the fake pane-tell received ("<to>|<alert>") for the alerts tick says it sent
-            if os.path.exists(f"{d}/told"):
-                os.remove(f"{d}/told")
+            for log in ("told", "notified", "closed"):
+                if os.path.exists(f"{d}/{log}"):
+                    os.remove(f"{d}/{log}")
             sent = once({**env, **extra}, now)
             got = open(f"{d}/told").read().splitlines() if os.path.exists(f"{d}/told") else []
-            assert extra or [line.split("|", 1)[1] for line in got] == sent, (got, sent)
+            assert extra or sorted([line.split("|", 1)[1] for line in got] + [line.split("|", 2)[2] for line in notified()]) == sorted(sent), (got, notified(), sent)
             return [line for line in got if line.split("|", 1)[1] in sent]
 
+        def notified():  # "<server>|<title>|<body>" of the herdr notifications the last tick showed
+            return open(f"{d}/notified").read().splitlines() if os.path.exists(f"{d}/notified") else []
+
         workers_running(True)
-        result("default-panes", "panes", [{"pane_id": "w5:p3", "terminal_id": "term_M", "label": "👑 메인"}])
+        result("default-panes", "panes", [{"pane_id": "w5:p3", "terminal_id": "term_M", "label": "👑 메인", "agent": "claude"}])
         result("default-agents", "agents", [])
         panes_on_workers()
         write(main_file, "term_M\n")
@@ -245,14 +301,16 @@ esac
         agents(agent("w1:p6", "term_6", "idle", seq=1)); touch_reported("term_6", 6995)
         assert tick(7000) == [] and tick(7900) == [], "reported a moment before the watch first saw the stop: still reported"
         agents(agent("w1:p6", "term_6", "blocked", seq=3)); tick(8100)
-        assert tick(8160, TELL_EXIT="1") == [] and len(tick(8220)) == 1, "a pane-tell that failed is sent again next minute"
-        workers_running(False); assert tick(8300, TELL_EXIT="1") == [] and len(tick(8360)) == 1, "so is the down alert"
+        assert tick(8160, TELL_EXIT="1", NOTIFY_EXIT="1") == [] and len(tick(8220)) == 1, "an alert nobody took is sent again next minute"
+        workers_running(False); assert tick(8300, TELL_EXIT="1", NOTIFY_EXIT="1") == [] and len(tick(8360)) == 1, "so is the down alert"
         workers_running(True); os.remove(f"{d}/workers-agents.json")
         assert tick(8420) == [] and json.load(open(f"{d}/state/orchestrator/watch.json"))["term_6"]["alerted"] == ["blocked"], \
             "an agent list that cannot be read keeps the records and tells nothing"
         write(f"{d}/default-panes.json", '{"result": {"panes": []}}'); agents(agent("w1:p6", "term_6", "blocked", seq=9))
-        assert tick(8500) == [] and tick(8600) == [], "the main pane is on no server: nobody to tell"
-        result("default-panes", "panes", [{"pane_id": "w5:p3", "terminal_id": "term_M"}])
+        assert tick(8500) == [] and len(notified()) == 1 and "리드가 닫혔습니다" in notified()[0], "the main pane is on no server: 요유's screen"
+        assert tick(8600) == [] and len(notified()) == 1 and "질문 창" in notified()[0], "and so does its dialog"
+        assert tick(8660) == [] and notified() == [], "once each"
+        result("default-panes", "panes", [{"pane_id": "w5:p3", "terminal_id": "term_M", "agent": "claude"}])
 
         # A pane with an agent gone from both lists (workers restarted between two ticks, a pane closed): news once, unless
         # it reported before it went. A list that cannot be read is no news and keeps the record.
@@ -260,14 +318,17 @@ esac
         panes_on_workers(); os.remove(f"{d}/workers-agents.json")
         assert tick(9000) == [] and "term_6" in watch(), "a list that cannot be read: no alert, the record is kept"
         agents(); told = tick(9060)
-        assert len(told) == 1 and told[0] == "w5:p3|밑 칸 🟢 🫡 시험(workers/w1:p6)이 보고 없이 사라졌습니다", told
+        assert len(told) == 1 and told[0] == f"w5:p3|밑 칸 🟢 🫡 시험(workers/w1:p6)이 보고 없이 사라졌습니다. {UNSENT}", told
         assert tick(9120) == [] and "term_6" not in watch(), "once; then the record is dropped"
         panes_on_workers(label("w1:p5", "🟢 🫡 보고함")); agents(agent("w1:p5", "term_5", "idle", seq=2)); tick(9200)
         touch_reported("term_5", 9230); panes_on_workers(); agents()
         assert tick(9260) == [] and "term_5" not in watch(), "a pane that reported before it went is no news"
         panes_on_workers(label("w1:p3", "🟢 🫡 재시도")); agents(agent("w1:p3", "term_3", "working", seq=1)); tick(9300)
         panes_on_workers(); agents()
-        assert tick(9360, TELL_EXIT="1") == [] and len(tick(9420)) == 1, "a pane-tell that failed is sent again next minute"
+        assert tick(9360, TELL_EXIT="1", NOTIFY_EXIT="1") == [] and len(tick(9420)) == 1, "an alert nobody took is sent again next minute"
+        panes_on_workers(label("w1:pC", "🟢 🫡 전달")); agents(agent("w1:pC", "term_C", "blocked", seq=1)); tick(9500)
+        assert tick(9560, TELL_EXIT="1") == [] and "질문 창" in notified()[0] and tick(9620) == [], "a pane-tell that failed falls to 요유's screen, once"
+        panes_on_workers(); agents(); tick(9680); touch_reported("term_C", 9700)
 
         panes_on_workers(label("w1:p7", "🟢 🫡 시작 중")); agents()
         assert tick(10000) == [] and tick(10419) == [], "pane-spawn may still be starting a 🫡 pane never seen with an agent"
@@ -287,6 +348,120 @@ esac
             write(f"{d}/state/orchestrator/watch.json", bad)
             tick(14000)
             assert isinstance(watch().get("term_9"), dict), bad
+
+        # 요유 2026-11-05: an ordinary lead's panes run here too. Each alert goes to the pane that opened it, then the main pane, then 요유's screen.
+        os.remove(f"{d}/state/orchestrator/watch.json")
+        MAIN = {"pane_id": "w5:p3", "terminal_id": "term_M", "agent": "claude"}
+        LEADS = [MAIN, {"pane_id": "w5:p9", "terminal_id": "term_L", "agent": "claude"}, {"pane_id": "w5:p8", "terminal_id": "term_K", "agent": "codex"}]
+        result("default-panes", "panes", LEADS)
+        panes_on_workers(label("w1:pA", "🟢 🫡 구현"), label("w1:pB", "🟢 🫡 다른 일"))
+        L = {"name": "spawn-L-1"}; K = {"name": "spawn-K-1"}
+        agents(agent("w1:pA", "term_pA", "blocked", seq=1, **L), agent("w1:pB", "term_pB", "blocked", seq=1, **K))
+        tick(30000); told = tick(30060)
+        assert sorted(t.split("|")[0] for t in told) == ["w5:p8", "w5:p9"], f"several leads at once: each hears of its own pane: {told}"
+        assert all("send-keys" in t and "agent read" in t for t in told), "a lead learns how to read and answer the dialog"
+        agents(agent("w1:pA", "term_pA", "blocked", seq=3, **L), agent("w1:pB", "term_pB", "working", seq=3, **K)); tick(30100)
+        told = tick(30160, TELL_REFUSE="w5:p9")
+        assert [t.split("|")[0] for t in told] == ["w5:p3"], f"a lead that cannot hear: the main pane: {told}"
+        agents(agent("w1:pA", "term_pA", "idle", seq=5, **L), agent("w1:pB", "term_pB", "working", seq=3, **K)); tick(31000)
+        told = tick(31900); assert [t.split("|")[0] for t in told] == ["w5:p9"] and "보고 없이" in told[0], told
+        agents(agent("w1:pB", "term_pB", "working", seq=3, **K))
+        told = tick(31960); assert [t.split("|")[0] for t in told] == ["w5:p9"] and "에이전트가 끝났" in told[0], f"the record remembers the opener: {told}"
+        agents(agent("w1:pA", "term_pA", "working", seq=7, **L), agent("w1:pB", "term_pB", "working", seq=3, **K)); tick(32000)
+        panes_on_workers(label("w1:pB", "🟢 🫡 다른 일")); agents(agent("w1:pB", "term_pB", "working", seq=3, **K))
+        told = tick(32060); assert [t.split("|")[0] for t in told] == ["w5:p9"] and "사라졌습니다" in told[0], f"gone, to its opener: {told}"
+
+        # The opener closed: the pane runs on unseen unless someone hears, once, and later alerts go there too.
+        result("default-panes", "panes", [MAIN])
+        told = tick(32100); assert [t.split("|")[0] for t in told] == ["w5:p3"] and "리드가 닫혔습니다" in told[0] and "w1:pB" in told[0], told
+        assert tick(32160) == [], "once"
+        agents(agent("w1:pB", "term_pB", "blocked", seq=5, **K)); assert tick(32200) == [], "a new state is no new orphan"
+        told = tick(32260); assert [t.split("|")[0] for t in told] == ["w5:p3"] and "질문 창" in told[0], told
+        # A list that cannot be read says nothing about the opener, and keeps every record.
+        result("default-panes", "panes", LEADS); agents(agent("w1:pB", "term_pB", "working", seq=7, **K)); tick(33000)
+        agents(agent("w1:pB", "term_pB", "working", seq=9, name="spawn-Z-1")); os.remove(f"{d}/default-panes.json")
+        before = watch()
+        assert tick(33060) == [] and notified() == [] and watch() == before, "the default server's list cannot be read: nothing is said"
+        result("default-panes", "panes", LEADS)
+        assert "리드가 닫혔습니다" in tick(33120)[0], "and the next good read says it"
+        # No main pane at all: an opener still hears; with no opener either, one notification on the default server.
+        os.remove(main_file); result("default-panes", "panes", LEADS[1:])
+        agents(agent("w1:pB", "term_pB", "blocked", seq=11, **K)); tick(34000)
+        told = tick(34060); assert [t.split("|")[0] for t in told] == ["w5:p8"] and notified() == [], f"no main pane is no reason to stop: {told}"
+        result("default-panes", "panes", [])
+        assert tick(34100) == [] and len(notified()) == 1 and notified()[0].startswith("default|") and "리드가 닫혔습니다" in notified()[0], notified()
+        assert tick(34160) == [] and notified() == [], "one notification, not one a minute"
+        agents(agent("w1:pB", "term_pB", "blocked", seq=13, name="spawned")); tick(34200)
+        assert tick(34260, NOTIFY_EXIT="1") == [] and notified() == [] and tick(34320) == [] and len(notified()) == 1, "a failed notification is tried again"
+        # Nobody to tell and nothing to tell of: a Mac with no workers server stays silent (집맥).
+        os.remove(f"{d}/state/orchestrator/watch.json"); panes_on_workers(); agents(); workers_running(False)
+        assert tick(35000) == [] and notified() == [], "no main pane, no record, workers absent: silence"
+        write(f"{d}/sessions.json", json.dumps({"sessions": [{"name": "default", "socket_path": DEF, "running": True}]}))
+        assert tick(35060) == [] and notified() == [], "workers not even listed: silence"
+        workers_running(True); panes_on_workers(label("w1:pB", "🟢 🫡 다른 일")); agents(agent("w1:pB", "term_pB", "working", seq=1, name="spawned")); tick(35100)
+        workers_running(False); assert tick(35160) == [] and "꺼져" in notified()[0], "a pane was seen there: the down alert reaches 요유's screen"
+        write(main_file, "term_M\n"); result("default-panes", "panes", LEADS); workers_running(True); os.remove(f"{d}/state/orchestrator/watch.json")
+
+        # 요유 2026-11-05: a pane that stopped and reported after its lead closed goes an hour later. A pane at work never does.
+        def closed():
+            return open(f"{d}/closed").read().splitlines() if os.path.exists(f"{d}/closed") else []
+
+        result("default-panes", "panes", [MAIN])
+        panes_on_workers(label("w1:pD", "🟢 🫡 끝남"), label("w1:pE", "🟢 🫡 일하는 중"), label("w1:pF", "🟢 🫡 보고 없음"), label("w1:pG", "🔴 🫡 감시 중"),
+                         label("w1:pH", "🟢 🫡 자식 있음"), label("w1:pJ", "🟢 🫡 자식"), label("w1:pI", "🟢 🫡 리드 있음"), label("w1:pP", "🟢 👑 승격"))
+        rows = [agent("w1:pD", "term_D", "idle", seq=1, **K), agent("w1:pE", "term_E", "working", seq=1, **K), agent("w1:pF", "term_F", "idle", seq=1, **K),
+                agent("w1:pG", "term_G", "idle", seq=1, **K), agent("w1:pH", "term_H", "idle", seq=1, **K), agent("w1:pJ", "term_J", "working", seq=1, name="spawn-H-1"),
+                agent("w1:pI", "term_I", "idle", seq=1, name="spawn-M-2"), agent("w1:pP", "term_P", "idle", seq=1, **K)]
+        agents(*rows); tick(40000)
+        for t in "DGHIP":
+            touch_reported(f"term_{t}", 40010)
+        tick(43599); assert closed() == [], "not before the hour"
+        open(f"{d}/close-fails", "w").close()
+        assert tick(43600) == [], "a close that failed tells nobody it closed"
+        os.unlink(f"{d}/close-fails")
+        told = tick(43660)
+        assert closed() == ["w1:pD"], f"only the pane that stopped and reported, with no 🔴, no 👑 and no live child: {closed()}"
+        assert [t.split("|")[0] for t in told] == ["w5:p3"] and "닫았습니다" in told[0] and "w1:pD" in told[0], told
+        assert tick(43720) == [] and closed() == ["w1:pD"], "a close that did not take is tried again; it is told once"
+        panes_on_workers(*[workers_panes[p] for p in ("w1:pE", "w1:pF", "w1:pG", "w1:pH", "w1:pJ", "w1:pI", "w1:pP")]); agents(*rows[1:])
+        assert tick(43780) == [] and closed() == [], "gone after a report is no news"
+        # The hour counts from whichever came last, the stop or the lead's close; a new stop has to report again; a lead that is back cancels it.
+        os.remove(f"{d}/state/orchestrator/watch.json"); result("default-panes", "panes", LEADS); panes_on_workers(label("w1:pD", "🟢 🫡 끝남"))
+        agents(agent("w1:pD", "term_D", "idle", seq=3, **K)); tick(50000); touch_reported("term_D", 50010); tick(60000)
+        result("default-panes", "panes", [MAIN]); tick(60060); tick(63659); assert closed() == [], "an hour from the lead's close, not from the stop"
+        tick(63660); assert closed() == ["w1:pD"]
+        agents(agent("w1:pD", "term_D", "working", seq=5, **K)); tick(63700); assert closed() == [], "back at work: left alone"
+        agents(agent("w1:pD", "term_D", "idle", seq=7, **K)); tick(63800); tick(67500); assert closed() == [], "a new stop with no new report: left alone"
+        touch_reported("term_D", 67510); tick(67520); assert closed() == ["w1:pD"], "and it is closed once it reports"
+        result("default-panes", "panes", LEADS); agents(agent("w1:pD", "term_D", "idle", seq=9, **K)); touch_reported("term_D", 67600); tick(67610)
+        result("default-panes", "panes", [MAIN]); tick(67620); result("default-panes", "panes", LEADS); tick(67700)
+        result("default-panes", "panes", [MAIN]); tick(71230); assert closed() == [], "a lead that came back starts the hour over"
+
+        # A lead whose agent ended leaves its pane at a shell, where nobody hears: it counts as closed, or the pane would stay hidden for good.
+        os.remove(f"{d}/state/orchestrator/watch.json"); panes_on_workers(label("w1:pS", "🟢 🫡 셸만 남음"))
+        result("default-panes", "panes", [MAIN, {"pane_id": "w5:p9", "terminal_id": "term_L", "agent": None}])
+        agents(agent("w1:pS", "term_S", "idle", seq=1, name="spawn-L-1")); touch_reported("term_S", 80010)
+        told = tick(80020); assert told[0].startswith("w5:p3|") and "리드가 닫혔습니다" in told[0], f"the main pane takes it: {told}"
+        tick(83619); assert closed() == []
+        tick(83620); assert closed() == ["w1:pS"], "and it closes an hour later"
+        result("default-panes", "panes", LEADS); tick(83680); result("default-panes", "panes", [MAIN, {**LEADS[1], "agent": None}]); tick(83740)
+        result("default-panes", "panes", LEADS); tick(83800); assert closed() == [], "a new session in that pane is its lead again"
+        panes_on_workers(); agents(); tick(83860)
+
+        # 요유 2026-11-05: a Home lead's pane may reach the main pane, which is told to keep it off company Slack and the board.
+        os.remove(f"{d}/state/orchestrator/watch.json"); result("default-panes", "panes", [MAIN]); panes_on_workers(label("w1:pX", "🟢 🫡 집 일"))
+        H = {"name": "spawn-K-h123"}
+        agents(agent("w1:pX", "term_X", "blocked", seq=1, **H)); told = tick(72000)
+        assert "리드가 닫혔습니다" in told[0] and herdr_peers.HOME_NOTE in told[0], f"the orphan alert says so: {told}"
+        told = tick(72060); assert "질문 창" in told[0] and herdr_peers.HOME_NOTE in told[0], f"and every later one: {told}"
+        agents(agent("w1:pX", "term_X", "working", seq=3, **H)); tick(72100); panes_on_workers(); agents()
+        told = tick(72160); assert "사라졌습니다" in told[0] and herdr_peers.HOME_NOTE in told[0], f"down to the last: {told}"
+        result("default-panes", "panes", LEADS); panes_on_workers(label("w1:pX", "🟢 🫡 집 일")); agents(agent("w1:pX", "term_X", "blocked", seq=5, **H)); tick(72200)
+        told = tick(72260); assert told[0].startswith("w5:p8|") and herdr_peers.HOME_NOTE not in told[0], f"its own lead needs no warning: {told}"
+        agents(agent("w1:pX", "term_X", "blocked", seq=7, **H)); tick(72300)
+        told = tick(72360, TELL_REFUSE="w5:p8"); assert told[0].startswith("w5:p3|") and herdr_peers.HOME_NOTE in told[0], f"its lead cannot hear: {told}"
+        agents(agent("w1:pX", "term_X", "working", seq=9, **K)); tick(72400); panes_on_workers(); agents(); touch_reported("term_X", 72420); tick(72440)
+        os.remove(f"{d}/state/orchestrator/watch.json"); result("default-panes", "panes", LEADS)
 
         # end to end, the way launchd runs it: python3 -I drops the script folder from sys.path
         panes_on_workers(label("w1:p6", "🟢 🫡 시험")); agents(agent("w1:p6", "term_6", "blocked", seq=11))

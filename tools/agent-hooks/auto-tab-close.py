@@ -20,8 +20,11 @@ questions for 요유 and its lead never heard (요유 2026-11-01). A reply witho
 What the pane above hears tells it to check the result itself before passing it up, and yoyoo-share-guard holds its next report
 to that (요유 2026-11-04). A pane that hands checks out (herdr_peers.delegates_checks: the main pane today, 요유 2026-11-05) hears
 to open a fresh check pane instead, and a check pane's report, which pane-spawn --check's agent name tells apart, asks for no other.
-A pane the main pane opened runs on the workers herdr server, so its opener is looked up on the other server too. The main
-pane hears a short form (first line, `남은 것:`, the pane's address and the saved file); the whole reply stays in that file.
+A pane pane-spawn opened runs on the workers herdr server, so its opener is looked up on the other server too. The main pane
+hears a short form (first line, `남은 것:`, the pane's address and the saved file); the whole reply stays in that file. Every
+lead's panes share that server's one workspace: when the opener is gone or cannot hear, the report goes to a 👑 in the same tab or
+the main pane, saying it stands in (and, for a Home pane, to keep it off company Slack and the board; 요유 2026-11-05), never to
+another lead.
 A pane moved to another workspace gets a new id, and only `herdr pane get` still knows the old one from its env, so the
 current pane comes from there, and pane-spawn records its caller by terminal id, which a move does not change.
 A Stop hook runs beside the other Stop hooks, and any of them can send the reply back to be rewritten, so a Stop is not the
@@ -32,8 +35,8 @@ Never blocks; prints nothing. Fails open.
 
 Before all that, every Stop of every pane (요유's own too) keeps its 🔴/🟢 mark true: see sync_mark.
 
---sweep lists the panes that already finished, which no Stop hook will visit again: named, idle, not held as above, and a
-last reply that passes the same test. --sweep --apply closes them the same way.
+--sweep lists the panes that already finished on the default and workers servers, which no Stop hook will visit again: named,
+idle, not held as above, and a last reply that passes the same test. --sweep --apply closes them the same way.
 
     auto-tab-close.py --selftest
     auto-tab-close.py --sweep [--apply]
@@ -63,7 +66,6 @@ _spec.loader.exec_module(herdr_peers)  # the default and workers servers, and pa
 
 SESSION = re.compile(r"세션[ \t]*\**[ \t]*[:：][ \t]*\**([^·\n]*)")
 LEFT = re.compile(r"남은[ \t]*것[ \t]*\**[ \t]*[:：]")
-OPENER = re.compile(r"^spawn-([0-9A-Za-z]+)-")  # pane-spawn's agent name: spawn-<caller's terminal>-<random>
 
 
 def plain(text: str) -> str:
@@ -194,6 +196,7 @@ def sync_mark(payload: dict, env):
 
 
 herdr = herdr_peers.herdr  # passes env on, so HERDR_SOCKET_PATH picks the server; {} on any failure, never raises (see finish)
+opener = herdr_peers.opener
 
 
 def here(env) -> dict:
@@ -208,15 +211,20 @@ def agent_name(env) -> str:
     return ((herdr(env, "agent", "get", pane).get("agent") or {}).get("name") or "") if pane else ""
 
 
-def opener(name) -> str:
-    """The terminal of the pane that opened this agent, from pane-spawn's name."""
-    m = OPENER.match(name or "")
-    return f"term_{m[1]}" if m else ""
-
-
 def held(label: str, terminal, agents: list) -> bool:
     """🔴 stops something; a pane waits for the panes it opened. 요유's own leads never get here: they have no agent name."""
     return label.startswith("🔴") or any(opener(a.get("name")) == terminal for a in agents)
+
+
+def hidden_agents(env) -> list | None:
+    """The workers server's agents for a pane elsewhere: pane-spawn opens a lead's panes there, a named 👑's included. None when it
+    cannot tell, which keeps the pane open. A workers pane opens on workers, so it has nothing to read."""
+    if herdr_peers.server_key(env) == "workers":
+        return []
+    sock = herdr_peers.socket_of(env, "workers")
+    if sock is None:
+        return None
+    return herdr(env, "agent", "list", socket=sock).get("agents") if sock else []
 
 
 def reply_of(payload: dict):
@@ -247,32 +255,42 @@ def decide(payload: dict, env) -> str | None:
     return text if not job and LEFT.search(share.prose(text)) and agent_name(env) else None
 
 
+def main_pane(env):
+    """(address, pane) of the main pane, or ("", {})."""
+    return (herdr_peers.all_panes(env) or {}).get(herdr_peers.main_terminal(env)) or ("", {})
+
+
 def lead_pane(me: dict, panes: list, name: str = "", sideways: bool = True, env=None):
-    """(address, pane) of nearest_lead, or ("", {})."""
+    """(address, pane) of nearest_lead, ("", {}) when there is none, or None when a list it could not read may hide its opener."""
     others = [p for p in panes if p.get("pane_id") != me.get("pane_id")]
     parent = opener(name)
     for p in others:
         if parent and p.get("terminal_id") == parent:
             return p["pane_id"], p
-    found = herdr_peers.find_terminal(env, parent) if parent and env is not None else None
-    if found:  # opened from the other server: the main pane's panes run on workers
-        return found
+    if parent and env is not None:
+        where = herdr_peers.all_panes(env)
+        if where is None:
+            return None
+        if parent in where:  # opened from the other server: every lead's panes run on workers
+            return where[parent]
     if not sideways:
         return "", {}
     leads = [p for p in others if "👑" in (p.get("label") or "")]
     tab = [p for p in leads if p.get("tab_id") == me.get("tab_id")]
     if tab:
         return tab[0]["pane_id"], tab[0]
+    if env is not None and herdr_peers.server_key(env) == "workers":
+        return main_pane(env)  # every lead shares that server's one workspace, so its only 👑 is nobody in particular
     workspace = [p for p in leads if p.get("workspace_id") == me.get("workspace_id")]
     return (workspace[0]["pane_id"], workspace[0]) if len(workspace) == 1 else ("", {})
 
 
 def nearest_lead(me: dict, panes: list, name: str = "", sideways: bool = True, env=None) -> str:
     """The pane that opened this one (on this server, else the other one), else the 👑 in this tab, else the only 👑 in this
-    workspace. With several, none is known to be ours, and a report in the wrong session reads as a task: the saved copy is
-    enough. Another workspace is another life (company, home). Without `sideways` only the opener counts: two open 👑 would
-    answer each other for ever. Sideways stays on this server. A pane on the other server comes back as `<session>/<id>`."""
-    return lead_pane(me, panes, name, sideways, env)[0]
+    workspace, or on workers the main pane. With several, none is known to be ours, and a report in the wrong session reads as a
+    task: the saved copy is enough. Another workspace is another life (company, home). Without `sideways` only the opener counts:
+    two open 👑 would answer each other for ever. A pane on the other server comes back as `<session>/<id>`."""
+    return (lead_pane(me, panes, name, sideways, env) or ("",))[0]
 
 
 def short_report(reply: str, cap: int | None = 200) -> str:
@@ -312,43 +330,61 @@ def finish(reply: str, env):
     env = {**env, "HERDR_PANE_ID": pane}
     panes = herdr(env, "pane", "list").get("panes") or []
     agents = herdr(env, "agent", "list").get("agents")
+    hidden = hidden_agents(env)
     # herdr fails open ({}): a pane or agent list it could not give hides the panes this one opened, so the pane stays
-    close = should_close(reply) and bool(me) and agents is not None and not held(me.get("label") or "", me.get("terminal_id"), agents)
-    agents = agents or []
-    name = next((a.get("name") for a in agents if a.get("pane_id") == pane), "")
+    close = (should_close(reply) and bool(me) and agents is not None and hidden is not None
+             and not held(me.get("label") or "", me.get("terminal_id"), agents + hidden))
+    name = agent_name(env) if agents is None else next((a.get("name") for a in agents if a.get("pane_id") == pane), "")
     now = datetime.datetime.now()
     path = save(reply, me, pane, env, now)
     quiet: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     sideways = close or "👑" not in (me.get("label") or "")
-    lead, to = ("", {}) if env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT") else lead_pane(me, panes, name, sideways, env)
-    if lead:
+    workers = herdr_peers.server_key(env) == "workers"
+    if env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT"):
+        found = ("", {})
+    else:  # with no name on workers, sideways would be the main pane, with no word of a Home pane
+        found = None if workers and agents is None and not name else lead_pane(me, panes, name, sideways, env)
+    if found is None:  # its lead may be alive: the file, no mark, and the pane stays for the watch to reach that lead
+        close, found = False, ("", {})
+    lead, to = found
+    main = herdr_peers.main_terminal(env)
+
+    def tell(lead: str, to: dict) -> bool:
         pt = env.get("AUTO_TAB_CLOSE_PANE_TELL") or os.path.join(HERE, "pane-tell")
         head = "칸의 마지막 보고입니다(칸을 닫기 전에 보냅니다)" if close else "칸의 보고입니다(칸은 열어 둡니다)"
         who, note = "이", share.RELAY_NOTE
         if herdr_peers.delegates_checks(env, to.get("terminal_id")):  # a check pane's report ends the round: no check of a check
             who, note = ("확인", share.CHECK_NOTE) if share.CHECK_AGENT.match(name or "") else ("이", share.DELEGATE_NOTE)
-        main = herdr_peers.main_terminal(env)
-        to_main = bool(main) and to.get("terminal_id") == main
-        if to_main:  # the main pane keeps many panes going: it reads the gist and opens the file when it needs more
+        if main and to.get("terminal_id") == main:  # the main pane keeps many panes going: it reads the gist and opens the file when it needs more
             # A check pane's first line holds its pass or fail, often at the end, and the main pane writes its `확인:` line from it: never cut.
             gist = short_report(reply, None) if who == "확인" else short_report(reply)
             body = (f"{gist}\n칸: {herdr_peers.address(env, pane)} {me.get('label') or ''}\n"
                     f"전체 보고: {path} ({now:%H:%M:%S} 항목)")
         else:
             body = f"{unicodedata.normalize('NFC', reply).strip()}\n\n전체 보고: {path}"
+        # Someone other than the opener reads this: say why, and that a Home pane's words stay off company Slack and the board (요유 2026-11-05).
+        stand_in = ""
+        if opener(name) and to.get("terminal_id") != opener(name):
+            stand_in = "이 칸을 연 리드에게 보낼 수 없어 대신 보냅니다. " + (f"{herdr_peers.HOME_NOTE} " if herdr_peers.home_pane(name) else "")
         try:  # share.RELAYED knows the head: the lead's next report has to show its check
-            sent = subprocess.run([pt, lead, f"{who} {head}. {note}:\n{body}"], env=dict(env), timeout=5, **quiet).returncode == 0
+            # 10 s, as the watch gives it: a slow send killed here would still type, then the main pane would get the same report
+            return subprocess.run([pt, lead, f"{who} {head}. {stand_in}{note}:\n{body}"], env=dict(env), timeout=10, **quiet).returncode == 0
         except subprocess.TimeoutExpired:
-            sent = False
-        # the main pane's watch: this pane is waiting, not stuck. Only workers panes: a personal server is left alone
-        if sent and me.get("terminal_id") and (to_main or herdr_peers.server_key(env) == "workers"):
-            try:
-                mark = os.path.join(herdr_peers.state_dir(env), "reported", me["terminal_id"])
-                os.makedirs(os.path.dirname(mark), exist_ok=True)
-                with open(mark, "a"):
-                    os.utime(mark)
-            except OSError:
-                pass
+            return False
+
+    sent = bool(lead) and tell(lead, to)
+    if lead and not sent and workers and to.get("terminal_id") != main:  # hidden: no tab of 요유's shows this pane stop, so the main pane hears it
+        lead, to = main_pane(env)
+        sent = bool(lead) and tell(lead, to)
+    # the main pane's watch: this pane is waiting, not stuck. Only workers panes: a personal server is left alone
+    if sent and me.get("terminal_id") and (workers or to.get("terminal_id") == main):
+        try:
+            mark = os.path.join(herdr_peers.state_dir(env), "reported", me["terminal_id"])
+            os.makedirs(os.path.dirname(mark), exist_ok=True)
+            with open(mark, "a"):
+                os.utime(mark)
+        except OSError:
+            pass
     if close:
         pl = env.get("AUTO_TAB_CLOSE_PANE_LABEL") or os.path.join(HERE, "pane-label")
         subprocess.run([pl, "--close"], env={**env, "PANE_CLOSE_REPORTED": "1"}, timeout=3, **quiet)
@@ -445,24 +481,29 @@ def last_reply(session: str) -> str:
 
 
 def sweep(env, apply: bool):
-    panes = {p.get("pane_id"): p for p in herdr(env, "pane", "list").get("panes") or []}
-    agents = herdr(env, "agent", "list").get("agents") or []
     me = here(env).get("pane_id") or env.get("HERDR_PANE_ID")
-    for a in agents:
-        pane, session = a.get("pane_id"), (a.get("agent_session") or {}).get("value")
-        label = panes.get(pane, {}).get("label") or ""
-        if (not a.get("name") or not session or a.get("agent_status") not in ("idle", "done") or pane == me
-                or held(label, panes.get(pane, {}).get("terminal_id"), agents)):
-            continue
-        try:
-            reply = last_reply(session)
-            if not should_close(reply):
+    own = env.get("HERDR_SOCKET_PATH") or herdr_peers.socket_of(env, "default")
+    socks = [herdr_peers.socket_of(env, n) for n in herdr_peers.PEERS]
+    for e in [env] + [{**env, "HERDR_SOCKET_PATH": s} for s in socks if s and s != own]:  # the same pane id names another pane on the other server
+        panes = {p.get("pane_id"): p for p in herdr(e, "pane", "list").get("panes") or []}
+        agents = herdr(e, "agent", "list").get("agents") or []
+        hidden = hidden_agents(e)
+        for a in agents:
+            pane, session = a.get("pane_id"), (a.get("agent_session") or {}).get("value")
+            label = panes.get(pane, {}).get("label") or ""
+            address = herdr_peers.address(e, pane)
+            if (not a.get("name") or not session or a.get("agent_status") not in ("idle", "done") or (e is env and pane == me)
+                    or hidden is None or held(label, panes.get(pane, {}).get("terminal_id"), agents + hidden)):
                 continue
-            print(f"{pane}\t{a['name']}\t{label}")
-            if apply:
-                finish(reply, {**env, "HERDR_PANE_ID": pane})
-        except Exception as e:  # one unreadable pane must not stop the others
-            print(f"{pane}\t건너뜀: {e}", file=sys.stderr)
+            try:
+                reply = last_reply(session)
+                if not should_close(reply):
+                    continue
+                print(f"{address}\t{a['name']}\t{label}")
+                if apply:
+                    finish(reply, {**e, "HERDR_PANE_ID": pane})
+            except Exception as err:  # one unreadable pane must not stop the others
+                print(f"{address}\t건너뜀: {err}", file=sys.stderr)
 
 
 def selftest():
@@ -534,12 +575,13 @@ case "$1 $2" in
   "agent get") [ -f {sandbox}/agent-gone ] || [ "$3" = "$(cat {sandbox}/old-id 2>/dev/null)" ] && exit 1; cat $d/agent.json ;;
   "pane get") [ -f {sandbox}/herdr-bad ] && {{ echo "not json"; exit 0; }}; jq --arg id "$3" --arg new "$(cat {sandbox}/new-id 2>/dev/null)" \
     '{{result: {{pane: ([.result.panes[] | select(.pane_id == $id or .pane_id == $new)][0])}}}}' $d/panes.json ;;
-  "agent list") [ -f {sandbox}/agents-bad ] && {{ echo "not json"; exit 0; }}; cat $d/agents.json ;;
-  "pane list") cat $d/panes.json ;;
+  "agent list") [ -f $d/agents-bad ] && {{ echo "not json"; exit 0; }}; cat $d/agents.json ;;
+  "pane list") [ -f $d/panes-bad ] && exit 1; cat $d/panes.json ;;
   *) exit 2 ;;
 esac''')
+    sessions(default=f"{sandbox}/herdr.sock")
     fake = script("pane-label", f'echo "reported=$PANE_CLOSE_REPORTED pane=$HERDR_PANE_ID $@" >> {sandbox}/calls')
-    fake_tell = script("pane-tell", f'echo "tell $1" >> {sandbox}/calls\necho "$2" > {sandbox}/told\nsleep ${{TELL_SLEEP:-0}}\nexit ${{TELL_EXIT:-0}}')
+    fake_tell = script("pane-tell", f'echo "tell $1" >> {sandbox}/calls\n[ "$1" = "${{TELL_REFUSE:-}}" ] && exit 2\necho "$2" > {sandbox}/told\nsleep ${{TELL_SLEEP:-0}}\nexit ${{TELL_EXIT:-0}}')
 
     me = {"pane_id": "w1:p2", "tab_id": "w1:t1", "workspace_id": "w1", "label": "🟢 일", "cwd": "/w",
           "terminal_id": "term_2", "agent_session": {"value": "sid-2"}, "agent_status": "idle"}
@@ -1049,6 +1091,128 @@ esac''')
     assert run(reported, on_workers) == (0, "", "tell w1:p1\n" + closed)
     assert os.path.exists(f"{sandbox}/.local/state/orchestrator/reported/term_2"), "a workers pane under its own lead still marks"
     saved()
+
+    # An ordinary lead's panes run on workers too (요유 2026-11-05). Every lead shares that server's one workspace, so its only 👑 is
+    # nobody's in particular, and the same pane id on default is another pane.
+    os.unlink(f"{sandbox}/.local/state/orchestrator/reported/term_2")
+    lead_a = {**crown, "pane_id": "w1:p2", "label": "🟢 👑 리드 A", "terminal_id": "term_A"}
+    lead_b = {**crown, "pane_id": "w5:p8", "tab_id": "w5:t8", "workspace_id": "w5", "label": "🟢 👑 리드 B", "terminal_id": "term_B"}
+    stranger = {**crown, "pane_id": "w1:p9", "tab_id": "w1:t9", "label": "🟢 👑 다른 리드", "terminal_id": "term_C"}
+    hidden = {**me, "label": "🟢 🫡 구현"}
+    stand_in = "대신 보냅니다"
+
+    def opened_by(name, *others):
+        herdr_says_on("workers", {"name": name}, [hidden, *others], [{"pane_id": "w1:p2", "name": name, "terminal_id": "term_2"}])
+
+    herdr_says({"name": "x"}, [main, lead_a, lead_b])
+    opened_by("spawn-A-1", stranger)
+    assert run(reported, on_workers) == (0, "", "tell default/w1:p2\n" + closed), "its opener hears it, not the workspace's 👑 or the main pane"
+    told = open(f"{sandbox}/told").read()
+    assert full in told and share.RELAY_NOTE in told and stand_in not in told, f"an ordinary lead gets the whole reply: {told!r}"
+    assert os.path.exists(f"{sandbox}/.local/state/orchestrator/reported/term_2"), "the watch learns this pane reported"
+    saved()
+    opened_by("spawn-B-1", stranger)
+    assert run(reported, on_workers) == (0, "", "tell default/w5:p8\n" + closed), "two leads at once: each hears its own panes"
+    saved()
+    # The lead closed: the main pane takes the report, and the head still reads as a relayed report.
+    herdr_says({"name": "x"}, [main, lead_b])
+    opened_by("spawn-A-1", stranger)
+    assert run(reported, on_workers) == (0, "", "tell default/w5:p3\n" + closed), "a closed lead's pane reports to the main pane"
+    told = open(f"{sandbox}/told").read()
+    assert told.startswith("이 칸의 마지막 보고입니다(") and stand_in in told and share.DELEGATE_NOTE in told, f"and says why: {told!r}"
+    assert "왜: 칸이 남습니다." not in told and "전체 보고:" in told, "the main pane's usual short form"
+    assert herdr_peers.HOME_NOTE not in told, "a company pane's report has no such note"
+    saved()
+    opened_by("spawn-A-1", {**stranger, "tab_id": "w1:t1"})
+    assert run(reported, on_workers) == (0, "", "tell w1:p9\n" + closed), "a 👑 in the same tab is sure to be its own"
+    assert stand_in in open(f"{sandbox}/told").read()
+    saved()
+    # The lead's pane is there but it cannot hear (its agent quit): nobody would see this hidden pane stop.
+    herdr_says({"name": "x"}, [main, lead_a])
+    opened_by("spawn-A-1")
+    assert run(reported, {**on_workers, "TELL_REFUSE": "default/w1:p2"}) == (0, "", "tell default/w1:p2\ntell default/w5:p3\n" + closed), \
+        "a lead that refuses: the main pane"
+    assert stand_in in open(f"{sandbox}/told").read()
+    saved()
+    herdr_says({"name": "x"}, [crown, me])
+    assert run(reported, {**pane2, "TELL_REFUSE": "w1:p1"}) == (0, "", "tell w1:p1\n" + closed), "on default the tab is in sight: as before"
+    saved()
+    # Home: the note goes with the report only when it leaves the Home lead.
+    herdr_says({"name": "x"}, [main, lead_a])
+    opened_by("spawn-A-h1")
+    assert run(reported, on_workers)[2] == "tell default/w1:p2\n" + closed
+    assert herdr_peers.HOME_NOTE not in open(f"{sandbox}/told").read(), "its own lead is at home"
+    saved()
+    herdr_says({"name": "x"}, [main])
+    assert run(reported, on_workers)[2] == "tell default/w5:p3\n" + closed
+    assert herdr_peers.HOME_NOTE in open(f"{sandbox}/told").read(), "요유 2026-11-05: the main pane must keep it off company Slack and the board"
+    saved()
+    # No lead, no main pane: the file only, never another lead's session.
+    os.unlink(state_file)
+    os.unlink(f"{sandbox}/.local/state/orchestrator/reported/term_2")
+    herdr_says({"name": "x"}, [lead_b])
+    opened_by("spawn-A-1", stranger)
+    assert run(reported, on_workers) == (0, "", closed), "no receiver: the report stays in the file, and no other lead reads it as a task"
+    assert full in saved()
+    assert not os.path.exists(f"{sandbox}/.local/state/orchestrator/reported/term_2"), "nobody heard it: the watch still says so"
+    open(state_file, "w").write("term_M")
+    # A list it cannot read is no closed lead. Sent sideways, a Home pane's report would reach the main pane with no word of it, and the
+    # mark would silence the watch while its lead waits. So: the file, no mark, and the pane stays for the watch to reach its lead.
+    report_mark = f"{sandbox}/.local/state/orchestrator/reported/term_2"
+    herdr_says({"name": "x"}, [main, lead_a])
+    opened_by("spawn-A-h1")
+    open(f"{sandbox}/workers/agents-bad", "w").close()
+    assert run(reported, on_workers) == (0, "", "tell default/w1:p2\n"), "its agent list unreadable: its own name still finds its lead, and it stays"
+    told = open(f"{sandbox}/told").read()
+    assert herdr_peers.HOME_NOTE not in told and stand_in not in told, f"to its own lead: {told!r}"
+    saved(); os.unlink(report_mark)
+    open(f"{sandbox}/agent-gone", "w").close()
+    finish(done, {"HOME": sandbox, "HERDR_BIN_PATH": fake_herdr, "PANE_REPORT_DIR": reports, "AUTO_TAB_CLOSE_PANE_LABEL": fake,
+                  "AUTO_TAB_CLOSE_PANE_TELL": fake_tell, "PATH": os.environ.get("PATH", ""), **on_workers})
+    assert taken() == "", "no name at all on workers: nobody is told"
+    assert done in saved() and not os.path.exists(report_mark)
+    os.unlink(f"{sandbox}/agent-gone"); os.unlink(f"{sandbox}/workers/agents-bad")
+    opened_by("spawn-A-1")
+    open(f"{sandbox}/panes-bad", "w").close()
+    assert run(reported, on_workers) == (0, "", ""), "default's list unreadable: its lead may be there"
+    assert full in saved() and not os.path.exists(report_mark)
+    os.unlink(f"{sandbox}/panes-bad")
+    # A pane with an agent name that 요유 made a lead opens on workers: it waits for those panes as for any it opened.
+    promoted = {**me, "pane_id": "w5:p2", "tab_id": "w5:t2", "workspace_id": "w5", "label": "🟢 👑 승격", "terminal_id": "term_P"}
+    herdr_says({"name": "spawn-Z-1"}, [main, promoted], [{"pane_id": "w5:p2", "name": "spawn-Z-1"}])
+    herdr_says_on("workers", None, [hidden], [{"pane_id": "w1:p2", "name": "spawn-P-1"}])
+    assert "--close" not in run(reported, {"HERDR_PANE_ID": "w5:p2"})[2], "a pane of its own alive on workers: it stays"
+    saved()
+    herdr_says_on("workers", None, [], [])
+    open(f"{sandbox}/workers/agents-bad", "w").close()
+    assert "--close" not in run(reported, {"HERDR_PANE_ID": "w5:p2"})[2], "workers running and its list unreadable: it may have some"
+    saved()
+    os.unlink(f"{sandbox}/workers/agents-bad")
+    os.rename(f"{sandbox}/sessions.json", f"{sandbox}/sessions.away")
+    assert "--close" not in run(reported, {"HERDR_PANE_ID": "w5:p2"})[2], "no telling whether workers runs: it may have some"
+    saved()
+    os.rename(f"{sandbox}/sessions.away", f"{sandbox}/sessions.json")
+    assert "--close" in run(reported, {"HERDR_PANE_ID": "w5:p2"})[2], "none left: it closes"
+    saved()
+    # --sweep visits both servers, each pane with its own server's lists. The same ids exist on both.
+    for sid in ("sid-d2", "sid-d9", "sid-w2", "sid-w9"):
+        transcript(sid, done)
+    default_rows = [{**me, "terminal_id": "term_d2"}, {**me, "pane_id": "w1:p9", "terminal_id": "term_d9"}, main]
+    workers_rows = [{**me, "terminal_id": "term_w2"}, {**me, "pane_id": "w1:p9", "terminal_id": "term_w9"}]
+    herdr_says({"name": "x"}, default_rows, [agent("w1:p2", "x", "sid-d2"), agent("w1:p9", "x", "sid-d9")])
+    herdr_says_on("workers", {"name": "x"}, workers_rows, [agent("w1:p2", "spawn-gone-1", "sid-w2"), agent("w1:p9", "spawn-gone-2", "sid-w9")])
+    code, out, calls = run("", {"HERDR_PANE_ID": "w1:p9"}, ["--sweep"])
+    assert (code, calls) == (0, ""), "--sweep alone only lists"
+    assert sorted(line.split("\t")[0] for line in out.splitlines()) == ["w1:p2", "workers/w1:p2", "workers/w1:p9"], f"only the caller itself is skipped: {out}"
+    code, out, calls = run("", {"HERDR_PANE_ID": "w1:p9", "HERDR_SOCKET_PATH": W}, ["--sweep"])
+    assert sorted(line.split("\t")[0] for line in out.splitlines()) == ["w1:p2", "w1:p9", "workers/w1:p2"], f"from workers, the same: {out}"
+    code, out, calls = run("", {"HERDR_PANE_ID": "w1:p9"}, ["--sweep", "--apply"])
+    assert calls.count("--close") == 3 and calls.count("tell default/w5:p3") == 2, f"workers panes whose lead closed report to the main pane: {calls}"
+    text = saved()
+    assert "workers/w1:p2" in text and "workers/w1:p9" in text and text.count(done) == 3, f"each saved under its own server: {text}"
+    herdr_says_on("workers", {"name": "x"}, workers_rows, [agent("w1:p2", "spawn-d2-1", "sid-w2", "working")])
+    code, out, calls = run("", {"HERDR_PANE_ID": "w1:p9"}, ["--sweep"])
+    assert "w1:p2" not in out, f"a default pane with a pane of its own at work on workers stays: {out}"
     print("selftest ok")
 
 

@@ -61,4 +61,44 @@ echo 'console.log("preloaded")' >"$T/repo/preload.js"
 out=$(cd "$T/repo" && CLAUDE_CONFIG_DIR="$T/leak" run)
 check "HUD ignores bunfig.toml in the session folder" "$out" 'leak=undefined' 'preloaded'
 
+# 요유 reads only the lead's pane, and a lead's panes run on the hidden workers server: their steps show here all the same.
+mkdir "$T/fake"
+cat >"$T/fake/herdr" <<EOF
+#!/bin/bash
+case "\${HERDR_SOCKET_PATH:-}" in */sessions/workers/*) s=workers ;; *) s=default ;; esac
+[ "\$1" = --session ] && { s=\$2; shift 2; echo "\$s" >>"$T/fake/calls"; }
+[ "\$s" = workers ] && [ -e "$T/fake/stuck" ] && exec /bin/sleep 30 # herdr's CLI waits on a stuck server for ever
+cat "$T/fake/\$s-\$1s.json" 2>/dev/null || { echo '{"error":{"code":"server_not_running"}}'; exit 1; }
+EOF
+chmod +x "$T/fake/herdr"
+agent_row() { printf '{"pane_id":"%s","terminal_id":"term_%s","name":"%s","agent_session":{"value":"%s"}}' "$@"; }
+pane_row() { printf '{"pane_id":"%s","label":"%s"}' "$@"; }
+echo "{\"result\":{\"agents\":[$(agent_row w5:p1 LEAD '' s-lead),$(agent_row w5:p2 NEAR spawn-LEAD-1 s-near)]}}" >"$T/fake/default-agents.json"
+echo "{\"result\":{\"panes\":[$(pane_row w5:p1 '🟢 👑 리드'),$(pane_row w5:p2 '🟢 🫡 옆 칸')]}}" >"$T/fake/default-panes.json"
+# The same pane id as a pane on default: each server's names come from its own list.
+echo "{\"result\":{\"agents\":[$(agent_row w5:p2 FAR spawn-LEAD-2 s-far),$(agent_row w1:p3 OTHER spawn-ELSE-1 s-other)]}}" >"$T/fake/workers-agents.json"
+echo "{\"result\":{\"panes\":[$(pane_row w5:p2 '🔴 🫡 숨은 칸'),$(pane_row w1:p3 '🟢 🫡 남의 칸')]}}" >"$T/fake/workers-panes.json"
+mkdir -p "$T/hud/statusline/task-progress"
+for s in near far other; do printf '0\tt\t단계 %s\n' "$s" >"$T/hud/statusline/task-progress/s-$s.tsv"; done
+lead_input() { printf '{"session_id":"%s","model":{"display_name":"Opus"},"workspace":{"current_dir":"%s"}}' "$1" "$T"; }
+run_lead() { lead_input "$1" | env -u HERDR_SOCKET_PATH PATH="$T/fake:$PATH" HERDR_PANE_ID=w5:p1 CLAUDE_CONFIG_DIR="$T/hud" ${2:+HERDR_SOCKET_PATH="$2"} bash "$SCRIPT" 2>&1; }
+out=$(run_lead s-lead)
+check "a pane beside the lead shows" "$out" '↳ 옆 칸  단계 near'
+check "a pane on workers shows" "$out" '↳ 숨은 칸  단계 far' '남의 칸'
+rm -f "$T/fake/calls"
+out=$(run_lead s-far /x/sessions/workers/herdr.sock)
+[ ! -e "$T/fake/calls" ] && r=once || r=twice
+check "a pane on workers reads workers once" "$r" 'once'
+mv "$T/fake/workers-agents.json" "$T/fake/gone"
+out=$(run_lead s-lead)
+check "no workers server: the rest still shows" "$out" '↳ 옆 칸  단계 near' '숨은 칸|error'
+mv "$T/fake/gone" "$T/fake/workers-agents.json"
+touch "$T/fake/stuck"
+started=$SECONDS
+out=$(STATUSLINE_WORKERS_LIMIT=1 run_lead s-lead)
+check "a stuck workers server: the rest still shows" "$out" '↳ 옆 칸  단계 near' '숨은 칸'
+[ $((SECONDS - started)) -lt 10 ] && r=soon || r=late
+check "a stuck workers server does not hold the line back" "$r" 'soon'
+rm -f "$T/fake/stuck"
+
 [ "$fails" -eq 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }
