@@ -220,6 +220,22 @@ def opener_of(pane: dict, names: dict, env) -> str:
         return ""
 
 
+def my_pane(panes: list, payload: dict, env) -> dict | None:
+    session = payload.get("session_id")
+    return next((p for p in panes if session and (p.get("agent_session") or {}).get("value") == session), None) or next(
+        (p for p in panes if p.get("pane_id") == env.get("HERDR_PANE_ID")), None)  # a moved pane keeps an old HERDR_PANE_ID
+
+
+def agent_names(env) -> dict:
+    return {a.get("pane_id"): a.get("name") for a in herdr_list(env, "agent")}
+
+
+def under_lead(payload: dict, env) -> bool:
+    """A pane pane-spawn opened and 요유 did not make a lead: its report goes to the lead that opened it, not to 요유."""
+    me = my_pane(herdr_list(env, "pane"), payload, env)
+    return bool(me) and "👑" not in (me.get("label") or "") and bool(OPENED_BY.match(agent_names(env).get(me.get("pane_id")) or ""))
+
+
 def left_open_reason(payload: dict, text: str, env) -> str | None:
     """The rewrite for panes this session opened and left open at a last report, or None.
 
@@ -228,12 +244,11 @@ def left_open_reason(payload: dict, text: str, env) -> str | None:
     """
     if not LAST_REPORT.search(prose(text)):
         return None
-    panes, session = herdr_list(env, "pane"), payload.get("session_id")
-    me = next((p for p in panes if session and (p.get("agent_session") or {}).get("value") == session), None) or next(
-        (p for p in panes if p.get("pane_id") == env.get("HERDR_PANE_ID")), None)  # a moved pane keeps an old HERDR_PANE_ID
+    panes = herdr_list(env, "pane")
+    me = my_pane(panes, payload, env)
     if not me or pane_name(me).startswith(TEST_PANE):
         return None
-    names = {a.get("pane_id"): a.get("name") for a in herdr_list(env, "agent")}
+    names = agent_names(env)
     mine = [p for p in panes if p is not me and opener_of(p, names, env) == me.get("terminal_id")]
     tests = [p for p in mine if pane_name(p).startswith(TEST_PANE)]
     stopped = [p for p in mine if p not in tests and p.get("agent_status") != "working"]
@@ -445,10 +460,13 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
         text = final_text(payload["transcript_path"])  # unreadable transcript raises: fail open
     if not isinstance(text, str):
         return None
-    checks = (POINTER_REASON if points_only(text) else None, names_reason(text, env), WHAT_REASON if misses_what(text) else None,
-              PROBLEM_REASON if misses_problem_line(text) else None, left_open_reason(payload, text, env), relay_reason(payload, text),
-              explain_reason(payload, text, env), stale_thread_reason(payload, text, env),
-              LONG_REASON if claude and not job_session(env) and too_long(text) else None)
+    # The formats 요유 reads by. 요유 2026-11-04 ("너희끼리는 그냥 편하게 주고받아"): a pane under a lead writes to the lead as it likes.
+    formats = [POINTER_REASON if points_only(text) else None, names_reason(text, env), WHAT_REASON if misses_what(text) else None,
+               PROBLEM_REASON if misses_problem_line(text) else None, LONG_REASON if claude and not job_session(env) and too_long(text) else None]
+    if any(formats) and under_lead(payload, env):  # herdr is asked only when a format would send the report back
+        formats = []
+    checks = (*formats[:4], left_open_reason(payload, text, env), relay_reason(payload, text), explain_reason(payload, text, env),
+              stale_thread_reason(payload, text, env), *formats[4:])
     rewrites = [r for r in checks if r]
     left = leaves_yoyoo_work(text)
     if left and not only_decisions(text):
@@ -654,6 +672,23 @@ def selftest():
         assert ends("계속 진행합니다.") is None, "only a last report is held back"
         herdr_has([{**me, "label": "🟢 임시 시험"}, worker], opened)
         assert ends() is None, "a test pane answers for nothing"
+        # 요유 2026-11-04 ("너희끼리는 그냥 편하게 주고받아"): a pane under a lead reports to that lead, so 요유's formats are not asked for.
+        sub, spawned = {**me, "label": "🟢 🫡 설계"}, [{"pane_id": "w1:p1", "name": "spawn-zz-1"}]
+        formats = ("변경했습니다.\n\n왜: 막혀서", "고쳤습니다.\n\n원인: 오타\n조치: 수정", "`w1:p9`에 넘겼습니다.", "상시 맥에서 돕니다.",
+                   "끝.\n\n남은 것: 요유 몫: #12 질문에 답하기 · 유요 몫: 없음 · 세션: 닫아도 됨")
+        wall = "가" * (LONG_REPLY + 1)
+        herdr_has([sub], spawned)
+        for t in formats:
+            assert ends(t) is None, f"a pane under a lead writes as it likes: {t[:40]!r}"
+        assert decide(p(wall, session_id="s1"), herdr_env, claude=True) is None, "nor is a long report sent to a page"
+        assert REASON in (ends("남은 것: 요유 몫: Slack에 공지 올리기 · 유요 몫: 없음") or ""), "it still does what it can itself"
+        herdr_has([sub, worker], [*spawned, *opened])
+        assert "구현(w1:p3)" in (ends() or ""), "and still finishes the panes it opened"
+        for label, panes, agents in (("a lead", [{**sub, "label": "🟢 👑 설계"}], spawned), ("a pane 요유 opened", [me], []),
+                                     ("another pane's spawn name", [sub], [{"pane_id": "w1:p7", "name": "spawn-zz-1"}])):
+            herdr_has(panes, agents)
+            assert all(ends(t) for t in formats), f"{label} still reports to 요유"
+            assert decide(p(wall, session_id="s1"), herdr_env, claude=True) == LONG_REASON, f"{label}: long goes to a page"
         moved = {**me, "pane_id": "w2:p9"}
         herdr_has([moved, test_pane])
         assert ends(), "a moved pane is found by its session"
