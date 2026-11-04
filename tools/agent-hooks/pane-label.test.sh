@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SUBJECT="$(cd "$(dirname "$0")" && pwd)/pane-label"
-unset MUNICE_AUTO_DISPATCH MUNICE_AMBIENT PANE_CLOSE_REPORTED HERDR_SOCKET_PATH  # a test run inside such a pane must not inherit them
+unset MUNICE_AUTO_DISPATCH MUNICE_AMBIENT PANE_CLOSE_REPORTED HERDR_SOCKET_PATH XDG_STATE_HOME  # a test run inside such a pane must not inherit them; XDG_STATE_HOME would point --main at the real main file
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
