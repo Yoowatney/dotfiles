@@ -8,6 +8,11 @@
 #                         Not wired into Codex: its hooks.json entry needs 요유 to trust it first.
 # One pending handoff per herdr pane; a newer save replaces it. The last loaded one stays as <pane>.md.loaded.
 dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-handoff"
+# A named herdr server gets its own folder, so the same pane id on two servers never shares a handoff.
+# Same session-name rule as herdr_peers.server_key.
+if [[ "${HERDR_SOCKET_PATH:-}" == */sessions/*/herdr.sock ]]; then
+  s=${HERDR_SOCKET_PATH%/herdr.sock}; s=${s##*/}; dir="$dir/$s"
+fi
 f="$dir/${HERDR_PANE_ID:-}.md"
 typed="Any text before the [handoff: marker in that message is 요유's own, typed while the prompt was on its way: answer it first."
 # Context alone waits for a first message, and interactive sessions ignore initialUserMessage (tested 10/21),
