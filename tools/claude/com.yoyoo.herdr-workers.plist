@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.yoyoo.herdr-workers</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/opt/herdr/bin/herdr</string>
+        <string>--session</string>
+        <string>workers</string>
+        <string>server</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/yoyoo/Library/Logs/herdr-workers.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/yoyoo/Library/Logs/herdr-workers.log</string>
+</dict>
+</plist>
