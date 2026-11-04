@@ -17,6 +17,8 @@ closing lines go to the pane that opened it, else a 👑 it can be sure of. A re
 any pane while a pane it opened is alive; one whose panes are gone closes like the rest. A report that keeps the pane open
 (요유 몫 left, `세션: 닫으면 …`, held as above) goes up the same way and the pane stays: an implementer finished with two
 questions for 요유 and its lead never heard (요유 2026-11-01). A reply without `남은 것:` is no report and tells nobody.
+What the pane above hears tells it to check the result itself before passing it up, and yoyoo-share-guard holds its next report
+to that (요유 2026-11-04).
 A pane moved to another workspace gets a new id, and only `herdr pane get` still knows the old one from its env, so the
 current pane comes from there, and pane-spawn records its caller by terminal id, which a move does not change.
 A Stop hook runs beside the other Stop hooks, and any of them can send the reply back to be rewritten, so a Stop is not the
@@ -53,7 +55,7 @@ share = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(share)  # reuse its 요유 몫 reader, code and quote stripping, and transcript fallback
 
 SESSION = re.compile(r"세션[ \t]*\**[ \t]*[:：][ \t]*\**([^·\n]*)")
-REPORT = re.compile(r"^[ \t]*(?:[-*][ \t]+)?\**(?:무엇을|왜|남은[ \t]*것)[ \t]*\**[ \t]*[:：]", re.M)
+REPORT = re.compile(r"^[ \t]*(?:[-*][ \t]+)?\**(?:무엇을|왜|확인|남은[ \t]*것)[ \t]*\**[ \t]*[:：]", re.M)
 LEFT = re.compile(r"남은[ \t]*것[ \t]*\**[ \t]*[:：]")
 OPENER = re.compile(r"^spawn-([0-9A-Za-z]+)-")  # pane-spawn's agent name: spawn-<caller's terminal>-<random>
 
@@ -297,8 +299,8 @@ def finish(reply: str, env):
     if lead:
         pt = env.get("AUTO_TAB_CLOSE_PANE_TELL") or os.path.join(HERE, "pane-tell")
         head = "이 칸의 마지막 보고입니다(칸을 닫기 전에 보냅니다)" if close else "이 칸의 보고입니다(칸은 열어 둡니다)"
-        try:
-            subprocess.run([pt, lead, f"{head}:\n{report(reply)}\n\n전체 보고: {path}"], env=dict(env), timeout=5, **quiet)
+        try:  # share.RELAYED knows the head: the lead's next report has to show its own check
+            subprocess.run([pt, lead, f"{head}. {share.RELAY_NOTE}:\n{report(reply)}\n\n전체 보고: {path}"], env=dict(env), timeout=5, **quiet)
         except subprocess.TimeoutExpired:
             pass
     if close:
@@ -501,6 +503,8 @@ esac''')
     assert report("끝났습니다.\n\n**남은 것:** 요유 몫: 없음") == "**남은 것:** 요유 몫: 없음", "남은 것 alone is a report"
     assert report("남은 것이 없습니다.") == "남은 것이 없습니다.", "without labels the whole text goes"
     assert report(unicodedata.normalize("NFD", "끝.\n왜: 칸.")) == "왜: 칸.", "NFD text from a macOS paste"
+    assert report("끝.\n확인: 테스트를 다시 돌림\n무엇을: 고침") == "확인: 테스트를 다시 돌림\n무엇을: 고침", \
+        "what a 🫡 lead checked goes up with its report"
 
     reports = f"{sandbox}/reports"
 
@@ -559,6 +563,16 @@ esac''')
     assert run(reported, pane2) == (0, "", "tell w1:p1\n" + closed), "the 👑 in this tab first"
     told = open(f"{sandbox}/told").read()
     assert full[full.index("무엇을"):] in told and reports in told, f"the report and its file must reach the lead: {told!r}"
+    # 요유 2026-11-04: a pane's "done" is its claim. The lead hears that it checks before passing it up, and its next report is
+    # held to it by yoyoo-share-guard, which must recognise this very message.
+    assert "직접 확인" in told and "'확인:'" in told, f"the lead is told to check before passing it up: {told!r}"
+    lead_log = os.path.join(sandbox, "lead.jsonl")
+    with open(lead_log, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "user", "message": {"role": "user", "content": told}}, ensure_ascii=False) + "\n")
+    unchecked = {"last_assistant_message": "무엇을: 고침\n남은 것: 요유 몫: 없음 · 세션: 닫아도 됨", "transcript_path": lead_log}
+    assert "하위 칸" in (share.decide(unchecked, {"HERDR_BIN_PATH": "/nonexistent/herdr", "EXPLAIN_STATE": sandbox}) or ""), \
+        "share-guard knows the message auto-tab-close sends"
+    os.unlink(lead_log)
     assert full in saved(), "kept even when a 👑 hears it"
     assert run(reported, {**pane2, "TELL_EXIT": "3"}) == (0, "", "tell w1:p1\n" + closed), "a 👑 that cannot hear holds nothing"
     herdr_says({"name": "spawned"}, [other_space, other_tab, me])

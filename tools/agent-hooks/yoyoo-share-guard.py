@@ -16,6 +16,9 @@ pane's name) and the machine names the global rule bans. A last report (it has `
 this session opened (`임시 …`) is open: 4 of them stayed idle after this hook's own tests (10/31). A report after an explainer
 page Claude had to write itself because Codex failed comes back unless it says so (요유 2026-10-31). In a Claude session a
 long reply with no page comes back and goes to Codex (요유 2026-11-01); a Codex session writes its own.
+The first last report after a pane's report reached this session (auto-tab-close's message, read from the session record)
+comes back without a `확인:` line and a command run since that is not a pane chore: a lead passing a pane's "done" on unchecked
+(요유 2026-11-04). Of 65 such reports by then, 8 came with no command run after the pane's report arrived.
 A report with nothing left to do ends without a word: the question used to demand a rewrite. Of 102 fires on 10/28-10/31,
 25 went on to a tool call and 69 only wrote text, most of it the same report again.
 Claude runs it with --claude: the question goes back as Stop additionalContext, which Claude shows as "Stop hook feedback"
@@ -100,7 +103,25 @@ EXPLAIN_REASON = "yoyoo-share-guard: 이번 설명 페이지는 Codex가 실패�
 # there and nothing held it: in the 14 days to 11/1, 13% of about 1,200 reports had a page and the median ran 621 characters of
 # prose outside the labeled lines. At 500 about half go to Codex, 29 to 41 a day; a conclusion, three points and a path fit under it.
 LONG_REPLY = 500
-LABEL_LINE = re.compile(r"^\W*(?:무엇을|왜|남은[ \t]*것|원인|조치|재발[ \t]*방지)\W*[:：]")
+LABEL_LINE = re.compile(r"^\W*(?:무엇을|왜|확인|남은[ \t]*것|원인|조치|재발[ \t]*방지)\W*[:：]")
+# 요유 2026-11-04: in a talk on multi-agent setups a lead passed a sub-agent's "done" on to the person unchecked, and the feature
+# did not work. Here the verification rule covered only changes, and nothing held a lead to it. auto-tab-close sends a pane's
+# report up with RELAY_NOTE; the first last report after one arrived needs a `확인:` line and a command run since it arrived.
+RELAY_NOTE = ("요유나 위 칸에 올리기 전에 결과를 이 칸에서 직접 확인하세요(테스트·명령을 다시 실행하거나 바뀐 동작·데이터를 직접 보기). "
+              "아래는 하위 칸의 주장입니다. 보고에는 무엇을 직접 확인했고 결과가 어땠는지 '확인:' 줄로 적으세요")
+RELAYED = re.compile(r"이 칸의 (?:마지막 )?보고입니다\(")  # auto-tab-close's two heads
+CHECK_LINE = re.compile(r"(?<![가-힣])확인[ \t]*\**[ \t]*[:：][ \t]*\**([^\n]*)")
+RELAY_REASON = ("yoyoo-share-guard: 하위 칸의 보고를 받은 뒤 처음 쓰는 보고인데, 이 칸에서 결과를 직접 확인한 흔적이 없습니다. "
+                "하위 칸의 '다 했다'는 주장일 뿐입니다. 지금 도구로 직접 확인하세요: 테스트·명령을 다시 실행하거나 바뀐 동작·데이터를 직접 보세요. "
+                "하위 칸 보고를 다시 읽거나 칸을 닫는 일은 확인이 아닙니다. 그런 다음 무엇을 확인했고 결과가 어땠는지 '확인:' 줄을 넣어 보고를 다시 쓰세요.")
+# Calls that handle panes or read the pane's own claim. ponytail: a word list, so `ls` still counts as a check; it stops a lead
+# that ran nothing, not one that ran too little.
+NOT_A_CHECK = {"TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop", "ToolSearch", "Skill", "SendMessage", "Write", "Edit",
+               "MultiEdit", "NotebookEdit", "ScheduleWakeup", "CronCreate", "CronDelete", "mcp__task-progress__progress",
+               "update_plan", "apply_patch", "send_message", "followup_task", "list_agents", "sleep", "request_user_input_async"}
+SHELL_STEP = re.compile(r"&&|\|\|?|;|\n")
+CHORE_STEP = re.compile(r"^\s*(?:\S*/)?(?:cd|echo|printf|true|sleep|pane-label|pane-tell|pane-spawn|pane-temp|herdr)\b|pane-reports")
+CODEX_CMD = re.compile(r"\bcmd\s*:\s*(\"(?:\\.|[^\"\\])*\")")  # Codex runs commands as tools.exec_command({cmd:"…"})
 PAGE = re.compile(r"/explain/\S+\.html")
 LONG_REASON = ("yoyoo-share-guard: 답이 깁니다. 긴 보고는 Codex가 씁니다. html-explainer 스킬대로 사실을 파일에 적어 explain-page로 맡기고, "
                "터미널에는 publish가 출력한 Codex의 글과 페이지 경로, 라벨 줄(무엇을, 왜, 남은 것 등)만 남기세요.")
@@ -217,6 +238,78 @@ def left_open_reason(payload: dict, text: str, env) -> str | None:
     return " ".join(parts) or None
 
 
+def unquote(literal: str) -> str:
+    try:
+        return json.loads(literal)
+    except ValueError:  # a JS escape JSON lacks, such as \'
+        return literal[1:-1]
+
+
+def records(lines):
+    """("in" | "say" | "call", text, tool name) from Claude or Codex session record lines, oldest first. Tool output is none."""
+    for raw in lines:
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(d, dict):
+            continue
+        p = d.get("payload") if isinstance(d.get("payload"), dict) else {}
+        queued = d.get("attachment") if isinstance(d.get("attachment"), dict) else {}
+        kind, content = d.get("type"), (d.get("message") or {}).get("content")
+        if kind == "attachment" and queued.get("type") == "queued_command":
+            yield "in", str(queued.get("prompt") or ""), ""  # typed while the agent worked
+        elif kind == "user" and isinstance(content, str):
+            yield "in", content, ""
+        elif kind == "user" and isinstance(content, list) and not any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            yield "in", " ".join(b.get("text") or "" for b in content if isinstance(b, dict)), ""
+        elif kind == "assistant" and not d.get("isSidechain"):
+            for b in content if isinstance(content, list) else []:
+                inp = b.get("input") if isinstance(b, dict) and isinstance(b.get("input"), dict) else {}
+                if isinstance(b, dict) and b.get("type") == "text":
+                    yield "say", b.get("text") or "", ""
+                elif isinstance(b, dict) and b.get("type") == "tool_use":
+                    command = inp.get("command")
+                    yield "call", command if isinstance(command, str) else json.dumps(inp, ensure_ascii=False), b.get("name") or ""
+        elif kind == "response_item" and p.get("type") == "message" and p.get("role") in ("user", "assistant"):
+            text = " ".join(b.get("text") or "" for b in p.get("content") or [] if isinstance(b, dict))
+            yield ("in" if p["role"] == "user" else "say"), text, ""
+        elif kind == "response_item" and p.get("type") in ("function_call", "custom_tool_call", "local_shell_call"):
+            body = str(p.get("arguments") or p.get("input") or p.get("action") or "")
+            commands = [unquote(c) for c in CODEX_CMD.findall(body)]
+            yield "call", "\n".join(commands) if commands else body, p.get("name") or ""
+
+
+def chore(name: str, command: str) -> bool:
+    return name in NOT_A_CHECK or all(CHORE_STEP.search(step) for step in SHELL_STEP.split(command) if step.strip())
+
+
+def relay_reason(payload: dict, text: str) -> str | None:
+    """The rewrite for the first last report after a pane's report arrived, when it shows no check of its own, or None.
+    A report answered in a turn that has ended is not asked again."""
+    path = payload.get("transcript_path")
+    if not path or not LAST_REPORT.search(prose(text)):
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    for start in reversed([i for i, line in enumerate(lines) if "보고입니다(" in line]):  # parse only from the newest one on
+        first = next(records(lines[start:start + 1]), None)
+        if first and first[0] == "in" and RELAYED.search(unicodedata.normalize("NFC", first[1])):
+            break
+    else:
+        return None
+    after = list(records(lines[start + 1:]))
+    reports = [i for i, (kind, said, _) in enumerate(after) if kind == "say" and LAST_REPORT.search(prose(said))]
+    if reports and any(kind == "in" for kind, _, _ in after[reports[0] + 1:]):
+        return None
+    ran = any(kind == "call" and not chore(name, command) for kind, command, name in after)
+    stated = any(v and not NONE.match(v) for v in (m.group(1).strip(" \t*_.,;") for m in CHECK_LINE.finditer(prose(text))))
+    return None if ran and stated else RELAY_REASON
+
+
 def names_reason(text: str, env) -> str | None:
     """The rewrite for names 요유 cannot read, or None."""
     text = unicodedata.normalize("NFC", text)
@@ -327,7 +420,7 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
     if not isinstance(text, str):
         return None
     checks = (POINTER_REASON if points_only(text) else None, names_reason(text, env), WHAT_REASON if misses_what(text) else None,
-              PROBLEM_REASON if misses_problem_line(text) else None, left_open_reason(payload, text, env),
+              PROBLEM_REASON if misses_problem_line(text) else None, left_open_reason(payload, text, env), relay_reason(payload, text),
               explain_reason(payload, text, env), stale_thread_reason(payload, text, env),
               LONG_REASON if claude and not job_session(env) and too_long(text) else None)
     rewrites = [r for r in checks if r]
@@ -603,6 +696,72 @@ def selftest():
         os.unlink(with_share)
         os.unlink(old_share)
 
+    # 요유 2026-11-04: a lead passed a pane's "done" on to the person unchecked, and the feature did not work. The first last
+    # report after a pane's report arrived needs a `확인:` line and a command run since, other than pane chores.
+    told = ("[pane-tell: '구현' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] "
+            "이 칸의 마지막 보고입니다(칸을 닫기 전에 보냅니다). 올리기 전에 확인하세요:\n무엇을: 로그인 고침\n남은 것: 요유 몫: 없음 · 세션: 닫음")
+    old_head = "이 칸의 보고입니다(칸은 열어 둡니다):\n무엇을: 로그인 고침\n남은 것: 요유 몫: 값 고르기 · 세션: 닫아도 됨"
+    bare = "무엇을: 로그인 고침\n왜: 로그인이 막혀서\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨"
+    checked = f"확인: 이 칸에서 `npm test`를 다시 돌려 12개 통과를 봤습니다.\n{bare}"
+
+    def claude_in(text):
+        return {"type": "user", "message": {"role": "user", "content": text}}
+
+    def claude_call(name, **inp):
+        return {"type": "assistant", "message": {"id": "c", "content": [{"type": "tool_use", "id": "t", "name": name, "input": inp}]}}
+
+    def codex_in(text):
+        return {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}}
+
+    def codex_exec(cmd):
+        return {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec",
+                                                     "input": f"text(await tools.exec_command({{cmd:{json.dumps(cmd)}}}))"}}
+
+    def codex_say(text):
+        return {"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}}
+
+    queued = {"type": "attachment", "attachment": {"type": "queued_command", "prompt": told}}
+    chores = [claude_call("Bash", command="herdr pane close w1:p3"), claude_call("Bash", command="pane-label '일 정리'"),
+              claude_call("Read", file_path="/Users/yoyoo/.local/state/pane-reports/2026-11-04.md"),
+              claude_call("Bash", command="cd /w && cat ~/.local/state/pane-reports/2026-11-04.md"), claude_call("TaskUpdate", taskId="1")]
+    test_run = claude_call("Bash", command="cd /w && npm test && herdr pane close w1:p3")
+
+    def relayed(records, text):
+        path = transcript(records)
+        try:
+            return decide(p(text, transcript_path=path), cli)
+        finally:
+            os.unlink(path)
+
+    for label, records, text in (
+            ("no check run", [claude_in(told)], bare),
+            ("only pane chores since", [claude_in(told), *chores], checked),
+            ("a check run but no 확인 line", [claude_in(told), test_run], bare),
+            ("a 확인 line that says none", [claude_in(told), test_run], bare + "\n확인: 없음"),
+            ("the old head", [claude_in(old_head)], bare),
+            ("queued into a running turn", [claude_in("다른 일 해 줘"), test_run, queued], bare),
+            ("the reply itself is in the transcript", [claude_in(told), said("m9", bare)], bare),
+            ("Codex: no check run", [codex_in(told)], bare),
+            ("Codex: only pane chores", [codex_in(told), codex_exec("herdr pane close w1:p3; pane-label x")], checked)):
+        assert "하위 칸" in (relayed(records, text) or ""), f"should send back: {label}"
+    for label, records, text in (
+            ("checked and says so", [claude_in(told), *chores, test_run], checked),
+            ("queued, then checked", [queued, test_run], checked),
+            ("no pane report arrived", [claude_in("배포해 줘"), test_run], bare),
+            ("the head inside a tool output is no report", [claude_in("훅 읽어 줘"), claude_call("Bash", command="cat auto-tab-close.py"),
+                                                           {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t", "content": told}]}}], bare),
+            ("answered in an earlier turn", [claude_in(told), said("m1", bare), claude_in("다음 일 해 줘"), test_run], bare),
+            ("not a last report", [claude_in(told)], "확인하는 중입니다."),
+            ("Codex: checked and says so", [codex_in(told), codex_exec("npm test"), codex_say("돌려 봤습니다.")], checked),
+            ("Codex: answered in an earlier turn", [codex_in(told), codex_say(bare), codex_in("다음")], bare)):
+        assert relayed(records, text) is None, f"should pass: {label}"
+    assert relayed([claude_in(told)], bare) == relayed([claude_in(told)], bare), "same input, same answer"
+    path = transcript([claude_in(told)])
+    try:
+        assert decide(p(bare, transcript_path=path, stop_hook_active=True), cli) is None, "asked once a turn"
+    finally:
+        os.unlink(path)
+
     def run(stdin, env=cli, args=()):
         # A job session's own flags would switch the long-reply check off in the child (seen from an auto tab, 11/04).
         base = {k: v for k, v in os.environ.items() if k not in ("MUNICE_AUTO_DISPATCH", "MUNICE_AMBIENT")}
@@ -628,7 +787,7 @@ def selftest():
     assert decide(p(wall), cli, claude=True) == LONG_REASON, "a long reply in a Claude session goes to Codex"
     assert decide(p(under), cli, claude=True) is None, "up to the limit stays in the terminal"
     assert decide(p(wall), cli) is None, "a Codex session writes its own reports"
-    closing = "\n".join(f"{label}: {under}" for label in ("무엇을", "왜", "원인", "조치", "재발 방지", "남은 것"))
+    closing = "\n".join(f"{label}: {under}" for label in ("무엇을", "왜", "확인", "원인", "조치", "재발 방지", "남은 것"))
     assert decide(p("끝났습니다.\n" + closing), cli, claude=True) is None, "the labeled lines stay in the terminal"
     assert decide(p(f"**무엇을:** {wall}"), cli, claude=True) is None, "a bold label is a label"
     assert decide(p(f"{wall}\n/Users/yoyoo/explain/2026-11-01-a.html"), cli, claude=True) is None, "a page already went to Codex"
