@@ -20,6 +20,8 @@ The first last report after a pane's report reached this session (auto-tab-close
 comes back without a `확인:` line and a command run since that is not a pane chore: a lead passing a pane's "done" on unchecked
 (요유 2026-11-04). It comes before the failure: in 53 such reports by then (tests and other leads' panes left out), a fresh
 review found no lead that passed a "done" on unchecked.
+A pane that hands checks out (herdr_peers.delegates_checks: the main pane today, 요유 2026-11-05) shows a check pane instead of a
+command of its own; relay_reason says how. Any other pane, a missing or stale main-pane file and a broken herdr get the rule above.
 A report with nothing left to do ends without a word: the question used to demand a rewrite. Of 102 fires on 10/28-10/31,
 25 went on to a tool call and 69 only wrote text, most of it the same report again.
 Claude runs it with --claude: the question goes back as Stop additionalContext, which Claude shows as "Stop hook feedback"
@@ -114,11 +116,27 @@ LABEL_LINE = re.compile(r"^\W*(?:무엇을|왜|확인|남은[ \t]*것|원인|조
 # report up with RELAY_NOTE; the first last report after one arrived needs a `확인:` line and a command run since it arrived.
 RELAY_NOTE = ("요유나 위 칸에 올리기 전에 결과를 이 칸에서 직접 확인하세요(테스트·명령을 다시 실행하거나 바뀐 동작·데이터를 직접 보기). "
               "아래는 하위 칸의 주장입니다. 보고에는 무엇을 직접 확인했고 결과가 어땠는지 '확인:' 줄로 적으세요")
-RELAYED = re.compile(r"(?:^|\] )이 칸의 (?:마지막 )?보고입니다\(", re.M)  # auto-tab-close's two heads, after pane-tell's mark
+RELAYED = re.compile(r"(?:^|\] )(이|확인) 칸의 (?:마지막 )?보고입니다\(", re.M)  # auto-tab-close's heads, after pane-tell's mark
 CHECK_LINE = re.compile(r"(?<![가-힣])확인[ \t]*\**[ \t]*[:：][ \t]*\**([^\n]*)")
 RELAY_REASON = ("yoyoo-share-guard: 하위 칸의 보고를 받은 뒤 처음 쓰는 보고인데, 이 칸에서 결과를 직접 확인한 흔적이 없습니다. "
                 "하위 칸의 '다 했다'는 주장일 뿐입니다. 지금 도구로 직접 확인하세요: 테스트·명령을 다시 실행하거나 바뀐 동작·데이터를 직접 보세요. "
                 "하위 칸 보고를 다시 읽거나 칸을 닫는 일은 확인이 아닙니다. 그런 다음 무엇을 확인했고 결과가 어땠는지 '확인:' 줄을 넣어 보고를 다시 쓰세요.")
+# 요유 2026-11-05 (api#1002): the main pane's turn is what 요유's next words wait behind, so a pane that hands checks out
+# (herdr_peers.delegates_checks) gives the check to a fresh pane and writes its `확인:` line from what that pane ran and saw. The check
+# pane's report ends the round. The wording names no pane kind, so widening the gate changes no text.
+HOW_TO_CHECK = ("`pane-spawn --check \"<일 이름>\" \"<실행할 테스트·명령이나 볼 동작·데이터, 전체 보고 파일>\"`로 일을 한 칸이 아닌 새 확인 칸을 여세요. "
+                "확인 칸의 보고가 오면 그 칸이 실행하고 본 것을 '확인:' 줄에 적고 확인 칸이 했다고 밝히세요.")
+DELEGATE_NOTE = (f"이 칸은 결과를 직접 확인하지 않습니다. 아래는 하위 칸의 주장입니다. 요유나 위 칸에 올리기 전에 {HOW_TO_CHECK} "
+                 "확인할 결과가 없는 보고(질문, 결정 요청)는 확인 칸 없이 처리하세요")
+CHECK_NOTE = ("아래는 확인 칸이 실행하고 본 결과입니다. 확인 칸을 또 열지 말고, 그 칸이 실행하고 본 것을 '확인:' 줄에 적고 확인 칸이 했다고 밝히세요. "
+              "통과하지 못했으면 일을 맡은 칸이나 새 칸에 고치라고 넘기세요")
+DELEGATE_REASON = (f"yoyoo-share-guard: 하위 칸의 보고를 받은 뒤 처음 쓰는 보고인데, 맡긴 확인 칸이 없습니다. 이 칸은 결과를 직접 확인하지 않으며, 직접 돌린 것은 확인으로 치지 않습니다. {HOW_TO_CHECK} "
+                   "확인할 결과가 없는 보고(질문, 결정 요청)였으면 응답 없이 턴을 끝내세요.")
+CHECK_REPORT_REASON = ("yoyoo-share-guard: 확인 칸의 보고를 받은 뒤 처음 쓰는 보고인데, 확인 칸의 결과를 적은 '확인:' 줄이 없습니다. 확인 칸을 또 열지 마세요. "
+                       "그 칸이 실행하고 본 것을 적고 확인 칸이 했다고 밝힌 '확인:' 줄을 넣어 보고를 다시 쓰세요.")
+CHECK_AGENT = re.compile(r"^spawn-[0-9A-Za-z]+-chk")  # pane-spawn --check's agent name, which a pane rename does not change
+BY_CHECK_PANE = re.compile(r"확인[ \t]*칸")
+SPAWN_CHECK = re.compile(r"(?:^|[;&|(\n])\s*(?:\S*/)?pane-spawn(?:\s+--[\w-]+(?:\s+[^\s\"'-]\S*)?)*?\s+--check\b")
 # Calls that handle panes, read the pane's own claim or hand the check to another agent (whose word is a claim again). ponytail:
 # a word list, so `ls` still counts as a check; it stops a lead that ran nothing, not one that ran too little.
 NOT_A_CHECK = {"TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop", "ToolSearch", "Skill", "SendMessage", "Write", "Edit",
@@ -242,13 +260,27 @@ def under_lead(payload: dict, env) -> bool:
     return bool(me) and "👑" not in (me.get("label") or "") and bool(OPENED_BY.match(agent_names(env).get(me.get("pane_id")) or ""))
 
 
+def peers_module():
+    spec = importlib.util.spec_from_file_location(
+        "herdr_peers", os.path.join(os.path.dirname(os.path.realpath(__file__)), "herdr_peers.py"))
+    peers = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(peers)
+    return peers
+
+
+def delegates_checks(payload: dict, env) -> bool:
+    """herdr_peers decides. A pane herdr cannot name, or any failure, is the ordinary rule."""
+    try:
+        me = my_pane(herdr_list(env, "pane"), payload, env) or {}
+        return peers_module().delegates_checks(env, me.get("terminal_id"))
+    except Exception:
+        return False
+
+
 def workers_socket(env, me: dict) -> str:
     """The workers server's socket when this pane is the main pane (its panes live there), else "". Fails open."""
     try:
-        spec = importlib.util.spec_from_file_location(
-            "herdr_peers", os.path.join(os.path.dirname(os.path.realpath(__file__)), "herdr_peers.py"))
-        peers = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(peers)
+        peers = peers_module()
         if not me.get("terminal_id") or peers.main_terminal(env) != me["terminal_id"]:
             return ""
         sock = peers.socket_of(env, "workers")
@@ -352,9 +384,10 @@ def chore(name: str, command: str) -> bool:
     return name in NOT_A_CHECK or all(CHORE_STEP.search(c.split("|")[0]) for c in commands)
 
 
-def relay_reason(payload: dict, text: str) -> str | None:
+def relay_reason(payload: dict, text: str, env) -> str | None:
     """The rewrite for the first last report after a pane's report arrived, when it shows no check of its own, or None.
-    A report answered in a turn that has ended is not asked again."""
+    A report answered in a turn that has ended is not asked again. A pane that hands checks out shows a check pane instead: it
+    opened one for a pane's report and is waiting, or it writes the `확인:` line from a check pane's report, which asks for no other."""
     path = payload.get("transcript_path")
     if not path or not LAST_REPORT.search(prose(text)):
         return None
@@ -365,7 +398,8 @@ def relay_reason(payload: dict, text: str) -> str | None:
         return None
     for start in reversed([i for i, line in enumerate(lines) if "보고입니다(" in line]):  # parse only from the newest one on
         first = next(records(lines[start:start + 1]), None)
-        if first and first[0] == "in" and RELAYED.search(unicodedata.normalize("NFC", first[1])):
+        relayed = RELAYED.search(unicodedata.normalize("NFC", first[1])) if first and first[0] == "in" else None
+        if relayed:
             break
     else:
         return None
@@ -374,8 +408,13 @@ def relay_reason(payload: dict, text: str) -> str | None:
     if reports and any(kind == "in" for kind, _, _, _ in after[reports[0] + 1:]):
         return None
     refused = {i for kind, _, _, i in after if kind == "refused"}
+    stated = [v for v in (m.group(1).strip(" \t*_.,;") for m in CHECK_LINE.finditer(prose(text))) if v and not NONE.match(v)]
+    if delegates_checks(payload, env):
+        if relayed[1] == "확인":
+            return None if any(BY_CHECK_PANE.search(v) for v in stated) else CHECK_REPORT_REASON
+        handed = any(kind == "call" and i not in refused and SPAWN_CHECK.search(command) for kind, command, _, i in after)
+        return None if handed else DELEGATE_REASON
     ran = any(kind == "call" and i not in refused and not chore(name, command) for kind, command, name, i in after)
-    stated = any(v and not NONE.match(v) for v in (m.group(1).strip(" \t*_.,;") for m in CHECK_LINE.finditer(prose(text))))
     return None if ran and stated else RELAY_REASON
 
 
@@ -493,7 +532,7 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
                PROBLEM_REASON if misses_problem_line(text) else None, LONG_REASON if claude and not job_session(env) and too_long(text) else None]
     if any(formats) and under_lead(payload, env):  # herdr is asked only when a format would send the report back
         formats = []
-    checks = (*formats[:4], left_open_reason(payload, text, env), relay_reason(payload, text), explain_reason(payload, text, env),
+    checks = (*formats[:4], left_open_reason(payload, text, env), relay_reason(payload, text, env), explain_reason(payload, text, env),
               stale_thread_reason(payload, text, env), *formats[4:])
     rewrites = [r for r in checks if r]
     left = leaves_yoyoo_work(text)
@@ -910,6 +949,73 @@ def selftest():
         assert decide(p(bare, transcript_path=path, stop_hook_active=True), cli) is None, "asked once a turn"
     finally:
         os.unlink(path)
+
+    # 요유 2026-11-05 (api#1002): the main pane stays free for 요유's next words, so a fresh check pane does the check. Only there.
+    check_told = ("[pane-tell: '확인 로그인' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] "
+                  f"확인 칸의 마지막 보고입니다(칸을 닫기 전에 보냅니다). {CHECK_NOTE}:\nnpm test 12개 통과를 봤습니다.\n남은 것: 요유 몫: 없음 · 세션: 닫음")
+    by_check = f"확인: 확인 칸이 `npm test`를 다시 돌려 12개 통과를 봤습니다.\n{bare}"
+    no_word = f"확인: `npm test` 12개 통과를 봤습니다.\n{bare}"
+    spawn_check = claude_call("Bash", "k1", command='pane-spawn --check "로그인" "npm test를 돌려 보세요"')
+    with tempfile.TemporaryDirectory() as d:
+        fake = os.path.join(d, "herdr")
+        with open(fake, "w", encoding="utf-8") as f:
+            f.write('#!/bin/sh\necho \'{"result":{"panes":[{"pane_id":"w1:p1","terminal_id":"term_M",'
+                    '"agent_session":{"value":"s1"},"label":"🟢 👑 메인 오케스트레이터"}]}}\'\n')
+        os.chmod(fake, 0o755)
+        here = {**cli, "HERDR_BIN_PATH": fake, "HOME": d}
+        state = os.path.join(d, ".local", "state", "orchestrator", "main")
+        os.makedirs(os.path.dirname(state))
+
+        def own_terminal(value):
+            with open(state, "w", encoding="utf-8") as f:
+                f.write(value)
+
+        def in_pane(records, text):
+            path = transcript(records)
+            try:
+                return decide(p(text, transcript_path=path, session_id="s1"), here)
+            finally:
+                os.unlink(path)
+
+        own_terminal("term_M\n")
+        for label, records, text, want in (
+                ("a report with no 확인 line and no check pane", [claude_in(told)], bare, DELEGATE_REASON),
+                ("a claimed check with no check pane behind it", [claude_in(told)], by_check, DELEGATE_REASON),
+                ("a check it ran itself", [claude_in(told), test_run], checked, DELEGATE_REASON),
+                ("a pane that is no check pane", [claude_in(told), claude_call("Bash", command='pane-spawn "로그인" "돌려 보세요"')], bare, DELEGATE_REASON),
+                ("a word in another command", [claude_in(told), claude_call("Bash", command='rg "pane-spawn --check" tools')], bare, DELEGATE_REASON),
+                ("a check pane a hook refused", [claude_in(told), spawn_check, claude_out("k1", "PreToolUse:Bash hook error: 막음", error=True)], bare, DELEGATE_REASON),
+                ("a check pane's report and no 확인 line", [claude_in(check_told)], bare, CHECK_REPORT_REASON),
+                ("a check pane's report and 확인: 없음", [claude_in(check_told)], bare + "\n확인: 없음", CHECK_REPORT_REASON),
+                ("a 확인 line that does not say a check pane did it", [claude_in(check_told)], no_word, CHECK_REPORT_REASON),
+                ("a later pane's report still needs its own check", [claude_in(check_told), said("m1", "읽었습니다."), claude_in(told)], by_check, DELEGATE_REASON)):
+            assert in_pane(records, text) == want, f"main pane should send back: {label}"
+        for label, records, text in (
+                ("waiting on the check pane it opened", [claude_in(told), spawn_check], bare),
+                ("its options in any order", [claude_in(told), claude_call("Bash", command='pane-spawn --cwd /w/api --check "a" "b"')], bare),
+                ("after a cd", [claude_in(told), claude_call("Bash", command='cd /w && pane-spawn --check "a" "b"')], bare),
+                ("what the check pane ran and saw", [claude_in(check_told)], by_check),
+                ("no command of its own after a check pane's report", [claude_in(told), spawn_check, said("m1", "맡겼습니다."), claude_in(check_told)], by_check),
+                ("answered in an earlier turn", [claude_in(check_told), said("m1", bare), claude_in("다음")], bare),
+                ("no pane report arrived", [claude_in("배포해 줘")], bare),
+                ("not a last report", [claude_in(told)], "확인 칸을 열겠습니다.")):
+            assert in_pane(records, text) is None, f"main pane should pass: {label}"
+        assert CHECK_REPORT_REASON.count("pane-spawn") == 0 and "또 열지" in CHECK_REPORT_REASON, "no check of a check: the reason opens nothing"
+        assert "pane-spawn --check" in DELEGATE_REASON, "the reason says what to run"
+        # Every other lead, and a main-pane file that is missing or names another terminal: the rule as it was, word for word.
+        for label, setup in (("names another terminal", lambda: own_terminal("term_gone\n")), ("empty", lambda: own_terminal("")),
+                             ("missing", lambda: os.unlink(state))):
+            setup()
+            assert in_pane([claude_in(told)], bare) == RELAY_REASON, f"state file {label}: no check is sent back as ever"
+            assert in_pane([claude_in(told), test_run], checked) is None, f"state file {label}: a lead's own check passes"
+            assert in_pane([claude_in(told), spawn_check], bare) == RELAY_REASON, f"state file {label}: a check pane answers for nothing"
+            assert in_pane([claude_in(check_told)], by_check) == RELAY_REASON, f"state file {label}: a check pane's report is no check"
+            assert in_pane([claude_in(check_told), test_run], checked) is None, f"state file {label}: its own check passes"
+        own_terminal("term_M\n")
+        with open(fake, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        assert in_pane([claude_in(told)], bare) == RELAY_REASON, "herdr down: the ordinary rule"
+        assert in_pane([claude_in(told), test_run], checked) is None, "herdr down: a lead's own check passes"
 
     def run(stdin, env=cli, args=()):
         # A job session's own flags would switch the long-reply check off in the child (seen from an auto tab, 11/04).

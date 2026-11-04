@@ -10,7 +10,12 @@ the call once with the question. Repeating the call passes. In the last 7 days 1
 Not asked: panes `herdr agent start` opened (they are the handed-over work; herdr's agent name tells them apart with nothing to
 remember), job tabs, headless runs, subagents, and sessions outside herdr. A pane herdr cannot find is not asked either.
 
-pane-label-nudge.sh arms it on every message, by touching ~/.local/state/pane-fit/<session id>; asking removes that file.
+A pane that hands checks out (herdr_peers.delegates_checks: the main pane today, 요유 2026-11-05) is asked a different question: at
+the first call of any kind but its own chores (stays_here), since a lookup there holds up 요유's next words as much as work does.
+
+pane-label-nudge.sh arms it on every message, by writing ~/.local/state/pane-fit/<session id>, with DELEGATES in it for such a pane
+(which is armed by relayed messages too: 요유's Slack words reach it by pane-tell); asking removes that file. An empty file is the
+ordinary question, so a main-pane file that is missing or stale changes nothing here.
 gcp-account-guard.py calls check(): that hook is already registered in both tools with the widest matcher. A new entry would
 wait for 요유's approval in Codex and never reach open sessions. Fails open.
 
@@ -43,6 +48,21 @@ HOW = ("이 호출을 버리고 `pane-spawn \"<작업 이름>\" \"<짧은 지시
 START = ("pane-fit: 이 요청의 일을 시작하기 직전입니다. 몇 분 넘게 걸릴 일이면 넘깁니다. PR·리뷰·테스트·머지가 따르면 파일이 한 줄이어도, "
          "요유가 보거나 고칠 결과물이어도, 서로 독립인 일이 여럿이어도, 이 세션이 닫혀도 이어져야 해도 해당하고, 애매하면 넘깁니다. " + HOW)
 LATE = "pane-fit: 이 요청을 시작한 지 5분이 넘었습니다. 남은 일이 몇 분 더 걸리면 지금 넘깁니다. " + HOW
+# 요유 2026-11-05 (api#1002): 요유's next words wait behind the main pane's turn, so there even a lookup goes to a pane. A hook cannot
+# tell a one-line answer or a step that needs `prod 허용` from any other call, so it asks once a message, and the repeat passes.
+DELEGATES = "delegates"  # what pane-label-nudge.sh writes into the armed file when herdr_peers.delegates_checks says yes
+DELEGATE_ASK = ("pane-fit: 이 칸은 일을 나눠 주기만 합니다. 요유의 다음 말을 바로 받아야 하니, 한 줄로 답할 수 없는 조회도 `pane-spawn \"<작업 이름>\" \"<짧은 지시>\"`로 넘기고, "
+                "하위 칸의 결과 확인은 `pane-spawn --check`로 새 확인 칸에 맡기세요(지시에는 마지막 보고를 `남은 것` 줄로 끝내라고만 적습니다). "
+                "이 칸에 남는 일은 한 줄 답, `prod 허용`·`staging 허용`이 필요한 단계, 짧은 보고 읽기, pane-spawn 실행뿐입니다. "
+                "이 호출이 그중 하나면 같은 호출을 그대로 다시 실행하세요. 이 질문은 메시지마다 한 번만 나옵니다.")
+# What a pane that hands work out does all day. Asking here would stop its handing out and its fresh-start reads, not a lookup.
+OWN_TOOLS = {"ToolSearch", "Skill", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop", "ScheduleWakeup",
+             "AskUserQuestion", "mcp__task-progress__progress", "update_plan"}
+OWN_FILES = re.compile(r"/\.local/state/(?:pane-reports|orchestrator)/|/skills/main-orchestrator/SKILL\.md$")
+OWN_COMMAND = re.compile(r"^\s*(?:\S*/)?(?:cd|pane-label|pane-tell|pane-spawn|herdr|board\.sh|decision-log|handoff|launchctl)\b"
+                         r"|^\s*python3\s+\S*main-channel\.py\b|^\s*(?:cat|tail|head|grep)\s.*/\.local/state/(?:pane-reports|orchestrator)/")
+QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")  # a message's words are no commands
+STAGES = re.compile(r"&&|\|\||;|\n")
 
 
 def state_file(payload: dict, env) -> str | None:
@@ -63,6 +83,18 @@ def starts_work(payload: dict) -> bool:
         return True
     command = str(inp.get("command") or "")
     return tool == "Bash" and bool(GIT_WORK.search(command) or LONG_RUN.search(command))
+
+
+def stays_here(payload: dict) -> bool:
+    """A pane that hands work out does this without being asked. ponytail: a word list and a regex reading of shell; a miss costs one
+    repeated call, once a message."""
+    tool, inp = payload.get("tool_name"), payload.get("tool_input") or {}
+    if tool == "Bash":
+        stages = (stage.split("|")[0] for stage in STAGES.split(QUOTED.sub("''", str(inp.get("command") or ""))))
+        return all(OWN_COMMAND.search(stage) for stage in stages if stage.strip())
+    if tool in EDITORS:
+        return not starts_work(payload)
+    return tool in OWN_TOOLS or (tool == "Read" and bool(OWN_FILES.search(str(inp.get("file_path") or ""))))
 
 
 def hand_opened(payload: dict, env) -> bool:
@@ -89,6 +121,13 @@ def check(payload: dict, env, now: float | None = None) -> str | None:
         return None
     late = (time.time() if now is None else now) - os.path.getmtime(path) >= WAIT
     spawning = payload.get("tool_name") == "Bash" and bool(SPAWNS.search(str((payload.get("tool_input") or {}).get("command"))))
+    with open(path, encoding="utf-8") as f:
+        delegates = f.read().strip() == DELEGATES
+    if delegates and not spawning:
+        if stays_here(payload):
+            return None
+        os.unlink(path)
+        return DELEGATE_ASK
     if not (late or spawning or starts_work(payload)):
         return None
     os.unlink(path)  # first, so a broken herdr call never asks twice
@@ -120,6 +159,55 @@ def selftest():
             path = state_file(p(), env)
             open(path, "w").close()
             os.utime(path, (time.time() - age, time.time() - age))
+
+        # 요유 2026-11-05 (api#1002): the main pane only hands work out, lookups and checks too. pane-label-nudge.sh writes the mark.
+        def armed_main(age=0):
+            armed(age)
+            with open(state_file(p(), env), "w", encoding="utf-8") as f:
+                f.write(DELEGATES)
+            os.utime(state_file(p(), env), (time.time() - age, time.time() - age))
+
+        listing({"pane_id": "w1:p1", "name": "any-agent-name", "agent_session": {"value": "s1"}})  # however this pane was opened
+        for payload in (p("Read", file_path="/repo/a.py"), p("Grep", pattern="x"), p("Glob", pattern="*"), p("WebFetch", url="https://x.dev"),
+                        p("mcp__slack__slack_get_thread_replies", thread_ts="1"), p(), p("Bash", command="gh issue view 1"),
+                        p("Bash", command="git log -3"), p("Bash", command="cat /repo/a.py"), p("Bash", command="herdr agent list; npm test"),
+                        p("Bash", command="cat /x/note.md | herdr pane list"), p("Agent", subagent_type="Explore"),
+                        p("Bash", command="rg pane-tell tools"), p("Bash", command='echo "herdr"'), p("Read", file_path="/repo/main-orchestrator/a.py")):
+            armed_main()
+            assert check(payload, env) == DELEGATE_ASK, f"the main pane is asked: {payload}"
+            assert check(payload, env) is None, f"once a message, so a one-line answer or a prod step goes on: {payload}"
+        armed_main()
+        assert check(p("Read", file_path="/repo/a.py"), {**env, "HERDR_BIN_PATH": "/nonexistent/herdr"}) == DELEGATE_ASK, "no herdr call decides it"
+        for payload in (p("Bash", command='pane-spawn --check "a" "b"'), p("Bash", command='pane-spawn "a" "b"')):
+            armed_main()
+            assert check(payload, env) is None, "handing out is the answer"
+            assert not os.path.exists(state_file(p(), env)), "and it ends the question"
+        for payload in (p("Bash", command="pane-tell workers/w1:p2 '답입니다'"), p("Bash", command="pane-label --free"),
+                        p("Bash", command="herdr --session workers agent list"), p("Bash", command="herdr --session workers agent read w1:p2 | tail -5"),
+                        p("Bash", command="/w/.agents/skills/agent-board/board.sh mine yoyoo"), p("Bash", command="decision-log kinds"),
+                        p("Bash", command="python3 /w/.agents/skills/agent-board/main/main-channel.py post /tmp/a"),
+                        p("Bash", command="handoff save /tmp/a"), p("Bash", command="launchctl print gui/501/com.yoyoo.main-channel | grep -m1 'state ='"),
+                        p("Bash", command="cd /tmp && herdr agent list"), p("Bash", command="tail -40 ~/.local/state/pane-reports/2026-11-05.md"),
+                        p("Bash", command="cat ~/.local/state/orchestrator/personal-decisions.md"),
+                        p("Read", file_path="/Users/y/.local/state/pane-reports/2026-11-05.md"),
+                        p("Read", file_path="/Users/y/.local/state/orchestrator/reuse-notes.md"),
+                        p("Read", file_path="/Users/y/.claude/skills/main-orchestrator/SKILL.md"), p("ToolSearch", query="x"), p("Skill", skill="x"),
+                        p("TaskUpdate", taskId="1"), p("mcp__task-progress__progress", done_steps=0),
+                        p("Write", file_path="/private/tmp/x/scratchpad/a.md"), p("Edit", file_path="/Users/y/.claude/projects/-x/memory/a.md")):
+            armed_main()
+            assert check(payload, env) is None, f"what stays in the main pane: {payload}"
+            assert os.path.exists(state_file(p(), env)), f"and the question stays for the first lookup: {payload}"
+        armed_main(WAIT + 1)
+        assert check(p("Bash", command="pane-tell w1:p2 x"), env) is None, "its own chores are never late"
+        assert check(p("Read", file_path="/repo/a.py"), env) == DELEGATE_ASK, "and the first lookup is asked at any age"
+        for extra in ({"MUNICE_AUTO_DISPATCH": "1"}, {"MUNICE_AMBIENT": "1"}, {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}):
+            armed_main()
+            assert check(p(), {**env, **extra}) is None, extra
+        armed_main()
+        assert check({**p(), "agent_id": "a1"}, env) is None, "a subagent of the main pane is not asked"
+        for word in ("pane-spawn", "확인", "prod 허용", "staging 허용", "한 줄"):
+            assert word in DELEGATE_ASK, f"the question names what stays or goes: {word}"
+        os.unlink(state_file(p(), env))
 
         listing({"pane_id": "w1:p1", "agent_session": {"value": "s1"}})
         armed()
@@ -207,6 +295,11 @@ def selftest():
         decision = json.loads(out.stdout)["hookSpecificOutput"]
         assert decision["permissionDecision"] == "deny" and decision["permissionDecisionReason"] == START, out.stdout
         assert run(p()).stdout == "", "the repeat passes through the guard"
+        armed_main()
+        lookup = p("Read", file_path="/repo/a.py")
+        out = run(lookup)
+        assert json.loads(out.stdout)["hookSpecificOutput"]["permissionDecisionReason"] == DELEGATE_ASK, out.stdout
+        assert run(lookup).stdout == "", "a lookup's repeat passes through the guard"
         armed()
         refused = run(p("Bash", command=" ".join(["gcloud", "config", "set", "account", "a@b.c"])))
         assert "gcp-account-guard" in refused.stdout, refused.stdout

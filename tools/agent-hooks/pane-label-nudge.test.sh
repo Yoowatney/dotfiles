@@ -86,6 +86,33 @@ ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 👑 메인 오케스트레�
 [[ "$ctx" != *'pane-label "'* ]] || fail "the main pane is never asked to rename: $ctx"
 ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_LABEL="cf#543 미국 확장" FAKE_TERM=term_X HOME="$SANDBOX/home" | context)
 [[ "$ctx" == *'pane-label "'* ]] || fail "other panes are nudged as before: $ctx"
+ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 👑 메인 오케스트레이터" FAKE_TERM=term_M HOME="$SANDBOX/home" | context)
+[[ "$ctx" == *"lookups"* && "$ctx" == *"check"* ]] || fail "the main pane hears that lookups and checks go to panes too: $ctx"
+
+# 요유 2026-11-05 (api#1002): the main pane only hands work out. 요유's Slack words and a pane's report reach it by pane-tell, so
+# every message arms the question there, and the file says it is the question for a pane that hands lookups out.
+rm -f "$SANDBOX/fit/s_1"
+ask "[pane-tell: '자동 작업' 세션이 보낸 글입니다] [Slack #yoyooyo 요유] 로그 봐 줘" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 👑 메인" FAKE_TERM=term_M HOME="$SANDBOX/home" >/dev/null
+[ "$(cat "$SANDBOX/fit/s_1" 2>/dev/null)" = delegates ] || fail "a relayed message arms the main pane's question"
+rm -f "$SANDBOX/fit/s_1"
+ask "로그 봐 줘" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 👑 메인" FAKE_TERM=term_M HOME="$SANDBOX/home" >/dev/null
+[ "$(cat "$SANDBOX/fit/s_1" 2>/dev/null)" = delegates ] || fail "요유's own message arms it too"
+# Every other pane: an empty file, as ever, even one the same session wrote as the main pane a message ago.
+ask "로그 봐 줘" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 일" FAKE_TERM=term_X HOME="$SANDBOX/home" >/dev/null
+[ -f "$SANDBOX/fit/s_1" ] && [ ! -s "$SANDBOX/fit/s_1" ] || fail "an ordinary pane arms the ordinary question"
+rm -f "$SANDBOX/fit/s_1"
+ask "[pane-tell: 다른 세션] 보고입니다" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 일" FAKE_TERM=term_X HOME="$SANDBOX/home" >/dev/null
+[ ! -e "$SANDBOX/fit/s_1" ] || fail "an ordinary pane is not armed by another session's message"
+# A main-pane file that is missing or names another terminal: the ordinary question.
+echo term_gone > "$SANDBOX/home/.local/state/orchestrator/main"
+ask "로그 봐 줘" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 👑 메인" FAKE_TERM=term_M HOME="$SANDBOX/home" >/dev/null
+[ -f "$SANDBOX/fit/s_1" ] && [ ! -s "$SANDBOX/fit/s_1" ] || fail "a stale main-pane file falls back"
+rm -f "$SANDBOX/home/.local/state/orchestrator/main" "$SANDBOX/fit/s_1"
+ask "로그 봐 줘" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 👑 메인" FAKE_TERM=term_M HOME="$SANDBOX/home" >/dev/null
+[ -f "$SANDBOX/fit/s_1" ] && [ ! -s "$SANDBOX/fit/s_1" ] || fail "a missing main-pane file falls back"
+rm -f "$SANDBOX/fit/s_1"
+ask "로그 봐 줘" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 👑 메인" FAKE_HERDR_FAIL=1 HOME="$SANDBOX/home" >/dev/null
+[ ! -s "$SANDBOX/fit/s_1" ] || fail "herdr down falls back"
 
 # Inside herdr without a label: say there is none.
 ctx=$(run_hook HERDR_PANE_ID=w1:p1 | context)

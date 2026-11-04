@@ -182,9 +182,44 @@ hasnt "pane split" "no split beside the main pane"
 if FAIL_START=9 ps "실패" "지시" 2>/dev/null; then fail "a failed start must exit non-zero"; fi
 has "[workers] pane close w1:new" "a failed start removes the workers pane"
 
+hasnt "확인 칸입니다" "a pane that does the job is no check pane"
+
+# 요유 2026-11-05 (api#1002): a fresh pane checks a pane's report for the main pane. Its agent name says so; a rename cannot change that.
+out=$(ps --check "api#1 로그인" "npm test를 돌려 보세요")
+has "[workers] tab create --workspace " "a check pane opens with the other workers"
+has "[workers] pane rename w1:new 🟢 🫡 확인 api#1 로그인" "its name says it is a check pane"
+has "[workers] agent start spawn-65f21913323dc21-chk" "its agent name tells auto-tab-close, and still records who opened it"
+has "npm test를 돌려 보세요" "the instruction arrives"
+has "확인 칸입니다" "it hears what a check pane does"
+has "고치지 말고" "a check pane changes nothing"
+has "다른 칸의 보고를 다시 읽는 것은 확인이 아닙니다" "rereading a report is no check"
+has "보고 첫 줄에" "its first line is what the main pane reads"
+[ "$out" = "workers/w1:new" ] || fail "a check pane's address names its server: $out"
+ps --cwd /tmp --check "로그인" "돌려 보세요" >/dev/null
+has "확인 칸입니다" "options in any order"
+ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
+has "agent start spawn-65f21913323dc21-chk" "any agent kind"
+has "--kind codex" "any agent kind"
+
+# Every other lead checks results itself, as does a pane under it, and a main-pane file that is stale or gone is no main pane.
+for state in other stale missing; do
+  case "$state" in
+    other) not_main ;;
+    stale) mkdir -p "$SANDBOX/home/.local/state/orchestrator"; echo term_gone > "$SANDBOX/home/.local/state/orchestrator/main" ;;
+    missing) not_main ;;
+  esac
+  if ps --check "로그인" "돌려 보세요" 2>"$SANDBOX/err"; then fail "--check outside the main pane must fail ($state)"; fi
+  grep -q "직접 확인" "$SANDBOX/err" || fail "says what to do instead ($state): $(cat "$SANDBOX/err")"
+  hasnt "tab create" "no pane opens ($state)"
+  hasnt "pane split" "no pane opens ($state)"
+  hasnt "agent start" "no agent starts ($state)"
+done
+is_main
+
 not_main; out=$(ps "api#4" "할 일")
 has "[default] pane split --pane w7:p3" "any other caller opens beside itself on its own server"
 hasnt "보고 첫 줄에" "only panes under the main pane get the summary line"
+hasnt "확인 칸입니다" "no check pane anywhere else"
 [ "$out" = "w1:new" ] || fail "a bare id as before: $out"
 
 echo "ok: pane-spawn"

@@ -14,17 +14,22 @@
 # The main pane (its terminal id is in ${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main) does no work itself: its
 # panes open on the `workers` herdr server, in that server's `workers` workspace, and it prints `workers/<pane id>`.
 # It never splits its own tab (--same-tab is bad usage there), and with `workers` down it opens nothing and fails.
+# --check opens a check pane: a fresh pane, not the one that did the job, runs the test or command, or looks at the changed behavior
+# or data, and changes nothing (요유 2026-11-05, api#1002). The agent name carries `chk`, which a rename does not change, so its
+# report asks for no other check (auto-tab-close.py). Only a pane herdr_peers.delegates_checks says yes to may open one (the main
+# pane today); any other lead checks results itself, so there it is bad usage and opens nothing.
 # Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
 H=${HERDR_BIN_PATH:-herdr}
-USAGE='usage: pane-spawn [--new-tab] [--kind claude|codex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]'
+USAGE='usage: pane-spawn [--new-tab] [--check] [--kind claude|codex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]'
 MIN_ROWS=${PANE_SPAWN_MIN_ROWS:-16} # a 46-row window holds 4 panes of 11-12 rows, which still show about 5 lines of work (2026-11-04); a fifth would leave 5-6
 die() { echo "pane-spawn: $*" >&2; exit 2; }
 
-same= new_tab= kind=claude cwd=$PWD
+same= new_tab= check= kind=claude cwd=$PWD
 while [ $# -gt 0 ]; do
   case "$1" in
     --same-tab) same=1; shift ;;
     --new-tab) new_tab=1; shift ;;
+    --check) check=1; shift ;;
     --kind | --cwd)
       [ $# -ge 2 ] || die "$USAGE"
       if [ "$1" = --kind ]; then kind=$2; else cwd=$2; fi
@@ -50,6 +55,11 @@ command -v jq >/dev/null 2>&1 || die "jq not found"
 IFS=$'\t' read -r me ws term label < <("$H" pane get "$HERDR_PANE_ID" | jq -r '.result.pane | [.pane_id, .workspace_id, (.terminal_id | ltrimstr("term_")), (.label // "")] | @tsv')
 [ -n "${term:-}" ] || die "herdr does not know this pane"
 export HERDR_PANE_ID=$me
+if [ -n "$check" ]; then
+  python3 -I "$(dirname "$(readlink -f "$0")")/herdr_peers.py" --delegates-checks "term_$term" || die "--check is for the main pane; any other lead checks a pane's result itself (직접 확인: run the test or command, or look at the changed behavior or data)"
+  name="확인 $name"
+  prompt+=' 이 칸은 확인 칸입니다. 다른 칸이 다 했다고 보고한 일을 확인만 합니다. 코드나 설정을 고치지 말고, 테스트나 명령을 직접 실행하거나 바뀐 동작과 데이터를 직접 보세요. 다른 칸의 보고를 다시 읽는 것은 확인이 아닙니다. 다른 칸을 열지 마세요. 보고 첫 줄에 실행한 명령, 본 결과, 통과 여부를 모두 쓰세요.'
+fi
 sock= addr=
 mainfile="${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main"
 if [ "term_$term" = "$(cat "$mainfile" 2>/dev/null)" ]; then
@@ -84,7 +94,7 @@ fi
 pane-label --sync-tabs
 
 give_up() { "$H" pane close "$pane" >/dev/null 2>&1; echo "pane-spawn: $1" >&2; exit 1; }
-agent="spawn-$term-$RANDOM" # herdr allows 32 characters; terminal ids run about 15
+agent="spawn-$term-${check:+chk}$RANDOM" # herdr allows 32 characters; terminal ids run about 15
 for try in 1 2 3; do # a pane opened a moment ago may not be at its shell prompt yet
   out=$("$H" agent start "$agent" --kind "$kind" --pane "$pane" --timeout 120000 ${1+--} "$@" 2>&1) && break
   [ "$try" != 3 ] || give_up "$kind did not start: $out"

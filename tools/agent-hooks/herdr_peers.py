@@ -7,6 +7,7 @@ A pane on the other server is addressed `<session>/<pane id>`: the same pane id 
 Every call fails open (empty result), never raises.
 
 Test: herdr_peers.py --selftest
+Shell scripts: herdr_peers.py --delegates-checks <terminal id> (see delegates_checks)
 """
 from __future__ import annotations
 
@@ -34,6 +35,18 @@ def main_terminal(env) -> str:
             return f.read().strip()
     except OSError:
         return ""
+
+
+def delegates_checks(env, terminal) -> bool:
+    """The one gate: does the pane on this terminal hand lookups and result checks to other panes instead of doing them itself?
+
+    Today only the main pane does (요유 2026-11-05, api#1002); every other lead checks results itself. A main-pane file that is
+    missing or stale matches no pane, which is the ordinary rule. To widen the rule, change this function and nothing else: the
+    Stop checks (yoyoo-share-guard.py), what a lead hears (auto-tab-close.py), the question before a lookup (pane-fit-guard.py,
+    through pane-label-nudge.sh) and `pane-spawn --check` all ask here, shell scripts through `--delegates-checks`.
+    What is the main pane's alone (the workers server, the short report form, its name) reads main_terminal.
+    """
+    return bool(terminal) and terminal == main_terminal(env)
 
 
 def server_key(env) -> str:
@@ -128,6 +141,15 @@ esac
         assert find_terminal(env_d, "term_O9") is None, "a session outside PEERS is never searched"
         assert find_terminal({"HERDR_BIN_PATH": "/nonexistent"}, "term_D2") is None, "herdr down: nothing, no raise"
         assert main_terminal({"HOME": d}) == ""; write(f"{d}/.local/state/orchestrator/main", "term_M\n"); assert main_terminal({"HOME": d}) == "term_M"
+        # The one gate for handing lookups and result checks to panes. Today it is the main pane's terminal and nothing else.
+        assert delegates_checks({"HOME": d}, "term_M") is True, "the main pane"
+        assert delegates_checks({"HOME": d}, "term_X") is False, "any other pane"
+        assert delegates_checks({"HOME": d}, "") is False and delegates_checks({"HOME": d}, None) is False, "a pane herdr could not name"
+        assert delegates_checks({"HOME": f"{d}/nowhere"}, "term_M") is False, "no state file: the ordinary rule"
+        assert delegates_checks({"HOME": f"{d}/nowhere"}, "") is False, "no state file and no pane is no match"
+        cli = lambda *a: subprocess.run([sys.executable, "-I", os.path.realpath(__file__), "--delegates-checks", *a],
+                                        env={**os.environ, "HOME": d, "XDG_STATE_HOME": ""}).returncode
+        assert cli("term_M") == 0 and cli("term_X") == 1 and cli("") == 1 and cli() == 1, "the same answer for shell scripts"
         assert address(env_w, "w1:p2") == "workers/w1:p2" and address(env_d, "w1:p2") == "w1:p2"
         assert state_dir({"HOME": d, "XDG_STATE_HOME": f"{d}/xdg"}) == f"{d}/xdg/orchestrator"
         # the selftest env is explicit: a socket in the caller's env must not leak into a call that names one
@@ -140,3 +162,6 @@ esac
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         selftest()
+    elif "--delegates-checks" in sys.argv:  # herdr_peers.py --delegates-checks <terminal id>: exit 0 yes, 1 no
+        rest = sys.argv[sys.argv.index("--delegates-checks") + 1:]
+        sys.exit(0 if rest and delegates_checks(os.environ, rest[0]) else 1)

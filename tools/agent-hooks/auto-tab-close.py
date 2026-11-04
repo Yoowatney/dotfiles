@@ -18,7 +18,8 @@ any pane while a pane it opened is alive; one whose panes are gone closes like t
 (요유 몫 left, `세션: 닫으면 …`, held as above) goes up the same way and the pane stays: an implementer finished with two
 questions for 요유 and its lead never heard (요유 2026-11-01). A reply without `남은 것:` is no report and tells nobody.
 What the pane above hears tells it to check the result itself before passing it up, and yoyoo-share-guard holds its next report
-to that (요유 2026-11-04).
+to that (요유 2026-11-04). A pane that hands checks out (herdr_peers.delegates_checks: the main pane today, 요유 2026-11-05) hears
+to open a fresh check pane instead, and a check pane's report, which pane-spawn --check's agent name tells apart, asks for no other.
 A pane the main pane opened runs on the workers herdr server, so its opener is looked up on the other server too. The main
 pane hears a short form (first line, `남은 것:`, the pane's address and the saved file); the whole reply stays in that file.
 A pane moved to another workspace gets a new id, and only `herdr pane get` still knows the old one from its env, so the
@@ -275,11 +276,12 @@ def nearest_lead(me: dict, panes: list, name: str = "", sideways: bool = True, e
 
 
 def short_report(reply: str) -> str:
-    """The first prose line and the last `남은 것:` line (with the lines under it when it is a heading). `남은 것:` keeps its
-    inline code and quotes (`prod 허용` is what 요유 types); only fenced code and blockquotes are not the report's."""
-    first = next((line for line in (x.strip() for x in share.prose(reply).splitlines()) if line and not LEFT.search(line)), "")[:200]
+    """The first prose line and the last `남은 것:` line (with the lines under it when it is a heading). Both keep their inline code
+    and quotes (`prod 허용` is what 요유 types, and a check pane's first line names what it ran); only fenced code and blockquotes
+    are not the report's."""
     raw = share.STRIP[2].sub(" ", share.STRIP[0].sub(" ", unicodedata.normalize("NFC", reply)))
     lines = [line.strip() for line in raw.splitlines()]
+    first = next((line for line in lines if line and not LEFT.search(line)), "")[:200]
     at = max((i for i, line in enumerate(lines) if LEFT.search(line)), default=-1)
     left = []
     if at >= 0:
@@ -321,7 +323,10 @@ def finish(reply: str, env):
     lead, to = ("", {}) if env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT") else lead_pane(me, panes, name, sideways, env)
     if lead:
         pt = env.get("AUTO_TAB_CLOSE_PANE_TELL") or os.path.join(HERE, "pane-tell")
-        head = "이 칸의 마지막 보고입니다(칸을 닫기 전에 보냅니다)" if close else "이 칸의 보고입니다(칸은 열어 둡니다)"
+        head = "칸의 마지막 보고입니다(칸을 닫기 전에 보냅니다)" if close else "칸의 보고입니다(칸은 열어 둡니다)"
+        who, note = "이", share.RELAY_NOTE
+        if herdr_peers.delegates_checks(env, to.get("terminal_id")):  # a check pane's report ends the round: no check of a check
+            who, note = ("확인", share.CHECK_NOTE) if share.CHECK_AGENT.match(name or "") else ("이", share.DELEGATE_NOTE)
         main = herdr_peers.main_terminal(env)
         to_main = bool(main) and to.get("terminal_id") == main
         if to_main:  # the main pane keeps many panes going: it reads the gist and opens the file when it needs more
@@ -329,8 +334,8 @@ def finish(reply: str, env):
                     f"전체 보고: {path} ({now:%H:%M:%S} 항목)")
         else:
             body = f"{unicodedata.normalize('NFC', reply).strip()}\n\n전체 보고: {path}"
-        try:  # share.RELAYED knows the head: the lead's next report has to show its own check
-            sent = subprocess.run([pt, lead, f"{head}. {share.RELAY_NOTE}:\n{body}"], env=dict(env), timeout=5, **quiet).returncode == 0
+        try:  # share.RELAYED knows the head: the lead's next report has to show its check
+            sent = subprocess.run([pt, lead, f"{who} {head}. {note}:\n{body}"], env=dict(env), timeout=5, **quiet).returncode == 0
         except subprocess.TimeoutExpired:
             sent = False
         # the main pane's watch: this pane is waiting, not stuck. Only workers panes: a personal server is left alone
@@ -945,12 +950,56 @@ esac''')
     on_workers = {"HERDR_PANE_ID": "w1:p2", "HERDR_SOCKET_PATH": W}
     assert run(reported, on_workers) == (0, "", "tell default/w5:p3\n" + closed), "a workers pane reports across servers to the main pane"
     told = open(f"{sandbox}/told").read()
-    assert told.startswith("이 칸의 마지막 보고입니다(") and share.RELAY_NOTE in told, "share-guard still sees a relayed report"
+    assert told.startswith("이 칸의 마지막 보고입니다(") and share.DELEGATE_NOTE in told, "share-guard still sees a relayed report"
+    assert share.RELAY_NOTE not in told and "pane-spawn --check" in told, f"요유 2026-11-05: the main pane hands the check to a check pane: {told!r}"
     assert "조사를 마쳤습니다." in told and "남은 것: 요유 몫: 없음 · 세션: 닫음" in told
     assert "왜: 칸이 남습니다." not in told, "the main pane gets the short form; the whole reply stays in the file"
     assert "workers/w1:p2" in told and "전체 보고:" in told
     assert os.path.exists(f"{sandbox}/.local/state/orchestrator/reported/term_2"), "the watch learns this pane reported"
     assert "workers/w1:p2" in saved()
+    # A check pane's report ends the round: it asks for the `확인:` line and no other check. pane-spawn's name is what tells it apart.
+    checker = [{"pane_id": "w1:p2", "name": "spawn-M-chk1", "terminal_id": "term_2"}]
+    herdr_says_on("workers", {"name": "spawn-M-chk1"}, [me], checker)
+    assert run(reported, on_workers) == (0, "", "tell default/w5:p3\n" + closed), "a check pane reports to the main pane"
+    told = open(f"{sandbox}/told").read()
+    assert told.startswith("확인 칸의 마지막 보고입니다(") and share.CHECK_NOTE in told, f"the head says it is a check pane's: {told!r}"
+    assert share.RELAY_NOTE not in told and share.DELEGATE_NOTE not in told and "pane-spawn" not in told, "no check of a check"
+    assert "조사를 마쳤습니다." in told and "전체 보고:" in told, "the same short form"
+    main_log = os.path.join(sandbox, "main.jsonl")
+    with open(main_log, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "user", "message": {"role": "user", "content": told}}, ensure_ascii=False) + "\n")
+    herdr_says({"name": "spawned"}, [{**main, "agent_session": {"value": "s-main"}}])
+    herdr_says_on("workers", None, [], [])  # the check pane has closed
+    main_env ={"HERDR_BIN_PATH": f"{sandbox}/herdr", "HERDR_SOCKET_PATH": f"{sandbox}/herdr.sock", "HOME": sandbox, "EXPLAIN_STATE": sandbox}
+    report = {"session_id": "s-main", "transcript_path": main_log}
+    assert share.decide({**report, "last_assistant_message": "무엇을: 고침\n남은 것: 요유 몫: 없음 · 세션: 닫아도 됨"}, main_env) == share.CHECK_REPORT_REASON, \
+        "share-guard knows the check pane's head, and sends back a report with no 확인 line"
+    assert share.decide({**report, "last_assistant_message": "확인: 확인 칸이 테스트 통과를 봤습니다.\n무엇을: 고침\n남은 것: 요유 몫: 없음 · 세션: 닫아도 됨"},
+                        main_env) is None, "and takes what the check pane saw"
+    os.unlink(main_log)
+    saved()
+    # Any other lead: the same check-pane name changes nothing, and neither does a main-pane file that names no live pane.
+    herdr_says({"name": "spawned"}, [crown])
+    herdr_says_on("workers", {"name": "spawn-1-chk1"}, [crown, me], [{"pane_id": "w1:p2", "name": "spawn-1-chk1", "terminal_id": "term_2"}])
+    assert run(reported, on_workers) == (0, "", "tell w1:p1\n" + closed)
+    told = open(f"{sandbox}/told").read()
+    assert told.startswith("이 칸의 마지막 보고입니다(") and share.RELAY_NOTE in told and "pane-spawn" not in told, f"an ordinary lead hears the old rule: {told!r}"
+    saved()
+    state_file = f"{sandbox}/.local/state/orchestrator/main"
+    for gone in ("missing", "stale"):
+        if os.path.exists(state_file):
+            os.unlink(state_file)
+        if gone == "stale":
+            open(state_file, "w").write("term_gone")
+        herdr_says_on("workers", {"name": "spawn-M-1"}, [me], wagents)
+        herdr_says({"name": "spawned"}, [main])
+        assert run(reported, on_workers)[0] == 0
+        told = open(f"{sandbox}/told").read()
+        assert told.startswith("이 칸의 마지막 보고입니다(") and share.RELAY_NOTE in told and "pane-spawn" not in told, f"main file {gone}: the ordinary rule: {told!r}"
+        saved()
+    open(state_file, "w").write("term_M")
+    herdr_says_on("workers", {"name": "spawn-M-1"}, [me], wagents)
+    herdr_says({"name": "spawned"}, [main])
     # The same pane id on both servers: a Stop on one never withdraws the other's held reply.
     herdr_says_on("workers", {"name": "spawn-M-1"}, [{**me, "agent_status": "working"}], wagents)
     stop(json.dumps({"last_assistant_message": full}), {**on_workers, "AUTO_TAB_CLOSE_SETTLE": "0.1"})
@@ -962,7 +1011,11 @@ esac''')
     assert short_report("끝났습니다.\n남은 것: 요유 몫: `prod 허용` 입력 · 세션: 닫으면 \"승격\" 못 함") == \
         "끝났습니다.\n남은 것: 요유 몫: `prod 허용` 입력 · 세션: 닫으면 \"승격\" 못 함"
     assert short_report("`x` 끝났습니다.\n```\n남은 것: 코드 속\n```\n> 남은 것: 인용\n남은 것:\n- 요유 몫: `prod 허용` 입력\n- 세션: 닫아도 됨\n") == \
-        "끝났습니다.\n남은 것:\n- 요유 몫: `prod 허용` 입력\n- 세션: 닫아도 됨", "a fenced or quoted 남은 것 is not the report's"
+        "`x` 끝났습니다.\n남은 것:\n- 요유 몫: `prod 허용` 입력\n- 세션: 닫아도 됨", "a fenced or quoted 남은 것 is not the report's"
+    # The first line is what a check pane ran and saw, which the `확인:` line is written from: its commands must arrive (seen 2026-11-05).
+    assert short_report('`ls -l`, `wc -l`로 "hello" 한 줄을 봤습니다.\n남은 것: 세션: 닫음') == \
+        '`ls -l`, `wc -l`로 "hello" 한 줄을 봤습니다.\n남은 것: 세션: 닫음', "the first line keeps its code and quotes"
+    assert short_report("```\n코드\n```\n> 인용\n끝났습니다.\n남은 것: 세션: 닫음") == "끝났습니다.\n남은 것: 세션: 닫음", "a fence or a quote is still no first line"
     # Only the workers server's panes mark the watch's reported file; a pane on any other named server is not the main pane's.
     os.unlink(f"{sandbox}/.local/state/orchestrator/reported/term_2")
     herdr_says({"name": "spawned"}, [crown, me])

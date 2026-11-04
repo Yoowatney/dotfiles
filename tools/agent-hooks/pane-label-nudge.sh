@@ -42,10 +42,15 @@ if [ "${1:-}" = session ]; then
 fi
 
 # A new message from 요유: the next working tool asks whether this work belongs in a pane (pane-fit-guard.py).
+# A pane that hands lookups and checks out (the main pane today) gets its own question, on relayed messages too: 요유's Slack words and
+# a pane's report reach it by pane-tell. The one gate is in herdr_peers.py.
 session=$(jq -r '.session_id // empty' <<<"$input" 2>/dev/null)
-if [ -n "$session" ] && [ -z "$machine" ]; then
+delegates=
+if [ -n "$term" ] && python3 -I "$(dirname "$0")/herdr_peers.py" --delegates-checks "$term" 2>/dev/null; then delegates=delegates; fi
+if [ -n "$session" ] && { [ -z "$machine" ] || [ -n "$delegates" ]; }; then
     armed=${PANE_FIT_DIR:-$HOME/.local/state/pane-fit}
-    mkdir -p "$armed" && touch "$armed/${session//[^A-Za-z0-9_-]/_}" 2>/dev/null
+    fit="$armed/${session//[^A-Za-z0-9_-]/_}"
+    mkdir -p "$armed" && { printf '%s' "$delegates" >"$fit" && touch "$fit"; } 2>/dev/null
     find "$armed" -type f -mtime +7 -delete 2>/dev/null
 fi
 
@@ -54,7 +59,7 @@ case "${name# }" in "$PLACEHOLDER"*) label= ;; esac # the session-start name is 
 
 # The mark tells 요유 whether closing this session stops something (요유 2026-10-17): see pane-label.
 if [ -n "$term" ] && [ "$term" = "$(cat "$mainfile" 2>/dev/null)" ]; then
-    msg="This pane is 요유's main pane. Keep its name; never rename it for a task. Follow ~/.claude/skills/main-orchestrator/SKILL.md: hand work to panes with pane-spawn, triage what comes back three ways, and end each answer with the collected decisions."
+    msg="This pane is 요유's main pane. Keep its name; never rename it for a task. Follow ~/.claude/skills/main-orchestrator/SKILL.md: hand work to panes with pane-spawn, lookups beyond a one-line answer too, have a fresh check pane (pane-spawn --check) check a pane's report, triage what comes back three ways, and end each answer with the collected decisions."
 elif [ -n "$label" ]; then
     msg="herdr pane label: \"$label\". If this message starts a different task or topic, rename the pane before other work: pane-label \"<issue> <2-4 words>\" (e.g. pane-label \"api#736 Dependabot 정리\"; the 🟢/🔴 mark is kept). Keep the label when a task ends."
     case "$label" in
