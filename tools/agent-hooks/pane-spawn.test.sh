@@ -12,10 +12,15 @@ fail() {
 
 # A fake herdr that logs each call to $SANDBOX/log. FAIL_START=<n> fails the first n agent starts, SESSIONLESS=1 keeps
 # the session id empty as Codex does until its first prompt, FAIL_WAIT=<n> fails the first n waits for work.
+# Each line starts with the server the call went to, read from HERDR_SOCKET_PATH: [default] or [workers].
 cat > "$SANDBOX/herdr" <<EOF
 #!/usr/bin/env bash
-echo "\$*" >> "$SANDBOX/log"
+case "\$HERDR_SOCKET_PATH" in */sessions/*) s=\${HERDR_SOCKET_PATH%/herdr.sock}; s=\${s##*/} ;; *) s=default ;; esac
+echo "[\$s] \$*" >> "$SANDBOX/log"
 case "\$1 \$2" in
+  "session list") cat "$SANDBOX/sessions.json" ;;
+  "workspace list") cat "$SANDBOX/\$s-workspaces.json" 2>/dev/null || echo '{"result":{"workspaces":[]}}' ;;
+  "workspace create") jq -n '{result: {workspace: {workspace_id: "w2"}}}' ;;
   "pane get") jq -n --arg label "\${CALLER_LABEL:-}" '{result: {pane: {pane_id: "w7:p3", workspace_id: "w7", terminal_id: "term_65f21913323dc21", label: \$label}}}' ;; # moved: env says w1:p1
   "tab create") jq -n '{result: {root_pane: {pane_id: "w1:new"}, tab: {tab_id: "w1:t9"}}}' ;;
   "pane split") jq -n '{result: {pane: {pane_id: "w1:new"}}}' ;;
@@ -34,10 +39,14 @@ case "\$1 \$2" in
 esac
 EOF
 chmod +x "$SANDBOX/herdr"
-printf '#!/bin/sh\necho "pane-label $*" >> "%s/log"\n' "$SANDBOX" > "$SANDBOX/pane-label"
+cat > "$SANDBOX/pane-label" <<EOF
+#!/usr/bin/env bash
+case "\$HERDR_SOCKET_PATH" in */sessions/*) s=\${HERDR_SOCKET_PATH%/herdr.sock}; s=\${s##*/} ;; *) s=default ;; esac
+echo "[\$s] pane-label \$*" >> "$SANDBOX/log"
+EOF
 chmod +x "$SANDBOX/pane-label"
 
-ps() { rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits"; env PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_RETRY_WAIT=0 bash "$SUBJECT" "$@"; }
+ps() { rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits"; env -u HERDR_SOCKET_PATH -u XDG_STATE_HOME HOME="$SANDBOX/home" PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_RETRY_WAIT=0 bash "$SUBJECT" "$@"; }
 log() { cat "$SANDBOX/log" 2>/dev/null || true; }
 has() { grep -qF -- "$1" "$SANDBOX/log" || fail "$2: no [$1] in: $(log)"; }
 hasnt() { if grep -qF -- "$1" "$SANDBOX/log"; then fail "$2: found [$1] in: $(log)"; fi; }
@@ -102,5 +111,42 @@ grep -q "pane-tell" "$SANDBOX/err" || fail "says what to do: $(cat "$SANDBOX/err
 if ps "이름만" 2>/dev/null; then fail "missing instruction must exit non-zero"; fi
 if ps --kind gemini "이름" "지시" 2>/dev/null; then fail "unknown kind must exit non-zero"; fi
 if env -u HERDR_PANE_ID HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "이름" "지시" 2>/dev/null; then fail "outside herdr must exit non-zero"; fi
+
+# The main pane does no work itself: what it opens goes to the workers server, and its address names that server.
+is_main() { mkdir -p "$SANDBOX/home/.local/state/orchestrator"; echo term_65f21913323dc21 > "$SANDBOX/home/.local/state/orchestrator/main"; }
+not_main() { rm -f "$SANDBOX/home/.local/state/orchestrator/main"; }
+workers_up() { jq -n --arg w "$SANDBOX/sessions/workers/herdr.sock" --argjson r "${1:-true}" '{sessions: [{name: "default", running: true, socket_path: "/x/herdr.sock"}, {name: "workers", running: $r, socket_path: $w}]}' > "$SANDBOX/sessions.json"; }
+workers_up; echo '{"result":{"workspaces":[{"workspace_id":"w1","label":"workers"}]}}' > "$SANDBOX/workers-workspaces.json"
+
+is_main; out=$(ps "api#1 설계" "할 일")
+has "[workers] tab create --workspace w1 " "a pane the main pane opens goes to workers"
+hasnt "[default] tab create" "nothing opens beside the main pane"
+has "[default] pane get w1:p1" "the caller is read on its own server"
+has "[default] pane-label --lead" "the caller is marked on its own server"
+has "[workers] pane-label --sync-tabs" "tab marks are synced where the new tab is"
+has "[workers] agent start spawn-65f21913323dc21-" "the name still records the main pane's terminal"
+has "[workers] agent prompt w1:new" "the instruction reaches the workers pane"
+has "보고 첫 줄에" "a pane under the main pane learns its first line is its summary"
+[ "$out" = "workers/w1:new" ] || fail "prints an address with the server: $out"
+
+rm "$SANDBOX/workers-workspaces.json"; ps "api#2" "할 일" >/dev/null
+has "[workers] workspace create --label workers --no-focus" "an empty workers server gets its workspace"
+before "workspace create" "tab create --workspace w2"
+
+workers_up false; if ps "api#3" "할 일" 2>"$SANDBOX/err"; then fail "workers down must fail"; fi
+grep -q "com.yoyoo.herdr-workers" "$SANDBOX/err" || fail "says how to start it: $(cat "$SANDBOX/err")"
+hasnt "tab create" "no pane opens anywhere when workers is down"
+workers_up
+
+if ps --same-tab "리뷰" "봐 줘" 2>/dev/null; then fail "the main pane never splits its own tab"; fi
+hasnt "pane split" "no split beside the main pane"
+
+if FAIL_START=9 ps "실패" "지시" 2>/dev/null; then fail "a failed start must exit non-zero"; fi
+has "[workers] pane close w1:new" "a failed start removes the workers pane"
+
+not_main; out=$(ps "api#4" "할 일")
+has "[default] tab create --workspace w7" "any other caller opens on its own server as before"
+hasnt "보고 첫 줄에" "only panes under the main pane get the summary line"
+[ "$out" = "w1:new" ] || fail "a bare id as before: $out"
 
 echo "ok: pane-spawn"
