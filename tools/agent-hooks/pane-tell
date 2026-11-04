@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Types a message into the agent of another herdr pane, so 요유 never carries words between sessions
 # (요유 2026-10: "메시지가 아니라 세션한테 전달하라고"). Claude and Codex both use it.
-#   pane-tell --list                          one line per pane: id, name, cwd; pick the target from these
-#   pane-tell <pane id|name text> "<message>"  name text: any piece of the pane name, case-insensitive ("KPI 표")
+#   pane-tell --list                          one line per pane: id, name, cwd; pick the target from these. Panes on the other
+#                                               server (default or workers) follow as <session>/<pane id>, when it runs
+#   pane-tell <pane id|name text> "<message>"  name text: any piece of the pane name, case-insensitive ("KPI 표"), on this
+#                                               server, else on the other one. A bare pane id is only ever this server's
 #   pane-tell <session>/<pane id> "<message>"  a pane on the default or workers herdr server (workers/w1:p2); the same pane
 #                                               id exists on both, so the sender is named and refused from its own server
 # Exit 3: no pane matches, or the named server is not running. Exit 2: bad usage, a session other than default or workers,
@@ -166,17 +168,26 @@ list_panes() {
     | [.pane_id, ((.label // "") | ltrimstr("🔴 ") | ltrimstr("🟢 ")), (.agent_session.value // ""), (.cwd // ""), (.tab_id // ""), (.agent // ""), (.terminal_id // "")] | @tsv'
 }
 srv() { [[ $1 =~ /sessions/([^/]+)/herdr\.sock$ ]] && echo "${BASH_REMATCH[1]}" || echo default; }
+socket_of() { "$H" session list --json 2>/dev/null | jq -r --arg n "$1" '.sessions[] | select(.name == $n and .running) | .socket_path' 2>/dev/null | head -1; }
+# The panes of the other servers, ids as <session>/<pane id>. One that is down or absent (집맥 has no workers) has none.
+other_panes() {
+  local n sock
+  for n in $PEERS; do
+    [ "$n" != "$(srv "$here")" ] || continue
+    sock=$(socket_of "$n")
+    [ -z "$sock" ] || HERDR_SOCKET_PATH=$sock list_panes | sed "s|^|$n/|"
+  done
+}
 # <session>/<pane id>: only a server other than this pane's own needs a lookup and a switch.
 here=${HERDR_SOCKET_PATH:-} there= target=${1:-}
 if [[ $target =~ ^(([a-z0-9_-]+)/)?(w[0-9A-Za-z]+:p[0-9A-Za-z]+)$ ]] && [ -n "${BASH_REMATCH[2]}" ]; then
   target=${BASH_REMATCH[3]} session=${BASH_REMATCH[2]}
   [[ " $PEERS " == *" $session "* ]] || die "only default and workers are reachable by name, not \"$session\""
   if [ "$session" != "$(srv "$here")" ]; then
-    sessions=$("$H" session list --json 2>/dev/null)
-    there=$(jq -r --arg n "$session" '.sessions[] | select(.name == $n and .running) | .socket_path' <<<"$sessions" 2>/dev/null | head -1)
+    there=$(socket_of "$session")
     [ -n "$there" ] || { echo "pane-tell: the $session herdr server is not running, so it has no pane $target" >&2; exit 3; }
     # --deliver runs on the receiver's socket, so the sender's server needs a real path there
-    [ -n "$here" ] || here=$(jq -r '.sessions[] | select(.name == "default" and .running) | .socket_path' <<<"$sessions" 2>/dev/null | head -1)
+    [ -n "$here" ] || here=$(socket_of default)
   fi
 fi
 # The sender is named and placed from its own server; a moved pane keeps its old id in the env, `pane get` still resolves it
@@ -190,7 +201,8 @@ panes=$(list_panes) || die "herdr pane list failed"
 [ -n "$there" ] || mine=$panes
 
 if [ "${1:-}" = --list ]; then
-  awk -F'\t' -v me="${HERDR_PANE_ID:-}" '{print $1 "\t" ($2 == "" ? "(이름 없음)" : $2) "\t" $4 ($1 == me ? "\t(이 pane)" : "")}' <<<"$panes"
+  { [ -z "$panes" ] || printf '%s\n' "$panes"; other_panes; } |
+    awk -F'\t' -v me="${HERDR_PANE_ID:-}" '{print $1 "\t" ($2 == "" ? "(이름 없음)" : $2) "\t" $4 ($1 == me ? "\t(이 pane)" : "")}'
   exit 0
 fi
 [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ] || die 'usage: pane-tell --list | pane-tell <pane id|name text> "<message>"'
@@ -199,6 +211,8 @@ if [[ "$target" =~ ^w[0-9A-Za-z]+:p[0-9A-Za-z]+$ ]]; then # herdr counts on past
   hits=$(awk -F'\t' -v t="$target" '$1 == t' <<<"$panes")
 else
   hits=$(awk -F'\t' -v t="$1" 'index(tolower($2), tolower(t))' <<<"$panes")
+  # The other server only when this one has none: a name that found a pane here finds the same one now.
+  [ -n "$hits" ] || hits=$(other_panes | awk -F'\t' -v t="$1" 'index(tolower($2), tolower(t))')
 fi
 [ -n "$hits" ] || { echo "pane-tell: no pane matches \"$1\" (see pane-tell --list)" >&2; exit 3; }
 if [ "$(wc -l <<<"$hits" | tr -d ' ')" -gt 1 ]; then
@@ -209,6 +223,12 @@ fi
 # cut, not `IFS=$'\t' read`: read merges the tabs around an empty session id and shifts every later field
 pane=$(cut -f1 <<<"$hits"); name=$(cut -f2 <<<"$hits"); sid=$(cut -f3 <<<"$hits"); tab=$(cut -f5 <<<"$hits")
 kind=$(cut -f6 <<<"$hits"); terminal=$(cut -f7 <<<"$hits")
+if [[ $pane == */* ]]; then # found on another server: every call from here on is about the receiver
+  there=$(socket_of "${pane%%/*}"); pane=${pane#*/}
+  [ -n "$there" ] || { echo "pane-tell: the server of \"$1\" has just stopped" >&2; exit 3; }
+  [ -n "$here" ] || here=$(socket_of default)
+  export HERDR_SOCKET_PATH=$there
+fi
 [ "$pane" != "$me" ] || [ -n "$there" ] || die "\"$1\" is this pane"
 why=$(auto_reason "$tab" "$sid")
 [ -z "$why" ] || die "$pane ($name) $why"

@@ -17,7 +17,7 @@ case "\${HERDR_SOCKET_PATH:-}" in */sessions/*) s=\${HERDR_SOCKET_PATH%/herdr.so
 f="$SANDBOX/panes"; [ "\$s" != workers ] || f="$SANDBOX/workers-panes"
 case "\$1 \$2" in
   "session list") cat "$SANDBOX/sessions.json" 2>/dev/null || exit 1 ;;
-  "pane list") [ ! -f "$SANDBOX/herdr-down" ] || exit 1; cat "\$f" ;;
+  "pane list") [ ! -f "$SANDBOX/herdr-down" ] || exit 1; [ "\$s" = workers ] || [ ! -f "$SANDBOX/default-down" ] || exit 1; cat "\$f" ;;
   "tab list") cat "$SANDBOX/tabs" 2>/dev/null || echo '{"result":{"tabs":[]}}' ;;
   "pane get") jq -n --arg i "\$(cat "$SANDBOX/new-id" 2>/dev/null)" --argjson o "\$(cat "$SANDBOX/scrolled" 2>/dev/null || echo 0)" \
     --arg p "\$3" --slurpfile all "\$f" \
@@ -253,5 +253,41 @@ panes "w1:p9|🟢 👑 메인 오케스트레이터|s9"; wpanes "w1:p2|🟢 🫡
 claude_screen "치던 글" > "$SANDBOX/screen-w1:p9"
 pt workers/w1:p9 "x" >/dev/null; rm -f "$SANDBOX/screen-w1:p9"; settled
 check "a queued message for the same id waits on the receiver's server" "$(sent)|$(sort -u "$SANDBOX/log-srv")" "w1:p9 |workers"
+
+# 2026-11-05: an item a workers pane holds was invisible to the jobs on default: its hand-back reset it and opened a second tab.
+panes "w1:p9|🟢 👑 메인 오케스트레이터|s9"; wpanes "w1:p2|🟢 🫡 api#7 구현|s2" "w1:p9|🟢 🫡 같은 번호|s7"
+check "list names a pane on the other server with its session" "$(pt --list | grep '구현' | cut -f1,2)" "$(printf 'workers/w1:p2\t🫡 api#7 구현')"
+check "list marks only this pane, not the same id over there" "$(pt --list | grep '(이 pane)' | cut -f1)" "w1:p9"
+check "list from a workers pane names default" "$(ptw --list | grep '메인' | cut -f1)|$(ptw --list | grep '(이 pane)' | cut -f1)" "default/w1:p9|w1:p2"
+out=$(pt "api#7 " "x"); check "a name only on the other server reaches it" "$?|$(sent)|$(sort -u "$SANDBOX/log-srv")|$out" "0|w1:p2 |workers|told w1:p2 (🫡 api#7 구현)"
+check "that message names the sender from its own server" "$(cut -d'|' -f2 "$SANDBOX/log")" "[pane-tell: '👑 메인 오케스트레이터' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] x"
+ptw "메인 오케" "x" >/dev/null; check "a name on default reaches it from a workers pane" "$?|$(sent)|$(sort -u "$SANDBOX/log-srv")" "0|w1:p9 |default"
+pt w1:p2 "x" 2>/dev/null; check "a bare id stays on this server" "$?|$(sent)" "3|"
+panes "w1:p9|🟢 👑 메인 오케스트레이터|s9" "w1:p3|🟢 api#7 여기|s3"
+pt "api#7 " "x" >/dev/null; check "a name on this server wins, as it always did" "$?|$(sent)|$(sort -u "$SANDBOX/log-srv")" "0|w1:p3 |default"
+panes "w1:p9|🟢 👑 메인 오케스트레이터|s9"; wpanes "w1:p2|🟢 🫡 api#7 구현|s2" "w1:p3|🟢 🫡 api#7 또|s3"
+out=$(pt "api#7 " "x" 2>&1); check "two panes over there are refused, listed with their session" "$?|$(sent)|$(grep -c '^workers/w1:p[23]' <<<"$out")" "2||2"
+wpanes "w1:p2|🟢 🫡 api#7 구현|s2"
+# An auto tab over there is refused like one here: a prompt typed in lifts its guard.
+echo '{"result":{"tabs":[{"tab_id":"w1:t5","label":"자동 api#7"}]}}' > "$SANDBOX/tabs"; wpanes "w1:p2|🟢 api#7 자동|s2|w1:t5"
+pt "api#7 " "x" 2>/dev/null; check "an auto tab on the other server is refused" "$?|$(sent)" "2|"
+rm -f "$SANDBOX/tabs"; wpanes "w1:p2|🟢 🫡 api#7 구현|s2"
+claude_screen "치던 글" > "$SANDBOX/screen-w1:p2"
+out=$(pt "api#7 " "x"); rm -f "$SANDBOX/screen-w1:p2"; settled
+check "a full box over there queues, and delivers on that server" "$(sed 's/: its input.*//' <<<"$out")|$(sent)|$(sort -u "$SANDBOX/log-srv")" "queued for w1:p2 (🫡 api#7 구현)|w1:p2 |workers"
+touch "$SANDBOX/default-down"; pt "api#7 " "x" >/dev/null; check "this server down: the name still reaches the other" "$?|$(sent)" "0|w1:p2 "; rm -f "$SANDBOX/default-down"
+# The other server down or absent: as before, with no error.
+OWN=$(printf 'w1:p9\t👑 메인 오케스트레이터\t/w\t(이 pane)')
+for how in stopped absent no-list; do
+  case $how in
+    stopped) sessions_up stopped ;;
+    absent) jq -n --arg d "$SANDBOX/herdr.sock" '{sessions: [{name: "default", running: true, socket_path: $d}]}' > "$SANDBOX/sessions.json" ;;
+    no-list) rm -f "$SANDBOX/sessions.json" ;;
+  esac
+  check "workers $how: list shows this server, no error" "$(pt --list 2>&1)" "$OWN"
+  out=$(pt "api#7 " "x" 2>&1); check "workers $how: a name only over there is no pane" "$?|$(sent)|$out" '3||pane-tell: no pane matches "api#7 " (see pane-tell --list)'
+  pt "메인 오케" "x" 2>/dev/null; check "workers $how: this pane is still refused by name" "$?|$(sent)" "2|"
+done
+sessions_up
 
 exit $fails
