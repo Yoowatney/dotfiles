@@ -75,7 +75,9 @@ DECISION = re.compile(r"(?:결정(?:하기| 입력)?|정하기|고르기|선택|
 DELEGATED = re.compile(r"머지|맡기|공유|리뷰|검토|댓글")  # standing permission: these are 유요's own steps, however they are worded
 # A step worded as a decision: `프로덕션 승격 승인` is 유요's step, or one bounce from it (요유 2026-11-01, api#975). A real 요유 call
 # ends quietly at the question. `설계 승인` names no step and stays a decision.
-STEP = re.compile(r"(?:배포|승격|반영|롤백|실행|재시작|설치|적용|전환|삭제|게시|전송|공지|로그인|진행)(?:할지|될지|을|를)?"
+# 시작/착수/답 (요유 2026-11-04, "watch하라는건 이 스레드가 알아서 작업하라는거임"): `작업을 지금 시작할지 정하기` and
+# `팀원에게 답할지 정하기` passed as 요유 calls. Replayed on every past report: 4 flipped, and 요유 had answered go to all 4.
+STEP = re.compile(r"(?:배포|승격|반영|롤백|실행|시작|착수|답할지|설치|적용|전환|삭제|게시|전송|공지|로그인|진행)(?:할지|될지|을|를)?"
                   r"(?:[ \t]*(?:승인|결정(?:하기)?|정하기|고르기|선택|판단|여부|답하기))*$")
 ONLY_YOYOO = re.compile(r"`/clear`|`prod 허용`|`staging 허용`")  # typed by 요유 alone: the handoff rule and the GCP unlocks
 ASK_BACK = re.compile(r"([가-힣])까요[ \t]*[?？]\**$")
@@ -506,6 +508,10 @@ def selftest():
         "남은 것: 요유 몫: prod 롤백 승인 · 유요 몫: 없음",
         "남은 것: 요유 몫: 재시작 여부 답하기 · 유요 몫: 없음",
         "남은 것: 요유 몫: 오늘 15시 진행 여부 답하기 · 유요 몫: 없음",
+        # 요유 2026-11-04: told to watch a thread, the session asked whether to start the requests already in it
+        "남은 것: 요유 몫: LaunchDaemon PR 작업을 이 칸에서 지금 시작할지 정하기(추천: 바로 시작) · 유요 몫: PR 두 개 · 세션: 닫으면 스레드 감시 멈춤",
+        "남은 것: 요유 몫: B안 구현을 시작할지 결정 · 유요 몫: 없음",
+        "남은 것: 요유 몫: 팀원에게 위 내용으로 답할지 정하기 · 유요 몫: 스레드 감시 중",  # 10/26: "감시한게 알아서하는거지?"
         "남은 것: 요유 몫: 합의한 Slack 공지 · 유요 몫: 없음",  # 지 in a noun is not a question ending
         "남은 것: 요유 몫: 팀원에게 보낼 메시지 · 유요 몫: 없음",
         "요유 몫: 없음 · 유요 몫: 없음\n\n남은 것: 요유 몫: 값 넣기 · 유요 몫: 없음",  # the last line counts too
@@ -521,6 +527,7 @@ def selftest():
         '남은 것: 요유 몫: "켜도 된다"고 답하기 · 유요 몫: 없음',
         "남은 것: 요유 몫: 세 길 중 하나 고르기 · 유요 몫: 없음",
         "남은 것: 요유 몫: 설계 승인 · 유요 몫: 구현 대기",  # a decision with no step in it
+        "남은 것: 요유 몫: 두 안 중 정답 고르기 · 유요 몫: 없음",  # 답 alone is no step, only 답할지
         "남은 것: 요유 몫: 훅을 만들지 결정 · 유요 몫: 없음",
         "남은 것: 요유 몫: 이 칸에서 `/clear` 입력 · 유요 몫: 없음",
         "남은 것: 요유 몫: 끌 때 `prod 허용` 한 번 · 유요 몫: 없음",
