@@ -8,6 +8,9 @@ LOG_FILE="$HOME/.claude/hooks/stop-hook-debug.log"
 # stdin에서 hook input 읽기
 HOOK_INPUT=$(cat)
 
+# The hidden workers herdr server: 요유 never enters those panes, and workers-watch tells the main pane what needs it.
+case "${HERDR_SOCKET_PATH:-}" in */sessions/workers/herdr.sock) echo "SKIPPED workers pane ${HERDR_PANE_ID:-}" >> "$LOG_FILE"; exit 0 ;; esac
+
 echo "=== $(date) ===" >> "$LOG_FILE"
 
 # tmux 세션/윈도우 정보 (알림에 직접 전달)
@@ -61,6 +64,6 @@ echo "" >> "$LOG_FILE"
 # Hammerspoon으로 알림 (클릭 시 tmux 세션 이동)
 # 메시지에서 작은따옴표 이스케이프
 ESCAPED_MESSAGE=$(echo "$MESSAGE" | sed "s/'/\\\\'/g")
-/opt/homebrew/bin/hs -c "claudeNotifyDone('$ESCAPED_MESSAGE', '$SESSION', '$WINDOW', '$PANE')" &
+"${NOTIFY_HS_BIN:-/opt/homebrew/bin/hs}" -c "claudeNotifyDone('$ESCAPED_MESSAGE', '$SESSION', '$WINDOW', '$PANE')" &
 
 exit 0

@@ -7,10 +7,8 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/opt/herdr/bin/herdr</string>
-        <string>--session</string>
-        <string>workers</string>
-        <string>server</string>
+        <string>/bin/sh</string>
+        <string>/Users/yoyoo/.dotfiles/tools/claude/herdr-workers-server.sh</string>
     </array>
 
     <key>RunAtLoad</key>
