@@ -55,7 +55,6 @@ share = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(share)  # reuse its 요유 몫 reader, code and quote stripping, and transcript fallback
 
 SESSION = re.compile(r"세션[ \t]*\**[ \t]*[:：][ \t]*\**([^·\n]*)")
-REPORT = re.compile(r"^[ \t]*(?:[-*][ \t]+)?\**(?:무엇을|왜|확인|남은[ \t]*것)[ \t]*\**[ \t]*[:：]", re.M)
 LEFT = re.compile(r"남은[ \t]*것[ \t]*\**[ \t]*[:：]")
 OPENER = re.compile(r"^spawn-([0-9A-Za-z]+)-")  # pane-spawn's agent name: spawn-<caller's terminal>-<random>
 
@@ -215,13 +214,6 @@ def held(label: str, terminal, agents: list) -> bool:
     return label.startswith("🔴") or any(opener(a.get("name")) == terminal for a in agents)
 
 
-def report(text: str) -> str:
-    """The closing lines of a reply: from the first 무엇을, 왜 or 남은 것 label to the end, else all of it."""
-    text = unicodedata.normalize("NFC", text)
-    m = REPORT.search(text)
-    return text[m.start() if m else 0:].strip()
-
-
 def reply_of(payload: dict):
     text = payload.get("last_assistant_message")
     if text is None and payload.get("transcript_path"):
@@ -300,7 +292,7 @@ def finish(reply: str, env):
         pt = env.get("AUTO_TAB_CLOSE_PANE_TELL") or os.path.join(HERE, "pane-tell")
         head = "이 칸의 마지막 보고입니다(칸을 닫기 전에 보냅니다)" if close else "이 칸의 보고입니다(칸은 열어 둡니다)"
         try:  # share.RELAYED knows the head: the lead's next report has to show its own check
-            subprocess.run([pt, lead, f"{head}. {share.RELAY_NOTE}:\n{report(reply)}\n\n전체 보고: {path}"], env=dict(env), timeout=5, **quiet)
+            subprocess.run([pt, lead, f"{head}. {share.RELAY_NOTE}:\n{unicodedata.normalize('NFC', reply).strip()}\n\n전체 보고: {path}"], env=dict(env), timeout=5, **quiet)
         except subprocess.TimeoutExpired:
             pass
     if close:
@@ -499,12 +491,6 @@ esac''')
     os.unlink(f"{sandbox}/agent-gone")
 
     full ="조사를 마쳤습니다.\n\n무엇을: 닫기 규칙을 바꿨습니다.\n왜: 칸이 남습니다.\n남은 것: 요유 몫: 없음 · 세션: 닫음"
-    assert report(full) == full[full.index("무엇을"):], "the report starts at 무엇을"
-    assert report("끝났습니다.\n\n**남은 것:** 요유 몫: 없음") == "**남은 것:** 요유 몫: 없음", "남은 것 alone is a report"
-    assert report("남은 것이 없습니다.") == "남은 것이 없습니다.", "without labels the whole text goes"
-    assert report(unicodedata.normalize("NFD", "끝.\n왜: 칸.")) == "왜: 칸.", "NFD text from a macOS paste"
-    assert report("끝.\n확인: 테스트를 다시 돌림\n무엇을: 고침") == "확인: 테스트를 다시 돌림\n무엇을: 고침", \
-        "what a 🫡 lead checked goes up with its report"
 
     reports = f"{sandbox}/reports"
 
@@ -562,7 +548,8 @@ esac''')
     herdr_says({"name": "spawned"}, [other_tab, crown, me])
     assert run(reported, pane2) == (0, "", "tell w1:p1\n" + closed), "the 👑 in this tab first"
     told = open(f"{sandbox}/told").read()
-    assert full[full.index("무엇을"):] in told and reports in told, f"the report and its file must reach the lead: {told!r}"
+    # 요유 2026-11-04 ("너희끼리는 그냥 편하게 주고받아"): a pane writes to its lead as it likes, so the lead gets all of it, not the labels.
+    assert full in told and reports in told, f"the whole reply and its file must reach the lead: {told!r}"
     # 요유 2026-11-04: a pane's "done" is its claim. The lead hears that it checks before passing it up, and its next report is
     # held to it by yoyoo-share-guard, which must recognise this very message.
     assert "직접 확인" in told and "'확인:'" in told, f"the lead is told to check before passing it up: {told!r}"
