@@ -18,7 +18,8 @@ page Claude had to write itself because Codex failed comes back unless it says s
 long reply with no page comes back and goes to Codex (요유 2026-11-01); a Codex session writes its own.
 The first last report after a pane's report reached this session (auto-tab-close's message, read from the session record)
 comes back without a `확인:` line and a command run since that is not a pane chore: a lead passing a pane's "done" on unchecked
-(요유 2026-11-04). Of 65 such reports by then, 9 came with no command run after the pane's report arrived.
+(요유 2026-11-04). It comes before the failure: in 53 such reports by then (tests and other leads' panes left out), a fresh
+review found no lead that passed a "done" on unchecked.
 A report with nothing left to do ends without a word: the question used to demand a rewrite. Of 102 fires on 10/28-10/31,
 25 went on to a tool call and 69 only wrote text, most of it the same report again.
 Claude runs it with --claude: the question goes back as Stop additionalContext, which Claude shows as "Stop hook feedback"
@@ -109,7 +110,7 @@ LABEL_LINE = re.compile(r"^\W*(?:무엇을|왜|확인|남은[ \t]*것|원인|조
 # report up with RELAY_NOTE; the first last report after one arrived needs a `확인:` line and a command run since it arrived.
 RELAY_NOTE = ("요유나 위 칸에 올리기 전에 결과를 이 칸에서 직접 확인하세요(테스트·명령을 다시 실행하거나 바뀐 동작·데이터를 직접 보기). "
               "아래는 하위 칸의 주장입니다. 보고에는 무엇을 직접 확인했고 결과가 어땠는지 '확인:' 줄로 적으세요")
-RELAYED = re.compile(r"이 칸의 (?:마지막 )?보고입니다\(")  # auto-tab-close's two heads
+RELAYED = re.compile(r"(?:^|\] )이 칸의 (?:마지막 )?보고입니다\(", re.M)  # auto-tab-close's two heads, after pane-tell's mark
 CHECK_LINE = re.compile(r"(?<![가-힣])확인[ \t]*\**[ \t]*[:：][ \t]*\**([^\n]*)")
 RELAY_REASON = ("yoyoo-share-guard: 하위 칸의 보고를 받은 뒤 처음 쓰는 보고인데, 이 칸에서 결과를 직접 확인한 흔적이 없습니다. "
                 "하위 칸의 '다 했다'는 주장일 뿐입니다. 지금 도구로 직접 확인하세요: 테스트·명령을 다시 실행하거나 바뀐 동작·데이터를 직접 보세요. "
@@ -120,8 +121,12 @@ NOT_A_CHECK = {"TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop", "T
                "MultiEdit", "NotebookEdit", "ScheduleWakeup", "CronCreate", "CronDelete", "mcp__task-progress__progress", "Agent",
                "Task", "update_plan", "apply_patch", "spawn_agent", "send_message", "followup_task", "list_agents", "sleep",
                "request_user_input_async"}
-SHELL_STEP = re.compile(r"&&|\|\|?|;|\n")
-CHORE_STEP = re.compile(r"^\s*(?:\S*/)?(?:cd|echo|printf|true|sleep|pane-label|pane-tell|pane-spawn|pane-temp|herdr)\b|pane-reports")
+# A command is judged by the first stage of its pipeline (`herdr … | head` is still a chore), heredoc bodies are text, and a plain
+# assignment runs nothing. ponytail: a regex reading of shell, as in auto-tab-close.
+COMMANDS = re.compile(r"&&|\|\||;|\n")
+CHORE_STEP = re.compile(r"^\s*(?:\w+=[\"']?\$\(\s*)?(?:\S*/)?(?:cd|echo|printf|true|sleep|pane-label|pane-tell|pane-spawn|pane-temp|herdr)\b"
+                        r"|pane-reports|^\s*\w+=[^\s$`]*\s*$")
+HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1[^\n]*\n.*?^[ \t]*\2[ \t]*$", re.S | re.M)
 # Codex runs commands as tools.exec_command({cmd:"…"}), with single quotes too, or as JSON arguments {"cmd": "…"}.
 CODEX_CMD = re.compile(r"\bcmd[\"']?\s*:\s*(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')")
 # A call a hook or a permission rule stopped never ran: Claude's error result, Codex's output text. A test that ran and failed counts.
@@ -300,7 +305,8 @@ def records(lines):
 
 
 def chore(name: str, command: str) -> bool:
-    return name in NOT_A_CHECK or all(CHORE_STEP.search(step) for step in SHELL_STEP.split(command) if step.strip())
+    commands = [c for c in COMMANDS.split(HEREDOC.sub("", command)) if re.search(r"\w", c)]
+    return name in NOT_A_CHECK or all(CHORE_STEP.search(c.split("|")[0]) for c in commands)
 
 
 def relay_reason(payload: dict, text: str) -> str | None:
@@ -781,7 +787,12 @@ def selftest():
             ("a check a hook refused", [claude_in(told), claude_call("Bash", "r1", command="npm test"),
                                         claude_out("r1", "PreToolUse:Bash hook error: secret-print-guard: 막음", error=True)], checked),
             ("Codex: a check a hook refused", [codex_in(told), {**codex_exec("npm test"), "payload": {**codex_exec("npm test")["payload"], "call_id": "c1"}},
-                                               codex_out("c1", "Script error:\nCommand blocked by PreToolUse hook: secret-print-guard")], checked)):
+                                               codex_out("c1", "Script error:\nCommand blocked by PreToolUse hook: secret-print-guard")], checked),
+            # Refutation review, 2026-11-04: a pipe, a heredoc body or an assignment made a pane chore count as a check.
+            ("a chore piped into head", [claude_in(told), claude_call("Bash", command="herdr pane close w5:pPP 2>&1 | head -3")], checked),
+            ("a chore inside an assignment", [claude_in(told), claude_call("Bash", command="sid=$(herdr pane get w1:p3 | jq -r .a); echo $sid")], checked),
+            ("an assignment and a pane-report read", [claude_in(told), claude_call("Bash", command="f=/x/pane-reports/a.md\ntail -20 ~/.local/state/pane-reports/a.md")], checked),
+            ("a heredoc body is no command", [claude_in(told), claude_call("Bash", command="pane-tell w1:p3 \"$(cat <<'EOF'\nnpm test 돌려 줘\nEOF\n)\"")], checked)):
         assert "하위 칸" in (relayed(records, text) or ""), f"should send back: {label}"
     for label, records, text in (
             ("checked and says so", [claude_in(told), *chores, test_run], checked),
@@ -796,7 +807,10 @@ def selftest():
             ("a test that ran and failed is a check", [claude_in(told), claude_call("Bash", "r1", command="npm test"),
                                                        claude_out("r1", "Exit code 1\n3 failing", error=True)], checked),
             ("Codex: a check as JSON arguments", [codex_in(told), {"type": "response_item", "payload": {
-                "type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": "npm test"})}}], checked)):
+                "type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": "npm test"})}}], checked),
+            ("a check piped into tail", [claude_in(told), claude_call("Bash", command="cd /w && npm test 2>&1 | tail -5")], checked),
+            ("a notice that quotes the head is no pane report", [claude_in(
+                "<task-notification>리드가 받은 글: 이 칸의 마지막 보고입니다(칸을 닫기 전에 보냅니다) 를 확인</task-notification>")], bare)):
         assert relayed(records, text) is None, f"should pass: {label}"
     assert relayed([claude_in(told)], bare) == relayed([claude_in(told)], bare), "same input, same answer"
     path = transcript([claude_in(told)])
