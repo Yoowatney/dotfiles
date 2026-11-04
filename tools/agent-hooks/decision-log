@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+"""decision-log: keep the decisions the user made, and reuse them later.
+
+The main pane records each decision here and asks `apply` before asking the
+user again. The tool, not a rule, refuses the protected classes.
+
+Usage:
+  decision-log add --kind K --scope company|personal --question Q --chosen C
+                   [--options A|B] [--recommended R] [--reason T]
+                   [--source terminal|slack] [--ref URL]       exit 2 on a bad form
+  decision-log apply K      0 = print last choice, 3 = no past decision,
+                            4 = protected class (always ask the user)
+  decision-log ripe         kinds decided 3 times in a row the same way, not yet proposed
+  decision-log proposed K | promoted K | revoke K               append one event
+  decision-log kinds        existing kinds with their decided counts
+  decision-log --selftest
+
+Kind is <class>/<topic>; class is one of CLASSES, topic is [a-z0-9-]+.
+State: $XDG_STATE_HOME/orchestrator/decisions.jsonl (default ~/.local/state), one JSON object per line.
+Not a hook: an unexpected error exits non-zero.
+"""
+from __future__ import annotations
+
+import sys
+
+sys.dont_write_bytecode = True
+
+import argparse
+import datetime
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+from contextlib import redirect_stderr, redirect_stdout
+
+CLASSES = ("method", "merge", "comment", "cleanup", "check", "scope",
+           "prod", "data", "external", "money", "outbound")
+PROTECTED = ("prod", "data", "external", "money", "outbound")
+KIND_RE = re.compile(r"(%s)/[a-z0-9-]+" % "|".join(CLASSES))
+PROTECTED_MSG = "보호 종류: 지난 결정이 있어도 요유에게 묻는다"
+KEYS = ("ts", "event", "kind", "scope", "question", "options", "recommended",
+        "chosen", "reason", "source", "ref")
+
+
+def state_file() -> str:
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.environ.get("HOME") or os.path.expanduser("~"), ".local", "state")
+    return os.path.join(base, "orchestrator", "decisions.jsonl")
+
+
+def read_events() -> list:
+    try:
+        with open(state_file(), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return []
+    events = []
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(e, dict) or not isinstance(e.get("event"), str) \
+                or not isinstance(e.get("kind"), str):
+            continue
+        if e["event"] == "decided" and not (isinstance(e.get("chosen"), str) and e["chosen"]):
+            continue
+        events.append(e)
+    return events
+
+
+def append(**fields) -> None:
+    rec = {k: None for k in KEYS}
+    rec.update(fields)
+    rec["ts"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    path = state_file()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def since_revoke(events: list, kind: str) -> list:
+    """Events of one kind after its last `revoked`."""
+    mine = [e for e in events if e["kind"] == kind]
+    for i in range(len(mine) - 1, -1, -1):
+        if mine[i]["event"] == "revoked":
+            return mine[i + 1:]
+    return mine
+
+
+def cmd_apply(kind: str) -> int:
+    # The protected check comes first, before the format check and before reading the file.
+    if kind.split("/")[0].strip().lower() in PROTECTED:
+        print(PROTECTED_MSG)
+        return 4
+    if not KIND_RE.fullmatch(kind):
+        print("kind 형식이 틀렸다: <class>/<topic>", file=sys.stderr)
+        return 2
+    decided = [e for e in since_revoke(read_events(), kind) if e["event"] == "decided"]
+    if not decided:
+        print("지난 결정이 없다")
+        return 3
+    print(decided[-1]["chosen"])
+    print("되돌리려면: decision-log revoke " + kind)
+    return 0
+
+
+def cmd_ripe() -> int:
+    events = read_events()
+    for kind in sorted({e["kind"] for e in events}):
+        if not KIND_RE.fullmatch(kind) or kind.split("/")[0] in PROTECTED:
+            continue
+        recent = since_revoke(events, kind)
+        if any(e["event"] in ("proposed", "promoted") for e in recent):
+            continue
+        last3 = [e["chosen"] for e in recent if e["event"] == "decided"][-3:]
+        if len(last3) == 3 and len(set(last3)) == 1:
+            print(kind)
+    return 0
+
+
+def cmd_kinds() -> int:
+    events = read_events()
+    for kind in sorted({e["kind"] for e in events}):
+        d = [e for e in events if e["kind"] == kind and e["event"] == "decided"]
+        scopes = ",".join(sorted({e["scope"] for e in d if isinstance(e.get("scope"), str)}))
+        print(("%s %d %s" % (kind, len(d), scopes)).rstrip())
+    return 0
+
+
+def main(argv: list) -> int:
+    p = argparse.ArgumentParser(prog="decision-log")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    a = sub.add_parser("add")
+    a.add_argument("--kind", required=True)
+    a.add_argument("--scope", required=True, choices=("company", "personal"))
+    a.add_argument("--question", required=True)
+    a.add_argument("--chosen", required=True)
+    a.add_argument("--options")
+    a.add_argument("--recommended")
+    a.add_argument("--reason")
+    a.add_argument("--source", choices=("terminal", "slack"))
+    a.add_argument("--ref")
+    for name in ("apply", "proposed", "promoted", "revoke"):
+        sub.add_parser(name).add_argument("kind")
+    sub.add_parser("ripe")
+    sub.add_parser("kinds")
+    args = p.parse_args(argv)
+
+    if args.cmd == "apply":
+        return cmd_apply(args.kind)
+    if args.cmd == "ripe":
+        return cmd_ripe()
+    if args.cmd == "kinds":
+        return cmd_kinds()
+    if not KIND_RE.fullmatch(args.kind):
+        print("kind 형식이 틀렸다: <class>/<topic>", file=sys.stderr)
+        return 2
+    if args.cmd == "add":
+        if not args.question.strip() or not args.chosen.strip():
+            print("--question과 --chosen은 비워 둘 수 없다", file=sys.stderr)
+            return 2
+        options = args.options.split("|") if args.options else None
+        append(event="decided", kind=args.kind, scope=args.scope, question=args.question,
+               options=options, recommended=args.recommended, chosen=args.chosen,
+               reason=args.reason, source=args.source, ref=args.ref)
+    else:
+        append(event={"proposed": "proposed", "promoted": "promoted", "revoke": "revoked"}[args.cmd],
+               kind=args.kind)
+    return 0
+
+
+def selftest() -> int:
+    root = tempfile.mkdtemp(prefix="decision-log-test-")
+    os.environ.pop("HERDR_SOCKET_PATH", None)
+    last = {"out": ""}
+
+    def fresh() -> None:
+        os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(dir=root)
+
+    def cli(argv):
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf), redirect_stderr(io.StringIO()):
+                code = main(argv)
+        except SystemExit as e:
+            code = e.code
+        last["out"] = buf.getvalue()
+        return code
+
+    def out():
+        return last["out"]
+
+    def add(k, c):
+        assert cli(["add", "--kind", k, "--scope", "company", "--question", "q", "--chosen", c]) == 0
+
+    def ripe():
+        cli(["ripe"])
+        return out().splitlines()
+
+    def raw(text):
+        path = state_file()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(text)
+
+    def file_text():
+        try:
+            with open(state_file(), encoding="utf-8") as f:
+                return f.read()
+        except OSError:
+            return None
+
+    try:
+        fresh()
+        # The brief's cases, in order.
+        assert cli(["add", "--kind", "merge/approved-pr", "--scope", "company", "--question", "q", "--chosen", "머지"]) == 0
+        base = ["--scope", "company", "--question", "q", "--chosen", "x"]
+        assert cli(["add", "--kind", "bad", *base]) == 2 and cli(["add", "--kind", "unknown/x", *base]) == 2
+        assert cli(["add", "--kind", "merge/approved-pr", "--scope", "team", "--question", "q", "--chosen", "x"]) == 2
+        assert cli(["apply", "merge/approved-pr"]) == 0 and "머지" in out() and "decision-log revoke merge/approved-pr" in out()
+        assert cli(["apply", "check/none"]) == 3
+        add("prod/promote-api", "승격")
+        assert cli(["apply", "prod/promote-api"]) == 4, "a protected class is refused by the tool, whatever was decided before"
+        for _ in range(3): add("prod/promote-api", "승격")
+        assert "prod/promote-api" not in ripe(), "a protected class is never proposed"
+        add("merge/approved-pr", "머지"); add("merge/approved-pr", "머지")
+        assert ripe() == ["merge/approved-pr"]
+        cli(["proposed", "merge/approved-pr"]); assert ripe() == []
+        add("cleanup/old-branch", "삭제"); add("cleanup/old-branch", "삭제"); add("cleanup/old-branch", "보존")
+        assert ripe() == [], "the last three must agree"
+        cli(["revoke", "merge/approved-pr"]); assert cli(["apply", "merge/approved-pr"]) == 3
+
+        # Protected classes: the tool refuses whatever the history says.
+        for c in PROTECTED:
+            fresh()
+            k = c + "/x"
+            assert cli(["apply", k]) == 4 and out().strip() == PROTECTED_MSG
+            for _ in range(4): add(k, "go")
+            assert cli(["apply", k]) == 4 and out().strip() == PROTECTED_MSG
+            assert k not in ripe()
+            cli(["promoted", k]); assert cli(["apply", k]) == 4
+            cli(["revoke", k]); assert cli(["apply", k]) == 4
+        assert cli(["apply", "prod"]) == 4 and cli(["apply", "PROD/x"]) == 4
+
+        # apply after revoke (R37).
+        fresh()
+        add("method/a", "one"); cli(["revoke", "method/a"]); cli(["proposed", "method/a"])
+        assert cli(["apply", "method/a"]) == 3
+        add("method/a", "two")
+        assert cli(["apply", "method/a"]) == 0 and "two" in out()
+
+        # ripe counts from the last revoke (R38).
+        fresh()
+        add("check/a", "y"); add("check/a", "y"); cli(["revoke", "check/a"])
+        add("check/a", "y"); add("check/a", "y")
+        assert ripe() == []
+        add("check/a", "y"); assert ripe() == ["check/a"]
+        cli(["promoted", "check/a"]); assert ripe() == []
+        fresh()
+        add("scope/b", "y"); add("scope/a", "y")
+        for k in ("scope/b", "scope/a"): add(k, "y"); add(k, "y")
+        assert ripe() == ["scope/a", "scope/b"], "sorted"
+
+        # Malformed kinds write nothing (R39).
+        fresh()
+        add("merge/x", "m")
+        before = file_text()
+        assert cli(["revoke", "MERGE/x"]) == 2 and cli(["proposed", "bad"]) == 2 and cli(["promoted", "merge/x\n"]) == 2
+        assert cli(["apply", "bad"]) == 2 and cli(["add", "--kind", "prod", *base]) == 2
+        assert cli(["add", "--kind", "merge/x\n", *base]) == 2
+        assert cli(["add", "--kind", "merge/x", "--scope", "company", "--question", " ", "--chosen", "x"]) == 2
+        assert cli(["add", "--kind", "merge/x", "--scope", "company", "--question", "q", "--chosen", ""]) == 2
+        assert cli(["add", "--kind", "merge/x", *base, "--source", "web"]) == 2
+        assert file_text() == before
+
+        # Broken lines and hand-written kinds change nothing.
+        fresh()
+        add("merge/x", "m"); raw("garbage\n"); add("merge/x", "m"); raw("42\n")
+        raw(json.dumps({"event": "decided", "kind": "merge/x"}) + "\n"); add("merge/x", "m")
+        assert ripe() == ["merge/x"]
+        for _ in range(3): raw(json.dumps({"event": "decided", "kind": "PROD/x", "chosen": "go"}) + "\n")
+        assert ripe() == ["merge/x"]
+
+        # A full add, and kinds.
+        fresh()
+        assert cli(["add", "--kind", "comment/tone", "--scope", "personal", "--question", "어떻게?", "--chosen", "짧게",
+                    "--options", "짧게|길게", "--recommended", "짧게", "--reason", "이유", "--source", "slack",
+                    "--ref", "https://example.com/1"]) == 0
+        rec = json.loads(file_text().splitlines()[0])
+        assert rec.pop("ts")[10] == "T"
+        assert rec == {"event": "decided", "kind": "comment/tone", "scope": "personal", "question": "어떻게?",
+                       "options": ["짧게", "길게"], "recommended": "짧게", "chosen": "짧게", "reason": "이유",
+                       "source": "slack", "ref": "https://example.com/1"}
+        assert "짧게" in file_text(), "Korean stays unescaped"
+        add("merge/x", "m")
+        cli(["kinds"]); assert out().splitlines() == ["comment/tone 1 personal", "merge/x 1 company"]
+
+        # The real process, directly and through a symlink.
+        fresh()
+        link = os.path.join(root, "decision-log")
+        os.symlink(os.path.abspath(__file__), link)
+        env = {**os.environ}
+        env.pop("HERDR_SOCKET_PATH", None)
+
+        def run(script, *a):
+            return subprocess.run([sys.executable, "-I", script, *a], env=env, capture_output=True, text=True)
+
+        for script in (os.path.abspath(__file__), link):
+            r = run(script, "apply", "money/x")
+            assert r.returncode == 4 and PROTECTED_MSG in r.stdout, r
+            assert run(script, "apply", "merge/z").returncode == 3
+        assert run(link, "add", "--kind", "merge/z", *base).returncode == 0
+        assert run(link, "apply", "merge/z").returncode == 0
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    print("selftest ok")
+    return 0
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--selftest"]:
+        sys.exit(selftest())
+    sys.exit(main(sys.argv[1:]))
