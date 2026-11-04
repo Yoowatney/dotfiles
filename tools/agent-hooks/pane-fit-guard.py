@@ -59,14 +59,36 @@ DELEGATE_ASK = ("pane-fit: 이 칸은 일을 나눠 주기만 합니다. 요유�
 OWN_TOOLS = {"ToolSearch", "Skill", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop", "ScheduleWakeup",
              "AskUserQuestion", "mcp__task-progress__progress", "update_plan"}
 OWN_FILES = re.compile(r"/\.local/state/(?:pane-reports|orchestrator)/|/skills/main-orchestrator/SKILL\.md$")
-# Each may sit in an `if` or an `out=$(…)`: a stuck pane is read and answered that way (seen 2026-11-05).
-LEAD_IN = r"^\s*(?:(?:if|then|elif|else|!)\s+)*"
-OWN_COMMAND = re.compile(LEAD_IN + r"(?:\w+=\$\(\s*)?(?:(?:\S*/)?(?:cd|pane-label|pane-tell|pane-spawn|herdr|board\.sh|decision-log|handoff|launchctl)\b"
-                         r"|python3\s+\S*main-channel\.py\b|(?:cat|tail|head|grep|rg|awk|sed)\s.*/\.local/state/(?:pane-reports|orchestrator)/)")
-# Prints or waits: fine beside a chore, no chore by itself. A redirect into a file is a write, so it is no longer neutral.
-NEUTRAL = re.compile(LEAD_IN + r"(?:echo|printf|sleep|true|fi)\b(?![^>]*>(?!&|\s*/dev/null))")
-QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")  # a message's words are no commands
-STAGES = re.compile(r"&&|\|\||;|\n")
+# Runs something from inside a word. Beside herdr or a print that is work; in a message to pane-tell or board.sh it is the message.
+SUBSTITUTION = r"\$\(|`|<\("
+RUNS = rf"(?!.*(?:{SUBSTITUTION}))"
+LEAD_IN = r"(?:(?:if|then|elif|else|!)\s+)+"
+STUCK_PANE = r"(?:\S*/)?herdr(?:\s+--session\s+\S+)?\s+(?:agent|pane)\s+(?:read|send-keys)(?=\s|$)" + RUNS
+# One report file and nothing else, so `rg x /repo <report>` is no read of a report. sed and awk take only a program that QUOTED left as ''.
+REPORT = r"\s+\S*/\.local/state/(?:pane-reports|orchestrator)/[^\s/]*\s*$"
+OPTIONS = r"(?:\s+-\w+(?:\s+\d+)?)*"
+# Only a stuck pane's read or keys may sit in an `if` or an `out=$(…)` (seen 2026-11-05), with nothing after the `)`: `out=$(x) npm test` runs npm.
+OWN_COMMAND = re.compile(r"^\s*(?:(?:\S*/)?(?:cd|pane-label|pane-tell|pane-spawn|board\.sh|decision-log|handoff|launchctl)(?=\s|$)"
+                         r"|(?:\S*/)?herdr(?=\s|$)" + RUNS + r"|python3\s+\S*main-channel\.py(?=\s|$)"
+                         r"|" + LEAD_IN + STUCK_PANE + r"|\w+=\$\(\s*" + STUCK_PANE + r"[^()]*\)?\s*$"
+                         r"|(?:cat|tail|head)" + OPTIONS + REPORT + r"|(?:grep|rg)" + OPTIONS + r"\s+[^\s/-]+" + REPORT
+                         + r"|awk\s+''" + REPORT + r"|sed\s+-n\s+(?:''|\d+(?:,\d+)?p)" + REPORT + r")")
+# Prints or waits: fine beside a chore, no chore by itself.
+NEUTRAL = re.compile(r"^\s*(?:" + LEAD_IN + r")?(?:(?:echo|printf|sleep|true)(?=\s|$)" + RUNS + r"|fi\s*$)")
+# What may read a chore's output. No path: `| tail /repo/a.py` is a lookup. ponytail: a bare relative file name still reads; add when one shows up.
+FILTER = re.compile(r"^\s*(?:grep|rg|head|tail|cut|jq|wc|sed\s+-n)(?=\s|$)[^/()!]*\)?\s*$")
+HARMLESS_REDIRECT = re.compile(r"\s*(?:[\d&]?>>?\s*/dev/null(?![\w./-])|\d?>&[\d-](?![\w.]))")  # any other `>` left in a stage is a write
+QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", re.S)
+ACTS = re.compile(r"print[^;}]*[>|]|\b(?:system|getline)\b|(?<![A-Za-z])w[\s/]")  # an awk or sed program that writes or runs
+STAGES = re.compile(r"&&|\|\||;|\n|(?<!>)&(?!>)")
+
+
+def blank_quote(match) -> str:
+    """A message's words are no commands, except what runs inside double quotes and a program that acts: those stay visible."""
+    text = match.group(0)
+    if text[0] == '"' and re.search(SUBSTITUTION, text):
+        return "$()"
+    return "'!'" if ACTS.search(text) else "''"
 
 
 def state_file(payload: dict, env) -> str | None:
@@ -94,9 +116,14 @@ def stays_here(payload: dict) -> bool:
     repeated call, once a message."""
     tool, inp = payload.get("tool_name"), payload.get("tool_input") or {}
     if tool == "Bash":
-        stages = (stage.split("|")[0] for stage in STAGES.split(QUOTED.sub("''", str(inp.get("command") or ""))))
-        real = [stage for stage in stages if stage.strip() and not NEUTRAL.search(stage)]
-        return bool(real) and all(OWN_COMMAND.search(stage) for stage in real)
+        stages = [HARMLESS_REDIRECT.sub("", stage) for stage in STAGES.split(QUOTED.sub(blank_quote, str(inp.get("command") or ""))) if stage.strip()]
+        if any(">" in stage for stage in stages):
+            return False
+        pipelines = [stage.split("|") for stage in stages]
+        if not all(FILTER.search(reader) for _, *readers in pipelines for reader in readers):
+            return False
+        real = [head for head, *_ in pipelines if not NEUTRAL.search(head)]
+        return bool(real) and all(OWN_COMMAND.search(head) for head in real)
     if tool in EDITORS:
         return not starts_work(payload)
     return tool in OWN_TOOLS or (tool == "Read" and bool(OWN_FILES.search(str(inp.get("file_path") or ""))))
@@ -139,6 +166,9 @@ def check(payload: dict, env, now: float | None = None) -> str | None:
     if spawning or not hand_opened(payload, env):
         return None
     return START if starts_work(payload) else LATE
+
+
+REPORT_FILE = "/Users/y/.local/state/pane-reports/2026-11-05.md"
 
 
 def selftest():
@@ -186,7 +216,23 @@ def selftest():
                         p("Bash", command="if true; then echo y; else echo n; fi"), p("Bash", command="sleep 3"), p("Bash", command="printf '%s' x; echo y"),
                         p("Bash", command="echo 'out=$(herdr agent read w1:p2)'"), p("Bash", command="tail -5 ~/.local/state/pane-reports/a.md; npm test"),
                         p("Bash", command="herdr agent list; echo x > /repo/a.py"), p("Bash", command="herdr agent list; printf x >>/repo/a.py"),
-                        p("Bash", command="herdr agent list; echo x 2>/repo/err")):
+                        p("Bash", command="herdr agent list; echo x 2>/repo/err"),
+                        # A check pane's 2026-11-05 entry: what the parent of 274c990 asked and 274c990 let through, 7 of them file writes.
+                        *(p("Bash", command=gap) for gap in (
+                            "herdr agent list; echo x >/dev/nullx", "herdr agent list; echo x >/dev/null > /repo/a.py", "herdr agent list; echo x >&2 > /repo/a.py",
+                            'herdr agent list; echo "$(npm test)"', "herdr agent list; echo $(git log -1)", "herdr agent list; echo x | tee /repo/a.py",
+                            "herdr agent list; echo npm test | sh", "herdr agent list; sleep-and-deploy", "herdr agent list; fi-nalize", "out=$(herdr agent list) npm test",
+                            f"rg secret /repo {REPORT_FILE}", f"awk '{{print > \"/repo/a.py\"}}' {REPORT_FILE}", f"sed -i '' 's/a/b/' {REPORT_FILE}", f"sed -n 1p /repo/a.py > {REPORT_FILE}",
+                            # The same entry: older gaps, which the same narrowing closes.
+                            "herdr agent list & npm test", "herdr agent list > /repo/a.py", "herdr agent list | sh", 'herdr agent read "$(npm test)"', "herdr-deploy --all",
+                            f"cat /repo/a.py {REPORT_FILE}", f"cat {REPORT_FILE} > /repo/a.py",
+                            # Neighbours of those forms.
+                            "herdr agent read w1:p2 | tee /repo/a.py", "herdr agent list; echo x | sed -n 'w /repo/a.py'", "out=$(herdr agent read w1:p2 | sh)",
+                            "out=$(herdr agent read w1:p2 | tail -3) npm test", "out=$(herdr agent read w1:p2) npm test", "if herdr agent read w1:p2; then npm test; fi", "out=$(herdr agent list); echo \"$out\"",
+                            "if ! herdr agent get w1:p2 >/dev/null; then echo gone; fi", "if herdr agent get w1:p2; then echo a; else echo b; fi",
+                            f"sed -n 'w /repo/a.py' {REPORT_FILE}", f"sed -n '1w /repo/a.py' {REPORT_FILE}", f"sed -n 1,5p a.py {REPORT_FILE}", f"sed -i 's/a/b/' {REPORT_FILE}",
+                            f"awk '{{print | \"sh\"}}' {REPORT_FILE}", f"awk 'BEGIN{{system(\"npm test\")}}' {REPORT_FILE}", f"awk -f /repo/a.awk {REPORT_FILE}",
+                            f"rg secret . {REPORT_FILE}", f"grep x a.py {REPORT_FILE}", f"tail -5 a.py {REPORT_FILE}"))):
             armed_main()
             assert check(payload, env) == DELEGATE_ASK, f"the main pane is asked: {payload}"
             assert check(payload, env) is None, f"once a message, so a one-line answer or a prod step goes on: {payload}"
@@ -216,8 +262,21 @@ def selftest():
                         )),
                         p("Bash", command="sed -n 159,215p ~/.local/state/pane-reports/2026-11-05.md"), p("Bash", command="rg -n 01:28 ~/.local/state/pane-reports/2026-11-05.md"),
                         p("Bash", command="herdr --session workers pane send-keys w1:pQ Enter"), p("Bash", command="out=$(herdr --session workers agent read w1:pQ); echo \"$out\" | tail -5"),
-                        p("Bash", command="if ! herdr agent get w1:p2 >/dev/null; then echo gone; fi"),
-                        p("Bash", command="herdr agent list; echo x >&2; echo y >/dev/null; echo z 2>&1; echo 'a > b'")):
+                        p("Bash", command="if herdr --session workers agent read w1:p2 | grep -q x; then herdr --session workers agent send-keys w1:p2 Enter; fi"),
+                        p("Bash", command="out=$(herdr --session workers agent read w1:p2 2>&1 | tail -3); echo \"$out\""),
+                        p("Bash", command="herdr agent list; echo x >&2; echo y >/dev/null; echo z 2>&1; echo 'a > b'"),
+                        # Reading an entry, in the forms the check pane and the real main pane used.
+                        p("Bash", command=f"sed -n '/02:07:56/,$p' {REPORT_FILE}"), p("Bash", command=f"awk 'NR>=159 && NR<=215' {REPORT_FILE}"),
+                        p("Bash", command=f'rg -n "남은 것" {REPORT_FILE}'), p("Bash", command=f"grep -n '^## ' {REPORT_FILE} | head -5"),
+                        p("Bash", command="tail -5 $HOME/.local/state/pane-reports/2026-11-05.md"), p("Bash", command=f"tail -n 40 {REPORT_FILE} 2>/dev/null"),
+                        p("Bash", command=f"awk '/02:05:07/{{f=1}} f{{print}}' {REPORT_FILE} | sed -n '/찾은 결함/,$p' | cut -c1-600"),
+                        # The main pane's real chores with a plain print between them (its record, 2026-11-04): these stay.
+                        p("Bash", command='pane-tell --list 2>&1 | head -40; echo ---; herdr pane get "$HERDR_PANE_ID" 2>&1 | head -20'),
+                        p("Bash", command="cat ~/.local/state/orchestrator/personal-decisions.md 2>&1; echo '--- reuse-notes'; cat ~/.local/state/orchestrator/reuse-notes.md 2>&1"),
+                        p("Bash", command="decision-log kinds 2>&1 | head -20; echo ---; decision-log add --help 2>&1 | head -20"),
+                        p("Bash", command="herdr --session workers pane close w1:pV | head -c 120; echo; herdr --session workers agent list | jq -r '.result.agents[]'"),
+                        p("Bash", command='pane-tell workers/w1:pF "a \\"b > c\\"; d"'), p("Bash", command='pane-tell workers/w1:pF "$(cat /tmp/x/a.md)"'),
+                        p("Bash", command='pane-tell workers/w1:pF "a `b`; c"')):
             armed_main()
             assert check(payload, env) is None, f"what stays in the main pane: {payload}"
             assert os.path.exists(state_file(p(), env)), f"and the question stays for the first lookup: {payload}"
