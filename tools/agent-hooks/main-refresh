@@ -70,7 +70,8 @@ late # the Mac may have slept through the first wait
 late # --box-ready takes a moment; the Mac may have slept across it
 
 req=$(date +%s)
-out=$("$TELL" "$id" "[main-refresh] 새벽 정리입니다. 지금 도는 밑 칸과 각 칸의 일, 모아 둔 결정(보드 링크, 개인 결정 파일), 오늘 남은 일을 handoff save로 남기고 '인계 저장함' 한 줄로 끝내세요. 다른 일은 하지 마세요." 2>/dev/null) \
+ask="[main-refresh] 새벽 정리입니다. 지금 도는 밑 칸과 각 칸의 일, 모아 둔 결정(보드 링크, 개인 결정 파일), 오늘 남은 일을 handoff save로 남기고 '인계 저장함' 한 줄로 끝내세요. 다른 일은 하지 마세요."
+out=$("$TELL" "$id" "$ask" 2>/dev/null) \
   || skip "인계 요청을 보내지 못해 건너뜀"
 case "$out" in told*) ;; *) skip "인계 요청이 대기열에 들어가 건너뜀" ;; esac
 # stat -f %m is whole seconds like the request time, so a handoff from earlier does not count; -s: an empty memo is none.
@@ -78,13 +79,14 @@ fresh() { [ -s "$hdir/$key.md" ] && [ "$(stat -f %m "$hdir/$key.md")" -ge "$req"
 wait_for "$HANDOFF_WAIT" fresh || skip "인계가 저장되지 않아 건너뜀"
 
 late
-# The last real user message must still be our request. An array that is not only tool results (an image) is a new message.
-tail -n 200 "$transcript" 2>/dev/null | jq -rs '[.[] | select(.type == "user" and .isMeta != true) | .message.content | if type == "string" then . else (map(select(.type != "tool_result")) | select(length > 0) | "array") end][-1] // ""' 2>/dev/null | grep -qF '[main-refresh]' \
-  || skip "인계 뒤에 새 대화가 있어 건너뜀"
 "$TELL" --box-ready "$id" claude >/dev/null 2>&1 || skip "입력창이 비어 있지 않아 건너뜀"
-# --box-ready reads the screen twice 0.7 s apart: a sleep or a new turn can land in between.
+# --box-ready reads the screen twice 0.7 s apart: a sleep or a whole new turn can land in between, so the checks follow it.
 late
 idle || skip "인계 뒤에 칸이 다시 일하고 있어 건너뜀"
+# The last real user message must still be our whole request (pane-tell prefixes it, so compare the end): a person's
+# later message that merely mentions the marker is a new turn. An array that is not only tool results (an image) is one too.
+last=$(tail -n 200 "$transcript" 2>/dev/null | jq -rs '[.[] | select(.type == "user" and .isMeta != true) | .message.content | if type == "string" then . else (map(select(.type != "tool_result")) | select(length > 0) | "array") end][-1] // ""' 2>/dev/null)
+[[ "$last" == *"$ask" ]] || skip "인계 뒤에 새 대화가 있어 건너뜀"
 # Straight through herdr, never pane-tell's queue: a queued /clear would fire hours later and wipe the main pane.
 "$H" agent prompt "$id" /clear >/dev/null 2>&1 || skip "/clear를 보내지 못해 건너뜀"
 mkdir -p "$DIR" && : > "$DIR/refreshed-$day"

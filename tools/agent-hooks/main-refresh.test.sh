@@ -35,6 +35,7 @@ if [ "\$1" = --box-ready ]; then
   n=\$((\$(cat "$SANDBOX/box-n" 2>/dev/null || echo 0) + 1)); echo "\$n" > "$SANDBOX/box-n"
   [ "\$n" != 1 ] || [ -z "\${BOX_LATE_FIRST:-}" ] || echo 09 > "$SANDBOX/hour"
   if [ "\$n" -ge 2 ]; then
+    [ -z "\${BOX_TURN:-}" ] || echo '{"type":"user","message":{"content":"typed during the box check"}}' >> "\$(cat "$SANDBOX/state/agent-handoff/w5:p3.md.transcript")"
     [ -z "\${BOX_WORK:-}" ] || echo working > "$SANDBOX/status"
     [ -z "\${BOX_LATE:-}" ] || echo 09 > "$SANDBOX/hour"
     [ -z "\${BOX_FULL_AFTER:-}" ] || exit 1
@@ -47,6 +48,7 @@ case "\$2" in *"handoff save"*)
   jq -nc --arg c "\$2" '{type: "user", message: {content: \$c}}' >> "\$t"
   case "\${NEW_TURN:-}" in
     yes) echo '{"type":"user","message":{"content":"a new message"}}' >> "\$t" ;;
+    mention) echo '{"type":"user","message":{"content":"이 [main-refresh] 메시지는 무슨 뜻인가요?"}}' >> "\$t" ;;
     meta) echo '{"type":"user","isMeta":true,"message":{"content":"meta line"}}' >> "\$t"
           echo '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}' >> "\$t" ;;
     image) echo '{"type":"user","message":{"content":[{"type":"image"},{"type":"text","text":"hi"}]}}' >> "\$t" ;;
@@ -129,6 +131,10 @@ rm_stamp; mr NEW_TURN=meta MAIN_REFRESH_HOUR=05
 check "meta and tool-result lines are not new messages" "$(cleared)" 1
 rm_stamp; mr NEW_TURN=image MAIN_REFRESH_HOUR=05
 check "a message with an image after the save: no /clear, announced" "$(cleared)|$(grep -c '새 대화' "$S/orchestrator/refresh.log")" "0|1"
+rm_stamp; mr NEW_TURN=mention MAIN_REFRESH_HOUR=05
+check "a later message that mentions the marker: no /clear" "$(cleared)|$(grep -c '새 대화' "$S/orchestrator/refresh.log")" "0|1"
+rm_stamp; mr BOX_TURN=1 MAIN_REFRESH_HOUR=05
+check "a message typed during the box check: no /clear" "$(cleared)" 0
 rm_stamp; echo 05 > "$SANDBOX/hour"; mr PATH="$SANDBOX/bin:$PATH" BOX_LATE_FIRST=1
 check "hour passed during the first box check: no request" "$(told)|$(cleared)" "--box-ready w5:p3 claude|0"
 rm_stamp; status idle; mr BOX_WORK=1 MAIN_REFRESH_HOUR=05; status idle
