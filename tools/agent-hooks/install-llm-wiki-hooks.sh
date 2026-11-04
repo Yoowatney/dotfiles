@@ -25,7 +25,9 @@ install_link() {
 for required_script in \
     "$ROOT/run-llm-wiki-ingest.sh" \
     "$ROOT/codex-stop-ingest.sh" \
-    "$ROOT/codex-work-log-guard.sh"; do
+    "$ROOT/codex-work-log-guard.sh" \
+    "$ROOT/codex-stop-notification.sh" \
+    "$ROOT/codex-permission-notification.sh"; do
     if [[ ! -x "$required_script" ]]; then
         echo "Required hook script is not executable: $required_script" >&2
         exit 1
@@ -35,6 +37,8 @@ done
 install_link "$ROOT/run-llm-wiki-ingest.sh" "$CLAUDE_HOME/hooks/stop-ingest.sh"
 install_link "$ROOT/codex-stop-ingest.sh" "$CODEX_HOME/hooks/stop-ingest.sh"
 install_link "$ROOT/codex-work-log-guard.sh" "$CODEX_HOME/hooks/work-log-guard.sh"
+install_link "$ROOT/codex-stop-notification.sh" "$CODEX_HOME/hooks/stop-notification.sh"
+install_link "$ROOT/codex-permission-notification.sh" "$CODEX_HOME/hooks/permission-notification.sh"
 
 mkdir -p "$CODEX_HOME"
 if [[ ! -f "$CODEX_HOOKS_JSON" ]]; then

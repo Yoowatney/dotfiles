@@ -24,6 +24,9 @@ setup_fixture() {
     printf '#!/bin/bash\necho old-claude\n' > "$SANDBOX/home/.claude/hooks/stop-ingest.sh"
     printf '#!/bin/bash\necho old-codex\n' > "$SANDBOX/home/.codex/hooks/stop-ingest.sh"
     chmod +x "$SANDBOX/home/.claude/hooks/stop-ingest.sh" "$SANDBOX/home/.codex/hooks/stop-ingest.sh"
+    # The alert hooks were plain files here, with no gate for workers panes.
+    printf '#!/bin/bash\necho old-alert\n' > "$SANDBOX/home/.codex/hooks/stop-notification.sh"
+    printf '#!/bin/bash\necho old-alert\n' > "$SANDBOX/home/.codex/hooks/permission-notification.sh"
     cat > "$SANDBOX/home/.codex/hooks.json" <<'EOF'
 {
   "hooks": {
@@ -85,7 +88,19 @@ first_hash="$(md5 -q "$hooks_json")"
 run_installer
 second_hash="$(md5 -q "$hooks_json")"
 assert_eq "$first_hash" "$second_hash" "second install leaves JSON unchanged"
-assert_eq 2 "$(find "$SANDBOX/home" -name '*.pre-agent-hooks' -type f | wc -l | tr -d ' ')" "second install creates no extra backups"
+assert_eq 4 "$(find "$SANDBOX/home" -name '*.pre-agent-hooks' -type f | wc -l | tr -d ' ')" "second install creates no extra backups"
+
+# hooks.json runs these two names: through them, a pane on the workers server stays silent.
+assert_eq "$ROOT/codex-stop-notification.sh" "$(readlink "$SANDBOX/home/.codex/hooks/stop-notification.sh")" "Codex Stop alert links to the tracked hook"
+assert_eq "$ROOT/codex-permission-notification.sh" "$(readlink "$SANDBOX/home/.codex/hooks/permission-notification.sh")" "Codex input alert links to the tracked hook"
+printf '#!/bin/sh\necho "$2" >> "%s/hs.log"\n' "$SANDBOX" > "$SANDBOX/hs"
+chmod +x "$SANDBOX/hs"
+for hook in stop-notification.sh permission-notification.sh; do
+    printf '{}' | HOME="$SANDBOX/home" NOTIFY_HS_BIN="$SANDBOX/hs" HERDR_PANE_ID=w1:p7 \
+        HERDR_SOCKET_PATH="$SANDBOX/home/.config/herdr/sessions/workers/herdr.sock" "$SANDBOX/home/.codex/hooks/$hook" >/dev/null
+done
+assert_eq 2 "$(cat "$SANDBOX"/home/.codex/hooks/*-debug.log | grep -c '^SKIPPED workers pane w1:p7$')" "the linked hooks skip a workers pane"
+[[ ! -e "$SANDBOX/hs.log" ]] || fail "a workers pane sent an alert"
 
 if grep -q 'launchctl' "$INSTALLER"; then
     fail "installer must not invoke launchd"
