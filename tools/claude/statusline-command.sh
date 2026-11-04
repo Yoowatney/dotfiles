@@ -64,15 +64,17 @@ if [ -s "$turn" ]; then
 			(reduce explode[] as $ch ({s: [], n: 0, done: false};
 				if .done or .n + ([$ch] | implode | w) > $n - 1 then .done = true
 				else {s: (.s + [$ch]), n: (.n + ([$ch] | implode | w)), done: false} end) | (.s | implode) + "…") end;
-		($now - .at) as $old
+		([$now - .at, 0] | max) as $old | .top as $top
 		| ($old | if . < 3600 then "\(. / 60 | floor)분 전" elif . < 172800 then "\(. / 3600 | floor)시간 전" else "\(. / 86400 | floor)일 전" end) as $age
-		| "요유 차례 \(.count)건" as $head
-		| (if .count > 0 and .overdue > 0 then "기한 지남 \(.overdue)건" else null end) as $over
-		| (if .count > 0 then "최장 \(.oldestDays)일" else null end) as $wait
-		| ([$head, $over, $wait] | map(select(. != null)) | join(" · ")) as $lead
-		| (if $c > 0 then $c - ($lead | w) - (" · " | w) - (" · \($age)" | w) else 10000 end) as $room
-		| (if .top != null and $room >= 6 then " · " + (.top | clip($room)) else "" end) as $top
-		| "\u001b[1m\($head)\u001b[0m" + (if $over then " · \u001b[31m\($over)\u001b[0m" else "" end)
-		  + (if $wait then " · \($wait)" else "" end) + $top
+		| (if $c > 0 then $c else 100000 end) as $max
+		# The count and the age always show; 기한 지남, 최장 and the top item follow while they fit, the top item cut to the room left.
+		| reduce ([{t: "요유 차례 \(.count)건", a: "1"}]
+			+ (if .count > 0 and .overdue > 0 then [{t: "기한 지남 \(.overdue)건", a: "31"}] else [] end)
+			+ (if .count > 0 then [{t: "최장 \(if .sinceFrom == "updatedAt" then "~" else "" end)\(.oldestDays)일", a: ""}] else [] end))[] as $s
+			({segs: [], used: (" · \($age)" | w)};
+			 if .segs == [] or .used + 3 + ($s.t | w) <= $max then .segs += [$s] | .used += (if .segs == [$s] then 0 else 3 end) + ($s.t | w) else . end)
+		| ($max - .used - 3) as $room
+		| (if $top != null and $room >= 6 then .segs + [{t: ($top | clip($room)), a: ""}] else .segs end)
+		| (map(if .a == "" then .t else "\u001b[\(.a)m\(.t)\u001b[0m" end) | join(" · "))
 		  + " · " + (if $old > 5400 then "\u001b[33m" else "\u001b[2m" end) + $age + "\u001b[0m"' "$turn" 2>/dev/null
 fi

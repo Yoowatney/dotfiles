@@ -81,6 +81,26 @@ line=$(grep '요유 차례' <<<"$out" | sed $'s/\x1b\\[[0-9;]*m//g')
 check "요유 차례: a long title is cut, the age kept" "$line" '…' '넘어간다'
 cells=$(python3 -I -c 'import sys,unicodedata; s=sys.stdin.read().rstrip("\n"); print(sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s))' <<<"$line")
 check "요유 차례: fits 60 cells" "$([ "${cells:-999}" -le 60 ] && echo fits || echo "$cells cells")" '^fits$'
+# A narrow pane drops parts from the end, 최장 first, then 기한 지남; the count and the age always stay (Codex review).
+fits() {   # <line> <cells> -> fits | <n> cells
+	local n
+	n=$(python3 -I -c 'import sys,unicodedata; s=sys.stdin.read().rstrip("\n"); print(sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s))' <<<"$1")
+	[ "${n:-999}" -le "$2" ] && echo fits || echo "$n cells"
+}
+real='{"at":'$((now - 60))',"count":40,"overdue":32,"oldestDays":28,"top":"10/19 P3 api#818 [채널톡] Hash Key 서버 이전","topUrl":"x","sinceFrom":"label"}'
+line=$(turn "$real" 40 | grep '요유 차례' | sed $'s/\x1b\\[[0-9;]*m//g')
+check "요유 차례 at 40 cells: count, past due and age kept" "$line" '^요유 차례 40건 · 기한 지남 32건 · 1분 전$'
+check "요유 차례 at 40 cells: fits" "$(fits "$line" 40)" '^fits$'
+line=$(turn "$real" 30 | grep '요유 차례' | sed $'s/\x1b\\[[0-9;]*m//g')
+check "요유 차례 at 30 cells: count and age only" "$line" '^요유 차례 40건 · 1분 전$'
+
+# A summary written ahead of this clock (집맥 runs a little behind 회사맥) reads 0분 전, not -1분 전 (code review).
+out=$(turn '{"at":'$((now + 90))',"count":1,"overdue":0,"oldestDays":2,"top":null,"topUrl":null,"sinceFrom":"label"}')
+check "요유 차례: a future write time reads 0분 전" "$out" ' · .*0분 전' '-[0-9]'
+# A wait counted from the last update (label times unavailable) is marked as approximate.
+out=$(turn '{"at":'$((now - 60))',"count":1,"overdue":0,"oldestDays":5,"top":null,"topUrl":null,"sinceFrom":"updatedAt"}')
+check "요유 차례: a wait from updatedAt reads 최장 ~5일" "$out" '최장 ~5일'
+
 out=$(turn '')
 check "요유 차례: no file, no line" "$out" 'Context' '요유 차례'
 out=$(turn 'not json')
