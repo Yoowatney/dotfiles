@@ -44,7 +44,7 @@ idle() { case "$(status "$id")" in idle|done) return 0 ;; esac; return 1; }
 if [ -n "${MAIN_REFRESH_DEADLINE:-}" ]; then deadline=$MAIN_REFRESH_DEADLINE
 else deadline=$(( $(date -j -f %H:%M:%S 07:00:00 +%s) - $(date +%s) )); [ "$deadline" -gt 0 ] || deadline=0; fi
 wait_for "$deadline" idle || skip "메인 칸이 07:00까지 일하고 있어 건너뜀"
-
+late # the Mac may have slept through the first wait
 # A pane moved between workspaces keeps its old id in HERDR_PANE_ID, and `handoff save` names its file by that,
 # so the key is found through the session id; the listed id is the fallback.
 hdir=$STATE/agent-handoff

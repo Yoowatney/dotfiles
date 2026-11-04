@@ -16,7 +16,8 @@ cat > "$SANDBOX/herdr" <<EOS
 echo "\$*" >> "$SANDBOX/herdr-log"
 case "\$1 \$2" in
   "pane list") cat "$SANDBOX/panes" ;;
-  "pane get") jq -n --arg s "\$(cat "$SANDBOX/status")" --arg p "\$3" '{result: {pane: {pane_id: \$p, agent_status: \$s}}}' ;;
+  "pane get") [ ! -f "$SANDBOX/late-on-get" ] || echo 09 > "$SANDBOX/hour"
+    jq -n --arg s "\$(cat "$SANDBOX/status")" --arg p "\$3" '{result: {pane: {pane_id: \$p, agent_status: \$s}}}' ;;
   "notification show") echo "\$3" >> "$SANDBOX/alerts" ;;
   "agent prompt") [ ! -f "$SANDBOX/prompt-fails" ] || exit 1 ;;
   *) exit 2 ;;
@@ -31,8 +32,10 @@ if [ "\$1" = --box-ready ]; then [ -z "\${BOX_FULL:-}" ]; exit; fi
 [ ! -f "$SANDBOX/tell-fails" ] || exit 1
 case "\$2" in *"handoff save"*)
   [ -z "\${GO_LATE:-}" ] || echo 09 > "$SANDBOX/hour"
-  [ "\${HANDOFF_AFTER:-0}" != never ] && ( sleep "\${HANDOFF_AFTER:-0}"; echo handoff > "$SANDBOX/state/agent-handoff/\${HANDOFF_KEY:-w5:p3}.md" ) ;;
+  [ -z "\${WORK_AFTER:-}" ] || echo working > "$SANDBOX/status"
+  if [ "\${HANDOFF_AFTER:-0}" != never ]; then ( sleep "\${HANDOFF_AFTER:-0}"; echo handoff > "$SANDBOX/state/agent-handoff/\${HANDOFF_KEY:-w5:p3}.md" ); fi ;;
 esac
+exit 0
 EOS
 # date shim: +%H comes from $SANDBOX/hour, everything else is the real date.
 cat > "$SANDBOX/bin/date" <<EOS
@@ -43,7 +46,7 @@ chmod +x "$SANDBOX/herdr" "$SANDBOX/pane-tell" "$SANDBOX/bin/date"
 
 S="$SANDBOX/state"
 mr() { # every call is sandboxed: state dir, herdr, pane-tell
-  rm -f "$SANDBOX/told" "$SANDBOX/herdr-log"; : > "$SANDBOX/alerts"
+  rm -f "$SANDBOX/told" "$SANDBOX/herdr-log" "$S/orchestrator/refresh.log"; : > "$SANDBOX/alerts"
   env XDG_STATE_HOME="$S" HERDR_BIN_PATH="$SANDBOX/herdr" MAIN_REFRESH_PANE_TELL="$SANDBOX/pane-tell" \
     MAIN_REFRESH_POLL=0 MAIN_REFRESH_DEADLINE="${MAIN_REFRESH_DEADLINE:-5}" MAIN_REFRESH_HANDOFF_WAIT="${MAIN_REFRESH_HANDOFF_WAIT:-5}" \
     "$@" /bin/bash "$SUBJECT" >/dev/null 2>&1
@@ -76,7 +79,7 @@ check "the skip is announced" "$(grep -c '건너뜀' "$SANDBOX/alerts")" 1
 status idle; mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=05 MAIN_REFRESH_HANDOFF_WAIT=0.3
 check "no handoff written: no /clear" "$(told)|$(cleared)" "w5:p3 [main-refresh] 새벽|0"
 check "no handoff: announced" "$(grep -c '건너뜀' "$SANDBOX/alerts")" 1
-check "no handoff: logged" "$(grep -c '인계' "$S/orchestrator/refresh.log")" 1
+check "no handoff: logged" "$(grep -c '인계가 저장되지 않아' "$S/orchestrator/refresh.log")" 1
 [ ! -f "$STAMP" ] || fail "no handoff leaves no stamp"
 rm_stamp; mr BOX_FULL=1 MAIN_REFRESH_HOUR=05   # 요유 left words in the box: --box-ready fails
 check "a full box gets no /clear, now or later" "$(told)|$(cleared)" "w5:p3 [main-refresh] 새벽|--box-ready w5:p3 claude|0"
@@ -102,6 +105,23 @@ mr PATH="$SANDBOX/bin:$PATH" GO_LATE=1
 check "woke at 09: no /clear" "$(cleared)" 0
 [ ! -f "$STAMP" ] || fail "woke late leaves no stamp"
 check "woke late: announced" "$(grep -c '건너뜀' "$SANDBOX/alerts")" 1
+
+# Woke at 09:00 during the first wait, pane idle: the request must not land in a pane in daytime use.
+rm_stamp; echo 05 > "$SANDBOX/hour"; touch "$SANDBOX/late-on-get"
+mr PATH="$SANDBOX/bin:$PATH"
+check "woke before the request: no pane-tell at all" "$(told)|$(cleared)" "|0"
+[ ! -f "$STAMP" ] || fail "woke before the request leaves no stamp"
+rm "$SANDBOX/late-on-get"
+
+# The hour is rechecked in the handoff wait itself (a long wait would otherwise run on into the morning).
+rm_stamp; echo 05 > "$SANDBOX/hour"
+mr PATH="$SANDBOX/bin:$PATH" GO_LATE=1 HANDOFF_AFTER=never MAIN_REFRESH_HANDOFF_WAIT=5
+check "late in the wait: stops on the hour, not the timeout" "$(grep -c '05~06시가 지나' "$S/orchestrator/refresh.log")|$(grep -c '인계가 저장되지 않아' "$S/orchestrator/refresh.log")" "1|0"
+
+# A pane that went back to work after saving is not interrupted.
+rm_stamp; status idle; mr WORK_AFTER=1 MAIN_REFRESH_HOUR=05 MAIN_REFRESH_HANDOFF_WAIT=0.3
+check "handoff saved but pane working: no /clear, announced" "$(cleared)|$(grep -c '건너뜀' "$SANDBOX/alerts")" "0|1"
+status idle
 
 # launchd has no pane id, but a run from inside the main pane must not be refused as "this pane".
 rm_stamp; mr HERDR_PANE_ID=w5:p3 MAIN_REFRESH_HOUR=05
