@@ -18,7 +18,7 @@ page Claude had to write itself because Codex failed comes back unless it says s
 long reply with no page comes back and goes to Codex (요유 2026-11-01); a Codex session writes its own.
 The first last report after a pane's report reached this session (auto-tab-close's message, read from the session record)
 comes back without a `확인:` line and a command run since that is not a pane chore: a lead passing a pane's "done" on unchecked
-(요유 2026-11-04). Of 65 such reports by then, 8 came with no command run after the pane's report arrived.
+(요유 2026-11-04). Of 65 such reports by then, 9 came with no command run after the pane's report arrived.
 A report with nothing left to do ends without a word: the question used to demand a rewrite. Of 102 fires on 10/28-10/31,
 25 went on to a tool call and 69 only wrote text, most of it the same report again.
 Claude runs it with --claude: the question goes back as Stop additionalContext, which Claude shows as "Stop hook feedback"
@@ -114,14 +114,18 @@ CHECK_LINE = re.compile(r"(?<![가-힣])확인[ \t]*\**[ \t]*[:：][ \t]*\**([^\
 RELAY_REASON = ("yoyoo-share-guard: 하위 칸의 보고를 받은 뒤 처음 쓰는 보고인데, 이 칸에서 결과를 직접 확인한 흔적이 없습니다. "
                 "하위 칸의 '다 했다'는 주장일 뿐입니다. 지금 도구로 직접 확인하세요: 테스트·명령을 다시 실행하거나 바뀐 동작·데이터를 직접 보세요. "
                 "하위 칸 보고를 다시 읽거나 칸을 닫는 일은 확인이 아닙니다. 그런 다음 무엇을 확인했고 결과가 어땠는지 '확인:' 줄을 넣어 보고를 다시 쓰세요.")
-# Calls that handle panes or read the pane's own claim. ponytail: a word list, so `ls` still counts as a check; it stops a lead
-# that ran nothing, not one that ran too little.
+# Calls that handle panes, read the pane's own claim or hand the check to another agent (whose word is a claim again). ponytail:
+# a word list, so `ls` still counts as a check; it stops a lead that ran nothing, not one that ran too little.
 NOT_A_CHECK = {"TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop", "ToolSearch", "Skill", "SendMessage", "Write", "Edit",
-               "MultiEdit", "NotebookEdit", "ScheduleWakeup", "CronCreate", "CronDelete", "mcp__task-progress__progress",
-               "update_plan", "apply_patch", "send_message", "followup_task", "list_agents", "sleep", "request_user_input_async"}
+               "MultiEdit", "NotebookEdit", "ScheduleWakeup", "CronCreate", "CronDelete", "mcp__task-progress__progress", "Agent",
+               "Task", "update_plan", "apply_patch", "spawn_agent", "send_message", "followup_task", "list_agents", "sleep",
+               "request_user_input_async"}
 SHELL_STEP = re.compile(r"&&|\|\|?|;|\n")
 CHORE_STEP = re.compile(r"^\s*(?:\S*/)?(?:cd|echo|printf|true|sleep|pane-label|pane-tell|pane-spawn|pane-temp|herdr)\b|pane-reports")
-CODEX_CMD = re.compile(r"\bcmd\s*:\s*(\"(?:\\.|[^\"\\])*\")")  # Codex runs commands as tools.exec_command({cmd:"…"})
+# Codex runs commands as tools.exec_command({cmd:"…"}), with single quotes too, or as JSON arguments {"cmd": "…"}.
+CODEX_CMD = re.compile(r"\bcmd[\"']?\s*:\s*(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')")
+# A call a hook or a permission rule stopped never ran: Claude's error result, Codex's output text. A test that ran and failed counts.
+REFUSED = re.compile(r"PreToolUse:\S+ hook error|blocked by PreToolUse hook|Permission to use \S+ has been denied|doesn't want to proceed")
 PAGE = re.compile(r"/explain/\S+\.html")
 LONG_REASON = ("yoyoo-share-guard: 답이 깁니다. 긴 보고는 Codex가 씁니다. html-explainer 스킬대로 사실을 파일에 적어 explain-page로 맡기고, "
                "터미널에는 publish가 출력한 Codex의 글과 페이지 경로, 라벨 줄(무엇을, 왜, 남은 것 등)만 남기세요.")
@@ -239,14 +243,22 @@ def left_open_reason(payload: dict, text: str, env) -> str | None:
 
 
 def unquote(literal: str) -> str:
+    if literal.startswith("'"):
+        return literal[1:-1].replace("\\'", "'")
     try:
         return json.loads(literal)
-    except ValueError:  # a JS escape JSON lacks, such as \'
+    except ValueError:  # a JS escape JSON lacks
         return literal[1:-1]
 
 
+def flat(content) -> str:
+    return content if isinstance(content, str) else " ".join(
+        b.get("text") or "" for b in content or [] if isinstance(b, dict)) if isinstance(content, list) else ""
+
+
 def records(lines):
-    """("in" | "say" | "call", text, tool name) from Claude or Codex session record lines, oldest first. Tool output is none."""
+    """(kind, text, tool name, call id) from Claude or Codex session record lines, oldest first. kind is "in", "say", "call", or
+    "refused" for a call a hook or a permission rule stopped. Other tool output yields nothing."""
     for raw in lines:
         try:
             d = json.loads(raw)
@@ -257,27 +269,34 @@ def records(lines):
         p = d.get("payload") if isinstance(d.get("payload"), dict) else {}
         queued = d.get("attachment") if isinstance(d.get("attachment"), dict) else {}
         kind, content = d.get("type"), (d.get("message") or {}).get("content")
+        results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"] if isinstance(content, list) else []
         if kind == "attachment" and queued.get("type") == "queued_command":
-            yield "in", str(queued.get("prompt") or ""), ""  # typed while the agent worked
-        elif kind == "user" and isinstance(content, str):
-            yield "in", content, ""
-        elif kind == "user" and isinstance(content, list) and not any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
-            yield "in", " ".join(b.get("text") or "" for b in content if isinstance(b, dict)), ""
+            yield "in", str(queued.get("prompt") or ""), "", ""  # typed while the agent worked
+        elif kind == "user" and results:
+            for b in results:
+                if b.get("is_error") and REFUSED.search(flat(b.get("content"))):
+                    yield "refused", "", "", b.get("tool_use_id") or ""
+        elif kind == "user" and content:
+            yield "in", flat(content), "", ""
         elif kind == "assistant" and not d.get("isSidechain"):
             for b in content if isinstance(content, list) else []:
                 inp = b.get("input") if isinstance(b, dict) and isinstance(b.get("input"), dict) else {}
                 if isinstance(b, dict) and b.get("type") == "text":
-                    yield "say", b.get("text") or "", ""
+                    yield "say", b.get("text") or "", "", ""
                 elif isinstance(b, dict) and b.get("type") == "tool_use":
                     command = inp.get("command")
-                    yield "call", command if isinstance(command, str) else json.dumps(inp, ensure_ascii=False), b.get("name") or ""
+                    command = command if isinstance(command, str) else json.dumps(inp, ensure_ascii=False)
+                    yield "call", command, b.get("name") or "", b.get("id") or ""
         elif kind == "response_item" and p.get("type") == "message" and p.get("role") in ("user", "assistant"):
-            text = " ".join(b.get("text") or "" for b in p.get("content") or [] if isinstance(b, dict))
-            yield ("in" if p["role"] == "user" else "say"), text, ""
+            yield ("in" if p["role"] == "user" else "say"), flat(p.get("content")), "", ""
         elif kind == "response_item" and p.get("type") in ("function_call", "custom_tool_call", "local_shell_call"):
             body = str(p.get("arguments") or p.get("input") or p.get("action") or "")
             commands = [unquote(c) for c in CODEX_CMD.findall(body)]
-            yield "call", "\n".join(commands) if commands else body, p.get("name") or ""
+            yield "call", "\n".join(commands) if commands else body, p.get("name") or "", p.get("call_id") or ""
+        elif kind == "response_item" and p.get("type") in ("function_call_output", "custom_tool_call_output"):
+            output = p.get("output")
+            if REFUSED.search(output if isinstance(output, str) else flat(output)):
+                yield "refused", "", "", p.get("call_id") or ""
 
 
 def chore(name: str, command: str) -> bool:
@@ -302,10 +321,11 @@ def relay_reason(payload: dict, text: str) -> str | None:
     else:
         return None
     after = list(records(lines[start + 1:]))
-    reports = [i for i, (kind, said, _) in enumerate(after) if kind == "say" and LAST_REPORT.search(prose(said))]
-    if reports and any(kind == "in" for kind, _, _ in after[reports[0] + 1:]):
+    reports = [i for i, (kind, said, _, _) in enumerate(after) if kind == "say" and LAST_REPORT.search(prose(said))]
+    if reports and any(kind == "in" for kind, _, _, _ in after[reports[0] + 1:]):
         return None
-    ran = any(kind == "call" and not chore(name, command) for kind, command, name in after)
+    refused = {i for kind, _, _, i in after if kind == "refused"}
+    ran = any(kind == "call" and i not in refused and not chore(name, command) for kind, command, name, i in after)
     stated = any(v and not NONE.match(v) for v in (m.group(1).strip(" \t*_.,;") for m in CHECK_LINE.finditer(prose(text))))
     return None if ran and stated else RELAY_REASON
 
@@ -707,8 +727,15 @@ def selftest():
     def claude_in(text):
         return {"type": "user", "message": {"role": "user", "content": text}}
 
-    def claude_call(name, **inp):
-        return {"type": "assistant", "message": {"id": "c", "content": [{"type": "tool_use", "id": "t", "name": name, "input": inp}]}}
+    def claude_call(name, i="t", **inp):
+        return {"type": "assistant", "message": {"id": "c", "content": [{"type": "tool_use", "id": i, "name": name, "input": inp}]}}
+
+    def claude_out(i, text, error=False):
+        return {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": i, "is_error": error, "content": text}]}}
+
+    def codex_out(i, text):
+        return {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": i,
+                                                     "output": [{"type": "input_text", "text": text}]}}
 
     def codex_in(text):
         return {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}}
@@ -742,7 +769,19 @@ def selftest():
             ("queued into a running turn", [claude_in("다른 일 해 줘"), test_run, queued], bare),
             ("the reply itself is in the transcript", [claude_in(told), said("m9", bare)], bare),
             ("Codex: no check run", [codex_in(told)], bare),
-            ("Codex: only pane chores", [codex_in(told), codex_exec("herdr pane close w1:p3; pane-label x")], checked)):
+            ("Codex: only pane chores", [codex_in(told), codex_exec("herdr pane close w1:p3; pane-label x")], checked),
+            # Codex review, 2026-11-04: commands in other shapes, a check handed to another agent, a call a hook refused.
+            ("Codex: a chore as JSON arguments", [codex_in(told), {"type": "response_item", "payload": {
+                "type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": "herdr pane close w1:p3"})}}], checked),
+            ("Codex: a chore in single quotes", [codex_in(told), {"type": "response_item", "payload": {
+                "type": "custom_tool_call", "name": "exec", "input": "text(await tools.exec_command({cmd:'herdr pane close w1:p3'}))"}}], checked),
+            ("the check handed to another agent", [claude_in(told), claude_call("Agent", prompt="결과 확인해 줘")], checked),
+            ("Codex: the check handed to another agent", [codex_in(told), {"type": "response_item", "payload": {
+                "type": "function_call", "name": "spawn_agent", "arguments": "{}"}}], checked),
+            ("a check a hook refused", [claude_in(told), claude_call("Bash", "r1", command="npm test"),
+                                        claude_out("r1", "PreToolUse:Bash hook error: secret-print-guard: 막음", error=True)], checked),
+            ("Codex: a check a hook refused", [codex_in(told), {**codex_exec("npm test"), "payload": {**codex_exec("npm test")["payload"], "call_id": "c1"}},
+                                               codex_out("c1", "Script error:\nCommand blocked by PreToolUse hook: secret-print-guard")], checked)):
         assert "하위 칸" in (relayed(records, text) or ""), f"should send back: {label}"
     for label, records, text in (
             ("checked and says so", [claude_in(told), *chores, test_run], checked),
@@ -753,7 +792,11 @@ def selftest():
             ("answered in an earlier turn", [claude_in(told), said("m1", bare), claude_in("다음 일 해 줘"), test_run], bare),
             ("not a last report", [claude_in(told)], "확인하는 중입니다."),
             ("Codex: checked and says so", [codex_in(told), codex_exec("npm test"), codex_say("돌려 봤습니다.")], checked),
-            ("Codex: answered in an earlier turn", [codex_in(told), codex_say(bare), codex_in("다음")], bare)):
+            ("Codex: answered in an earlier turn", [codex_in(told), codex_say(bare), codex_in("다음")], bare),
+            ("a test that ran and failed is a check", [claude_in(told), claude_call("Bash", "r1", command="npm test"),
+                                                       claude_out("r1", "Exit code 1\n3 failing", error=True)], checked),
+            ("Codex: a check as JSON arguments", [codex_in(told), {"type": "response_item", "payload": {
+                "type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": "npm test"})}}], checked)):
         assert relayed(records, text) is None, f"should pass: {label}"
     assert relayed([claude_in(told)], bare) == relayed([claude_in(told)], bare), "same input, same answer"
     path = transcript([claude_in(told)])
