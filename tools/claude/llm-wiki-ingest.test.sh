@@ -57,6 +57,19 @@ assert_eq 1 "$(hits "$HOME/calls" cli-one)" "cli transcript is processed"
 run
 assert_eq 1 "$(hits "$HOME/calls" cli-one)" "processed transcript is not rerun"
 
+# Phase 1: RAG study is skipped by folder; a work session that only mentions its path is not.
+new_home rag
+study_dir="$HOME/.claude/projects/${HOME//\//-}-work-rag-lab"
+mkdir -p "$study_dir"
+transcript study-one cli
+mv "$HOME/.claude/projects/-proj/study-one.jsonl" "$study_dir/"
+transcript mentions-one cli
+echo '{"type":"note","path":"work/rag-lab"}' >> "$HOME/.claude/projects/-proj/mentions-one.jsonl"
+touch -t 202001010000 "$HOME/.claude/projects/-proj/mentions-one.jsonl"
+run
+assert_eq 0 "$(hits "$HOME/calls" study-one)" "RAG study transcript never reaches claude"
+assert_eq 1 "$(hits "$HOME/calls" mentions-one)" "a work session mentioning the study folder is still processed"
+
 # Phase 2: an always-failing source is attempted 3 times over 4 runs, GAVE UP logged once.
 new_home fail
 echo x > "$HOME/.local/share/llm-wiki/raw/bad.md"

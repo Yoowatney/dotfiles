@@ -45,7 +45,7 @@ Existing daily work-log: $worklog
 Project: $project
 Date: $today
 
-Return exactly NO_WORK when the turn only contains typo, lint, or formatting fixes; package version bumps only; a one-line config change; research or exploration with no conclusion or action; or ordinary conversation with no completed non-trivial work.
+Return exactly NO_WORK when the turn only contains typo, lint, or formatting fixes; package version bumps only; a one-line config change; research or exploration with no conclusion or action; anything about the RAG study in ~/work/rag-lab, which is study, not work; or ordinary conversation with no completed non-trivial work.
 
 Otherwise return exactly one Korean Markdown entry and no code fence or commentary:
 ## [Brief title]
@@ -64,6 +64,11 @@ payload="$(cat)"
 if ! printf '%s' "$payload" | jq -e 'type == "object"' >/dev/null 2>&1; then
     exit 0
 fi
+
+# RAG study is not work: never recover a log entry for it (요유 2026-11-04).
+case "$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null)/" in
+    */work/rag-lab/*) exit 0 ;;
+esac
 
 session_id="$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null)"
 safe_session="$(printf '%s' "$session_id" | tr -cd 'A-Za-z0-9._-')"

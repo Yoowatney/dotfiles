@@ -135,6 +135,9 @@ phase1_worklog() {
         if [[ "$slash_count" -ne 1 ]]; then
             continue
         fi
+        # RAG study is not work and its transcripts hold private card text (요유 2026-11-04).
+        # By folder, not LLM_WIKI_SKIP_PATTERNS: real work sessions also mention that path.
+        [[ "$rel_path" == "${HOME//\//-}-work-rag-lab/"* ]] && continue
 
         local filename
         filename="$(basename "$session_file")"

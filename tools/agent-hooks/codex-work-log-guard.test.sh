@@ -104,6 +104,14 @@ stop_output="$(stop_payload | run_guard finish)"
 assert_not_contains "$worklog" "Recovered entry" "updated work-log must not be duplicated"
 
 setup_fixture
+begin_payload | sed 's#/work/munice#/work/rag-lab#' | run_guard begin
+[[ ! -f "$state_file" ]] || fail "RAG study starts no turn state"
+printf 'non-trivial tool work\n' >> "$SANDBOX/home/transcript.jsonl"
+valid_entry > "$SANDBOX/home/model-result"
+stop_payload | sed 's#/work/munice#/work/rag-lab#' | run_guard finish
+[[ ! -f "$SANDBOX/home/claude-calls" ]] || fail "RAG study is never recovered into the work-log"
+
+setup_fixture
 begin_payload | run_guard begin
 printf 'non-trivial tool work\n' >> "$SANDBOX/home/transcript.jsonl"
 valid_entry > "$SANDBOX/home/model-result"
