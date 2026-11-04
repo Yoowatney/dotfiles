@@ -6,6 +6,7 @@ set -u
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/statusline-command.sh"
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
+mkdir -p "$T/home" && export HOME="$T/home"   # a home with no 요유 차례 summary, whatever this machine's holds
 INPUT='{"model":{"display_name":"Opus"},"workspace":{"current_dir":"'"$T"'"},"context_window":{"used_percentage":12,"context_window_size":200000}}'
 fails=0
 export CLOUDSDK_CORE_PROJECT=test-dev   # a dev project, whatever this machine's gcloud points at
