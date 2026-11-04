@@ -275,13 +275,13 @@ def nearest_lead(me: dict, panes: list, name: str = "", sideways: bool = True, e
     return lead_pane(me, panes, name, sideways, env)[0]
 
 
-def short_report(reply: str) -> str:
-    """The first prose line and the last `남은 것:` line (with the lines under it when it is a heading). Both keep their inline code
-    and quotes (`prod 허용` is what 요유 types, and a check pane's first line names what it ran); only fenced code and blockquotes
-    are not the report's."""
+def short_report(reply: str, cap: int | None = 200) -> str:
+    """The first prose line, up to `cap` characters, and the last `남은 것:` line (with the lines under it when it is a heading). Both
+    keep their inline code and quotes (`prod 허용` is what 요유 types, and a check pane's first line names what it ran); only fenced
+    code and blockquotes are not the report's."""
     raw = share.STRIP[2].sub(" ", share.STRIP[0].sub(" ", unicodedata.normalize("NFC", reply)))
     lines = [line.strip() for line in raw.splitlines()]
-    first = next((line for line in lines if line and not LEFT.search(line)), "")[:200]
+    first = next((line for line in lines if line and not LEFT.search(line)), "")[:cap]
     at = max((i for i, line in enumerate(lines) if LEFT.search(line)), default=-1)
     left = []
     if at >= 0:
@@ -330,7 +330,9 @@ def finish(reply: str, env):
         main = herdr_peers.main_terminal(env)
         to_main = bool(main) and to.get("terminal_id") == main
         if to_main:  # the main pane keeps many panes going: it reads the gist and opens the file when it needs more
-            body = (f"{short_report(reply)}\n칸: {herdr_peers.address(env, pane)} {me.get('label') or ''}\n"
+            # A check pane's first line holds its pass or fail, often at the end, and the main pane writes its `확인:` line from it: never cut.
+            gist = short_report(reply, None) if who == "확인" else short_report(reply)
+            body = (f"{gist}\n칸: {herdr_peers.address(env, pane)} {me.get('label') or ''}\n"
                     f"전체 보고: {path} ({now:%H:%M:%S} 항목)")
         else:
             body = f"{unicodedata.normalize('NFC', reply).strip()}\n\n전체 보고: {path}"
@@ -978,12 +980,33 @@ esac''')
                         main_env) is None, "and takes what the check pane saw"
     os.unlink(main_log)
     saved()
+    # A check pane's pass or fail must arrive whatever the length: a 224-character first line ending in it was cut off (2026-11-05).
+    long_line = "`npm test`, `herdr_peers.py --selftest`를 돌렸고 " + "차등 시험도 다시 돌려 보았고 " * 20 + "통과하지 못했습니다."
+    assert len(long_line) > 200, "the case this pins"
+    long_report = json.dumps({"last_assistant_message": f"{long_line}\n\n자세한 내용은 아래와 같습니다.\n남은 것: 요유 몫: 없음 · 세션: 닫음"})
+    herdr_says({"name": "spawned"}, [main])
+    herdr_says_on("workers", {"name": "spawn-M-chk1"}, [me], checker)
+    assert run(long_report, on_workers) == (0, "", "tell default/w5:p3\n" + closed)
+    told = open(f"{sandbox}/told").read()
+    assert long_line in told, f"a check pane's first line arrives whole: {told!r}"
+    assert "자세한 내용은" not in told and "남은 것: 요유 몫: 없음" in told, "and the rest stays in the file, as ever"
+    saved()
+    herdr_says_on("workers", {"name": "spawn-M-1"}, [me], wagents)
+    assert run(long_report, on_workers) == (0, "", "tell default/w5:p3\n" + closed)
+    told = open(f"{sandbox}/told").read()
+    assert long_line[:200] in told and long_line[:201] not in told and "통과하지 못했습니다" not in told, f"any other pane's stays cut: {told!r}"
+    saved()
     # Any other lead: the same check-pane name changes nothing, and neither does a main-pane file that names no live pane.
     herdr_says({"name": "spawned"}, [crown])
     herdr_says_on("workers", {"name": "spawn-1-chk1"}, [crown, me], [{"pane_id": "w1:p2", "name": "spawn-1-chk1", "terminal_id": "term_2"}])
     assert run(reported, on_workers) == (0, "", "tell w1:p1\n" + closed)
     told = open(f"{sandbox}/told").read()
     assert told.startswith("이 칸의 마지막 보고입니다(") and share.RELAY_NOTE in told and "pane-spawn" not in told, f"an ordinary lead hears the old rule: {told!r}"
+    saved()
+    # And it still reads the whole report, a long first line included.
+    assert run(long_report, on_workers) == (0, "", "tell w1:p1\n" + closed)
+    told = open(f"{sandbox}/told").read()
+    assert long_line in told and "자세한 내용은" in told, f"an ordinary lead gets the whole reply: {told!r}"
     saved()
     state_file = f"{sandbox}/.local/state/orchestrator/main"
     for gone in ("missing", "stale"):

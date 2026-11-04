@@ -136,7 +136,11 @@ CHECK_REPORT_REASON = ("yoyoo-share-guard: 확인 칸의 보고를 받은 뒤 �
                        "그 칸이 실행하고 본 것을 적고 확인 칸이 했다고 밝힌 '확인:' 줄을 넣어 보고를 다시 쓰세요.")
 CHECK_AGENT = re.compile(r"^spawn-[0-9A-Za-z]+-chk")  # pane-spawn --check's agent name, which a pane rename does not change
 BY_CHECK_PANE = re.compile(r"확인[ \t]*칸")
-SPAWN_CHECK = re.compile(r"(?:^|[;&|(\n])\s*(?:\S*/)?pane-spawn(?:\s+--[\w-]+(?:\s+[^\s\"'-]\S*)?)*?\s+--check\b")
+SPAWN_CHECK = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?pane-spawn(?:\s+--[\w-]+(?:\s+[^\s\"'-]\S*)?)*?\s+--check\b")
+QUOTED = re.compile(r"\"(?:\\.|[^\"\\])*\"|'[^']*'")
+# A command that ran and failed: Claude marks the result, Codex's output holds the status, and `pane-spawn …; echo done` exits 0, so
+# pane-spawn's own error line counts too. Only the check pane has to have opened: a test that ran and failed is still a check.
+FAILED = re.compile(r"\"exit_code\"\s*:\s*-?[1-9]|(?<![\w-])pane-spawn: ")
 # Calls that handle panes, read the pane's own claim or hand the check to another agent (whose word is a claim again). ponytail:
 # a word list, so `ls` still counts as a check; it stops a lead that ran nothing, not one that ran too little.
 NOT_A_CHECK = {"TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop", "ToolSearch", "Skill", "SendMessage", "Write", "Edit",
@@ -337,8 +341,8 @@ def flat(content) -> str:
 
 
 def records(lines):
-    """(kind, text, tool name, call id) from Claude or Codex session record lines, oldest first. kind is "in", "say", "call", or
-    "refused" for a call a hook or a permission rule stopped. Other tool output yields nothing."""
+    """(kind, text, tool name, call id) from Claude or Codex session record lines, oldest first. kind is "in", "say", "call",
+    "refused" for a call a hook or a permission rule stopped, or "failed" for one that ran and failed. Other tool output yields nothing."""
     for raw in lines:
         try:
             d = json.loads(raw)
@@ -354,8 +358,11 @@ def records(lines):
             yield "in", str(queued.get("prompt") or ""), "", ""  # typed while the agent worked
         elif kind == "user" and results:
             for b in results:
-                if b.get("is_error") and REFUSED.search(flat(b.get("content"))):
+                output = flat(b.get("content"))
+                if b.get("is_error") and REFUSED.search(output):
                     yield "refused", "", "", b.get("tool_use_id") or ""
+                elif b.get("is_error") or FAILED.search(output):
+                    yield "failed", "", "", b.get("tool_use_id") or ""
         elif kind == "user" and content:
             yield "in", flat(content), "", ""
         elif kind == "assistant" and not d.get("isSidechain"):
@@ -374,9 +381,17 @@ def records(lines):
             commands = [unquote(c) for c in CODEX_CMD.findall(body)]
             yield "call", "\n".join(commands) if commands else body, p.get("name") or "", p.get("call_id") or ""
         elif kind == "response_item" and p.get("type") in ("function_call_output", "custom_tool_call_output"):
-            output = p.get("output")
-            if REFUSED.search(output if isinstance(output, str) else flat(output)):
+            output = flat(p.get("output"))
+            if REFUSED.search(output):
                 yield "refused", "", "", p.get("call_id") or ""
+            elif FAILED.search(output):
+                yield "failed", "", "", p.get("call_id") or ""
+
+
+def spawns_check(command: str) -> bool:
+    """A heredoc body or quoted text is no command. ponytail: a regex reading of shell, so a spawn inside `"$(…)"` reads as text and
+    costs one rewrite."""
+    return bool(SPAWN_CHECK.search(QUOTED.sub("q", HEREDOC.sub("", command))))
 
 
 def chore(name: str, command: str) -> bool:
@@ -412,7 +427,8 @@ def relay_reason(payload: dict, text: str, env) -> str | None:
     if delegates_checks(payload, env):
         if relayed[1] == "확인":
             return None if any(BY_CHECK_PANE.search(v) for v in stated) else CHECK_REPORT_REASON
-        handed = any(kind == "call" and i not in refused and SPAWN_CHECK.search(command) for kind, command, _, i in after)
+        failed = {i for kind, _, _, i in after if kind == "failed"}
+        handed = any(kind == "call" and i not in refused and i not in failed and spawns_check(command) for kind, command, _, i in after)
         return None if handed else DELEGATE_REASON
     ran = any(kind == "call" and i not in refused and not chore(name, command) for kind, command, name, i in after)
     return None if ran and stated else RELAY_REASON
@@ -956,6 +972,12 @@ def selftest():
     by_check = f"확인: 확인 칸이 `npm test`를 다시 돌려 12개 통과를 봤습니다.\n{bare}"
     no_word = f"확인: `npm test` 12개 통과를 봤습니다.\n{bare}"
     spawn_check = claude_call("Bash", "k1", command='pane-spawn --check "로그인" "npm test를 돌려 보세요"')
+    workers_down = "pane-spawn: the workers herdr server is not running; start it with: launchctl kickstart gui/501/com.yoyoo.herdr-workers"
+    codex_spawn = {"type": "response_item", "payload": {**codex_exec('pane-spawn --check "로그인" "돌려 보세요"')["payload"], "call_id": "c1"}}
+    # Word for word what the real main pane ran on 2026-11-05 (home folder shortened): the instruction names the very command it is about.
+    real_check = 'pane-spawn --check "메인 칸 위임 변경 확인" "Check the claim in the 01:09:13 entry of /Users/y/.local/state/pane-reports/2026-11-05.md: try to break it.\n1) Confirm."'
+    real_fix = ('pane-spawn "메인 칸 위임 결함 수정" "Fix three defects. Full findings: the \'찾은 결함\' section of the 01:28:30 entry.\n'
+                '1. A failed pane-spawn --check (exit 1 with workers down, exit 2) still counts as handing the check over.\npane-spawn --check a b\n; pane-spawn --check c d"')
     with tempfile.TemporaryDirectory() as d:
         fake = os.path.join(d, "herdr")
         with open(fake, "w", encoding="utf-8") as f:
@@ -985,6 +1007,28 @@ def selftest():
                 ("a pane that is no check pane", [claude_in(told), claude_call("Bash", command='pane-spawn "로그인" "돌려 보세요"')], bare, DELEGATE_REASON),
                 ("a word in another command", [claude_in(told), claude_call("Bash", command='rg "pane-spawn --check" tools')], bare, DELEGATE_REASON),
                 ("a check pane a hook refused", [claude_in(told), spawn_check, claude_out("k1", "PreToolUse:Bash hook error: 막음", error=True)], bare, DELEGATE_REASON),
+                # A check pane that never opened hands nothing over, however the command ended (a check pane's finding, 2026-11-05).
+                ("a spawn with workers down, exit 1", [claude_in(told), spawn_check, claude_out("k1", f"Exit code 1\n{workers_down}", error=True)], bare, DELEGATE_REASON),
+                ("a spawn refused as bad usage, exit 2", [claude_in(told), spawn_check, claude_out("k1", "Exit code 2\npane-spawn: --check is for the main pane", error=True)], bare, DELEGATE_REASON),
+                ("a spawn whose pane shows no work, exit 1", [claude_in(told), spawn_check, claude_out("k1", "Exit code 1\nworkers/w1:pQ\npane-spawn: workers/w1:pQ shows no work", error=True)], bare, DELEGATE_REASON),
+                ("a failed spawn behind `; echo`, which exits 0", [claude_in(told), claude_call("Bash", "k1", command='pane-spawn --check "a" "b"; echo done'),
+                                                                   claude_out("k1", f"{workers_down}\ndone")], bare, DELEGATE_REASON),
+                ("a failed spawn behind `| tail`, which exits 0", [claude_in(told), claude_call("Bash", "k1", command='pane-spawn --check "a" "b" 2>&1 | tail -3'),
+                                                                   claude_out("k1", workers_down)], bare, DELEGATE_REASON),
+                ("Codex: a spawn with workers down, exit 1", [codex_in(told), codex_spawn, codex_out("c1", json.dumps({"exit_code": 1, "output": workers_down}))], bare, DELEGATE_REASON),
+                ("Codex: a spawn refused, exit 2", [codex_in(told), codex_spawn, codex_out("c1", json.dumps({"exit_code": 2, "output": "pane-spawn: usage"}))], bare, DELEGATE_REASON),
+                ("Codex: a failed spawn behind `; echo`, exit 0", [codex_in(told), codex_spawn, codex_out("c1", json.dumps({"exit_code": 0, "output": f"{workers_down}\ndone"}))], bare, DELEGATE_REASON),
+                # No error line of pane-spawn's own: it never ran.
+                ("a cd that failed before the spawn", [claude_in(told), claude_call("Bash", "k1", command='cd /nope && pane-spawn --check "a" "b"'),
+                                                       claude_out("k1", "Exit code 1\ncd: no such file or directory: /nope", error=True)], bare, DELEGATE_REASON),
+                ("Codex: a spawn it could not find, exit 127", [codex_in(told), codex_spawn, codex_out("c1", json.dumps({"exit_code": 127, "output": "zsh:1: command not found: pane-spawn"}))], bare, DELEGATE_REASON),
+                # Words about the command are not the command.
+                ("double-quoted text", [claude_in(told), claude_call("Bash", command='echo "a; pane-spawn --check b"')], bare, DELEGATE_REASON),
+                ("single-quoted text", [claude_in(told), claude_call("Bash", command="echo 'a; pane-spawn --check b'")], bare, DELEGATE_REASON),
+                ("escaped quotes in double-quoted text", [claude_in(told), claude_call("Bash", command=r'echo "say \"x; pane-spawn --check y\" now"')], bare, DELEGATE_REASON),
+                ("a heredoc body", [claude_in(told), claude_call("Bash", command="cat <<EOF\npane-spawn --check a b\nEOF")], bare, DELEGATE_REASON),
+                ("a heredoc body with a lone quote", [claude_in(told), claude_call("Bash", command="cat <<'EOF'\nit's\npane-spawn --check a b\nEOF")], bare, DELEGATE_REASON),
+                ("a plain pane whose instruction names the check", [claude_in(told), claude_call("Bash", command=real_fix)], bare, DELEGATE_REASON),
                 ("a check pane's report and no 확인 line", [claude_in(check_told)], bare, CHECK_REPORT_REASON),
                 ("a check pane's report and 확인: 없음", [claude_in(check_told)], bare + "\n확인: 없음", CHECK_REPORT_REASON),
                 ("a 확인 line that does not say a check pane did it", [claude_in(check_told)], no_word, CHECK_REPORT_REASON),
@@ -994,6 +1038,18 @@ def selftest():
                 ("waiting on the check pane it opened", [claude_in(told), spawn_check], bare),
                 ("its options in any order", [claude_in(told), claude_call("Bash", command='pane-spawn --cwd /w/api --check "a" "b"')], bare),
                 ("after a cd", [claude_in(told), claude_call("Bash", command='cd /w && pane-spawn --check "a" "b"')], bare),
+                ("a spawn that printed its pane", [claude_in(told), spawn_check, claude_out("k1", "workers/w1:pQ")], bare),
+                ("a failed spawn and a retry that opened", [claude_in(told), spawn_check, claude_out("k1", f"Exit code 1\n{workers_down}", error=True),
+                                                            claude_call("Bash", "k2", command='pane-spawn --check "a" "b"'), claude_out("k2", "workers/w1:pQ")], bare),
+                ("another command that failed after the spawn", [claude_in(told), spawn_check, claude_out("k1", "workers/w1:pQ"),
+                                                                 claude_call("Bash", "k2", command="rg x /nope"), claude_out("k2", "Exit code 2", error=True)], bare),
+                ("Codex: a spawn that opened, exit 0", [codex_in(told), codex_spawn, codex_out("c1", json.dumps({"exit_code": 0, "output": "workers/w1:pQ"}))], bare),
+                ("a leading env assignment", [claude_in(told), claude_call("Bash", command='FOO=1 pane-spawn --check "a" "b"')], bare),
+                ("a quoted env assignment", [claude_in(told), claude_call("Bash", command='FOO="a b" BAR=1 /w/pane-spawn --check "a" "b"')], bare),
+                ("an output kept in a variable", [claude_in(told), claude_call("Bash", command='out=$(pane-spawn --check "a" "b"); echo "$out"')], bare),
+                ("a quoted option value before it", [claude_in(told), claude_call("Bash", command='pane-spawn --cwd "/w/my repo" --check "a" "b"')], bare),
+                ("an instruction from a heredoc", [claude_in(told), claude_call("Bash", command="pane-spawn --check \"a\" \"$(cat <<'EOF'\nit's a; pane-spawn x\nEOF\n)\"")], bare),
+                ("the real main pane's command", [claude_in(told), claude_call("Bash", command=real_check)], bare),
                 ("what the check pane ran and saw", [claude_in(check_told)], by_check),
                 ("no command of its own after a check pane's report", [claude_in(told), spawn_check, said("m1", "맡겼습니다."), claude_in(check_told)], by_check),
                 ("answered in an earlier turn", [claude_in(check_told), said("m1", bare), claude_in("다음")], bare),
@@ -1011,6 +1067,10 @@ def selftest():
             assert in_pane([claude_in(told), spawn_check], bare) == RELAY_REASON, f"state file {label}: a check pane answers for nothing"
             assert in_pane([claude_in(check_told)], by_check) == RELAY_REASON, f"state file {label}: a check pane's report is no check"
             assert in_pane([claude_in(check_told), test_run], checked) is None, f"state file {label}: its own check passes"
+            assert in_pane([claude_in(told), claude_call("Bash", "r1", command="npm test"), claude_out("r1", "Exit code 1\n3 failing", error=True)], checked) is None, \
+                f"state file {label}: a test that ran and failed is still a check"
+            assert in_pane([claude_in(told), spawn_check, claude_out("k1", f"Exit code 1\n{workers_down}", error=True)], bare) == RELAY_REASON, \
+                f"state file {label}: a failed spawn is no check either"
         own_terminal("term_M\n")
         with open(fake, "w", encoding="utf-8") as f:
             f.write("#!/bin/sh\nexit 1\n")

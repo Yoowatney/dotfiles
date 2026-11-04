@@ -59,8 +59,11 @@ DELEGATE_ASK = ("pane-fit: 이 칸은 일을 나눠 주기만 합니다. 요유�
 OWN_TOOLS = {"ToolSearch", "Skill", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop", "ScheduleWakeup",
              "AskUserQuestion", "mcp__task-progress__progress", "update_plan"}
 OWN_FILES = re.compile(r"/\.local/state/(?:pane-reports|orchestrator)/|/skills/main-orchestrator/SKILL\.md$")
-OWN_COMMAND = re.compile(r"^\s*(?:\S*/)?(?:cd|pane-label|pane-tell|pane-spawn|herdr|board\.sh|decision-log|handoff|launchctl)\b"
-                         r"|^\s*python3\s+\S*main-channel\.py\b|^\s*(?:cat|tail|head|grep)\s.*/\.local/state/(?:pane-reports|orchestrator)/")
+# Each may sit in an `if` or an `out=$(…)`: a stuck pane is read and answered that way (seen 2026-11-05).
+LEAD_IN = r"^\s*(?:(?:if|then|elif|else|!)\s+)*"
+OWN_COMMAND = re.compile(LEAD_IN + r"(?:\w+=\$\(\s*)?(?:(?:\S*/)?(?:cd|pane-label|pane-tell|pane-spawn|herdr|board\.sh|decision-log|handoff|launchctl)\b"
+                         r"|python3\s+\S*main-channel\.py\b|(?:cat|tail|head|grep|rg|awk|sed)\s.*/\.local/state/(?:pane-reports|orchestrator)/)")
+NEUTRAL = re.compile(LEAD_IN + r"(?:echo|printf|sleep|true|fi)\b")  # prints or waits: fine beside a chore, no chore by itself
 QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")  # a message's words are no commands
 STAGES = re.compile(r"&&|\|\||;|\n")
 
@@ -91,7 +94,8 @@ def stays_here(payload: dict) -> bool:
     tool, inp = payload.get("tool_name"), payload.get("tool_input") or {}
     if tool == "Bash":
         stages = (stage.split("|")[0] for stage in STAGES.split(QUOTED.sub("''", str(inp.get("command") or ""))))
-        return all(OWN_COMMAND.search(stage) for stage in stages if stage.strip())
+        real = [stage for stage in stages if stage.strip() and not NEUTRAL.search(stage)]
+        return bool(real) and all(OWN_COMMAND.search(stage) for stage in real)
     if tool in EDITORS:
         return not starts_work(payload)
     return tool in OWN_TOOLS or (tool == "Read" and bool(OWN_FILES.search(str(inp.get("file_path") or ""))))
@@ -172,7 +176,14 @@ def selftest():
                         p("mcp__slack__slack_get_thread_replies", thread_ts="1"), p(), p("Bash", command="gh issue view 1"),
                         p("Bash", command="git log -3"), p("Bash", command="cat /repo/a.py"), p("Bash", command="herdr agent list; npm test"),
                         p("Bash", command="cat /x/note.md | herdr pane list"), p("Agent", subagent_type="Explore"),
-                        p("Bash", command="rg pane-tell tools"), p("Bash", command='echo "herdr"'), p("Read", file_path="/repo/main-orchestrator/a.py")):
+                        p("Bash", command="rg pane-tell tools"), p("Bash", command='echo "herdr"'), p("Read", file_path="/repo/main-orchestrator/a.py"),
+                        # Real work next to the chores' shell grammar. What only prints or waits settles nothing alone.
+                        p("Bash", command="awk '{print}' /repo/a.py"), p("Bash", command="sed -n 1,5p /repo/a.py"),
+                        p("Bash", command="awk '/.local/state/pane-reports/' /repo/a.py"), p("Bash", command="out=$(cat /repo/a.py)"),
+                        p("Bash", command="out=$(npm test); echo \"$out\""), p("Bash", command="out=$(herdr agent list); npm test"),
+                        p("Bash", command="if rg x /repo; then echo y; fi"), p("Bash", command="if npm test; then herdr agent list; fi"),
+                        p("Bash", command="if true; then echo y; else echo n; fi"), p("Bash", command="sleep 3"), p("Bash", command="printf '%s' x; echo y"),
+                        p("Bash", command="echo 'out=$(herdr agent read w1:p2)'"), p("Bash", command="tail -5 ~/.local/state/pane-reports/a.md; npm test")):
             armed_main()
             assert check(payload, env) == DELEGATE_ASK, f"the main pane is asked: {payload}"
             assert check(payload, env) is None, f"once a message, so a one-line answer or a prod step goes on: {payload}"
@@ -193,7 +204,16 @@ def selftest():
                         p("Read", file_path="/Users/y/.local/state/orchestrator/reuse-notes.md"),
                         p("Read", file_path="/Users/y/.claude/skills/main-orchestrator/SKILL.md"), p("ToolSearch", query="x"), p("Skill", skill="x"),
                         p("TaskUpdate", taskId="1"), p("mcp__task-progress__progress", done_steps=0),
-                        p("Write", file_path="/private/tmp/x/scratchpad/a.md"), p("Edit", file_path="/Users/y/.claude/projects/-x/memory/a.md")):
+                        p("Write", file_path="/private/tmp/x/scratchpad/a.md"), p("Edit", file_path="/Users/y/.claude/projects/-x/memory/a.md"),
+                        # Word for word what the real main pane was refused on 2026-11-05: an entry of the pane-reports file, a stuck pane.
+                        *(p("Bash", command=real) for real in (
+                            "awk '/01:09:13/{f=1} f&&/^## .*0?1:[0-9][0-9]:[0-9][0-9]/&&!/01:09:13/{exit} f' /Users/y/.local/state/pane-reports/2026-11-05.md | cut -c1-700 | head -40",
+                            "herdr agent list | jq -r '.result.agents[] | [.pane_id, .agent_status, .name // \"-\", .terminal_title] | @tsv' | cut -c1-90; echo ---; pane-tell --list | cut -c1-70; echo ---; herdr --session workers agent list | jq -r '.result.agents[] | [.pane_id, .agent_status] | @tsv'",
+                            "out=$(herdr --session workers agent read w1:pQ 2>&1); if printf '%s' \"$out\" | grep -q 'possibly-empty variable path: \\$SP/\\*.log'; then herdr --session workers agent send-keys w1:pQ Enter; echo \"answered Yes\"; else echo \"dialog differs:\"; printf '%s' \"$out\" | tail -c 700; fi; sleep 3; herdr --session workers agent list | jq -r '.result.agents[] | select(.pane_id==\"w1:pQ\") | .agent_status'",
+                        )),
+                        p("Bash", command="sed -n 159,215p ~/.local/state/pane-reports/2026-11-05.md"), p("Bash", command="rg -n 01:28 ~/.local/state/pane-reports/2026-11-05.md"),
+                        p("Bash", command="herdr --session workers pane send-keys w1:pQ Enter"), p("Bash", command="out=$(herdr --session workers agent read w1:pQ); echo \"$out\" | tail -5"),
+                        p("Bash", command="if ! herdr agent get w1:p2 >/dev/null; then echo gone; fi")):
             armed_main()
             assert check(payload, env) is None, f"what stays in the main pane: {payload}"
             assert os.path.exists(state_file(p(), env)), f"and the question stays for the first lookup: {payload}"
@@ -210,6 +230,14 @@ def selftest():
         os.unlink(state_file(p(), env))
 
         listing({"pane_id": "w1:p1", "agent_session": {"value": "s1"}})
+        # Any other pane has no chores: the main pane's list changes nothing here, the clock and real work still ask.
+        chore = "out=$(herdr --session workers agent read w1:pQ); awk '/x/' ~/.local/state/pane-reports/a.md"
+        armed()
+        assert check(p("Bash", command=chore), env) is None and os.path.exists(state_file(p(), env)), "not work, so not asked yet"
+        armed(WAIT + 1)
+        assert check(p("Bash", command=chore), env) == LATE, "and past 5 minutes it is asked as any tool is"
+        armed()
+        assert check(p("Bash", command="out=$(herdr agent list); git commit -m x"), env) == START, "real work beside it is asked"
         armed()
         assert check(p(), env) == START, "first work after a message is asked"
         assert check(p(), env) is None, "the repeat passes"
@@ -300,6 +328,9 @@ def selftest():
         out = run(lookup)
         assert json.loads(out.stdout)["hookSpecificOutput"]["permissionDecisionReason"] == DELEGATE_ASK, out.stdout
         assert run(lookup).stdout == "", "a lookup's repeat passes through the guard"
+        armed_main()
+        assert run(p("Bash", command="out=$(herdr --session workers agent read w1:pQ); echo \"$out\"")).stdout == "", "a chore passes through the guard"
+        assert os.path.exists(state_file(p(), env)), "with the question kept for the first lookup"
         armed()
         refused = run(p("Bash", command=" ".join(["gcloud", "config", "set", "account", "a@b.c"])))
         assert "gcp-account-guard" in refused.stdout, refused.stdout
