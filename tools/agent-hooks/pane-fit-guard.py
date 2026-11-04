@@ -11,7 +11,8 @@ Not asked: panes `herdr agent start` opened (they are the handed-over work; herd
 remember), job tabs, headless runs, subagents, and sessions outside herdr. A pane herdr cannot find is not asked either.
 
 A pane that hands checks out (herdr_peers.delegates_checks: the main pane today, 요유 2026-11-05) is asked a different question: at
-the first call of any kind but its own chores (stays_here), since a lookup there holds up 요유's next words as much as work does.
+the first call of any kind but pane-spawn, since a lookup there holds up 요유's next words as much as work does. Its own chores are
+asked too: this is a reminder, not a gate, the repeat passes, and shell cannot be matched reliably enough to spare them.
 
 pane-label-nudge.sh arms it on every message, by writing ~/.local/state/pane-fit/<session id>, with DELEGATES in it for such a pane
 (which is armed by relayed messages too: 요유's Slack words reach it by pane-tell); asking removes that file. An empty file is the
@@ -53,42 +54,8 @@ LATE = "pane-fit: 이 요청을 시작한 지 5분이 넘었습니다. 남은 �
 DELEGATES = "delegates"  # what pane-label-nudge.sh writes into the armed file when herdr_peers.delegates_checks says yes
 DELEGATE_ASK = ("pane-fit: 이 칸은 일을 나눠 주기만 합니다. 요유의 다음 말을 바로 받아야 하니, 한 줄로 답할 수 없는 조회도 `pane-spawn \"<작업 이름>\" \"<짧은 지시>\"`로 넘기고, "
                 "하위 칸의 결과 확인은 `pane-spawn --check`로 새 확인 칸에 맡기세요(지시에는 마지막 보고를 `남은 것` 줄로 끝내라고만 적습니다). "
-                "이 칸에 남는 일은 한 줄 답, `prod 허용`·`staging 허용`이 필요한 단계, 짧은 보고 읽기, pane-spawn 실행뿐입니다. "
+                "이 칸에 남는 일은 한 줄 답, `prod 허용`·`staging 허용`이 필요한 단계, 짧은 보고 읽기, pane-spawn·pane-tell·보드 같은 잡일뿐입니다. "
                 "이 호출이 그중 하나면 같은 호출을 그대로 다시 실행하세요. 이 질문은 메시지마다 한 번만 나옵니다.")
-# What a pane that hands work out does all day. Asking here would stop its handing out and its fresh-start reads, not a lookup.
-OWN_TOOLS = {"ToolSearch", "Skill", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop", "ScheduleWakeup",
-             "AskUserQuestion", "mcp__task-progress__progress", "update_plan"}
-OWN_FILES = re.compile(r"/\.local/state/(?:pane-reports|orchestrator)/|/skills/main-orchestrator/SKILL\.md$")
-# Runs something from inside a word. Beside herdr or a print that is work; in a message to pane-tell or board.sh it is the message.
-SUBSTITUTION = r"\$\(|`|<\("
-RUNS = rf"(?!.*(?:{SUBSTITUTION}))"
-LEAD_IN = r"(?:(?:if|then|elif|else|!)\s+)+"
-STUCK_PANE = r"(?:\S*/)?herdr(?:\s+--session\s+\S+)?\s+(?:agent|pane)\s+(?:read|send-keys)(?=\s|$)" + RUNS
-# One report file and nothing else, so `rg x /repo <report>` is no read of a report. sed and awk take only a program that QUOTED left as ''.
-REPORT = r"\s+\S*/\.local/state/(?:pane-reports|orchestrator)/[^\s/]*\s*$"
-OPTIONS = r"(?:\s+-\w+(?:\s+\d+)?)*"
-# Only a stuck pane's read or keys may sit in an `if` or an `out=$(…)` (seen 2026-11-05), with nothing after the `)`: `out=$(x) npm test` runs npm.
-OWN_COMMAND = re.compile(r"^\s*(?:(?:\S*/)?(?:cd|pane-label|pane-tell|pane-spawn|board\.sh|decision-log|handoff|launchctl)(?=\s|$)"
-                         r"|(?:\S*/)?herdr(?=\s|$)" + RUNS + r"|python3\s+\S*main-channel\.py(?=\s|$)"
-                         r"|" + LEAD_IN + STUCK_PANE + r"|\w+=\$\(\s*" + STUCK_PANE + r"[^()]*\)?\s*$"
-                         r"|(?:cat|tail|head)" + OPTIONS + REPORT + r"|(?:grep|rg)" + OPTIONS + r"\s+[^\s/-]+" + REPORT
-                         + r"|awk\s+''" + REPORT + r"|sed\s+-n\s+(?:''|\d+(?:,\d+)?p)" + REPORT + r")")
-# Prints or waits: fine beside a chore, no chore by itself.
-NEUTRAL = re.compile(r"^\s*(?:" + LEAD_IN + r")?(?:(?:echo|printf|sleep|true)(?=\s|$)" + RUNS + r"|fi\s*$)")
-# What may read a chore's output. No path: `| tail /repo/a.py` is a lookup. ponytail: a bare relative file name still reads; add when one shows up.
-FILTER = re.compile(r"^\s*(?:grep|rg|head|tail|cut|jq|wc|sed\s+-n)(?=\s|$)[^/()!]*\)?\s*$")
-HARMLESS_REDIRECT = re.compile(r"\s*(?:[\d&]?>>?\s*/dev/null(?![\w./-])|\d?>&[\d-](?![\w.]))")  # any other `>` left in a stage is a write
-QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", re.S)
-ACTS = re.compile(r"print[^;}]*[>|]|\b(?:system|getline)\b|(?<![A-Za-z])w[\s/]")  # an awk or sed program that writes or runs
-STAGES = re.compile(r"&&|\|\||;|\n|(?<!>)&(?!>)")
-
-
-def blank_quote(match) -> str:
-    """A message's words are no commands, except what runs inside double quotes and a program that acts: those stay visible."""
-    text = match.group(0)
-    if text[0] == '"' and re.search(SUBSTITUTION, text):
-        return "$()"
-    return "'!'" if ACTS.search(text) else "''"
 
 
 def state_file(payload: dict, env) -> str | None:
@@ -109,24 +76,6 @@ def starts_work(payload: dict) -> bool:
         return True
     command = str(inp.get("command") or "")
     return tool == "Bash" and bool(GIT_WORK.search(command) or LONG_RUN.search(command))
-
-
-def stays_here(payload: dict) -> bool:
-    """A pane that hands work out does this without being asked. ponytail: a word list and a regex reading of shell; a miss costs one
-    repeated call, once a message."""
-    tool, inp = payload.get("tool_name"), payload.get("tool_input") or {}
-    if tool == "Bash":
-        stages = [HARMLESS_REDIRECT.sub("", stage) for stage in STAGES.split(QUOTED.sub(blank_quote, str(inp.get("command") or ""))) if stage.strip()]
-        if any(">" in stage for stage in stages):
-            return False
-        pipelines = [stage.split("|") for stage in stages]
-        if not all(FILTER.search(reader) for _, *readers in pipelines for reader in readers):
-            return False
-        real = [head for head, *_ in pipelines if not NEUTRAL.search(head)]
-        return bool(real) and all(OWN_COMMAND.search(head) for head in real)
-    if tool in EDITORS:
-        return not starts_work(payload)
-    return tool in OWN_TOOLS or (tool == "Read" and bool(OWN_FILES.search(str(inp.get("file_path") or ""))))
 
 
 def hand_opened(payload: dict, env) -> bool:
@@ -156,8 +105,6 @@ def check(payload: dict, env, now: float | None = None) -> str | None:
     with open(path, encoding="utf-8") as f:
         delegates = f.read().strip() == DELEGATES
     if delegates and not spawning:
-        if stays_here(payload):
-            return None
         os.unlink(path)
         return DELEGATE_ASK
     if not (late or spawning or starts_work(payload)):
@@ -166,9 +113,6 @@ def check(payload: dict, env, now: float | None = None) -> str | None:
     if spawning or not hand_opened(payload, env):
         return None
     return START if starts_work(payload) else LATE
-
-
-REPORT_FILE = "/Users/y/.local/state/pane-reports/2026-11-05.md"
 
 
 def selftest():
@@ -203,36 +147,18 @@ def selftest():
             os.utime(state_file(p(), env), (time.time() - age, time.time() - age))
 
         listing({"pane_id": "w1:p1", "name": "any-agent-name", "agent_session": {"value": "s1"}})  # however this pane was opened
+        # Everything but pane-spawn, chores too: no list decides it, since a check pane got 62 of 196 shell forms through the last one.
         for payload in (p("Read", file_path="/repo/a.py"), p("Grep", pattern="x"), p("Glob", pattern="*"), p("WebFetch", url="https://x.dev"),
                         p("mcp__slack__slack_get_thread_replies", thread_ts="1"), p(), p("Bash", command="gh issue view 1"),
                         p("Bash", command="git log -3"), p("Bash", command="cat /repo/a.py"), p("Bash", command="herdr agent list; npm test"),
-                        p("Bash", command="cat /x/note.md | herdr pane list"), p("Agent", subagent_type="Explore"),
-                        p("Bash", command="rg pane-tell tools"), p("Bash", command='echo "herdr"'), p("Read", file_path="/repo/main-orchestrator/a.py"),
-                        # Real work next to the chores' shell grammar. What only prints or waits settles nothing alone.
-                        p("Bash", command="awk '{print}' /repo/a.py"), p("Bash", command="sed -n 1,5p /repo/a.py"),
-                        p("Bash", command="awk '/.local/state/pane-reports/' /repo/a.py"), p("Bash", command="out=$(cat /repo/a.py)"),
-                        p("Bash", command="out=$(npm test); echo \"$out\""), p("Bash", command="out=$(herdr agent list); npm test"),
-                        p("Bash", command="if rg x /repo; then echo y; fi"), p("Bash", command="if npm test; then herdr agent list; fi"),
-                        p("Bash", command="if true; then echo y; else echo n; fi"), p("Bash", command="sleep 3"), p("Bash", command="printf '%s' x; echo y"),
-                        p("Bash", command="echo 'out=$(herdr agent read w1:p2)'"), p("Bash", command="tail -5 ~/.local/state/pane-reports/a.md; npm test"),
-                        p("Bash", command="herdr agent list; echo x > /repo/a.py"), p("Bash", command="herdr agent list; printf x >>/repo/a.py"),
-                        p("Bash", command="herdr agent list; echo x 2>/repo/err"),
-                        # A check pane's 2026-11-05 entry: what the parent of 274c990 asked and 274c990 let through, 7 of them file writes.
-                        *(p("Bash", command=gap) for gap in (
-                            "herdr agent list; echo x >/dev/nullx", "herdr agent list; echo x >/dev/null > /repo/a.py", "herdr agent list; echo x >&2 > /repo/a.py",
-                            'herdr agent list; echo "$(npm test)"', "herdr agent list; echo $(git log -1)", "herdr agent list; echo x | tee /repo/a.py",
-                            "herdr agent list; echo npm test | sh", "herdr agent list; sleep-and-deploy", "herdr agent list; fi-nalize", "out=$(herdr agent list) npm test",
-                            f"rg secret /repo {REPORT_FILE}", f"awk '{{print > \"/repo/a.py\"}}' {REPORT_FILE}", f"sed -i '' 's/a/b/' {REPORT_FILE}", f"sed -n 1p /repo/a.py > {REPORT_FILE}",
-                            # The same entry: older gaps, which the same narrowing closes.
-                            "herdr agent list & npm test", "herdr agent list > /repo/a.py", "herdr agent list | sh", 'herdr agent read "$(npm test)"', "herdr-deploy --all",
-                            f"cat /repo/a.py {REPORT_FILE}", f"cat {REPORT_FILE} > /repo/a.py",
-                            # Neighbours of those forms.
-                            "herdr agent read w1:p2 | tee /repo/a.py", "herdr agent list; echo x | sed -n 'w /repo/a.py'", "out=$(herdr agent read w1:p2 | sh)",
-                            "out=$(herdr agent read w1:p2 | tail -3) npm test", "out=$(herdr agent read w1:p2) npm test", "if herdr agent read w1:p2; then npm test; fi", "out=$(herdr agent list); echo \"$out\"",
-                            "if ! herdr agent get w1:p2 >/dev/null; then echo gone; fi", "if herdr agent get w1:p2; then echo a; else echo b; fi",
-                            f"sed -n 'w /repo/a.py' {REPORT_FILE}", f"sed -n '1w /repo/a.py' {REPORT_FILE}", f"sed -n 1,5p a.py {REPORT_FILE}", f"sed -i 's/a/b/' {REPORT_FILE}",
-                            f"awk '{{print | \"sh\"}}' {REPORT_FILE}", f"awk 'BEGIN{{system(\"npm test\")}}' {REPORT_FILE}", f"awk -f /repo/a.awk {REPORT_FILE}",
-                            f"rg secret . {REPORT_FILE}", f"grep x a.py {REPORT_FILE}", f"tail -5 a.py {REPORT_FILE}"))):
+                        p("Agent", subagent_type="Explore"), p("Bash", command="pane-tell workers/w1:p2 '답입니다'"), p("Bash", command="pane-label --free"),
+                        p("Bash", command="herdr --session workers agent list"), p("Bash", command="/w/.agents/skills/agent-board/board.sh mine yoyoo"),
+                        p("Bash", command="tail -40 ~/.local/state/pane-reports/2026-11-05.md"), p("Read", file_path="/Users/y/.local/state/pane-reports/2026-11-05.md"),
+                        p("ToolSearch", query="x"), p("Skill", skill="x"), p("TaskUpdate", taskId="1"), p("mcp__task-progress__progress", done_steps=0),
+                        p("Write", file_path="/private/tmp/x/scratchpad/a.md"),
+                        # Word for word what the real main pane was refused on 2026-11-05: it repeats them, and they pass.
+                        p("Bash", command="awk '/01:09:13/{f=1} f&&/^## .*0?1:[0-9][0-9]:[0-9][0-9]/&&!/01:09:13/{exit} f' /Users/y/.local/state/pane-reports/2026-11-05.md | cut -c1-700 | head -40"),
+                        p("Bash", command="out=$(herdr --session workers agent read w1:pQ 2>&1); if printf '%s' \"$out\" | grep -q 'x'; then herdr --session workers agent send-keys w1:pQ Enter; fi")):
             armed_main()
             assert check(payload, env) == DELEGATE_ASK, f"the main pane is asked: {payload}"
             assert check(payload, env) is None, f"once a message, so a one-line answer or a prod step goes on: {payload}"
@@ -242,58 +168,19 @@ def selftest():
             armed_main()
             assert check(payload, env) is None, "handing out is the answer"
             assert not os.path.exists(state_file(p(), env)), "and it ends the question"
-        for payload in (p("Bash", command="pane-tell workers/w1:p2 '답입니다'"), p("Bash", command="pane-label --free"),
-                        p("Bash", command="herdr --session workers agent list"), p("Bash", command="herdr --session workers agent read w1:p2 | tail -5"),
-                        p("Bash", command="/w/.agents/skills/agent-board/board.sh mine yoyoo"), p("Bash", command="decision-log kinds"),
-                        p("Bash", command="python3 /w/.agents/skills/agent-board/main/main-channel.py post /tmp/a"),
-                        p("Bash", command="handoff save /tmp/a"), p("Bash", command="launchctl print gui/501/com.yoyoo.main-channel | grep -m1 'state ='"),
-                        p("Bash", command="cd /tmp && herdr agent list"), p("Bash", command="tail -40 ~/.local/state/pane-reports/2026-11-05.md"),
-                        p("Bash", command="cat ~/.local/state/orchestrator/personal-decisions.md"),
-                        p("Read", file_path="/Users/y/.local/state/pane-reports/2026-11-05.md"),
-                        p("Read", file_path="/Users/y/.local/state/orchestrator/reuse-notes.md"),
-                        p("Read", file_path="/Users/y/.claude/skills/main-orchestrator/SKILL.md"), p("ToolSearch", query="x"), p("Skill", skill="x"),
-                        p("TaskUpdate", taskId="1"), p("mcp__task-progress__progress", done_steps=0),
-                        p("Write", file_path="/private/tmp/x/scratchpad/a.md"), p("Edit", file_path="/Users/y/.claude/projects/-x/memory/a.md"),
-                        # Word for word what the real main pane was refused on 2026-11-05: an entry of the pane-reports file, a stuck pane.
-                        *(p("Bash", command=real) for real in (
-                            "awk '/01:09:13/{f=1} f&&/^## .*0?1:[0-9][0-9]:[0-9][0-9]/&&!/01:09:13/{exit} f' /Users/y/.local/state/pane-reports/2026-11-05.md | cut -c1-700 | head -40",
-                            "herdr agent list | jq -r '.result.agents[] | [.pane_id, .agent_status, .name // \"-\", .terminal_title] | @tsv' | cut -c1-90; echo ---; pane-tell --list | cut -c1-70; echo ---; herdr --session workers agent list | jq -r '.result.agents[] | [.pane_id, .agent_status] | @tsv'",
-                            "out=$(herdr --session workers agent read w1:pQ 2>&1); if printf '%s' \"$out\" | grep -q 'possibly-empty variable path: \\$SP/\\*.log'; then herdr --session workers agent send-keys w1:pQ Enter; echo \"answered Yes\"; else echo \"dialog differs:\"; printf '%s' \"$out\" | tail -c 700; fi; sleep 3; herdr --session workers agent list | jq -r '.result.agents[] | select(.pane_id==\"w1:pQ\") | .agent_status'",
-                        )),
-                        p("Bash", command="sed -n 159,215p ~/.local/state/pane-reports/2026-11-05.md"), p("Bash", command="rg -n 01:28 ~/.local/state/pane-reports/2026-11-05.md"),
-                        p("Bash", command="herdr --session workers pane send-keys w1:pQ Enter"), p("Bash", command="out=$(herdr --session workers agent read w1:pQ); echo \"$out\" | tail -5"),
-                        p("Bash", command="if herdr --session workers agent read w1:p2 | grep -q x; then herdr --session workers agent send-keys w1:p2 Enter; fi"),
-                        p("Bash", command="out=$(herdr --session workers agent read w1:p2 2>&1 | tail -3); echo \"$out\""),
-                        p("Bash", command="herdr agent list; echo x >&2; echo y >/dev/null; echo z 2>&1; echo 'a > b'"),
-                        # Reading an entry, in the forms the check pane and the real main pane used.
-                        p("Bash", command=f"sed -n '/02:07:56/,$p' {REPORT_FILE}"), p("Bash", command=f"awk 'NR>=159 && NR<=215' {REPORT_FILE}"),
-                        p("Bash", command=f'rg -n "남은 것" {REPORT_FILE}'), p("Bash", command=f"grep -n '^## ' {REPORT_FILE} | head -5"),
-                        p("Bash", command="tail -5 $HOME/.local/state/pane-reports/2026-11-05.md"), p("Bash", command=f"tail -n 40 {REPORT_FILE} 2>/dev/null"),
-                        p("Bash", command=f"awk '/02:05:07/{{f=1}} f{{print}}' {REPORT_FILE} | sed -n '/찾은 결함/,$p' | cut -c1-600"),
-                        # The main pane's real chores with a plain print between them (its record, 2026-11-04): these stay.
-                        p("Bash", command='pane-tell --list 2>&1 | head -40; echo ---; herdr pane get "$HERDR_PANE_ID" 2>&1 | head -20'),
-                        p("Bash", command="cat ~/.local/state/orchestrator/personal-decisions.md 2>&1; echo '--- reuse-notes'; cat ~/.local/state/orchestrator/reuse-notes.md 2>&1"),
-                        p("Bash", command="decision-log kinds 2>&1 | head -20; echo ---; decision-log add --help 2>&1 | head -20"),
-                        p("Bash", command="herdr --session workers pane close w1:pV | head -c 120; echo; herdr --session workers agent list | jq -r '.result.agents[]'"),
-                        p("Bash", command='pane-tell workers/w1:pF "a \\"b > c\\"; d"'), p("Bash", command='pane-tell workers/w1:pF "$(cat /tmp/x/a.md)"'),
-                        p("Bash", command='pane-tell workers/w1:pF "a `b`; c"')):
-            armed_main()
-            assert check(payload, env) is None, f"what stays in the main pane: {payload}"
-            assert os.path.exists(state_file(p(), env)), f"and the question stays for the first lookup: {payload}"
         armed_main(WAIT + 1)
-        assert check(p("Bash", command="pane-tell w1:p2 x"), env) is None, "its own chores are never late"
-        assert check(p("Read", file_path="/repo/a.py"), env) == DELEGATE_ASK, "and the first lookup is asked at any age"
+        assert check(p("Read", file_path="/repo/a.py"), env) == DELEGATE_ASK, "asked at any age"
         for extra in ({"MUNICE_AUTO_DISPATCH": "1"}, {"MUNICE_AMBIENT": "1"}, {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}):
             armed_main()
             assert check(p(), {**env, **extra}) is None, extra
         armed_main()
         assert check({**p(), "agent_id": "a1"}, env) is None, "a subagent of the main pane is not asked"
-        for word in ("pane-spawn", "확인", "prod 허용", "staging 허용", "한 줄"):
+        for word in ("pane-spawn", "pane-tell", "확인", "prod 허용", "staging 허용", "한 줄"):
             assert word in DELEGATE_ASK, f"the question names what stays or goes: {word}"
         os.unlink(state_file(p(), env))
 
         listing({"pane_id": "w1:p1", "agent_session": {"value": "s1"}})
-        # Any other pane has no chores: the main pane's list changes nothing here, the clock and real work still ask.
+        # Any other pane is asked at real work or past the clock, as ever.
         chore = "out=$(herdr --session workers agent read w1:pQ); awk '/x/' ~/.local/state/pane-reports/a.md"
         armed()
         assert check(p("Bash", command=chore), env) is None and os.path.exists(state_file(p(), env)), "not work, so not asked yet"
@@ -386,14 +273,11 @@ def selftest():
         decision = json.loads(out.stdout)["hookSpecificOutput"]
         assert decision["permissionDecision"] == "deny" and decision["permissionDecisionReason"] == START, out.stdout
         assert run(p()).stdout == "", "the repeat passes through the guard"
-        armed_main()
-        lookup = p("Read", file_path="/repo/a.py")
-        out = run(lookup)
-        assert json.loads(out.stdout)["hookSpecificOutput"]["permissionDecisionReason"] == DELEGATE_ASK, out.stdout
-        assert run(lookup).stdout == "", "a lookup's repeat passes through the guard"
-        armed_main()
-        assert run(p("Bash", command="out=$(herdr --session workers agent read w1:pQ); echo \"$out\"")).stdout == "", "a chore passes through the guard"
-        assert os.path.exists(state_file(p(), env)), "with the question kept for the first lookup"
+        for call in (p("Read", file_path="/repo/a.py"), p("Bash", command="out=$(herdr --session workers agent read w1:pQ); echo \"$out\"")):
+            armed_main()
+            out = run(call)
+            assert json.loads(out.stdout)["hookSpecificOutput"]["permissionDecisionReason"] == DELEGATE_ASK, out.stdout
+            assert run(call).stdout == "", f"the repeat passes through the guard: {call}"
         armed()
         refused = run(p("Bash", command=" ".join(["gcloud", "config", "set", "account", "a@b.c"])))
         assert "gcp-account-guard" in refused.stdout, refused.stdout
