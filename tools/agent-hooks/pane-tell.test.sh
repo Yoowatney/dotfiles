@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
+unset HERDR_SOCKET_PATH XDG_STATE_HOME # never the live herdr or state
 
 SUBJECT="$(cd "$(dirname "$0")" && pwd)/pane-tell"
 SANDBOX="$(mktemp -d)"
@@ -8,33 +9,46 @@ fails=0
 check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected [$3] got [$2]"; fails=1; fi; }
 
 # A fake herdr: `pane list` prints $SANDBOX/panes, `agent prompt <pane> <text>` is logged to $SANDBOX/log.
+# The workers server (HERDR_SOCKET_PATH .../sessions/workers/herdr.sock) reads $SANDBOX/workers-panes instead; the server each
+# prompt and notification went to is logged to $SANDBOX/log-srv and $SANDBOX/alerts-srv.
 cat > "$SANDBOX/herdr" <<EOF
 #!/usr/bin/env bash
+case "\${HERDR_SOCKET_PATH:-}" in */sessions/*) s=\${HERDR_SOCKET_PATH%/herdr.sock}; s=\${s##*/} ;; *) s=default ;; esac
+f="$SANDBOX/panes"; [ "\$s" != workers ] || f="$SANDBOX/workers-panes"
 case "\$1 \$2" in
-  "pane list") [ ! -f "$SANDBOX/herdr-down" ] || exit 1; cat "$SANDBOX/panes" ;;
+  "session list") cat "$SANDBOX/sessions.json" 2>/dev/null || exit 1 ;;
+  "pane list") [ ! -f "$SANDBOX/herdr-down" ] || exit 1; cat "\$f" ;;
   "tab list") cat "$SANDBOX/tabs" 2>/dev/null || echo '{"result":{"tabs":[]}}' ;;
   "pane get") jq -n --arg i "\$(cat "$SANDBOX/new-id" 2>/dev/null)" --argjson o "\$(cat "$SANDBOX/scrolled" 2>/dev/null || echo 0)" \
-    --arg p "\$3" --slurpfile all "$SANDBOX/panes" \
+    --arg p "\$3" --slurpfile all "\$f" \
     '{result: {pane: ((\$all[0].result.panes | map(select(.pane_id == \$p)) | .[0] // {}) + {scroll: {offset_from_bottom: \$o}} + (if \$i == "" then {} else {pane_id: \$i} end))}}' ;;
   "pane read") n=\$((\$(cat "$SANDBOX/reads" 2>/dev/null || echo 0) + 1)); echo "\$n" > "$SANDBOX/reads"
     if [ -f "$SANDBOX/screen-\$3" ]; then cat "$SANDBOX/screen-\$3"
     elif [ -f "$SANDBOX/screen.\$n" ]; then cat "$SANDBOX/screen.\$n"; else cat "$SANDBOX/screen"; fi ;;
-  "agent prompt") [ ! -f "$SANDBOX/refuse" ] || exit 1; printf '%s|%s\n' "\$3" "\$4" >> "$SANDBOX/log" ;;
-  "notification show") printf '%s\n' "\$5" >> "$SANDBOX/alerts" ;;
+  "agent prompt") [ ! -f "$SANDBOX/refuse" ] || exit 1; printf '%s|%s\n' "\$3" "\$4" >> "$SANDBOX/log"; echo "\$s" >> "$SANDBOX/log-srv" ;;
+  "notification show") printf '%s\n' "\$5" >> "$SANDBOX/alerts"; echo "\$s" >> "$SANDBOX/alerts-srv" ;;
   *) exit 2 ;;
 esac
 EOF
 chmod +x "$SANDBOX/herdr"
 panes() { # "<id>|<label>|<session>[|<tab id>[|<agent>]]" ...
   local p; for p in "$@"; do IFS='|' read -r id label sid tab kind <<<"$p"; jq -nc --arg i "$id" --arg l "$label" --arg s "$sid" --arg t "${tab:-w1:t1}" --arg k "${kind:-claude}" --arg term "term_${id##*:}" '{pane_id: $i, label: $l, agent_session: {value: $s}, cwd: "/w", tab_id: $t, agent: ($k | if . == "-" then null else . end), terminal_id: $term}'; done \
-    | jq -s '{result: {panes: .}}' > "$SANDBOX/panes"
+    | jq -s '{result: {panes: .}}' > "$SANDBOX/${PANES_FILE:-panes}"
   rm -f "$SANDBOX/log"
+}
+wpanes() { PANES_FILE=workers-panes panes "$@"; }
+sessions_up() { # [stopped]: workers is listed but not running
+  local r=true; [ -z "${1:-}" ] || r=false
+  jq -n --arg d "$SANDBOX/herdr.sock" --arg w "$SANDBOX/sessions/workers/herdr.sock" --argjson r "$r" \
+    '{sessions: [{name: "default", running: true, socket_path: $d}, {name: "workers", running: $r, socket_path: $w}]}' > "$SANDBOX/sessions.json"
 }
 RULE=$(printf '─%.0s' $(seq 1 40))
 claude_screen() { printf '%s\n\xe2\x9d\xaf\xc2\xa0%s\n%s\n  footer\n' "$RULE" "${1:-}" "$RULE"; } # ❯ and a no-break space
 claude_screen > "$SANDBOX/screen"
 export PANE_TELL_POLL=0.05 PANE_TELL_SETTLE=0
-pt() { rm -f "$SANDBOX/log" "$SANDBOX/reads"; env HOME="$SANDBOX/home" XDG_STATE_HOME="$SANDBOX/state" HERDR_PANE_ID=w1:p9 HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "$@"; }
+pt() { rm -f "$SANDBOX/log" "$SANDBOX/log-srv" "$SANDBOX/alerts-srv" "$SANDBOX/reads"; env HOME="$SANDBOX/home" XDG_STATE_HOME="$SANDBOX/state" HERDR_PANE_ID=w1:p9 HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "$@"; }
+# pt from pane w1:p2 of the workers server
+ptw() { rm -f "$SANDBOX/log" "$SANDBOX/log-srv" "$SANDBOX/alerts-srv" "$SANDBOX/reads"; env HOME="$SANDBOX/home" XDG_STATE_HOME="$SANDBOX/state" HERDR_PANE_ID=w1:p2 HERDR_SOCKET_PATH="$SANDBOX/sessions/workers/herdr.sock" HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "$@"; }
 sent() { cut -d'|' -f1 "$SANDBOX/log" 2>/dev/null | tr '\n' ' '; }
 # Waits for the detached delivery to finish: nothing is left waiting and the process itself is gone. It outlives its file while
 # it warns the sender, and those pane reads would land on the next check's counter ("typed between the two reads" failed 5 of 6).
@@ -208,5 +222,36 @@ pt --raw w1:p1 2>/dev/null; check "raw: bad usage" "$?" 2
 
 pt --box-ready w1:p1 claude; check "box-ready: empty" "$?" 0
 claude_screen "치던 글" > "$SANDBOX/screen"; pt --box-ready w1:p1 claude; check "box-ready: words in it" "$?" 1
+
+# <session>/<pane id>: the same pane id lives on both servers and is never taken for the other one.
+claude_screen > "$SANDBOX/screen"
+sessions_up
+panes "w1:p9|🟢 👑 메인 오케스트레이터|s9"
+wpanes "w1:p2|🟢 🫡 구현|s2" "w1:p9|🟢 🫡 같은 번호|s7"
+pt workers/w1:p2 "x" >/dev/null
+check "an address with a session reaches that server" "$?|$(sent)|$(tail -1 "$SANDBOX/log-srv")" "0|w1:p2 |workers"
+check "the sender is named from its own server" "$(cut -d'|' -f2 "$SANDBOX/log")" "[pane-tell: '👑 메인 오케스트레이터' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] x"
+pt workers/w1:p9 "x" >/dev/null; check "the same id on the other server is not this pane" "$?|$(sent)" "0|w1:p9 "
+pt default/w1:p9 "x" 2>/dev/null; check "its own server named in the address is still this pane" "$?|$(sent)" "2|"
+pt other/w1:p2 "x" 2>/dev/null; check "only default and workers are reachable by name" "$?|$(sent)" "2|"
+sessions_up stopped; pt workers/w1:p2 "x" 2>/dev/null; check "a stopped server has no such pane" "$?|$(sent)" "3|"
+sessions_up
+# main -> workers, the workers box is full: the alert goes where that box is; the note to the sender reaches main on default.
+claude_screen "치던 글" > "$SANDBOX/screen-w1:p2"
+PANE_TELL_ALERT=0 PANE_TELL_WAIT=0.3 pt workers/w1:p2 "x" >/dev/null; settled
+check "an alert for a full box goes to the receiver's server" "$(sort -u "$SANDBOX/alerts-srv")" "workers"
+check "the sender's note reaches the main pane on its server" "$(grep -c '^w1:p9|.*자동 안내' "$SANDBOX/log")|$(grep -c default "$SANDBOX/log-srv")" "1|1"
+# workers -> main, 요유's half-typed words fill main's box and the workers pane has already closed: 요유 must see the alert.
+rm -f "$SANDBOX/alerts-srv" "$SANDBOX/screen-w1:p2"; claude_screen "요유가 치던 글" > "$SANDBOX/screen-w1:p9"
+PANE_TELL_ALERT=0 PANE_TELL_WAIT=0.3 ptw default/w1:p9 "보고" >/dev/null
+wpanes "w1:p9|🟢 🫡 같은 번호|s7" # the sender w1:p2 is gone from workers
+settled
+check "an alert for main's full box reaches 요유 on default" "$(sort -u "$SANDBOX/alerts-srv")" "default"
+rm -f "$SANDBOX"/state/pane-tell/undelivered/* "$SANDBOX/screen-w1:p9"
+# A queued message waits on the receiver's server: on default the same terminal would find main's own box.
+panes "w1:p9|🟢 👑 메인 오케스트레이터|s9"; wpanes "w1:p2|🟢 🫡 구현|s2" "w1:p9|🟢 🫡 같은 번호|s7"
+claude_screen "치던 글" > "$SANDBOX/screen-w1:p9"
+pt workers/w1:p9 "x" >/dev/null; rm -f "$SANDBOX/screen-w1:p9"; settled
+check "a queued message for the same id waits on the receiver's server" "$(sent)|$(sort -u "$SANDBOX/log-srv")" "w1:p9 |workers"
 
 exit $fails
