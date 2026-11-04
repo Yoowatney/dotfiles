@@ -265,7 +265,7 @@ def selftest() -> int:
             assert k not in ripe()
             cli(["promoted", k]); assert cli(["apply", k]) == 4
             cli(["revoke", k]); assert cli(["apply", k]) == 4
-        assert cli(["apply", "prod"]) == 4
+        assert cli(["apply", "prod"]) == 4 and cli(["apply", "PROD/x"]) == 4 and cli(["apply", " prod/x"]) == 4
 
         # apply counts only decisions after the last revoke.
         fresh()
@@ -399,7 +399,6 @@ def selftest() -> int:
         link = os.path.join(root, "decision-log")
         os.symlink(os.path.abspath(__file__), link)
         env = {**os.environ}
-        env.pop("HERDR_SOCKET_PATH", None)
 
         def run(script, *a):
             return subprocess.run([sys.executable, "-I", script, *a], env=env, capture_output=True, text=True)
