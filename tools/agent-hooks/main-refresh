@@ -1,0 +1,70 @@
+#!/bin/bash
+# Once a day at 05:00 (launchd): ask the main pane for a handoff, then /clear it in place, so the next
+# session starts fresh and loads the handoff by itself. Runs under macOS bash 3.2.
+# Test knobs: MAIN_REFRESH_HOUR (wins over the clock), _POLL, _DEADLINE, _HANDOFF_WAIT (seconds, fractions ok),
+# _PANE_TELL, and HERDR_BIN_PATH.
+# A run from inside the main pane would make pane-tell refuse "this pane"; launchd sets none anyway.
+# HERDR_SOCKET_PATH stays: a run from a workers pane must find nothing, not reach the default server.
+unset HERDR_PANE_ID
+H=${HERDR_BIN_PATH:-herdr}
+TELL=${MAIN_REFRESH_PANE_TELL:-$(dirname "$0")/pane-tell}
+STATE=${XDG_STATE_HOME:-$HOME/.local/state}
+DIR=$STATE/orchestrator
+POLL=${MAIN_REFRESH_POLL:-30}
+HANDOFF_WAIT=${MAIN_REFRESH_HANDOFF_WAIT:-1800}
+
+log() { mkdir -p "$DIR" && echo "$(date '+%F %T') $*" >> "$DIR/refresh.log"; }
+skip() { kill $(jobs -p) 2>/dev/null; log "$*"; "$H" notification show "메인 칸 새로 시작 건너뜀" --body "$*" >/dev/null 2>&1; exit 0; }
+in_window() { case "${MAIN_REFRESH_HOUR:-$(date +%H)}" in 05|06) return 0 ;; esac; return 1; }
+late() { in_window || skip "새벽 05~06시가 지나 건너뜀"; }
+status() { "$H" pane get "$1" 2>/dev/null | jq -r '.result.pane.agent_status // empty'; }
+# Polls "$@" until it passes or $limit seconds pass; a background sleep also handles fractions.
+# Each poll rechecks the hour: a Mac that sleeps in the wait wakes late with the script still running.
+wait_for() { # <limit> <cmd...>
+  local limit=$1 t; shift
+  sleep "$limit" & t=$!
+  while ! "$@"; do
+    kill -0 "$t" 2>/dev/null || { return 1; }
+    late; sleep "$POLL"
+  done
+  kill "$t" 2>/dev/null; wait "$t" 2>/dev/null; return 0
+}
+
+in_window || { log "05~06시가 아니라 아무것도 안 함"; exit 0; }
+day=$(date +%F)
+[ ! -f "$DIR/refreshed-$day" ] || exit 0
+term=$(cat "$DIR/main" 2>/dev/null)
+[ -n "$term" ] || { log "메인 칸 파일 없음"; exit 0; }
+row=$("$H" pane list 2>/dev/null | jq -c --arg t "$term" '[.result.panes[] | select(.terminal_id == $t)][0] // empty')
+id=$(jq -r '.pane_id // empty' <<<"$row" 2>/dev/null)
+[ -n "$id" ] || { log "메인 칸을 찾지 못함 ($term)"; exit 0; }
+sid=$(jq -r '.agent_session.value // empty' <<<"$row")
+
+idle() { case "$(status "$id")" in idle|done) return 0 ;; esac; return 1; }
+if [ -n "${MAIN_REFRESH_DEADLINE:-}" ]; then deadline=$MAIN_REFRESH_DEADLINE
+else deadline=$(( $(date -j -f %H:%M:%S 07:00:00 +%s) - $(date +%s) )); [ "$deadline" -gt 0 ] || deadline=0; fi
+wait_for "$deadline" idle || skip "메인 칸이 07:00까지 일하고 있어 건너뜀"
+
+# A pane moved between workspaces keeps its old id in HERDR_PANE_ID, and `handoff save` names its file by that,
+# so the key is found through the session id; the listed id is the fallback.
+hdir=$STATE/agent-handoff
+key=$id
+if [ -n "$sid" ]; then
+  # ponytail: top level only; subfolders belong to named servers. First match wins.
+  m=$(grep -l -F -- "$sid" "$hdir"/*.md.transcript 2>/dev/null | head -n 1)
+  [ -z "$m" ] || { key=${m##*/}; key=${key%.md.transcript}; }
+fi
+
+req=$(date +%s)
+"$TELL" "$id" "[main-refresh] 새벽 정리입니다. 지금 도는 밑 칸과 각 칸의 일, 모아 둔 결정(보드 링크, 개인 결정 파일), 오늘 남은 일을 handoff save로 남기고 '인계 저장함' 한 줄로 끝내세요. 다른 일은 하지 마세요." >/dev/null 2>&1 \
+  || skip "인계 요청을 보내지 못해 건너뜀"
+# stat -f %m is whole seconds like the request time, so a handoff from earlier does not count.
+fresh() { [ -f "$hdir/$key.md" ] && [ "$(stat -f %m "$hdir/$key.md")" -ge "$req" ] && idle; }
+wait_for "$HANDOFF_WAIT" fresh || skip "인계가 저장되지 않아 건너뜀"
+
+late
+"$TELL" --box-ready "$id" claude >/dev/null 2>&1 || skip "입력창이 비어 있지 않아 건너뜀"
+# Straight through herdr, never pane-tell's queue: a queued /clear would fire hours later and wipe the main pane.
+"$H" agent prompt "$id" /clear >/dev/null 2>&1 || skip "/clear를 보내지 못해 건너뜀"
+mkdir -p "$DIR" && : > "$DIR/refreshed-$day"
+log "메인 칸 $id 새로 시작함"
