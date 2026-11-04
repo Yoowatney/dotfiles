@@ -16,6 +16,9 @@
 #                                             🫡 sits in the same place on a pane under a lead: herdr has an agent name for
 #                                             it (`herdr agent start`), it is outside the job tabs, and it is not 👑. It
 #                                             comes by itself from the first name on, and marks and renames keep it.
+#   pane-label --main                         make this pane 요유's main pane: write its terminal id to
+#                                             ${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main and name it
+#                                             "<mark> 👑 메인 오케스트레이터" (the file is how hooks recognize it)
 #   pane-label --mark-subs                    add 🫡 to the panes already running; new ones need no call
 #   pane-label --sync-tabs                    make every tab name in this herdr session follow its panes (요유 2026-10-31):
 #                                             `👑 ` when a pane in it is a lead, else `🫡 ` when one is under a lead, no mark
@@ -128,12 +131,17 @@ lead() { # lead|"" label: rewrite the label with or without 👑, keeping mark a
 }
 
 case "${1:-}" in
-  "") echo 'usage: pane-label "<text>" | --hold | --free | --lead | --unlead | --mark-subs | --sync-tabs | --sync-all-tabs | --clear | --clear-if-prefix "<prefix>" | --close' >&2; exit 2 ;;
+  "") echo 'usage: pane-label "<text>" | --hold | --free | --lead | --unlead | --main | --mark-subs | --sync-tabs | --sync-all-tabs | --clear | --clear-if-prefix "<prefix>" | --close' >&2; exit 2 ;;
   --sync-tabs) sync_tabs ;;
   --sync-all-tabs) sync_all_tabs ;;
   --clear) rename --clear ;;
   --lead) lead 1 "$(current)" ;;
   --unlead) lead "" "$(current)" ;;
+  --main)
+    f="${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main"
+    term=$("$H" pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.terminal_id // empty' 2>/dev/null)
+    [ -n "$term" ] && mkdir -p "${f%/*}" && echo "$term" > "$f" || { echo "pane-label: no terminal id for this pane" >&2; exit 1; }
+    lead 1 "$(mark_of "$(current)") 메인 오케스트레이터" ;;
   --mark-subs)
     labels=$("$H" pane list 2>/dev/null | jq -c '[.result.panes[] | {key: .pane_id, value: (.label // "")}] | from_entries')
     jobs=$("$H" tab list 2>/dev/null | jq -c '[.result.tabs[] | select((.label // "") | test("^(자동|알아서) ")) | .tab_id]')

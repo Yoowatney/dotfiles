@@ -18,7 +18,7 @@ cat > "$SANDBOX/herdr" <<'EOF'
 if [ "$1 $2" = "pane rename" ]; then echo "$4" >> "$(dirname "$0")/rename.log"; exit 0; fi
 [ "$1 $2" = "pane get" ] || exit 2
 if [ -n "${FAKE_LABEL:-}" ]; then
-    jq -n --arg l "$FAKE_LABEL" '{result: {pane: {pane_id: "w1:p1", label: $l}}}'
+    jq -n --arg l "$FAKE_LABEL" --arg t "${FAKE_TERM:-}" '{result: {pane: {pane_id: "w1:p1", label: $l, terminal_id: $t}}}'
 else
     echo '{"result":{"pane":{"pane_id":"w1:p1"}}}'
 fi
@@ -27,7 +27,7 @@ chmod +x "$SANDBOX/herdr"
 
 run_hook() { # prints the hook's stdout; the hook must always exit 0
     echo '{"hook_event_name":"UserPromptSubmit","prompt":"hi"}' |
-        env -u HERDR_PANE_ID -u FAKE_LABEL -u FAKE_HERDR_FAIL HERDR_BIN_PATH="$SANDBOX/herdr" "$@" "$SUBJECT" ||
+        env -u HERDR_PANE_ID -u FAKE_LABEL -u FAKE_TERM -u FAKE_HERDR_FAIL HERDR_BIN_PATH="$SANDBOX/herdr" "$@" "$SUBJECT" ||
         fail "hook exited non-zero ($*)"
 }
 
@@ -77,6 +77,15 @@ ask "[pane-tell: 다른 세션] 보고입니다" HERDR_PANE_ID=w1:p1 FAKE_LABEL=
 [ ! -e "$SANDBOX/fit/s_1" ] || fail "another session's message armed pane-fit"
 ask "로그 봐 줘" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 일" >/dev/null
 [ -f "$SANDBOX/fit/s_1" ] || fail "a message from 요유 stopped arming"
+
+# The main pane is pointed at its rules file, never asked to rename; other panes are nudged as before.
+unset XDG_STATE_HOME
+mkdir -p "$SANDBOX/home/.local/state/orchestrator"; echo term_M > "$SANDBOX/home/.local/state/orchestrator/main"
+ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 👑 메인 오케스트레이터" FAKE_TERM=term_M HOME="$SANDBOX/home" | context)
+[[ "$ctx" == *"main-orchestrator/SKILL.md"* ]] || fail "the main pane is pointed at its rules: $ctx"
+[[ "$ctx" != *'pane-label "'* ]] || fail "the main pane is never asked to rename: $ctx"
+ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_LABEL="cf#543 미국 확장" FAKE_TERM=term_X HOME="$SANDBOX/home" | context)
+[[ "$ctx" == *'pane-label "'* ]] || fail "other panes are nudged as before: $ctx"
 
 # Inside herdr without a label: say there is none.
 ctx=$(run_hook HERDR_PANE_ID=w1:p1 | context)

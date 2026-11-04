@@ -21,8 +21,9 @@ case "\$1 \$2" in
     st=\$(cat "$SANDBOX/status" 2>/dev/null || echo idle)
     id=\$(cat "$SANDBOX/new-id" 2>/dev/null || echo "\$3")
     t=\$(cat "$SANDBOX/tab-id" 2>/dev/null)
-    if [ -f "$SANDBOX/label" ]; then jq -n --rawfile l "$SANDBOX/label" --arg s "\$st" --arg i "\$id" --arg t "\$t" '{result: {pane: {pane_id: \$i, label: \$l, agent_status: \$s, tab_id: (if \$t == "" then null else \$t end)}}}'
-    else jq -n --arg s "\$st" --arg i "\$id" --arg t "\$t" '{result: {pane: {pane_id: \$i, agent_status: \$s, tab_id: (if \$t == "" then null else \$t end)}}}'; fi ;;
+    tm=\$(cat "$SANDBOX/term" 2>/dev/null || echo term_M)
+    if [ -f "$SANDBOX/label" ]; then jq -n --rawfile l "$SANDBOX/label" --arg s "\$st" --arg i "\$id" --arg t "\$t" --arg tm "\$tm" '{result: {pane: {pane_id: \$i, label: \$l, terminal_id: \$tm, agent_status: \$s, tab_id: (if \$t == "" then null else \$t end)}}}'
+    else jq -n --arg s "\$st" --arg i "\$id" --arg t "\$t" --arg tm "\$tm" '{result: {pane: {pane_id: \$i, terminal_id: \$tm, agent_status: \$s, tab_id: (if \$t == "" then null else \$t end)}}}'; fi ;;
   "pane rename")
     echo "\$3 \$4" >> "$SANDBOX/renames"
     if [ "\$4" = "--clear" ]; then rm -f "$SANDBOX/label"; else printf '%s' "\$4" > "$SANDBOX/label"; fi ;;
@@ -263,5 +264,12 @@ echo t1 > "$SANDBOX/tab-rename-fails"; tab_is "$(follow c '🟢 c' 'api#6 일')"
 expect "🟢 api#6 일" "a failed tab rename leaves the pane rename"
 follow c '🟢 c' x >/dev/null; rm "$SANDBOX/panes.json"; pl "api#7 일"; expect "🟢 api#7 일" "a failed pane list leaves the pane rename"
 tab_is "$(jq -r '.result.tabs[0].label' "$SANDBOX/tabs.json")" x "a failed pane list"
+
+
+# --main records this pane's terminal as the main pane and names it, keeping the mark.
+printf '🔴 일' > "$SANDBOX/label"
+HOME="$SANDBOX/home" pl --main
+[ "$(cat "$SANDBOX/home/.local/state/orchestrator/main")" = term_M ] || fail "--main records this pane's terminal"
+expect "🔴 👑 메인 오케스트레이터" "--main names the pane and keeps the mark"
 
 echo "ok: pane-label"

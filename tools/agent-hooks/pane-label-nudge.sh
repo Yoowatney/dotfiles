@@ -26,7 +26,10 @@ if [ -z "${HERDR_PANE_ID:-}" ]; then
     exit 0
 fi
 
-label=$("${HERDR_BIN_PATH:-herdr}" pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.label // empty' 2>/dev/null)
+pane=$("${HERDR_BIN_PATH:-herdr}" pane get "$HERDR_PANE_ID" 2>/dev/null)
+label=$(jq -r '.result.pane.label // empty' <<<"$pane" 2>/dev/null)
+term=$(jq -r '.result.pane.terminal_id // empty' <<<"$pane" 2>/dev/null)
+mainfile="${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main"
 
 if [ "${1:-}" = session ]; then
     # a named pane (resume, /clear) keeps its name
@@ -50,7 +53,9 @@ name=${label#🔴}; name=${name#🟢}; name=${name# }; name=${name#👑}; name=$
 case "${name# }" in "$PLACEHOLDER"*) label= ;; esac # the session-start name is no name yet
 
 # The mark tells 요유 whether closing this session stops something (요유 2026-10-17): see pane-label.
-if [ -n "$label" ]; then
+if [ -n "$term" ] && [ "$term" = "$(cat "$mainfile" 2>/dev/null)" ]; then
+    msg="This pane is 요유's main pane. Keep its name; never rename it for a task. Follow ~/.claude/skills/main-orchestrator/SKILL.md: hand work to panes with pane-spawn, triage what comes back three ways, and end each answer with the collected decisions."
+elif [ -n "$label" ]; then
     msg="herdr pane label: \"$label\". If this message starts a different task or topic, rename the pane before other work: pane-label \"<issue> <2-4 words>\" (e.g. pane-label \"api#736 Dependabot 정리\"; the 🟢/🔴 mark is kept). Keep the label when a task ends."
     case "$label" in
         🔴*) msg="$msg 🔴 tells 요유 that closing this session stops something. Once nothing of yours still runs here (background command, Monitor, loop or wakeup, session cron, background agent), run pane-label --free." ;;
