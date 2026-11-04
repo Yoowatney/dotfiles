@@ -23,7 +23,8 @@ case "\$1 \$2" in
   "workspace create") jq -n '{result: {workspace: {workspace_id: "w2"}}}' ;;
   "pane get") jq -n --arg label "\${CALLER_LABEL:-}" '{result: {pane: {pane_id: "w7:p3", workspace_id: "w7", terminal_id: "term_65f21913323dc21", label: \$label}}}' ;; # moved: env says w1:p1
   "tab create") jq -n '{result: {root_pane: {pane_id: "w1:new"}, tab: {tab_id: "w1:t9"}}}' ;;
-  "pane split") jq -n '{result: {pane: {pane_id: "w1:new"}}}' ;;
+  "pane layout") [ -z "\${FAIL_LAYOUT:-}" ] && cat "$SANDBOX/layout.json" ;;
+  "pane split") [ -z "\${FAIL_SPLIT:-}" ] && jq -n '{result: {pane: {pane_id: "w1:new"}}}' ;;
   "pane rename"|"agent prompt"|"pane close") ;;
   "agent wait")
     n=\$(cat "$SANDBOX/waits" 2>/dev/null || echo 0); echo \$((n + 1)) > "$SANDBOX/waits"
@@ -52,12 +53,16 @@ has() { grep -qF -- "$1" "$SANDBOX/log" || fail "$2: no [$1] in: $(log)"; }
 hasnt() { if grep -qF -- "$1" "$SANDBOX/log"; then fail "$2: found [$1] in: $(log)"; fi; }
 before() { [ "$(grep -nF -- "$1" "$SANDBOX/log" | head -1 | cut -d: -f1)" -lt "$(grep -nF -- "$2" "$SANDBOX/log" | head -1 | cut -d: -f1)" ] || fail "[$1] should come before [$2]: $(log)"; }
 
-# Default: a new tab named for the work; the caller is marked 👑, the new pane 🫡 before its agent starts.
+# The caller's tab as herdr reports it, one "<pane id> <x> <y> <height>" per pane.
+layout() { printf '%s\n' "$@" | jq -Rn '{result: {layout: {panes: [inputs | split(" ") | {pane_id: .[0], rect: {x: (.[1] | tonumber), y: (.[2] | tonumber), height: (.[3] | tonumber)}}]}}}' > "$SANDBOX/layout.json"; }
+layout "w7:p3 0 0 46"
+
+# Default: the caller's tab, split to its right; the caller is marked 👑, the new pane 🫡 before its agent starts.
 out=$(ps --cwd /work "api#1 설계" "할 일입니다")
 has "pane-label --lead" "caller becomes the lead"
-has "tab create --workspace w7 --cwd /work --label api#1 설계 --no-focus" "new tab in the caller's current workspace"
+has "pane split --pane w7:p3 --direction right --cwd /work --no-focus" "a lead alone in its tab keeps the left, the pane goes right"
 has "agent start spawn-65f21913323dc21-" "the agent's name records the caller's terminal, within herdr's limit"
-hasnt "pane split" "no split by default"
+hasnt "tab create" "no new tab by default"
 has "pane rename w1:new 🟢 🫡 api#1 설계" "the first name carries 🫡"
 before "pane rename w1:new" "agent start"
 before "pane rename w1:new" "pane-label --sync-tabs"
@@ -79,10 +84,42 @@ has "pane-label --lead" "a lead stays one"
 CALLER_LABEL="🟢 일" ps "리뷰" "봐 줘" >/dev/null
 has "pane-label --lead" "a pane under nobody becomes the lead"
 
-# Same work: --same-tab splits the caller's tab.
+# 요유 2026-11-04: a lead and its panes share one tab, the lead on the whole left, its panes stacked on the right.
+layout "w7:p3 0 0 46" "w7:p4 81 0 46"
+ps "구현" "지시" >/dev/null
+has "pane split --pane w7:p4 --direction down" "the next pane stacks in the right column"
+hasnt "tab create" "still no new tab"
+layout "w7:p3 0 0 46" "w7:p4 81 0 23" "w7:p5 81 23 11" "w7:p6 81 34 12"
+ps "리뷰" "지시" >/dev/null
+has "pane split --pane w7:p4 --direction down" "the tallest pane takes it, so heights stay close"
+layout "w7:p3 0 0 46" "w7:p4 81 0 23" "w7:p5 81 23 23"
+ps "리뷰" "지시" >/dev/null
+has "pane split --pane w7:p5 --direction down" "a tie goes to the lowest"
+layout "w7:p1 0 0 46" "w7:p3 81 0 46"
+CALLER_LABEL="🟢 🫡 구현" ps "리뷰" "지시" >/dev/null
+has "pane split --pane w7:p3 --direction down" "a pane under the lead stacks in the column, not beside itself"
+layout "w7:p3 0 0 46" "w7:p4 81 0 11" "w7:p5 81 11 11" "w7:p6 81 22 12" "w7:p7 81 34 12"
+ps "다섯째" "지시" >/dev/null
+has "tab create --workspace w7 --cwd" "a column too short to read: the work gets its own tab"
+has "--label 다섯째 --no-focus" "named for the work"
+hasnt "pane split" "no pane shorter than can be read"
+
+# A job the lead does not follow asks for its own tab, and a split or layout that fails still opens the pane.
+layout "w7:p3 0 0 46"
+ps --new-tab --cwd /work "api#1 설계" "지시" >/dev/null
+has "tab create --workspace w7 --cwd /work --label api#1 설계 --no-focus" "--new-tab in the caller's current workspace"
+hasnt "pane split" "--new-tab splits nothing"
+hasnt "pane layout" "--new-tab reads no layout"
+FAIL_SPLIT=1 ps "실패" "지시" >/dev/null
+has "tab create --workspace w7" "a failed split falls back to a tab"
+has "agent prompt w1:new 지시" "and the work still goes out"
+FAIL_LAYOUT=1 ps "실패" "지시" >/dev/null
+has "tab create --workspace w7" "so does a failed layout read"
+
+# --same-tab was the way to ask for this before it became the default: sessions already running may still pass it.
 ps --same-tab "api#1 리뷰" "리뷰" >/dev/null
-has "pane split --pane w7:p3 --direction right" "same tab splits the caller's current pane"
-hasnt "tab create" "same tab opens no tab"
+has "pane split --pane w7:p3 --direction right" "--same-tab still works"
+hasnt "tab create" "--same-tab opens no tab"
 
 # Agent arguments pass through, and Codex works without a session id until its first prompt.
 SESSIONLESS=1 ps --kind codex "조사" "지시" -- -m gpt-5 >/dev/null
@@ -121,6 +158,7 @@ workers_up; echo '{"result":{"workspaces":[{"workspace_id":"w1","label":"workers
 is_main; out=$(ps "api#1 설계" "할 일")
 has "[workers] tab create --workspace w1 " "a pane the main pane opens goes to workers"
 hasnt "[default] tab create" "nothing opens beside the main pane"
+hasnt "pane split" "the main pane keeps its tab to itself"
 has "[default] pane get w1:p1" "the caller is read on its own server"
 has "[default] pane-label --lead" "the caller is marked on its own server"
 has "[workers] pane-label --sync-tabs" "tab marks are synced where the new tab is"
@@ -145,7 +183,7 @@ if FAIL_START=9 ps "실패" "지시" 2>/dev/null; then fail "a failed start must
 has "[workers] pane close w1:new" "a failed start removes the workers pane"
 
 not_main; out=$(ps "api#4" "할 일")
-has "[default] tab create --workspace w7" "any other caller opens on its own server as before"
+has "[default] pane split --pane w7:p3" "any other caller opens beside itself on its own server"
 hasnt "보고 첫 줄에" "only panes under the main pane get the summary line"
 [ "$out" = "w1:new" ] || fail "a bare id as before: $out"
 

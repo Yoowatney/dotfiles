@@ -126,8 +126,8 @@ def bash_problem(cmd: str) -> str | None:
     cmd = HERDR_BIN.sub("herdr", cmd)
     code = code_only(cmd)
     if SPAWN.search(code) or (TYPES.search(code) and LAUNCH.search(_guard.HEREDOC.sub("<<heredoc", cmd))):
-        return ('pane-spawn: 칸을 직접 띄우지 말 것. `pane-spawn "<일 이름>" "<지시>"`로 띄울 것: 일 이름을 붙인 새 탭에서 시작하고, '
-                '호출한 칸을 👑로 표시하고(이미 🫡이면 그대로), 세션을 기다려 지시까지 전달함. 같은 일의 칸(설계·구현·리뷰)만 `--same-tab`. '
+        return ('pane-spawn: 칸을 직접 띄우지 말 것. `pane-spawn "<일 이름>" "<지시>"`로 띄울 것: 호출한 칸의 탭 오른쪽에 쌓고, '
+                '호출한 칸을 👑로 표시하고(이미 🫡이면 그대로), 세션을 기다려 지시까지 전달함. 이 리드가 따라가지 않을 별개의 일만 `--new-tab`. '
                 '요유가 연 세션처럼 이름 없는 칸이 꼭 필요한 시험은 `pane-temp "<이름>"`: 일이 끝나거나 1시간이 지나면 스스로 닫힘')
     visible = _guard.strip_captures(_guard.HEREDOC.sub("<<heredoc", cmd))  # heredoc bodies are text
     for seg in _guard.segments(visible):

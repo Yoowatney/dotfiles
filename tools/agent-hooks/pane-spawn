@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Opens a pane for another agent, in one command (Claude and Codex both use it). One tab holds one job (요유 2026-10-31):
-# new work starts in a new tab named for it, and only one job's design, build and review share a tab (--same-tab).
-# It marks the calling pane 👑 unless it is already 🫡, opens the tab or split, names the pane 🫡, starts the agent, waits for its session and
+# Opens a pane for another agent, in one command (Claude and Codex both use it). A lead and its panes share one tab (요유 2026-11-04:
+# separate tabs filled the window): the lead keeps the whole left, its panes stack on the right. The tallest pane of the rightmost
+# column takes the new one, which keeps their heights close. Once that pane is too short to read, or for a job this lead does not
+# follow (--new-tab), the work gets its own tab, named for it. --same-tab is the old name of the default, kept for running sessions.
+# It marks the calling pane 👑 unless it is already 🫡, opens the split or tab, names the pane 🫡, starts the agent, waits for its session and
 # hands over the instruction. The agent's herdr name is what lets the pane close itself when its work ends (pane-label).
 # Agents cannot run `herdr agent start` or `herdr pane split` themselves: the hook no-sed-inplace.py sends them here.
-#   pane-spawn [--same-tab] [--kind claude|codex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
+#   pane-spawn [--new-tab] [--kind claude|codex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
 #   pane-spawn "api#1 설계" "지시" -- --model opus --effort high
-# The tab opens in the caller's current workspace: HERDR_PANE_ID and HERDR_WORKSPACE_ID go stale when a pane moves, so both
+# A new tab opens in the caller's current workspace: HERDR_PANE_ID and HERDR_WORKSPACE_ID go stale when a pane moves, so both
 # come from `herdr pane get`. The agent's name records the caller's terminal id, which a move does not change; the pane
 # reports to that caller first (auto-tab-close.py), and a pane stays open while a pane it opened is alive.
 # The main pane (its terminal id is in ${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main) does no work itself: its
@@ -14,13 +16,15 @@
 # It never splits its own tab (--same-tab is bad usage there), and with `workers` down it opens nothing and fails.
 # Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
 H=${HERDR_BIN_PATH:-herdr}
-USAGE='usage: pane-spawn [--same-tab] [--kind claude|codex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]'
+USAGE='usage: pane-spawn [--new-tab] [--kind claude|codex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]'
+MIN_ROWS=${PANE_SPAWN_MIN_ROWS:-16} # a 46-row window holds 4 panes of 11-12 rows, which still show about 5 lines of work (2026-11-04); a fifth would leave 5-6
 die() { echo "pane-spawn: $*" >&2; exit 2; }
 
-same= kind=claude cwd=$PWD
+same= new_tab= kind=claude cwd=$PWD
 while [ $# -gt 0 ]; do
   case "$1" in
     --same-tab) same=1; shift ;;
+    --new-tab) new_tab=1; shift ;;
     --kind | --cwd)
       [ $# -ge 2 ] || die "$USAGE"
       if [ "$1" = --kind ]; then kind=$2; else cwd=$2; fi
@@ -63,11 +67,18 @@ if [ -n "$sock" ]; then # every call from here on is about the new pane, so all 
   [ -n "$ws" ] || ws=$("$H" workspace create --label workers --no-focus --cwd "$HOME" | jq -r '.result.workspace.workspace_id // empty')
   [ -n "$ws" ] || { echo "pane-spawn: the workers server has no workspace" >&2; exit 1; }
 fi
-if [ -n "$same" ]; then
-  pane=$("$H" pane split --pane "$me" --direction right --cwd "$cwd" --no-focus | jq -r '.result.pane.pane_id // empty')
-else
-  pane=$("$H" tab create --workspace "$ws" --cwd "$cwd" --label "$name" --no-focus | jq -r '.result.root_pane.pane_id // empty')
+pane= target= direction=
+if [ -z "$new_tab$sock" ]; then
+  # ponytail: only the rightmost column is looked at, so a hand-made layout just grows on its right edge.
+  read -r target direction < <("$H" pane layout --pane "$me" 2>/dev/null | jq -r --argjson min "$MIN_ROWS" '
+    .result.layout.panes as $all
+    | if ($all | length) == 1 then "\($all[0].pane_id) right"
+      else ($all | map(.rect.x) | max) as $x | ($all | map(select(.rect.x == $x)) | max_by([.rect.height, .rect.y])) as $t
+        | if $t.rect.height < $min then empty else "\($t.pane_id) down" end
+      end' 2>/dev/null)
+  [ -z "$target" ] || pane=$("$H" pane split --pane "$target" --direction "$direction" --cwd "$cwd" --no-focus | jq -r '.result.pane.pane_id // empty')
 fi
+[ -n "$pane" ] || pane=$("$H" tab create --workspace "$ws" --cwd "$cwd" --label "$name" --no-focus | jq -r '.result.root_pane.pane_id // empty')
 [ -n "$pane" ] || die "herdr opened no pane"
 "$H" pane rename "$pane" "🟢 🫡 $name" >/dev/null
 pane-label --sync-tabs
