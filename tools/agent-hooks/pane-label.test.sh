@@ -20,19 +20,23 @@ case "\$1 \$2" in
   "pane get")
     st=\$(cat "$SANDBOX/status" 2>/dev/null || echo idle)
     id=\$(cat "$SANDBOX/new-id" 2>/dev/null || echo "\$3")
-    if [ -f "$SANDBOX/label" ]; then jq -n --rawfile l "$SANDBOX/label" --arg s "\$st" --arg i "\$id" '{result: {pane: {pane_id: \$i, label: \$l, agent_status: \$s}}}'
-    else jq -n --arg s "\$st" --arg i "\$id" '{result: {pane: {pane_id: \$i, agent_status: \$s}}}'; fi ;;
+    t=\$(cat "$SANDBOX/tab-id" 2>/dev/null)
+    if [ -f "$SANDBOX/label" ]; then jq -n --rawfile l "$SANDBOX/label" --arg s "\$st" --arg i "\$id" --arg t "\$t" '{result: {pane: {pane_id: \$i, label: \$l, agent_status: \$s, tab_id: (if \$t == "" then null else \$t end)}}}'
+    else jq -n --arg s "\$st" --arg i "\$id" --arg t "\$t" '{result: {pane: {pane_id: \$i, agent_status: \$s, tab_id: (if \$t == "" then null else \$t end)}}}'; fi ;;
   "pane rename")
     echo "\$3 \$4" >> "$SANDBOX/renames"
     if [ "\$4" = "--clear" ]; then rm -f "$SANDBOX/label"; else printf '%s' "\$4" > "$SANDBOX/label"; fi ;;
   "pane list") cat "$SANDBOX/panes\${s##*/}.json" ;;
   "tab list") cat "$SANDBOX/tabs\${s##*/}.json" ;;
   "tab get")
+    [ ! -f "$SANDBOX/tab-get-fails" ] || exit 1
     if [ -f "$SANDBOX/tab-changed" ]; then jq -n '{result: {tab: {label: "요유가 방금 바꾼 이름"}}}'
     else jq --arg t "\$3" '{result: {tab: (.result.tabs[] | select(.tab_id == \$t))}}' "$SANDBOX/tabs\${s##*/}.json"; fi ;;
   "tab rename")
     [ "\$3" != "\$(cat "$SANDBOX/tab-rename-fails" 2>/dev/null)" ] || exit 1
-    echo "\${s##*/} \$3 \$4" >> "$SANDBOX/tab-renames" ;;
+    echo "\${s##*/} \$3 \$4" >> "$SANDBOX/tab-renames"
+    f="$SANDBOX/tabs\${s##*/}.json" # tab-persist: the new name stays, as in herdr
+    if [ -f "$SANDBOX/tab-persist" ]; then jq --arg t "\$3" --arg l "\$4" '(.result.tabs[] | select(.tab_id == \$t) | .label) = \$l' "\$f" > "\$f.new" && mv "\$f.new" "\$f"; fi ;;
   "session list") cat "$SANDBOX/sessions.json" ;;
   "agent list") cat "$SANDBOX/agents.json" ;;
   "pane close") touch "$SANDBOX/closed" ;;
@@ -225,5 +229,39 @@ sync_ok all; [ "$(renamed)" = "b t1 👑 다른 세션" ] || fail "one broken se
 rm "$SANDBOX/sessions.json"
 sync_ok all; [ "$(renamed)" = "" ] || fail "nothing to sync without a session list: $(renamed)"
 sync_ok env HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH=/nonexistent/herdr bash "$SUBJECT" --sync-tabs
+
+# A tab that holds only this pane follows its job (요유 2026-11-04: a tab still read `c` after the work changed). It changes
+# when it still names the pane's last task or is a stand-in; 요유's own names and job tabs stay. sync_tabs adds the mark.
+printf 't1' > "$SANDBOX/tab-id"; touch "$SANDBOX/tab-persist"; rm -f "$SANDBOX/name"
+# follow <tab name> <pane label before> <new name> [another pane in the tab]: prints the tab name afterwards
+follow() {
+  jq -n --arg l "$1" '{result: {tabs: [{tab_id: "t1", label: $l}]}}' > "$SANDBOX/tabs.json"
+  jq -n --arg l "$2" --arg o "${4:-}" '{result: {panes: ([{pane_id: "w1:p1", tab_id: "t1", label: $l}]
+    + if $o == "" then [] else [{pane_id: "w1:p2", tab_id: "t1", label: $o}] end)}}' > "$SANDBOX/panes.json"
+  printf '%s' "$2" > "$SANDBOX/label"
+  pl "$3"
+  jq -r '.result.tabs[0].label' "$SANDBOX/tabs.json"
+}
+tab_is() { [ "$1" = "$2" ] || fail "$3: tab expected [$2], got [$1]"; }
+tab_is "$(follow '🫡 api#1 첫 일' '🟢 🫡 api#1 첫 일' 'api#2 새 일')" '🫡 api#2 새 일' "a tab named for the last task follows"
+tab_is "$(follow '👑 api#1 리드' '🔴 👑 api#1 리드' 'api#1 리드 2')" '👑 api#1 리드 2' "a lead's tab follows and keeps 👑"
+for stand_in in c ab 7 102 test TEST '새 세션 munice' ''; do
+  tab_is "$(follow "$stand_in" '🟢 api#1 다른 일' 'api#3 일')" 'api#3 일' "stand-in [$stand_in]"
+done
+for own in 곰곰 작업 home ios 수락산; do # two Hangul letters are a word 요유 chose, not a stand-in
+  tab_is "$(follow "$own" '🟢 api#1 다른 일' 'api#3 일')" "$own" "요유's name [$own]"
+done
+tab_is "$(follow '자동 api#1' '🟢 자동 api#1' 'api#1 다음')" '자동 api#1' "a dispatch tab"
+tab_is "$(follow '알아서 #1-dev x' '🟢 알아서 #1-dev x' 'x 다음')" '알아서 #1-dev x' "an ambient tab"
+tab_is "$(follow c '🟢 c' '자동 api#2')" c "a new name other code would read as a job tab"
+tab_is "$(follow c '🟢 c' 'api#4 일' '🟢 옆 칸')" c "a tab with another pane"
+tab_is "$(follow c '🟢 c' '🟢')" c "a name with no task"
+# Failure flow: herdr refusing a read or the rename leaves the tab as it was and the pane renamed.
+touch "$SANDBOX/tab-get-fails"; tab_is "$(follow c '🟢 c' 'api#5 일')" c "a failed tab read"; rm "$SANDBOX/tab-get-fails"
+expect "🟢 api#5 일" "a failed tab read leaves the pane rename"
+echo t1 > "$SANDBOX/tab-rename-fails"; tab_is "$(follow c '🟢 c' 'api#6 일')" c "a failed tab rename"; rm "$SANDBOX/tab-rename-fails"
+expect "🟢 api#6 일" "a failed tab rename leaves the pane rename"
+follow c '🟢 c' x >/dev/null; rm "$SANDBOX/panes.json"; pl "api#7 일"; expect "🟢 api#7 일" "a failed pane list leaves the pane rename"
+tab_is "$(jq -r '.result.tabs[0].label' "$SANDBOX/tabs.json")" x "a failed pane list"
 
 echo "ok: pane-label"

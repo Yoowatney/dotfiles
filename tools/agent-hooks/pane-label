@@ -5,7 +5,9 @@
 # Claude's pane-hold.sh hook sets 🔴 by itself; going back to 🟢 is the agent's `--free`, or in Claude the Stop hook
 # auto-tab-close.py once nothing still runs.
 # No-op outside herdr. Display only: always exits 0 except on bad usage.
-#   pane-label "api#736 Dependabot 정리"      set the name, keeping the mark (🟢 when there is none)
+#   pane-label "api#736 Dependabot 정리"      set the name, keeping the mark (🟢 when there is none). A tab that holds only
+#                                             this pane takes the name too while it reads the last one or a stand-in
+#                                             (follow_tab)
 #   pane-label --hold | --free                set the mark to 🔴 / 🟢, keeping the name
 #   pane-label --lead | --unlead              add / drop 👑 after the mark: 요유's lead pane (요유 2026-10-30). herdr has
 #                                             no per-pane border or background colour, and the collapsed sidebar shows
@@ -98,6 +100,23 @@ sync_all_tabs() {
   "$H" session list --json 2>/dev/null | jq -r '.sessions[] | select(.running) | .socket_path' 2>/dev/null |
     while IFS= read -r sock; do HERDR_SOCKET_PATH=$sock sync_tabs; done
 }
+# $1 the pane's last task, $2 its new one. A tab that holds only this pane takes the new task when its name without marks is
+# the last task or a stand-in: up to two ASCII characters (`c`), digits, `test`, `새 세션 …` (요유 2026-11-04: a tab still
+# read `c`; sessions skipped the manual rename the rules asked for). Two Hangul letters (곰곰) are a name 요유 chose. Job tabs
+# keep their names and no tab gets one: code reads them by the first word. A failed read changes nothing. Runs before the
+# pane rename, whose sync_tabs adds the mark.
+follow_tab() {
+  local tab panes info new
+  tab=$("$H" pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.tab_id // empty' 2>/dev/null)
+  [ -n "$tab" ] && panes=$("$H" pane list 2>/dev/null) && info=$("$H" tab get "$tab" 2>/dev/null) || return 0
+  new=$(jq -rn --argjson p "$panes" --argjson i "$info" --arg t "$tab" --arg old "$1" --arg new "$2" '
+    ($i.result.tab.label // "" | sub("^((👑|🫡) ?)+"; "")) as $base
+    | select([$p.result.panes[] | select(.tab_id == $t)] | length == 1)
+    | select($base == $old or ($base | test("^([ -~]{0,2}|[0-9]+|test|새 세션.*)$"; "i")))
+    | select($base != $new and ([$base, $new] | all(test("^(자동|알아서) ") | not)))
+    | $new' 2>/dev/null) || return 0
+  [ -z "$new" ] || "$H" tab rename "$tab" "$new" >/dev/null 2>&1
+}
 rename() { "$H" pane rename "$HERDR_PANE_ID" "$@" >/dev/null 2>&1; sync_tabs; }
 mark() { # mark name
   if [ -n "$2" ]; then rename "$1 $2"; else rename "$1"; fi
@@ -148,6 +167,7 @@ case "${1:-}" in
   --close-now) close_when_idle ;;
   *)
     cur=$(current)
+    follow_tab "$(task_of "$cur")" "$(task_of "$*")"
     m=$(mark_of "$*")
     [ -n "$m" ] || m=$(mark_of "$cur")
     if is_lead "$cur" || is_lead "$*"; then lead 1 "${m:-$FREE} $(task_of "$*")"
