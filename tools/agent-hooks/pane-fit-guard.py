@@ -63,7 +63,8 @@ OWN_FILES = re.compile(r"/\.local/state/(?:pane-reports|orchestrator)/|/skills/m
 LEAD_IN = r"^\s*(?:(?:if|then|elif|else|!)\s+)*"
 OWN_COMMAND = re.compile(LEAD_IN + r"(?:\w+=\$\(\s*)?(?:(?:\S*/)?(?:cd|pane-label|pane-tell|pane-spawn|herdr|board\.sh|decision-log|handoff|launchctl)\b"
                          r"|python3\s+\S*main-channel\.py\b|(?:cat|tail|head|grep|rg|awk|sed)\s.*/\.local/state/(?:pane-reports|orchestrator)/)")
-NEUTRAL = re.compile(LEAD_IN + r"(?:echo|printf|sleep|true|fi)\b")  # prints or waits: fine beside a chore, no chore by itself
+# Prints or waits: fine beside a chore, no chore by itself. A redirect into a file is a write, so it is no longer neutral.
+NEUTRAL = re.compile(LEAD_IN + r"(?:echo|printf|sleep|true|fi)\b(?![^>]*>(?!&|\s*/dev/null))")
 QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")  # a message's words are no commands
 STAGES = re.compile(r"&&|\|\||;|\n")
 
@@ -183,7 +184,9 @@ def selftest():
                         p("Bash", command="out=$(npm test); echo \"$out\""), p("Bash", command="out=$(herdr agent list); npm test"),
                         p("Bash", command="if rg x /repo; then echo y; fi"), p("Bash", command="if npm test; then herdr agent list; fi"),
                         p("Bash", command="if true; then echo y; else echo n; fi"), p("Bash", command="sleep 3"), p("Bash", command="printf '%s' x; echo y"),
-                        p("Bash", command="echo 'out=$(herdr agent read w1:p2)'"), p("Bash", command="tail -5 ~/.local/state/pane-reports/a.md; npm test")):
+                        p("Bash", command="echo 'out=$(herdr agent read w1:p2)'"), p("Bash", command="tail -5 ~/.local/state/pane-reports/a.md; npm test"),
+                        p("Bash", command="herdr agent list; echo x > /repo/a.py"), p("Bash", command="herdr agent list; printf x >>/repo/a.py"),
+                        p("Bash", command="herdr agent list; echo x 2>/repo/err")):
             armed_main()
             assert check(payload, env) == DELEGATE_ASK, f"the main pane is asked: {payload}"
             assert check(payload, env) is None, f"once a message, so a one-line answer or a prod step goes on: {payload}"
@@ -213,7 +216,8 @@ def selftest():
                         )),
                         p("Bash", command="sed -n 159,215p ~/.local/state/pane-reports/2026-11-05.md"), p("Bash", command="rg -n 01:28 ~/.local/state/pane-reports/2026-11-05.md"),
                         p("Bash", command="herdr --session workers pane send-keys w1:pQ Enter"), p("Bash", command="out=$(herdr --session workers agent read w1:pQ); echo \"$out\" | tail -5"),
-                        p("Bash", command="if ! herdr agent get w1:p2 >/dev/null; then echo gone; fi")):
+                        p("Bash", command="if ! herdr agent get w1:p2 >/dev/null; then echo gone; fi"),
+                        p("Bash", command="herdr agent list; echo x >&2; echo y >/dev/null; echo z 2>&1; echo 'a > b'")):
             armed_main()
             assert check(payload, env) is None, f"what stays in the main pane: {payload}"
             assert os.path.exists(state_file(p(), env)), f"and the question stays for the first lookup: {payload}"
