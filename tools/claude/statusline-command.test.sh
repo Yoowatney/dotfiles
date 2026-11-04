@@ -87,7 +87,7 @@ fits() {   # <line> <cells> -> fits | <n> cells
 	n=$(python3 -I -c 'import sys,unicodedata; s=sys.stdin.read().rstrip("\n"); print(sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s))' <<<"$1")
 	[ "${n:-999}" -le "$2" ] && echo fits || echo "$n cells"
 }
-real='{"at":'$((now - 60))',"count":40,"overdue":32,"oldestDays":28,"top":"10/19 P3 api#818 [채널톡] Hash Key 서버 이전","topUrl":"x","sinceFrom":"label"}'
+real='{"at":'$((now - 60))',"count":40,"overdue":32,"oldestDays":28,"top":"10/19 P3 api#10 시험용 제목이 이 정도 길이면 좁은 칸에서 잘린다","topUrl":"x","sinceFrom":"label"}'
 line=$(turn "$real" 40 | grep '요유 차례' | sed $'s/\x1b\\[[0-9;]*m//g')
 check "요유 차례 at 40 cells: count, past due and age kept" "$line" '^요유 차례 40건 · 기한 지남 32건 · 1분 전$'
 check "요유 차례 at 40 cells: fits" "$(fits "$line" 40)" '^fits$'
