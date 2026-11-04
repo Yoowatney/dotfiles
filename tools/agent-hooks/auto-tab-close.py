@@ -192,7 +192,7 @@ def sync_mark(payload: dict, env):
         pass
 
 
-herdr = herdr_peers.herdr  # passes env on, so HERDR_SOCKET_PATH picks the server
+herdr = herdr_peers.herdr  # passes env on, so HERDR_SOCKET_PATH picks the server; {} on any failure, never raises (see finish)
 
 
 def here(env) -> dict:
@@ -275,9 +275,11 @@ def nearest_lead(me: dict, panes: list, name: str = "", sideways: bool = True, e
 
 
 def short_report(reply: str) -> str:
-    """The first prose line and the last `남은 것:` line (with the lines under it when it is a heading)."""
-    lines = [line.strip() for line in share.prose(reply).splitlines()]
-    first = next((line for line in lines if line and not LEFT.search(line)), "")[:200]
+    """The first prose line and the last `남은 것:` line (with the lines under it when it is a heading). `남은 것:` keeps its
+    inline code and quotes (`prod 허용` is what 요유 types); only fenced code and blockquotes are not the report's."""
+    first = next((line for line in (x.strip() for x in share.prose(reply).splitlines()) if line and not LEFT.search(line)), "")[:200]
+    raw = share.STRIP[2].sub(" ", share.STRIP[0].sub(" ", unicodedata.normalize("NFC", reply)))
+    lines = [line.strip() for line in raw.splitlines()]
     at = max((i for i, line in enumerate(lines) if LEFT.search(line)), default=-1)
     left = []
     if at >= 0:
@@ -307,8 +309,10 @@ def finish(reply: str, env):
     pane = me.get("pane_id") or env.get("HERDR_PANE_ID", "")
     env = {**env, "HERDR_PANE_ID": pane}
     panes = herdr(env, "pane", "list").get("panes") or []
-    agents = herdr(env, "agent", "list").get("agents") or []
-    close = should_close(reply) and not held(me.get("label") or "", me.get("terminal_id"), agents)
+    agents = herdr(env, "agent", "list").get("agents")
+    # herdr fails open ({}): a pane or agent list it could not give hides the panes this one opened, so the pane stays
+    close = should_close(reply) and bool(me) and agents is not None and not held(me.get("label") or "", me.get("terminal_id"), agents)
+    agents = agents or []
     name = next((a.get("name") for a in agents if a.get("pane_id") == pane), "")
     now = datetime.datetime.now()
     path = save(reply, me, pane, env, now)
@@ -329,7 +333,8 @@ def finish(reply: str, env):
             sent = subprocess.run([pt, lead, f"{head}. {share.RELAY_NOTE}:\n{body}"], env=dict(env), timeout=5, **quiet).returncode == 0
         except subprocess.TimeoutExpired:
             sent = False
-        if sent and me.get("terminal_id") and (to_main or herdr_peers.server_key(env)):  # the main pane's watch: this pane is waiting, not stuck
+        # the main pane's watch: this pane is waiting, not stuck. Only workers panes: a personal server is left alone
+        if sent and me.get("terminal_id") and (to_main or herdr_peers.server_key(env) == "workers"):
             try:
                 mark = os.path.join(herdr_peers.state_dir(env), "reported", me["terminal_id"])
                 os.makedirs(os.path.dirname(mark), exist_ok=True)
@@ -522,7 +527,7 @@ case "$1 $2" in
   "agent get") [ -f {sandbox}/agent-gone ] || [ "$3" = "$(cat {sandbox}/old-id 2>/dev/null)" ] && exit 1; cat $d/agent.json ;;
   "pane get") [ -f {sandbox}/herdr-bad ] && {{ echo "not json"; exit 0; }}; jq --arg id "$3" --arg new "$(cat {sandbox}/new-id 2>/dev/null)" \
     '{{result: {{pane: ([.result.panes[] | select(.pane_id == $id or .pane_id == $new)][0])}}}}' $d/panes.json ;;
-  "agent list") cat $d/agents.json ;;
+  "agent list") [ -f {sandbox}/agents-bad ] && {{ echo "not json"; exit 0; }}; cat $d/agents.json ;;
   "pane list") cat $d/panes.json ;;
   *) exit 2 ;;
 esac''')
@@ -757,6 +762,11 @@ esac''')
     open(reports, "w").close()
     assert run(reported, pane2) == (0, "", ""), "report not saved: the pane stays, it holds the only copy"
     os.unlink(reports)
+    herdr_says({"name": "spawned"}, [crown, me], [{"pane_id": "w1:p5", "name": "spawn-2-1"}])
+    open(f"{sandbox}/agents-bad", "w").close()
+    assert run(reported, pane2) == (0, "", "tell w1:p1\n"), "an agent list herdr cannot give: panes it opened may run, so it stays"
+    os.unlink(f"{sandbox}/agents-bad")
+    assert full in saved(), "and the report is still kept"
 
     def agent(pane, name, sid, status="idle"):
         return {"pane_id": pane, "name": name, "agent_status": status, "agent_session": {"value": sid}}
@@ -947,6 +957,21 @@ esac''')
     stop(json.dumps({"last_assistant_message": keep[3]}), {"HERDR_PANE_ID": "w1:p2"})   # default w1:p2: no report, withdraws its own only
     herdr_says_on("workers", {"name": "spawn-M-1"}, [me], wagents)
     assert taken() == "tell default/w5:p3\n" + closed, "the workers pane's report survives the default pane's Stop"
+    saved()
+    # The short form keeps code and quotes in `남은 것:`: they are what 요유 has to type.
+    assert short_report("끝났습니다.\n남은 것: 요유 몫: `prod 허용` 입력 · 세션: 닫으면 \"승격\" 못 함") == \
+        "끝났습니다.\n남은 것: 요유 몫: `prod 허용` 입력 · 세션: 닫으면 \"승격\" 못 함"
+    assert short_report("`x` 끝났습니다.\n```\n남은 것: 코드 속\n```\n> 남은 것: 인용\n남은 것:\n- 요유 몫: `prod 허용` 입력\n- 세션: 닫아도 됨\n") == \
+        "끝났습니다.\n남은 것:\n- 요유 몫: `prod 허용` 입력\n- 세션: 닫아도 됨", "a fenced or quoted 남은 것 is not the report's"
+    # Only the workers server's panes mark the watch's reported file; a pane on any other named server is not the main pane's.
+    os.unlink(f"{sandbox}/.local/state/orchestrator/reported/term_2")
+    herdr_says({"name": "spawned"}, [crown, me])
+    assert run(reported, {"HERDR_PANE_ID": "w1:p2", "HERDR_SOCKET_PATH": f"{sandbox}/sessions/other/herdr.sock"}) == \
+        (0, "", "tell w1:p1\n" + closed)
+    assert not os.path.exists(f"{sandbox}/.local/state/orchestrator/reported/term_2"), "a personal server is left alone"
+    herdr_says_on("workers", {"name": "spawned"}, [crown, me], [])
+    assert run(reported, on_workers) == (0, "", "tell w1:p1\n" + closed)
+    assert os.path.exists(f"{sandbox}/.local/state/orchestrator/reported/term_2"), "a workers pane under its own lead still marks"
     saved()
     print("selftest ok")
 
