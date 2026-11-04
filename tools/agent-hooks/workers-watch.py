@@ -6,11 +6,13 @@ a report would sit there unseen. This watch sends the main pane one `pane-tell` 
 - an agent `blocked` (an approval or question dialog) for 60 s or more, once per state_change_seq;
 - an agent `idle`/`done` for 900 s or more that has not reported since it stopped (auto-tab-close.py touches
   `{state_dir}/reported/<terminal>` when its report was sent), once per state_change_seq;
-- a pane whose name has 🫡 but no agent in it, once per pane (the unnamed root shell pane is never news);
+- a pane whose name has 🫡 but no agent in it, once per pane (the unnamed root shell pane is never news): at once when the
+  watch saw an agent there, else after 420 s, since pane-spawn names the pane before its agent starts;
 - the workers server down, once while it stays down.
 No main pane (no file, or its terminal is on no server): nothing is sent. State: `{state_dir}/watch.json`, terminal id ->
 seq, status, since (first tick that saw this state), seen (last tick that saw it), floor (`seen` of the state before:
 a report touched after it belongs to this stop, since the watch sees a new state up to a minute late), alerted.
+By design, two stops inside one tick interval look like one: a report for the first also covers the second.
 A pane-tell that fails marks nothing, so the next minute sends it again. Fails open: any error exits 0 quietly.
 
 Test env: WORKERS_WATCH_NOW (seconds), WORKERS_WATCH_PANE_TELL (a fake pane-tell).
@@ -106,11 +108,15 @@ def tick(env, now: float) -> list:
             term = p.get("terminal_id") or p.get("pane_id") or ""
             if "🫡" not in (p.get("label") or "") or p.get("pane_id") in with_agent:
                 continue
-            # ponytail: a 🫡 pane between pane-spawn naming it and herdr seeing its agent start also counts as ended;
-            # if that false alarm shows up, wait for a second tick that sees the pane without an agent
             old = state.get(term) or {}
-            rec = records[term] = {"alerted": [] if "status" in old else old.get("alerted", [])}  # an agent record: it just ended
-            if "ended" not in rec["alerted"] and tell(f"밑 칸 {p.get('label')}의 에이전트가 끝났습니다"):
+            if "status" in old:  # the watch held an agent record here: the agent really ended
+                old = {"first": now, "had_agent": True}
+            rec = records[term] = {"first": old.get("first", now), "had_agent": old.get("had_agent", False),
+                                   "alerted": old.get("alerted", [])}
+            # ponytail: pane-spawn names a pane 🫡 before `agent start` (3 tries x 120 s, then it closes the pane), so a 🫡
+            # pane never seen with an agent may still be starting: it is news only after a 420 s grace
+            if (rec["had_agent"] or now - rec["first"] >= 420) and "ended" not in rec["alerted"] \
+                    and tell(f"밑 칸 {p.get('label')}의 에이전트가 끝났습니다"):
                 rec["alerted"].append("ended")
         state = records  # panes that are gone drop out
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -210,7 +216,8 @@ esac
         assert tick(2899) == [] and "보고 없이" in tick(2900)[0]
         agents(agent("w1:p2", "term_2", "idle", seq=11)); tick(3000); touch_reported("term_2", 3001)
         assert tick(3901) == [], "a pane that reported is waiting on the main pane, not stuck"
-        panes_on_workers(label("w1:p4", "🟢 🫡 정리"), label("w1:p1", "")); agents()
+        panes_on_workers(label("w1:p4", "🟢 🫡 정리"), label("w1:p1", "")); agents(agent("w1:p4", "term_4", "working", seq=1))
+        assert tick(3950) == [], "a working agent is no news"; agents()
         assert len([t for t in tick(4000) if "에이전트가 끝났" in t]) == 1 and tick(4100) == [], "once per pane; the root shell is never news"
         workers_running(False); assert "꺼져" in tick(5000)[0] and tick(5060) == []
         workers_running(True); tick(5120); workers_running(False); assert len(tick(5180)) == 1, "down again alerts again"
@@ -220,7 +227,6 @@ esac
         write(main_file, "term_M\n"); workers_running(True); panes_on_workers(label("w1:p6", "🟢 🫡 시험"))
         agents(agent("w1:p6", "term_6", "idle", seq=1)); touch_reported("term_6", 6995)
         assert tick(7000) == [] and tick(7900) == [], "reported a moment before the watch first saw the stop: still reported"
-        agents(agent("w1:p6", "term_6", "done", seq=2)); assert tick(8000) == [], "idle -> done is the same stop"
         agents(agent("w1:p6", "term_6", "blocked", seq=3)); tick(8100)
         assert tick(8160, TELL_EXIT="1") == [] and len(tick(8220)) == 1, "a pane-tell that failed is sent again next minute"
         workers_running(False); assert tick(8300, TELL_EXIT="1") == [] and len(tick(8360)) == 1, "so is the down alert"
@@ -231,14 +237,28 @@ esac
         assert tick(8500) == [] and tick(8600) == [], "the main pane is on no server: nobody to tell"
         result("default-panes", "panes", [{"pane_id": "w5:p3", "terminal_id": "term_M"}])
 
+        panes_on_workers(label("w1:p7", "🟢 🫡 시작 중")); agents()
+        assert tick(10000) == [] and tick(10419) == [], "pane-spawn may still be starting a 🫡 pane never seen with an agent"
+        assert len([t for t in tick(10420) if "에이전트가 끝났" in t]) == 1 and tick(10480) == [], "after the 420 s grace: once"
+
+        panes_on_workers(label("w1:p8", "🟢 🫡 대기")); agents(agent("w1:p8", "term_8", "idle", seq=4)); tick(11000)
+        agents(agent("w1:p8", "term_8", "done", seq=4)); assert tick(11600) == []
+        assert "보고 없이" in tick(11900)[0], "idle -> done is the same stop: the 900 s count from 11000"
+
+        panes_on_workers(label("w1:p9", "🟢 🫡 반복")); agents(agent("w1:p9", "term_9", "idle", seq=1)); tick(12000)
+        touch_reported("term_9", 12005); tick(12060)
+        agents(agent("w1:p9", "term_9", "working", seq=2)); tick(12120)
+        agents(agent("w1:p9", "term_9", "idle", seq=3)); tick(12180)
+        assert tick(13079) == [] and "보고 없이" in tick(13080)[0], "the last stop's report does not cover the next one"
+
         # end to end, the way launchd runs it: python3 -I drops the script folder from sys.path
-        agents(agent("w1:p6", "term_6", "blocked", seq=11))
+        panes_on_workers(label("w1:p6", "🟢 🫡 시험")); agents(agent("w1:p6", "term_6", "blocked", seq=11))
         run = lambda now, **e: subprocess.run(["/usr/bin/python3", "-I", os.path.realpath(__file__)], capture_output=True, text=True,
                                               env={"PATH": "/usr/bin:/bin", **env, "WORKERS_WATCH_NOW": str(now), **e})
-        assert run(9000).returncode == 0 and run(9060).returncode == 0
+        assert run(20000).returncode == 0 and run(20060).returncode == 0
         assert open(f"{d}/told").read().count("질문 창") == 1, "main() runs a tick at WORKERS_WATCH_NOW"
         os.remove(f"{d}/state/orchestrator/watch.json"); os.mkdir(f"{d}/state/orchestrator/watch.json")  # the state cannot be saved
-        r = run(9120)
+        r = run(20120)
         assert (r.returncode, r.stdout, r.stderr) == (0, "", ""), "fails open, quietly"
     finally:
         shutil.rmtree(d, ignore_errors=True)
