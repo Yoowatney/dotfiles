@@ -83,6 +83,14 @@ PANE_MARKS = re.compile(r"^[\s🟢🔴👑🫡]+")
 # The global rule's names for the three Macs: a bare 서버 맥 leaves 요유 guessing which one (요유 2026-10-24).
 GOOD_MAC = re.compile(r"회사[ \t]*서버[ \t]*맥")
 BAD_MAC = re.compile(r"상시[ \t]?맥(?!락)|always-on Mac|서버[ \t]?맥(?![북미락스])", re.I)
+# 요유 2026-11-04 (api#993, "깃헙들어가서 히스토리 하나하나 읽어야해"): a 요유 몫 item that only points at where the
+# question is (a link, an issue number, the board, "위") names no decision. The item must say what to choose.
+POINTER_ITEM = re.compile(r"^(?:(?:https?://\S+|\S*#\d+|보드|이슈|항목|댓글|위|이)[ \t]*(?:의|에|에서)?[ \t]*)+"
+                          r"(?:질문|댓글|코멘트|결정|선택지|내용)(?:에|을|를|의)?[ \t]*"
+                          r"(?:결정|답하기|답|확인|보기|읽기|검토|고르기|하기)?$")
+BARE_QUESTION = re.compile(r"^(?:질문|댓글|코멘트)(?:에|을|를)?[ \t]*(?:답하기|답|확인|보기|읽기)?$")
+POINTER_REASON = ("yoyoo-share-guard: 요유 몫이 링크나 보드 질문만 가리킵니다. 요유는 GitHub에서 기록을 읽지 않습니다. "
+                  "요유 몫에 결정할 내용을 한 줄로 적어 보고를 다시 쓰세요: 무엇을 고르는지, 추천안, 고르면 무엇이 바뀌는지.")
 LAST_REPORT = re.compile(r"남은[ \t]*것[ \t]*\**[ \t]*[:：]")
 TEST_PANE = "임시 "  # with the space: `임시저장 API 수정` is a work name
 OPENED_BY = re.compile(r"^spawn-([0-9A-Za-z]+)-")  # pane-spawn's agent name: spawn-<caller's terminal>-<random>
@@ -286,6 +294,17 @@ def is_decision(item: str) -> bool:
     return (bool(DECISION.search(item)) or asks_which(item)) and not DELEGATED.search(item) and not STEP.search(item)
 
 
+def points_only(text: str) -> bool:
+    """Some 요유 몫 item says where a question is instead of what it asks. A parenthesis that states it ends the match."""
+    text = STRIP[2].sub(" ", STRIP[0].sub(" ", unicodedata.normalize("NFC", text)))
+    for m in SHARE_FULL.finditer(text):
+        for item in ITEM.split(m.group(1)):
+            item = item.strip(" \t*_.,;")
+            if POINTER_ITEM.match(item) or BARE_QUESTION.match(item):
+                return True
+    return False
+
+
 def only_decisions(text: str) -> bool:
     """Nothing in 요유 몫 is a step 유요 could take: asking would only print the report again.
 
@@ -307,7 +326,7 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
         text = final_text(payload["transcript_path"])  # unreadable transcript raises: fail open
     if not isinstance(text, str):
         return None
-    checks = (names_reason(text, env), WHAT_REASON if misses_what(text) else None,
+    checks = (POINTER_REASON if points_only(text) else None, names_reason(text, env), WHAT_REASON if misses_what(text) else None,
               PROBLEM_REASON if misses_problem_line(text) else None, left_open_reason(payload, text, env),
               explain_reason(payload, text, env), stale_thread_reason(payload, text, env),
               LONG_REASON if claude and not job_session(env) and too_long(text) else None)
@@ -532,6 +551,21 @@ def selftest():
     assert (decide(p("`w5:pKR` 확인\n남은 것: 요유 몫: 값 넣기 · 유요 몫: 없음"), cli) or "").endswith(DO_REASON), \
         "a rewrite for a name keeps the 요유 몫 question without telling it to stay silent"
     assert leaves_yoyoo_work("남은 것: 요유 몫: 결정 하나 · 유요 몫: 없음"), "auto-tab-close keeps a pane with a decision left"
+    # 요유 2026-11-04 (api#993): a 요유 몫 that only points at the board made them read the issue history on GitHub.
+    for t in ("남은 것: 요유 몫: https://github.com/munice-dev/nightly_api/issues/993 의 질문에 답하기 · 유요 몫: 없음",
+              "남은 것: 요유 몫: #993 질문에 답하기 · 유요 몫: 없음",
+              "남은 것: 요유 몫: 보드 질문에 답하기 · 유요 몫: 없음 · 세션: 닫아도 됨",
+              "남은 것: 요유 몫: api#993 댓글의 결정 · 유요 몫: 없음",
+              "남은 것: 요유 몫: 보드 항목의 선택지 고르기 · 유요 몫: 없음",
+              "남은 것: 요유 몫: 위 질문에 답하기 · 유요 몫: 없음",
+              "남은 것: 요유 몫: 질문에 답하기, 테스트할 사람 정하기 · 유요 몫: 없음"):
+        assert (decide(p(t), cli) or "").startswith(POINTER_REASON), f"a pointer is not a decision: {t[:60]!r}"
+    for t in ("남은 것: 요유 몫: #972 제목을 바꿔 쌓인 PR 5개를 staging에 올릴지 결정(추천: 바꾼다) · 유요 몫: 없음",
+              "남은 것: 요유 몫: https://github.com/x/y/issues/1 의 질문(#972 제목을 바꿔도 되는지)에 답하기 · 유요 몫: 없음",
+              "남은 것: 요유 몫: 세 길 중 하나 고르기 · 유요 몫: 없음",
+              "남은 것: 요유 몫: 훅을 만들지 결정 · 유요 몫: 없음",
+              "요유 몫은 보드 질문을 가리키기만 하면 안 됩니다."):
+        assert decide(p(t), cli) is None, f"the decision is stated: {t[:60]!r}"
 
     with tempfile.TemporaryDirectory() as d:
         wrote = {**cli, "EXPLAIN_STATE": d}
@@ -570,8 +604,10 @@ def selftest():
         os.unlink(old_share)
 
     def run(stdin, env=cli, args=()):
+        # A job session's own flags would switch the long-reply check off in the child (seen from an auto tab, 11/04).
+        base = {k: v for k, v in os.environ.items() if k not in ("MUNICE_AUTO_DISPATCH", "MUNICE_AMBIENT")}
         r = subprocess.run([sys.executable, "-I", os.path.realpath(__file__), *args], input=stdin,
-                           capture_output=True, text=True, env={**os.environ, **env}, timeout=10)
+                           capture_output=True, text=True, env={**base, **env}, timeout=10)
         return r.returncode, r.stdout
 
     assert run("not json{") == (0, ""), "malformed input must exit 0 silently"
