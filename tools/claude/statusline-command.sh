@@ -49,3 +49,30 @@ weather="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/statusline/token-weather/${session_
 if [ -n "$session_id" ] && [ -f "$weather" ]; then
 	awk -F'\t' -v c="${COLUMNS:-0}" 'c == 0 || $1 <= c { print $2; exit }' "$weather"
 fi
+
+# Last, the board items waiting on 요유 (owner:yoyoo): how many, how many past due, the longest wait, the top item
+# (soonest due first), from the summary the agent-board watch job writes every 30 minutes (watch/yoyoo-turn.sh in the
+# munice workspace's .agents/skills/agent-board). The status line redraws too often to ask GitHub itself, so the line
+# ends with the summary's age, yellow once it is over 90 minutes old. No file, or a broken one: no line.
+# (요유 2026-11-04: /monitor goes unopened, the status line is always in view.)
+# ponytail: every code point from U+1100 up counts as 2 cells, which overcounts … and the like; the clip only gets shorter.
+turn="$HOME/.config/munice/yoyoo-turn.json"
+if [ -s "$turn" ]; then
+	jq -r --argjson now "$(date +%s)" --argjson c "${COLUMNS:-0}" '
+		def w: [explode[] | if . >= 4352 then 2 else 1 end] | add // 0;
+		def clip($n): if w <= $n then . else
+			(reduce explode[] as $ch ({s: [], n: 0, done: false};
+				if .done or .n + ([$ch] | implode | w) > $n - 1 then .done = true
+				else {s: (.s + [$ch]), n: (.n + ([$ch] | implode | w)), done: false} end) | (.s | implode) + "…") end;
+		($now - .at) as $old
+		| ($old | if . < 3600 then "\(. / 60 | floor)분 전" elif . < 172800 then "\(. / 3600 | floor)시간 전" else "\(. / 86400 | floor)일 전" end) as $age
+		| "요유 차례 \(.count)건" as $head
+		| (if .count > 0 and .overdue > 0 then "기한 지남 \(.overdue)건" else null end) as $over
+		| (if .count > 0 then "최장 \(.oldestDays)일" else null end) as $wait
+		| ([$head, $over, $wait] | map(select(. != null)) | join(" · ")) as $lead
+		| (if $c > 0 then $c - ($lead | w) - (" · " | w) - (" · \($age)" | w) else 10000 end) as $room
+		| (if .top != null and $room >= 6 then " · " + (.top | clip($room)) else "" end) as $top
+		| "\u001b[1m\($head)\u001b[0m" + (if $over then " · \u001b[31m\($over)\u001b[0m" else "" end)
+		  + (if $wait then " · \($wait)" else "" end) + $top
+		  + " · " + (if $old > 5400 then "\u001b[33m" else "\u001b[2m" end) + $age + "\u001b[0m"' "$turn" 2>/dev/null
+fi
