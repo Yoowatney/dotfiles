@@ -65,12 +65,21 @@ case "\$2" in *"handoff save"*)
 esac
 exit 0
 EOS
-# date shim: +%H comes from $SANDBOX/hour, everything else is the real date.
+# date shim: +%H comes from $SANDBOX/hour, +%s from $SANDBOX/frozen-s when it exists, everything else is the real date.
 cat > "$SANDBOX/bin/date" <<EOS
 #!/bin/bash
-if [ "\${1:-}" = +%H ]; then cat "$SANDBOX/hour"; else exec /bin/date "\$@"; fi
+if [ "\${1:-}" = +%H ]; then cat "$SANDBOX/hour"
+elif [ "\${1:-}" = +%s ] && [ -f "$SANDBOX/frozen-s" ]; then cat "$SANDBOX/frozen-s"
+else exec /bin/date "\$@"; fi
 EOS
-chmod +x "$SANDBOX/herdr" "$SANDBOX/pane-tell" "$SANDBOX/bin/date"
+# pgrep shim: a message lands in the main transcript while the last checks run, and nothing waits for the pane.
+mkdir -p "$SANDBOX/pg"
+cat > "$SANDBOX/pg/pgrep" <<EOS
+#!/bin/bash
+echo '{"type":"user","message":{"content":"typed during the last checks"}}' >> "$SANDBOX/sid-main.jsonl"
+exit 1
+EOS
+chmod +x "$SANDBOX/herdr" "$SANDBOX/pane-tell" "$SANDBOX/bin/date" "$SANDBOX/pg/pgrep"
 
 S="$SANDBOX/state"
 mr() { # every call is sandboxed: state dir, herdr, pane-tell
@@ -166,6 +175,12 @@ rm -f "$S/agent-handoff/w6:p4.md.transcript"; set_main
 rm_stamp; echo old > "$S/agent-handoff/w5:p3.md"; touch -t 202001010000 "$S/agent-handoff/w5:p3.md"
 mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=05 MAIN_REFRESH_HANDOFF_WAIT=0.3
 check "a stale handoff does not count" "$(cleared)" 0
+# Saved before the request but in the same second (check pane, 11/05): whole-second times call it new.
+rm_stamp; echo 09 > "$SANDBOX/hour"; touch -t 202001010000 "$SANDBOX/sid-main.jsonl"
+echo old > "$S/agent-handoff/w5:p3.md"; stat -f %m "$S/agent-handoff/w5:p3.md" > "$SANDBOX/frozen-s"
+MR_ARGS=--now mr PATH="$SANDBOX/bin:$PATH" HANDOFF_AFTER=never MAIN_REFRESH_HANDOFF_WAIT=0.3; rm -f "$SANDBOX/frozen-s"
+check "a handoff from before the request, same second: no /clear" "$(cleared)|$(grep -c '인계가 저장되지 않아' "$S/orchestrator/refresh.log")" "0|1"
+[ -f "$S/agent-handoff/w5:p3.md" ] || fail "the skip leaves the older handoff where it was"
 
 # A pane moved between workspaces: the handoff file keeps the old key; the session id finds it.
 rm_stamp; panes w9:p1 sid-moved
@@ -243,6 +258,9 @@ check "a stale lock: goes ahead" "$(cleared)" 1
 rm_stamp; ( exec -a "pane-tell --deliver msg term_M sid-main term_x " sleep 5 ) & pend=$!
 now MAIN_REFRESH_HOUR=09; kill "$pend" 2>/dev/null; wait "$pend" 2>/dev/null
 check "a message waiting for the main pane: no /clear" "$(cleared)|$(grep -c '기다리는 글' "$S/orchestrator/refresh.log")" "0|1"
+# A message that lands while the last checks run (here: during pgrep) is still caught: the transcript is read last.
+rm_stamp; now PATH="$SANDBOX/pg:$PATH" MAIN_REFRESH_HOUR=09
+check "a message during the last checks: no /clear" "$(cleared)|$(grep -c '새 대화' "$S/orchestrator/refresh.log")" "0|1"
 # Started in the main pane's background, main-refresh must not be listed as a job to start again: it would loop.
 rm_stamp; now MAIN_REFRESH_HOUR=09; check "the request leaves main-refresh itself out" "$(grep -c 'main-refresh 자신은 빼고' "$SANDBOX/told")" 1
 rm_stamp; : > "$STAMP"; now MAIN_REFRESH_HOUR=05; check "--now ignores the daily stamp" "$(cleared)" 1

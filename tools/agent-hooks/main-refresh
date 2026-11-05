@@ -29,7 +29,7 @@ log() { mkdir -p "$DIR" && echo "$(date '+%F %T') $*" >> "$DIR/refresh.log"; }
 # A skipped run must not leave its memo behind: a later hand /clear would load it and say "continue from this".
 skip() {
   kill $(jobs -p) 2>/dev/null
-  if [ -n "${req:-}" ] && [ -f "$hdir/$key.md" ] && [ "$(stat -f %m "$hdir/$key.md")" -ge "$req" ]; then mv -f "$hdir/$key.md" "$hdir/$key.md.skipped"; fi
+  if [ -n "${req:-}" ] && newer; then mv -f "$hdir/$key.md" "$hdir/$key.md.skipped"; fi
   log "$*"; "$H" notification show "메인 칸 새로 시작 건너뜀" --body "$*" >/dev/null 2>&1; exit 0; }
 in_window() { [ -z "$now" ] || return 0; case "${MAIN_REFRESH_HOUR:-$(date +%H)}" in 05|06) return 0 ;; esac; return 1; }
 late() { in_window || skip "새벽 05~06시가 지나 건너뜀"; }
@@ -87,7 +87,10 @@ late # the Mac may have slept through the first wait
 "$TELL" --box-ready "$id" claude >/dev/null 2>&1 || skip "입력창이 비어 있지 않아 건너뜀"
 late # --box-ready takes a moment; the Mac may have slept across it
 
-req=$(date +%s)
+# The lock's mtime marks the request: find -newer compares to the nanosecond, so a handoff saved before it, even in the
+# same second, is never taken for the answer (whole-second times did, check pane 11/05).
+touch "$lock"; req=1
+newer() { [ -n "$(find "$hdir/$key.md" -newer "$lock" 2>/dev/null)" ]; }
 # Background jobs outlive the clear and their end reaches the next session (tested 2026-11-05), which must know what each
 # one watches; one that has stopped is started again from its command, never a second copy of one still running.
 what="지금 도는 밑 칸과 각 칸의 일, 모아 둔 결정(보드 링크, 개인 결정 파일), 감시 중인 Slack 스레드와 각각의 재감시 명령, 답을 기다리는 요유 질문과 그 자리, 이 칸에서 백그라운드로 도는 작업(main-refresh 자신은 빼고)과 각각의 재시작 명령(명령 전문, 다음 세션은 pgrep -f로 이미 도는 것을 건너뛰고 다시 건다), 오늘 남은 일"
@@ -96,8 +99,8 @@ else ask="[main-refresh] 새벽 정리입니다. ${what}을 handoff save로 남�
 out=$("$TELL" "$id" "$ask" 2>/dev/null) \
   || skip "인계 요청을 보내지 못해 건너뜀"
 case "$out" in told*) ;; *) skip "인계 요청이 대기열에 들어가 건너뜀" ;; esac
-# stat -f %m is whole seconds like the request time, so a handoff from earlier does not count; -s: an empty memo is none.
-fresh() { [ -s "$hdir/$key.md" ] && [ "$(stat -f %m "$hdir/$key.md")" -ge "$req" ] && idle; }
+# -s: an empty memo is none.
+fresh() { [ -s "$hdir/$key.md" ] && newer && idle; }
 wait_for "$HANDOFF_WAIT" fresh || skip "인계가 저장되지 않아 건너뜀"
 
 late
@@ -105,6 +108,8 @@ late
 # --box-ready reads the screen twice 0.7 s apart: a sleep or a whole new turn can land in between, so the checks follow it.
 late
 idle || skip "인계 뒤에 칸이 다시 일하고 있어 건너뜀"
+# A pane-tell message queued for this pane waits for its session (pane-tell --deliver): after a clear it would never arrive.
+! pgrep -f -- "--deliver [^ ]+ $term " >/dev/null || skip "메인 칸을 기다리는 글이 있어 건너뜀"
 # Another run may have cleared the pane meanwhile: every check above read the old session's transcript.
 [ -z "$sid" ] || [ "$("$H" pane get "$id" 2>/dev/null | jq -r '.result.pane.agent_session.value // empty')" = "$sid" ] \
   || skip "세션이 바뀌어 건너뜀"
@@ -112,14 +117,14 @@ idle || skip "인계 뒤에 칸이 다시 일하고 있어 건너뜀"
 # later message that merely mentions the marker is a new turn. An array that is not only tool results (an image) is one too,
 # and so are words that came while the pane worked: those are a queued_command attachment, not a user line (review 11/05).
 # A compaction summary is a user line but no message. 2000 lines: a save of 30 tool calls fills 200.
+# This check runs last, right before the /clear: a message that lands during any earlier check is still seen (11/05).
+# ponytail: what lands during the herdr call itself is not; closing that needs a send-if-idle in herdr.
 last=$(tail -n 2000 "$transcript" 2>/dev/null | jq -rs '[.[]
   | if .type == "attachment" and .attachment.type? == "queued_command" then "queued"
     elif .type == "user" and .isMeta != true and .isCompactSummary != true then
       .message.content | if type == "string" then . else (map(select(.type != "tool_result")) | select(length > 0) | "array") end
     else empty end][-1] // ""' 2>/dev/null)
 [[ "$last" == *"$ask" ]] || skip "인계 뒤에 새 대화가 있어 건너뜀"
-# A pane-tell message queued for this pane waits for its session (pane-tell --deliver): after a clear it would never arrive.
-! pgrep -f -- "--deliver [^ ]+ $term " >/dev/null || skip "메인 칸을 기다리는 글이 있어 건너뜀"
 # Straight through herdr, never pane-tell's queue: a queued /clear would fire hours later and wipe the main pane.
 "$H" agent prompt "$id" /clear >/dev/null 2>&1 || skip "/clear를 보내지 못해 건너뜀"
 [ -n "$now" ] || { mkdir -p "$DIR" && : > "$DIR/refreshed-$day"; }
