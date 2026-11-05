@@ -187,14 +187,14 @@ HOME = os.path.expanduser("~")
 WORD_CHAR = re.compile(r"[\w\-=./:,@%+]")
 STAGING_ENV = {"CLOUDSDK_ACTIVE_CONFIG_NAME", "CLOUDSDK_CORE_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS"}
 FEED = re.compile(r'\s*printf\s+%s\s+"\$\{\w+\}"\s*')  # a secret comes in on stdin (api#992)
-PROJECT_FLAGS = {"--project", "--billing-project", "-P"}
+PROJECT_FLAG = {"gcloud": {"--project"}, "firebase": {"--project", "-P"}}  # the project the call runs in, nothing else
 
 
 def shell_words(line: str) -> list[str] | None:
     """The words the shell makes of one plain command, or None when it would do more than split them and drop quotes:
     expand ($, `, a glob, a brace, ~), escape, redirect, chain or background anything (api#1026: judge what runs)."""
     words, word, quote, started = [], "", None, False
-    for c in line:
+    for i, c in enumerate(line):
         if quote:
             if c == quote:
                 quote = None
@@ -209,7 +209,9 @@ def shell_words(line: str) -> list[str] | None:
                 words.append(word)
             word, started = "", False
         elif c == "#" and not started:
-            break  # a comment: the shell reads nothing after it
+            if line[i:].partition("\n")[2].strip():
+                return None  # a comment ends at its line; the shell runs the next one
+            break
         elif WORD_CHAR.fullmatch(c):
             word, started = word + c, True
         else:
@@ -235,19 +237,20 @@ def staging_only(cmd: str) -> bool:
             return False
     if not words or words[0] not in ("gcloud", "firebase"):
         return False
-    projects = []
+    flags, projects, paths = PROJECT_FLAG[words[0]], [], []
     for prev, w in zip([""] + words, words):
         flag, eq, value = w.partition("=")
         if flag in ("--flags-file", "--impersonate-service-account"):
             return False
-        if prev in PROJECT_FLAGS:
+        if prev in flags:
             projects.append(w)
-        elif eq and flag in PROJECT_FLAGS:
+        elif eq and flag in flags:
             projects.append(value)
-        projects += re.findall(r"projects/([^/]+)", w)
+        paths += re.findall(r"projects/([^/]+)", w)
         if any(not any(s in b for s in STAGING_IDS) for b in re.findall(r"gs://([^/]*)", w)):
             return False  # a bucket's name, not --project, says whose it is
-    return bool(projects) and all(p in STAGING_IDS for p in projects)
+    # A `projects/<id>` path may sit in any value (a description), so only the project flag says where the call runs.
+    return bool(projects) and all(p in STAGING_IDS for p in projects + paths)
 
 
 PATCH_PATHS = re.compile(r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$", re.M)
@@ -827,6 +830,11 @@ def selftest():
         "staging_runtime_env": "CLOUDSDK_PYTHON=/tmp/py CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin gcloud run services list --project=miraclenight-dev",
         "staging_path_env": f"export PATH=/tmp/x:/usr/bin; gcloud {admin} run services list --project=miraclenight-dev",
         "staging_prod_bucket": f"gcloud {admin} storage rm gs://android-firestore-backup-20241005/x --project=miraclenight-dev",
+        # Codex review of the first fix: only the project the call runs in counts, and a comment ends at its line
+        "staging_billing_project": f"gcloud {admin} run services update api --billing-project=miraclenight-dev",
+        "staging_path_in_value": f"gcloud {admin} run services update api --description=projects/miraclenight-dev",
+        "staging_gcloud_dash_p": f"gcloud {admin} run services update api -P miraclenight-dev",
+        "staging_line_after_comment": f"gcloud {admin} secrets list --project=miraclenight-dev # staging\ngcloud {admin} run services update api",
     }
     checks: dict = {name: (lambda c=c: bool(stg(c))) for name, c in stg_refused.items()}
 
