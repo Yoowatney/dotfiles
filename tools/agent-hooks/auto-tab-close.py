@@ -402,14 +402,16 @@ def finish(reply: str, env):
         close = False
     # the main pane's watch: this pane is waiting, not stuck. Only workers panes: a personal server is left alone. A dispatch
     # pane that closes reported on the board, and --sweep closes it with no job env for pane-label to see (Codex review)
+    # By its session too: a herdr restart brings a pane back on its session under a new terminal (workers/w1:p6G, 2026-11-05).
     if me.get("terminal_id") and ((sent and (workers or to.get("terminal_id") == main)) or (close and dispatch_job(env, name))):
-        try:
-            mark = os.path.join(herdr_peers.state_dir(env), "reported", me["terminal_id"])
-            os.makedirs(os.path.dirname(mark), exist_ok=True)
-            with open(mark, "a"):
-                os.utime(mark)
-        except OSError:
-            pass
+        for key in filter(None, (me["terminal_id"], (me.get("agent_session") or {}).get("value"))):
+            try:
+                mark = os.path.join(herdr_peers.state_dir(env), "reported", key)
+                os.makedirs(os.path.dirname(mark), exist_ok=True)
+                with open(mark, "a"):
+                    os.utime(mark)
+            except OSError:
+                pass
     if close:
         pl = env.get("AUTO_TAB_CLOSE_PANE_LABEL") or os.path.join(HERE, "pane-label")
         subprocess.run([pl, "--close"], env={**env, "PANE_CLOSE_REPORTED": "1"}, timeout=3, **quiet)
@@ -491,9 +493,9 @@ def after_turn(token: str, env):
         drop(token, env)
 
 
-def last_reply(session: str) -> str:
+def last_reply(session: str, home: str = "") -> str:
     """The last reply of a finished session, from its Claude transcript or its Codex log."""
-    home = os.path.expanduser("~")
+    home = home or os.path.expanduser("~")
     for path in glob.glob(f"{home}/.claude/projects/*/{session}.jsonl"):
         return share.final_text(path)
     for path in glob.glob(f"{home}/.codex/sessions/*/*/*/rollout-*-{session}.jsonl"):
@@ -1030,6 +1032,8 @@ esac''')
     assert "왜: 칸이 남습니다." not in told, "the main pane gets the short form; the whole reply stays in the file"
     assert "workers/w1:p2" in told and "전체 보고:" in told
     assert os.path.exists(f"{sandbox}/.local/state/orchestrator/reported/term_2"), "the watch learns this pane reported"
+    assert os.path.exists(f"{sandbox}/.local/state/orchestrator/reported/sid-2"), \
+        "and by its session, which a herdr restart keeps while it gives the pane a new terminal (p6G, 2026-11-05)"
     assert "workers/w1:p2" in saved()
     # A check pane's report ends the round: it asks for the `확인:` line and no other check. pane-spawn's name is what tells it apart.
     checker = [{"pane_id": "w1:p2", "name": "spawn-M-chk1", "terminal_id": "term_2"}]
