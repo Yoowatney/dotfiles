@@ -27,6 +27,8 @@ command of its own; relay_reason says how. Any other pane, a missing or stale ma
 There a stopped pane rides on the next message instead (note_next): each rewrite re-read its whole long session.
 In the main pane alone, any turn also comes back while 요유's Slack words the relay passed there have no reply after them
 (owed_reason, from the relay's local state).
+Thread calls also come back once when the current turn shows no successful post in the called thread or main channel.
+A scheduled post is not a reply. Chitchat may be skipped after that reminder; stop_hook_active lets the second stop through.
 A report with nothing left to do ends without a word: the question used to demand a rewrite. Of 102 fires on 10/28-10/31,
 25 went on to a tool call and 69 only wrote text, most of it the same report again.
 Claude runs it with --claude: the question goes back as Stop additionalContext, which Claude shows as "Stop hook feedback"
@@ -37,10 +39,13 @@ explicit because CLAUDE_CODE_ENTRYPOINT leaks into commands Claude runs, Codex i
 """
 from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
 
+import ast
+import glob
 import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -185,6 +190,12 @@ OWED_REASON = ("yoyoo-share-guard: 릴레이가 이 칸에 넘긴 요유의 Slac
                "턴을 끝내기 전에 스레드마다 `main-channel.py post --thread <스레드 ts>`로 답하세요. 일이 이어지면 어디까지 했고 끝나면 "
                "그 스레드에 알린다고 쓰고, 끝난 일이면 답한 뒤 `main-channel.py done --thread <스레드 ts>`로 닫으세요. "
                "이미 다른 길로 답했으면 릴레이가 1분 안에 그 답을 읽고 목록에서 지우니, 응답 없이 턴을 끝내세요.")
+THREAD_CALL = re.compile(r"\[Slack 스레드 요유 부름\][^\n]*?\(스레드 ([CG][A-Z0-9]+)/(\d+\.\d+), 글 [CG][A-Z0-9]+/\d+\.\d+\)")
+SLACK_TS = re.compile(r"\d+\.\d+")
+THREAD_CALL_REASON = ("yoyoo-share-guard: [Slack 스레드 요유 부름]으로 받은 글에 아직 게시한 답을 확인하지 못했습니다: {}. "
+                      "그 스레드나 #0-yoyooyo에 답하세요. 답글을 예약만 했다면 #0-yoyooyo에 언제 답하는지 지금 알리세요. "
+                      "이미 다른 경로로 답했는지도 확인하세요. 답할 필요 없는 잡담이면 그대로 끝내도 됩니다. "
+                      "이 검사는 한 번만 돌려보내며 두 번째 종료는 통과합니다.")
 LONG_REASON = ("yoyoo-share-guard: 답이 깁니다. 긴 보고는 Codex가 씁니다. html-explainer 스킬대로 사실을 파일에 적어 explain-page로 맡기고, "
                "터미널에는 publish가 출력한 Codex의 글과 페이지 경로, 라벨 줄(무엇을, 왜, 남은 것 등)만 남기세요.")
 
@@ -396,7 +407,7 @@ def pane_opened(output: str) -> bool:
 
 def records(lines):
     """(kind, text, tool name, call id) from Claude or Codex session record lines, oldest first. kind is "in", "say", "call",
-    "refused" for a call a hook or a permission rule stopped, or "opened" for one whose output shows a pane it opened. Other tool output yields nothing."""
+    "refused" for a call a hook or a permission rule stopped, "opened" for a pane it opened, or "result"/"error" for other output."""
     for raw in lines:
         try:
             d = json.loads(raw)
@@ -417,6 +428,8 @@ def records(lines):
                     yield "refused", "", "", b.get("tool_use_id") or ""
                 elif pane_opened(output):
                     yield "opened", "", "", b.get("tool_use_id") or ""
+                else:
+                    yield "error" if b.get("is_error") else "result", output, "", b.get("tool_use_id") or ""
         elif kind == "user" and content:
             yield "in", flat(content), "", ""
         elif kind == "assistant" and not d.get("isSidechain"):
@@ -440,6 +453,8 @@ def records(lines):
                 yield "refused", "", "", p.get("call_id") or ""
             elif pane_opened(output):
                 yield "opened", "", "", p.get("call_id") or ""
+            else:
+                yield "result", output, "", p.get("call_id") or ""
 
 
 def spawns_check(command: str) -> bool:
@@ -553,6 +568,164 @@ def owed_reason(payload: dict, env) -> str | None:
     except Exception:
         return None
     return OWED_REASON.format(", ".join(left))
+
+
+def reply_values(output: str):
+    """Unwrap JSON tool/exec envelopes and Slack responses without executing anything."""
+    yield output
+    try:
+        value = json.loads(output)
+    except ValueError:
+        return
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            if isinstance(child, str):
+                yield from reply_values(child)
+            elif isinstance(child, (dict, list)):
+                yield from reply_values(json.dumps(child))
+    elif isinstance(value, list):
+        for child in value:
+            yield from reply_values(child if isinstance(child, str) else json.dumps(child))
+
+
+def main_channels(env) -> set:
+    """Read the posting helper's channel constant as data; never import its private application or copy its ID here."""
+    home = env.get("HOME")
+    channels = {"#0-yoyooyo", "0-yoyooyo"}
+    if not home:
+        return channels
+    sources = [os.path.join(home, root, "skills", "agent-board", "ambient", "collect.py") for root in (".claude", ".agents")]
+    sources += glob.glob(os.path.join(home, "work", "*", ".agents", "skills", "agent-board", "ambient", "collect.py"))
+    for source in sources:
+        try:
+            with open(source, encoding="utf-8") as f:
+                tree = ast.parse(f.read())
+            for node in tree.body:
+                if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "MAIN_CHANNEL" for t in node.targets):
+                    value = ast.literal_eval(node.value)
+                    if isinstance(value, str) and re.fullmatch(r"[CG][A-Z0-9]+", value):
+                        channels.add(value)
+        except (OSError, SyntaxError, ValueError, TypeError):
+            continue
+    return channels
+
+
+def posting_command(command: str):
+    """Recognize one post, optionally with cd before it and main-channel done after it.
+
+    Arbitrary compound shell output cannot prove which command printed a ts, so it must not clear this check.
+    """
+    post = None
+    for step in COMMANDS.split(HEREDOC.sub("", command)):
+        try:
+            args = shlex.split(step)
+        except ValueError:
+            return None
+        if not args:
+            continue
+        if args[0] == "cd" and len(args) == 2 and post is None:
+            continue
+        assignments = {}
+        if args[0] == "env":
+            args = args[1:]
+        while args and re.match(r"\w+=", args[0]):
+            key, value = args.pop(0).split("=", 1)
+            assignments[key] = value
+        if args and re.fullmatch(r"python(?:3(?:\.\d+)?)?|bash|sh", os.path.basename(args[0])):
+            args = args[1:]
+            while args and re.fullmatch(r"-[IBuEsSO]+", args[0]):
+                args = args[1:]
+        if len(args) < 2:
+            return None
+        script = os.path.basename(args[0])
+        if script == "main-channel.py" and args[1] == "done" and post:
+            continue
+        helper = script == "main-channel.py" and args[1] in ("post", "reply")
+        ambient = os.path.basename(os.path.dirname(args[0])) == "ambient" and (
+            script == "reply.sh" or script == "slack.py" and args[1] == "post-file")
+        if post or not (helper or ambient):
+            return None
+        post = (script, args[1:], assignments)
+    return post
+
+
+def posted_reply(command: str, name: str, output: str, targets: set, channels: set) -> set:
+    """Only a matching completed post counts; neither an attempt nor a scheduled-message acknowledgement does."""
+    values = list(reply_values(output))
+    objects = [v for v in values if isinstance(v, dict)]
+    if any(v.get("ok") is False or v.get("isError") or v.get("scheduled_message_id") or
+           v.get("exit_code") not in (None, 0) for v in objects):
+        return set()
+    timestamp = any(SLACK_TS.fullmatch(line.strip()) for v in values if isinstance(v, str) for line in v.splitlines())
+    post = posting_command(command) if timestamp else None
+    if post:
+        script, args, assignments = post
+        if script == "main-channel.py":
+            if args[0] == "post":
+                return set(targets)  # This helper's post command always posts in the main channel.
+            flags = {}
+            for i, arg in enumerate(args):
+                key, equal, value = arg.partition("=")
+                if key in ("--channel", "--thread"):
+                    flags[key] = value if equal else args[i + 1] if i + 1 < len(args) else ""
+            target = (flags.get("--channel"), flags.get("--thread"))
+        else:
+            target = tuple(assignments.get("MUNICE_AMBIENT_THREAD", "").split("/", 1))
+        if len(target) == 2 and target[0] in channels:
+            return set(targets)
+        if target in targets:
+            return {target}
+    # Slack's immediate-post API carries a message ts; scheduleMessage carries scheduled_message_id/post_at instead.
+    if not re.search(r"slack.*(?:reply|post)|chat\.postMessage", name + " " + command, re.I) or re.search(r"schedul", name + " " + command, re.I):
+        return set()
+    answered = set()
+    for value in objects:
+        if value.get("ok") is not True or not SLACK_TS.fullmatch(str(value.get("ts", ""))):
+            continue
+        message = value.get("message") or {}
+        target = (value.get("channel"), value.get("thread_ts") or message.get("thread_ts"))
+        if target[0] in channels:
+            return set(targets)
+        if target in targets:
+            answered.add(target)
+    return answered
+
+
+def thread_call_reason(payload: dict, env) -> str | None:
+    """Inspect the latest input and its completed tool calls, locally. Other panes and unreadable records fail open.
+
+    Do not use replied/<thread>: the posting helper writes it even when quiet hours only schedule the reply.
+    A new user input supersedes the previous turn, including a chitchat call intentionally skipped after one reminder.
+    """
+    path = payload.get("transcript_path")
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+        # Read only the latest input and the calls after it, rather than parsing the whole session on every Stop.
+        for start in range(len(lines) - 1, -1, -1):
+            latest = next((r for r in records(lines[start:start + 1]) if r[0] == "in"), None)
+            if latest:
+                break
+        else:
+            return None
+        targets = set(THREAD_CALL.findall(unicodedata.normalize("NFC", latest[1])))
+        if not targets or not delegates_checks(payload, env):
+            return None
+        calls, channels = {}, main_channels(env)
+        for kind, body, name, ident in records(lines[start + 1:]):
+            if targets and kind == "call" and ident:
+                calls[ident] = (body, name)
+            elif targets and kind == "result" and ident in calls:
+                command, tool = calls.pop(ident)
+                targets -= posted_reply(command, tool, body, targets, channels)
+        if targets:
+            return THREAD_CALL_REASON.format(", ".join(f"{channel}/{thread}" for channel, thread in sorted(targets)))
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
 
 
 def job_session(env) -> bool:
@@ -679,7 +852,7 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
     if formats and formats[4] and delegates_checks(payload, env):
         formats[4] = None
     checks = (*formats[:4], left_open_reason(payload, text, env), relay_reason(payload, text, env), explain_reason(payload, text, env),
-              stale_thread_reason(payload, text, env), owed_reason(payload, env), *formats[4:])
+              stale_thread_reason(payload, text, env), owed_reason(payload, env), thread_call_reason(payload, env), *formats[4:])
     rewrites = [r for r in checks if r]
     left = leaves_yoyoo_work(text)
     if left and not only_decisions(text) and not asked_before(payload, text, env):
