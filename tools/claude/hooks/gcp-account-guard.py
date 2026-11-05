@@ -246,6 +246,8 @@ def staging_only(cmd: str) -> bool:
             projects.append(w)
         elif eq and flag in flags:
             projects.append(value)
+        elif prev == "--billing-project" or (eq and flag == "--billing-project"):
+            paths.append(value if eq else w)  # billed to: staging too, but not where the call runs
         paths += re.findall(r"projects/([^/]+)", w)
         if any(not any(s in b for s in STAGING_IDS) for b in re.findall(r"gs://([^/]*)", w)):
             return False  # a bucket's name, not --project, says whose it is
@@ -741,6 +743,7 @@ def selftest():
         'printf %s "${V}" | gcloud --configuration=munice-admin secrets versions add R2_API_TOKEN --project miraclenight-dev --data-file=-',
         "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin gcloud run services describe hub-nightly-so --project miraclenight-dev --region asia-northeast1",
         "GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gcloud/adc-munice-admin.json firebase deploy --only functions:assets -P miraclenight-dev",
+        "gcloud --configuration=munice-admin secrets list --project=miraclenight-dev --billing-project=miraclenight-dev",
     ]:
         assert stg(c) is None, f"staging unlock should allow: {c} -> {stg(c)}"
     for c in [
@@ -832,6 +835,7 @@ def selftest():
         "staging_prod_bucket": f"gcloud {admin} storage rm gs://android-firestore-backup-20241005/x --project=miraclenight-dev",
         # Codex review of the first fix: only the project the call runs in counts, and a comment ends at its line
         "staging_billing_project": f"gcloud {admin} run services update api --billing-project=miraclenight-dev",
+        "staging_other_billing_project": f"gcloud {admin} secrets list --project=miraclenight-dev --billing-project munice-tfstate",
         "staging_path_in_value": f"gcloud {admin} run services update api --description=projects/miraclenight-dev",
         "staging_gcloud_dash_p": f"gcloud {admin} run services update api -P miraclenight-dev",
         "staging_line_after_comment": f"gcloud {admin} secrets list --project=miraclenight-dev # staging\ngcloud {admin} run services update api",
