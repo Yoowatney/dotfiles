@@ -23,6 +23,8 @@ comes back without a `확인:` line and a command run since that is not a pane c
 review found no lead that passed a "done" on unchecked.
 A pane that hands checks out (herdr_peers.delegates_checks: the main pane today, 요유 2026-11-05) shows a check pane instead of a
 command of its own; relay_reason says how. Any other pane, a missing or stale main-pane file and a broken herdr get the rule above.
+In the main pane alone, any turn also comes back while 요유's Slack words the relay passed there have no reply after them
+(owed_reason, from the relay's local state).
 A report with nothing left to do ends without a word: the question used to demand a rewrite. Of 102 fires on 10/28-10/31,
 25 went on to a tool call and 69 only wrote text, most of it the same report again.
 Claude runs it with --claude: the question goes back as Stop additionalContext, which Claude shows as "Stop hook feedback"
@@ -174,6 +176,13 @@ CODEX_CMD = re.compile(r"\bcmd[\"']?\s*:\s*(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])
 # A call a hook or a permission rule stopped never ran: Claude's error result, Codex's output text. A test that ran and failed counts.
 REFUSED = re.compile(r"PreToolUse:\S+ hook error|blocked by PreToolUse hook|Permission to use \S+ has been denied|doesn't want to proceed")
 PAGE = re.compile(r"/explain/\S+\.html")
+# Lead 2026-11-05: the main pane left 요유's Slack words unanswered twice that day (tf#1083's '머지 ㄱㄱ' went to a pane with no
+# reply in the thread), and done --thread, the one check, runs only when a thread is closed. So each turn of the main pane ends
+# with the threads still owed a reply, read from the relay's own state (owed_reason).
+OWED_REASON = ("yoyoo-share-guard: 릴레이가 이 칸에 넘긴 요유의 Slack 글 가운데, 뒤에 우리 답글이 없는 스레드가 있습니다: {}. "
+               "턴을 끝내기 전에 스레드마다 `main-channel.py post --thread <스레드 ts>`로 답하세요. 일이 이어지면 어디까지 했고 끝나면 "
+               "그 스레드에 알린다고 쓰고, 끝난 일이면 답한 뒤 `main-channel.py done --thread <스레드 ts>`로 닫으세요. "
+               "이미 다른 길로 답했으면 릴레이가 1분 안에 그 답을 읽고 목록에서 지우니, 응답 없이 턴을 끝내세요.")
 LONG_REASON = ("yoyoo-share-guard: 답이 깁니다. 긴 보고는 Codex가 씁니다. html-explainer 스킬대로 사실을 파일에 적어 explain-page로 맡기고, "
                "터미널에는 publish가 출력한 Codex의 글과 페이지 경로, 라벨 줄(무엇을, 왜, 남은 것 등)만 남기세요.")
 
@@ -490,6 +499,36 @@ def stale_thread_reason(payload: dict, text: str, env) -> str | None:
         return None
 
 
+def owed_reason(payload: dict, env) -> str | None:
+    """The main pane's turn back for 요유's Slack words with no reply of ours after them, or None. The relay (main-channel.py)
+    keeps the words it passed on in its state's `owed` ({thread: [words ts, first line]}) until it reads a reply; `post --thread`
+    writes replied/<thread> at once, since the relay reads only every minute. Local files: no Slack read at a stop. Fails open."""
+    if not env.get("HOME"):  # never the real state from a test
+        return None
+    try:
+        peers = peers_module()
+        folder = peers.state_dir(env)
+        with open(os.path.join(folder, "channel.json"), encoding="utf-8") as f:
+            owed = json.load(f).get("owed") or {}
+        left = []
+        for thread, (said, words) in sorted(owed.items()):
+            try:
+                with open(os.path.join(folder, "replied", os.path.basename(thread)), encoding="utf-8") as f:
+                    answer = float(f.read().strip())
+            except (OSError, ValueError):
+                answer = 0.0
+            if float(said) > answer:
+                left.append(f"{thread}('{words}')")
+        if not left:
+            return None
+        me = my_pane(herdr_list(env, "pane"), payload, env) or {}  # herdr only when something is owed
+        if not me.get("terminal_id") or me["terminal_id"] != peers.main_terminal(env):
+            return None
+    except Exception:
+        return None
+    return OWED_REASON.format(", ".join(left))
+
+
 def job_session(env) -> bool:
     """A job's report goes to the board and Slack, and no one reads it in the terminal."""
     return bool(env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT"))
@@ -606,7 +645,7 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
     if any(formats) and under_lead(payload, env):  # herdr is asked only when a format would send the report back
         formats = []
     checks = (*formats[:4], left_open_reason(payload, text, env), relay_reason(payload, text, env), explain_reason(payload, text, env),
-              stale_thread_reason(payload, text, env), *formats[4:])
+              stale_thread_reason(payload, text, env), owed_reason(payload, env), *formats[4:])
     rewrites = [r for r in checks if r]
     left = leaves_yoyoo_work(text)
     if left and not only_decisions(text) and not asked_before(payload, text, env):
@@ -1222,6 +1261,52 @@ def selftest():
             f.write("#!/bin/sh\nexit 1\n")
         assert in_pane([claude_in(told)], bare) == RELAY_REASON, "herdr down: the ordinary rule"
         assert in_pane([claude_in(told), test_run], checked) is None, "herdr down: a lead's own check passes"
+
+    # Lead 2026-11-05 (tf#1083's '머지 ㄱㄱ'): the main pane handed the work to a pane and left 요유's Slack words unanswered.
+    with tempfile.TemporaryDirectory() as d:
+        fake, listing, state = os.path.join(d, "herdr"), os.path.join(d, "panes"), os.path.join(d, ".local", "state", "orchestrator")
+        with open(fake, "w", encoding="utf-8") as f:
+            f.write(f'#!/bin/sh\ncat "{listing}.$1"\n')
+        os.chmod(fake, 0o755)
+        main = {"pane_id": "w1:p1", "terminal_id": "term_M", "agent_session": {"value": "s1"}, "label": "🟢 👑 메인 오케스트레이터"}
+        json.dump({"result": {"panes": [main]}}, open(f"{listing}.pane", "w"))
+        json.dump({"result": {"agents": []}}, open(f"{listing}.agent", "w"))
+        os.makedirs(os.path.join(state, "replied"))
+        open(os.path.join(state, "main"), "w").write("term_M\n")
+        env, thread = {**cli, "HERDR_BIN_PATH": fake, "HOME": d}, "1793870239.004549"
+
+        def owes(**owed):
+            json.dump({"cursor": "1793871000.000000", "owed": owed}, open(os.path.join(state, "channel.json"), "w"))
+
+        def replied(ts):
+            open(os.path.join(state, "replied", thread), "w").write(ts + "\n")
+
+        def stops(text="확인했습니다.", **kw):
+            return decide(p(text, session_id="s1", **kw), env)
+
+        owes(**{thread: ["1793871000.000100", "머지 ㄱㄱ"]})
+        r = stops() or ""
+        assert f"{thread}('머지 ㄱㄱ')" in r and "post --thread" in r and "done --thread" in r, f"owed words come back: {r}"
+        assert stops(stop_hook_active=True) is None, "once a turn"
+        replied("1793870900.000000")
+        assert thread in (stops() or ""), "a reply from before the words answers nothing"
+        replied("1793871100.000000")
+        assert stops() is None, "post --thread wrote its reply: the relay's minute does not matter"
+        owes(**{thread: ["1793871200.000100", "그리고 이것도"], "1793861963.607349": ["1793861963.607349", "토큰 이슈"]})
+        r = stops() or ""
+        assert "그리고 이것도" in r and "토큰 이슈" in r, f"newer words after the reply, and a thread never answered: {r}"
+        assert stops(f"남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨") == r, "whatever the reply says"
+        open(os.path.join(state, "main"), "w").write("term_X\n")
+        assert stops() is None, "only the main pane: another pane is not who answers 요유's channel"
+        open(os.path.join(state, "main"), "w").write("term_M\n")
+        assert stops() is not None
+        assert decide(p("확인했습니다.", session_id="s1"), {**env, "HOME": ""}) is None, "no HOME: never the real state"
+        owes()
+        assert stops() is None, "nothing owed"
+        open(os.path.join(state, "channel.json"), "w").write("{broken")
+        assert stops() is None, "an unreadable state passes"
+        os.unlink(os.path.join(state, "channel.json"))
+        assert stops() is None, "no relay state (집맥): nothing"
 
     def run(stdin, env=cli, args=()):
         # A job session's own flags would switch the long-reply check off in the child (seen from an auto tab, 11/04).
