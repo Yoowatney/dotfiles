@@ -134,6 +134,12 @@ DELEGATE_REASON = (f"yoyoo-share-guard: 하위 칸의 보고를 받은 뒤 처�
                    "확인할 결과가 없는 보고(질문, 결정 요청)였으면 응답 없이 턴을 끝내세요.")
 CHECK_REPORT_REASON = ("yoyoo-share-guard: 확인 칸의 보고를 받은 뒤 처음 쓰는 보고인데, 확인 칸의 결과를 적은 '확인:' 줄이 없습니다. 확인 칸을 또 열지 마세요. "
                        "그 칸이 실행하고 본 것을 적고 확인 칸이 했다고 밝힌 '확인:' 줄을 넣어 보고를 다시 쓰세요.")
+# 요유 2026-11-05: dispatch tabs run on the hidden workers server, and only what needs 요유 reaches the main pane. It is no claim of work
+# done, so it asks for no check pane: this head stays out of RELAYED, and it keeps the main pane's turn short, since 요유's next
+# words wait behind it. Nothing can be typed into that pane, and it has closed by then, so the board and a new pane carry the rest.
+JOB_NOTE = ("자동 칸이 요유의 결정이나 손을 기다립니다. 결과 보고가 아니니 확인 칸을 열지 마세요. 질문은 그 칸의 보드 항목에도 있습니다. "
+            "바로 처리할 일이 아니면 모아 둔 결정에 더하고 턴을 짧게 끝내세요. 그 칸은 입력을 받지 않으니 이어 갈 일은 새 칸에 맡기고, "
+            "production 단계는 메인 칸에서 직접 하세요")
 CHECK_AGENT = re.compile(r"^spawn-[0-9A-Za-z]+-chk")  # pane-spawn --check's agent name, which a pane rename does not change
 BY_CHECK_PANE = re.compile(r"확인[ \t]*칸")
 SPAWN_CHECK = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?pane-spawn(?:\s+--[\w-]+(?:\s+[^\s\"'-]\S*)?)*?\s+--check\b")

@@ -75,6 +75,14 @@ pt "와우" "x" 2>/dev/null; check "this pane refuses" "$?|$(sent)" "2|"
 panes "w1:p5|🟢 api#8 자동 일|s5"; mkdir -p "$SANDBOX/home/.claude/projects/p"
 echo '{"type":"user","origin":{"kind":"human"},"message":{"content":"[auto-dispatch] work"}}' > "$SANDBOX/home/.claude/projects/p/s5.jsonl"
 pt "api#8" "x" 2>/dev/null; check "auto-dispatch session refuses" "$?|$(sent)" "2|"
+echo '{"type":"user","origin":{"kind":"human"},"message":{"content":"auto-dispatch] work"}}' > "$SANDBOX/home/.claude/projects/p/s5.jsonl"
+pt "api#8" "x" 2>/dev/null; check "an eaten [ still refuses" "$?|$(sent)" "2|"
+# 3 sessions in the 30 days to 2026-11-05 were refused for good because their first prompt only named the marker.
+for first in "[pane-tell: 리드 세션이 보낸 글입니다] [auto-dispatch] 탭을 고치세요" "auto-dispatch 탭을 workers로 옮기세요"; do
+  jq -nc --arg c "$first" '{type:"user",origin:{kind:"human"},message:{content:$c}}' > "$SANDBOX/home/.claude/projects/p/s5.jsonl"
+  pt "api#8" "x" >/dev/null; check "a session that names the marker is no job: $first" "$?|$(sent)" "0|w1:p5 "; sent >/dev/null; rm -f "$SANDBOX/log"
+done
+echo '{"type":"user","origin":{"kind":"human"},"message":{"content":"[auto-dispatch] work"}}' > "$SANDBOX/home/.claude/projects/p/s5.jsonl"
 # Claude review 10/21: with no session id to read, the 자동 tab itself still refuses (board.sh unwatch tells this pane)
 echo '{"result":{"tabs":[{"tab_id":"w1:t1","label":"작업"},{"tab_id":"w1:t7","label":"자동 api#8"},{"tab_id":"w1:t8","label":"자동화"}]}}' > "$SANDBOX/tabs"
 panes "w1:p6|🟢 api#8 자동 일||w1:t7"

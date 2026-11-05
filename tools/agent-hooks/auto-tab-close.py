@@ -25,6 +25,10 @@ hears a short form (first line, `남은 것:`, the pane's address and the saved 
 lead's panes share that server's one workspace: when the opener is gone or cannot hear, the report goes to a 👑 in the same tab or
 the main pane, saying it stands in (and, for a Home pane, to keep it off company Slack and the board; 요유 2026-11-05), never to
 another lead.
+A dispatch tab runs on the workers server too, where nobody types (요유 2026-11-05). A report with something in `요유 몫` goes to the
+main pane in the short form under share.JOB_NOTE, which asks for no check pane, and then the tab closes unless its report says
+`세션: 닫으면 …`: the board holds the question, and a new pane carries on. One it could not tell stays, unmarked, for
+workers-watch to reach someone. A finished one reaches nobody. Slack ambient tabs have no main pane to call and stay as they were.
 A pane moved to another workspace gets a new id, and only `herdr pane get` still knows the old one from its env, so the
 current pane comes from there, and pane-spawn records its caller by terminal id, which a move does not change.
 A Stop hook runs beside the other Stop hooks, and any of them can send the reply back to be rewritten, so a Stop is not the
@@ -241,6 +245,12 @@ def no_new_report(payload: dict) -> bool:
     return bool(payload.get("stop_hook_active")) and not LEFT.search(share.prose(reply_of(payload) or ""))
 
 
+def dispatch_job(env, name="") -> bool:
+    """A tab the dispatch job opened. It is known by its env, or by its agent name to a reader with no such env (--sweep). When both
+    flags are set the Slack ambient one wins, as it does in dispatch/guard.sh."""
+    return not env.get("MUNICE_AMBIENT") and (bool(env.get("MUNICE_AUTO_DISPATCH")) or herdr_peers.dispatch_pane(name))
+
+
 def decide(payload: dict, env) -> str | None:
     """The reply to act on when the turn ends, or None: one that closes this pane, or a report that keeps it open and still has
     to reach the pane above. The nested claude -p inherits this pane's env but is not its session."""
@@ -252,6 +262,8 @@ def decide(payload: dict, env) -> str | None:
     job = env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT")
     if should_close(text):
         return text if job or agent_name(env) else None
+    if dispatch_job(env) and LEFT.search(share.prose(text)) and share.leaves_yoyoo_work(plain(text)):
+        return text
     return text if not job and LEFT.search(share.prose(text)) and agent_name(env) else None
 
 
@@ -331,16 +343,20 @@ def finish(reply: str, env):
     panes = herdr(env, "pane", "list").get("panes") or []
     agents = herdr(env, "agent", "list").get("agents")
     hidden = hidden_agents(env)
-    # herdr fails open ({}): a pane or agent list it could not give hides the panes this one opened, so the pane stays
-    close = (should_close(reply) and bool(me) and agents is not None and hidden is not None
-             and not held(me.get("label") or "", me.get("terminal_id"), agents + hidden))
     name = agent_name(env) if agents is None else next((a.get("name") for a in agents if a.get("pane_id") == pane), "")
+    needs_yoyoo = dispatch_job(env, name) and bool(LEFT.search(share.prose(reply))) and share.leaves_yoyoo_work(plain(reply))
+    # herdr fails open ({}): a pane or agent list it could not give hides the panes this one opened, so the pane stays
+    close = ((should_close(reply) or (needs_yoyoo and not session_value(reply).startswith("닫으면")))
+             and bool(me) and agents is not None and hidden is not None
+             and not held(me.get("label") or "", me.get("terminal_id"), agents + hidden))
     now = datetime.datetime.now()
     path = save(reply, me, pane, env, now)
     quiet: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     sideways = close or "👑" not in (me.get("label") or "")
     workers = herdr_peers.server_key(env) == "workers"
-    if env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT"):
+    if needs_yoyoo:
+        found = main_pane(env)
+    elif env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT") or dispatch_job(env, name):
         found = ("", {})
     else:  # with no name on workers, sideways would be the main pane, with no word of a Home pane
         found = None if workers and agents is None and not name else lead_pane(me, panes, name, sideways, env)
@@ -351,6 +367,12 @@ def finish(reply: str, env):
 
     def tell(lead: str, to: dict) -> bool:
         pt = env.get("AUTO_TAB_CLOSE_PANE_TELL") or os.path.join(HERE, "pane-tell")
+        if needs_yoyoo:
+            message = f"{share.JOB_NOTE}:\n{short_report(reply)}\n칸: {me.get('label') or ''}\n전체 보고: {path} ({now:%H:%M:%S} 항목)"
+            try:
+                return subprocess.run([pt, lead, message], env=dict(env), timeout=10, **quiet).returncode == 0
+            except subprocess.TimeoutExpired:
+                return False
         head = "칸의 마지막 보고입니다(칸을 닫기 전에 보냅니다)" if close else "칸의 보고입니다(칸은 열어 둡니다)"
         who, note = "이", share.RELAY_NOTE
         if herdr_peers.delegates_checks(env, to.get("terminal_id")):  # a check pane's report ends the round: no check of a check
@@ -376,8 +398,11 @@ def finish(reply: str, env):
     if lead and not sent and workers and to.get("terminal_id") != main:  # hidden: no tab of 요유's shows this pane stop, so the main pane hears it
         lead, to = main_pane(env)
         sent = bool(lead) and tell(lead, to)
-    # the main pane's watch: this pane is waiting, not stuck. Only workers panes: a personal server is left alone
-    if sent and me.get("terminal_id") and (workers or to.get("terminal_id") == main):
+    if needs_yoyoo and not sent:  # the file alone would lose it: it stays, unmarked, for the watch to reach someone
+        close = False
+    # the main pane's watch: this pane is waiting, not stuck. Only workers panes: a personal server is left alone. A dispatch
+    # pane that closes reported on the board, and --sweep closes it with no job env for pane-label to see (Codex review)
+    if me.get("terminal_id") and ((sent and (workers or to.get("terminal_id") == main)) or (close and dispatch_job(env, name))):
         try:
             mark = os.path.join(herdr_peers.state_dir(env), "reported", me["terminal_id"])
             os.makedirs(os.path.dirname(mark), exist_ok=True)
@@ -543,7 +568,10 @@ def selftest():
     assert not no_new_report({"last_assistant_message": ""}), "a first stop with no reply holds nothing"
     assert not no_new_report({"last_assistant_message": "위 보고가 최종입니다."}), "not sent back: a new reply and no report"
     assert not decide({"last_assistant_message": done}, {}), "a session 요유 opened is never closed"
-    assert not decide({"last_assistant_message": keep[0]}, auto)
+    assert decide({"last_assistant_message": keep[0]}, auto) == keep[0], "요유 몫 in a dispatch tab goes to the main pane"
+    assert not decide({"last_assistant_message": "CI를 기다립니다. 요유 몫: 머지 확인"}, auto), "no 남은 것 line: no report (review)"
+    assert not decide({"last_assistant_message": keep[0]}, {"MUNICE_AMBIENT": "1"}), "not from a Slack ambient tab"
+    assert not decide({"last_assistant_message": keep[0]}, {"MUNICE_AMBIENT": "1", "MUNICE_AUTO_DISPATCH": "1"}), "ambient wins when both are set"
     assert not decide({"last_assistant_message": None}, auto)
 
     sandbox = tempfile.mkdtemp()
@@ -700,7 +728,9 @@ esac''')
     stays = json.dumps({"last_assistant_message": keep[0]})
     assert run(stays, pane2) == (0, "", "tell w1:p1\n"), "요유 몫 left: the pane stays, and its lead still hears the report"
     assert "칸은 열어 둡니다" in open(f"{sandbox}/told").read() and keep[0] in saved()
-    assert run(stays, {**pane2, "MUNICE_AUTO_DISPATCH": "1"}) == (0, "", ""), "job tabs report on the board, not to a 👑"
+    assert run(stays, {**pane2, "MUNICE_AUTO_DISPATCH": "1"}) == (0, "", ""), "no main pane here: a dispatch tab stays, for the watch to reach someone"
+    assert keep[0] in saved(), "and its report is kept"
+    assert run(stays, {**pane2, "MUNICE_AMBIENT": "1"}) == (0, "", ""), "a Slack ambient tab (집맥) stays as it was: nothing sent, nothing saved"
     assert saved() == ""
     herdr_says({"name": "spawned"}, [crown, {**other_tab, "label": "🟢 🫡 구현"}, me], mine)
     assert run(stays, pane2) == (0, "", "tell w1:p7\n"), "a 🫡 that opened this pane hears it, not the 👑 above that 🫡"
@@ -1091,6 +1121,73 @@ esac''')
     assert run(reported, on_workers) == (0, "", "tell w1:p1\n" + closed)
     assert os.path.exists(f"{sandbox}/.local/state/orchestrator/reported/term_2"), "a workers pane under its own lead still marks"
     saved()
+
+    # 요유 2026-11-05: dispatch tabs run on workers. What needs 요유 reaches the main pane and the tab closes: nobody types in a hidden
+    # pane, and the board holds the question. A finished job reaches nobody. Neither asks the main pane for a check pane.
+    job_agents = [{"pane_id": "w1:p2", "name": "auto-api-820", "terminal_id": "term_2"}]
+    job_env = {**on_workers, "MUNICE_AUTO_DISPATCH": "1"}
+    herdr_says({"name": "x"}, [main])
+    herdr_says_on("workers", {"name": "auto-api-820"}, [{**me, "label": "🟢 api#820 결정 필요"}], job_agents)
+    job_mark = f"{sandbox}/.local/state/orchestrator/reported/term_2"
+
+    def unmarked():
+        if os.path.exists(job_mark):
+            os.unlink(job_mark)
+
+    unmarked()
+    asks = "api#820 결정 필요: 재시도 횟수를 정해야 합니다.\n\n긴 근거입니다.\n\n남은 것: 요유 몫: 재시도 3회로 할지 정하기, 추천 3회 · 유요 몫: 답이 오면 이어 감 · 세션: 닫음"
+    assert run(json.dumps({"last_assistant_message": asks}), job_env) == (0, "", "tell default/w5:p3\n" + closed), "a decision reaches the main pane, then the tab closes"
+    told = open(f"{sandbox}/told").read()
+    assert told.startswith(share.JOB_NOTE), f"its own head: {told!r}"
+    assert "재시도 횟수를 정해야" in told and "요유 몫: 재시도 3회" in told and "전체 보고:" in told and "api#820 결정 필요" in told, told
+    assert "긴 근거입니다" not in told, "the short form; the whole reply stays in the file"
+    assert asks in saved(), "the whole reply is kept"
+    assert os.path.exists(job_mark), "marked, so the watch does not call it a pane gone without a report"
+    unmarked()
+    # `닫아도 됨` with 요유 몫 kept a tab open for 요유 to type in. Nobody types in a hidden pane.
+    open_ask = asks.replace("세션: 닫음", "세션: 닫아도 됨")
+    assert run(json.dumps({"last_assistant_message": open_ask}), job_env)[2] == "tell default/w5:p3\n" + closed
+    saved(); unmarked()
+    held_ask = asks.replace("세션: 닫음", "세션: 닫으면 CI 감시 멈춤")
+    assert run(json.dumps({"last_assistant_message": held_ask}), job_env)[2] == "reported= pane=w1:p2 --hold\ntell default/w5:p3\n", "told, and something still runs there: it stays"
+    saved(); unmarked()
+    # The failure flow: the main pane cannot hear. The tab stays and nothing marks it, so the watch reaches 요유's screen.
+    assert run(json.dumps({"last_assistant_message": asks}), {**job_env, "TELL_EXIT": "2"})[2] == "tell default/w5:p3\n", "not told: it stays"
+    assert not os.path.exists(job_mark) and asks in saved()
+    herdr_says({"name": "x"}, [])
+    assert run(json.dumps({"last_assistant_message": asks}), job_env)[2] == "", "no main pane at all: it stays, and the file has it"
+    assert not os.path.exists(job_mark) and asks in saved()
+    herdr_says({"name": "x"}, [main])
+    # A finished job reaches nobody, whatever else it says; a line with no report is no report.
+    assert run(reported, job_env) == (0, "", closed), "a finished job: closed, no word to the main pane"
+    assert full in saved()
+    assert run(json.dumps({"last_assistant_message": "진행 중입니다."}), job_env) == (0, "", ""), "no report: nothing"
+    assert saved() == ""
+    # The sweep has no job env and goes by the agent name, so a finished dispatch pane must not read as a report for the main pane.
+    unmarked()
+    assert run(reported, on_workers) == (0, "", closed), "agent name auto-…: a job even without its env"
+    assert os.path.exists(job_mark), "marked, though pane-label sees no job env here"
+    assert run(json.dumps({"last_assistant_message": asks}), on_workers)[2] == "tell default/w5:p3\n" + closed
+    assert open(f"{sandbox}/told").read().startswith(share.JOB_NOTE)
+    saved(); unmarked()
+    # Slack ambient stays out of all this, even on a Mac with a main pane.
+    ambient_env = {**on_workers, "MUNICE_AMBIENT": "1"}
+    herdr_says_on("workers", {"name": "ambient-1"}, [me], [{"pane_id": "w1:p2", "name": "ambient-1", "terminal_id": "term_2"}])
+    assert run(json.dumps({"last_assistant_message": asks}), ambient_env)[2] == closed and not os.path.exists(job_mark), "세션: 닫음 closes it, and no word goes up"
+    saved()
+    assert run(stays, ambient_env) == (0, "", ""), "요유 몫 in an ambient tab: stays, no word"
+    assert saved() == ""
+    # What the main pane receives asks for no check pane: share-guard must let its next report pass.
+    assert not share.RELAYED.search(share.JOB_NOTE) and "보고입니다(" not in share.JOB_NOTE
+    herdr_says({"name": "x"}, [{**main, "agent_session": {"value": "s-main"}}])
+    herdr_says_on("workers", None, [], [])
+    with open(main_log, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "user", "message": {"role": "user", "content": f"[pane-tell: 칸] {share.JOB_NOTE}:\n{asks}"}}, ensure_ascii=False) + "\n")
+    report = {"session_id": "s-main", "transcript_path": main_log, "last_assistant_message": "모아 두겠습니다.\n남은 것: 요유 몫: 재시도 3회로 할지 정하기, 추천 3회 · 유요 몫: 없음 · 세션: 닫아도 됨"}
+    env_main = {"HERDR_BIN_PATH": fake_herdr, "HERDR_PANE_ID": "w5:p3", "HOME": sandbox, "XDG_STATE_HOME": "", "EXPLAIN_STATE": sandbox}
+    assert share.relay_reason(report, report["last_assistant_message"], env_main) is None, "a dispatch tab's report asks the main pane for no check pane"
+    os.unlink(main_log)
+    open(job_mark, "w").close()  # the case below finds the mark an earlier case left
 
     # An ordinary lead's panes run on workers too (요유 2026-11-05). Every lead shares that server's one workspace, so its only 👑 is
     # nobody's in particular, and the same pane id on default is another pane.

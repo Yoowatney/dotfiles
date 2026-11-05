@@ -175,6 +175,25 @@ rm "$SANDBOX/workers-workspaces.json"; ps "api#2" "할 일" >/dev/null
 has "[workers] workspace create --label workers --no-focus" "an empty workers server gets its workspace"
 before "workspace create" "tab create --workspace w2"
 
+# 요유 2026-11-05: a tab named `자동 칸을 workers로 이전` read as a dispatch tab, so pane-tell refused its pane. A work name never
+# starts a job tab's name; the pane keeps the work name as given.
+for word in 자동 알아서; do
+  ps "$word 칸을 workers로 이전" "할 일" >/dev/null
+  has "[workers] tab create --workspace w2 --cwd $PWD --label 일 $word 칸을 workers로 이전 --no-focus" "the main pane's tab: no job tab's first word ($word)"
+  hasnt "--label $word " "no tab starts with $word"
+  has "pane rename w1:new 🟢 🫡 $word 칸을 workers로 이전" "the pane keeps the work name"
+done
+ps "자동화 정리" "할 일" >/dev/null
+has "--label 자동화 정리 --no-focus" "자동화 is no job tab's first word"
+not_main; echo '{"result":{"workspaces":[{"workspace_id":"w1","label":"workers"}]}}' > "$SANDBOX/workers-workspaces.json"
+CALLER_LABEL="🟢 자동 칸 정리" ps "구현" "할 일" >/dev/null
+has "[workers] tab rename w7:t1 일 자동 칸 정리" "a lead's tab named for it: no job tab's first word"
+hasnt "--label 자동 " "and none when the tab opens"
+FAIL_SPLIT=1 ps --new-tab "자동 칸 고치기" "할 일" >/dev/null
+hasnt "--label 자동 " "a --new-tab name goes the same way"
+rm -f "$SANDBOX/workers-workspaces.json"; is_main
+ps "api#2-2" "할 일" >/dev/null
+
 workers_up false; if ps "api#3" "할 일" 2>"$SANDBOX/err"; then fail "workers down must fail"; fi
 grep -q "com.yoyoo.herdr-workers" "$SANDBOX/err" || fail "says how to start it: $(cat "$SANDBOX/err")"
 hasnt "tab create" "no pane opens anywhere when workers is down"

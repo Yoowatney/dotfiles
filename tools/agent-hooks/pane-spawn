@@ -27,6 +27,9 @@ H=${HERDR_BIN_PATH:-herdr}
 USAGE='usage: pane-spawn [--new-tab] [--check] [--kind claude|codex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]'
 MIN_ROWS=${PANE_SPAWN_MIN_ROWS:-16} # a 46-row window holds 4 panes of 11-12 rows, which still show about 5 lines of work (2026-11-04); a fifth would leave 5-6
 die() { echo "pane-spawn: $*" >&2; exit 2; }
+# Every reader takes a tab named "자동 …" or "알아서 …" for a job's: pane-tell refuses its panes, and no mark goes on it. A work name that
+# starts that way made an ordinary pane unreachable (요유 2026-11-05), so no tab it names starts that way.
+tab_name() { case "$1" in "자동 "* | "알아서 "*) echo "일 $1" ;; *) echo "$1" ;; esac; }
 
 same= new_tab= check= kind=claude cwd=$PWD
 while [ $# -gt 0 ]; do
@@ -100,7 +103,7 @@ open_pane() { # <a pane whose tab takes the new one, or empty> <workspace> <name
         end' 2>/dev/null)
     [ -z "$target" ] || pane=$("${call[@]}" pane split --pane "$target" --direction "$direction" --cwd "$cwd" --no-focus | jq -r '.result.pane.pane_id // empty')
   fi
-  [ -n "$pane" ] || pane=$("${call[@]}" tab create --workspace "$2" --cwd "$cwd" --label "$3" --no-focus | jq -r '.result.root_pane.pane_id // empty')
+  [ -n "$pane" ] || pane=$("${call[@]}" tab create --workspace "$2" --cwd "$cwd" --label "$(tab_name "$3")" --no-focus | jq -r '.result.root_pane.pane_id // empty')
   echo "$pane"
 }
 owner=${label#🔴}; owner=${owner#🟢}; owner=${owner# }; owner=${owner#👑}; owner=${owner#🫡}; owner=${owner# }; owner=${owner:-$name}
@@ -123,7 +126,7 @@ fi
 if [ -n "$pane" ]; then # every call from here on is about the new pane, so all of them go to workers
   export HERDR_SOCKET_PATH=$sock
   addr=workers/
-  [ -n "$main" ] || "$H" tab rename "$("$H" pane get "$pane" 2>/dev/null | jq -r '.result.pane.tab_id // empty' 2>/dev/null)" "$owner" >/dev/null 2>&1 # the lead may have moved on since the tab got its name
+  [ -n "$main" ] || "$H" tab rename "$("$H" pane get "$pane" 2>/dev/null | jq -r '.result.pane.tab_id // empty' 2>/dev/null)" "$(tab_name "$owner")" >/dev/null 2>&1 # the lead may have moved on since the tab got its name
 elif [ -n "$main" ]; then
   echo "pane-spawn: the workers herdr server opened no pane; $workers_help" >&2; exit 1
 else

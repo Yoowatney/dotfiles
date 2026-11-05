@@ -23,6 +23,7 @@ import subprocess
 PEERS = ("default", "workers")
 SOCKET = re.compile(r"/sessions/([^/]+)/herdr\.sock$")
 OPENER = re.compile(r"^spawn-([0-9A-Za-z]+)-")
+DISPATCH_AGENT = re.compile(r"^auto-[a-z]+-\d+$")  # dispatch/run.sh names its agents auto-<repo>-<n>
 HOME_NOTE = "집 일 칸의 내용입니다. 회사 Slack이나 보드에 올리지 마세요."
 
 
@@ -113,6 +114,11 @@ def opener(name) -> str:
     return f"term_{m[1]}" if m else ""
 
 
+def dispatch_pane(name) -> bool:
+    """A tab the dispatch job opened, for a reader with no pane env to look at (the watch, --sweep). A rename does not change it."""
+    return bool(DISPATCH_AGENT.match(name or ""))
+
+
 def home_pane(name) -> bool:
     """Opened from the Home workspace (pane-spawn adds `h` before the random part). The name says so because that lead's
     workspace cannot be read once it closes, and what the pane says may then reach the main pane (요유 2026-11-05)."""
@@ -163,6 +169,8 @@ esac
         assert all_panes({"HERDR_BIN_PATH": "/nonexistent"}) is None, "herdr down: unknown, no raise"
         assert opener("spawn-65f2-123") == "term_65f2" and opener("spawn-65f2-chk1") == "term_65f2", "pane-spawn's agent name"
         assert opener("spawned") == "" and opener("") == "" and opener(None) == "", "any other name has no opener"
+        assert dispatch_pane("auto-api-820") and dispatch_pane("auto-mbr-7"), "dispatch/run.sh's agent name"
+        assert not dispatch_pane("spawn-65f2-123") and not dispatch_pane("auto") and not dispatch_pane("") and not dispatch_pane(None)
         assert opener("spawn-65f2-h123") == "term_65f2", "a Home lead's pane still names its opener"
         assert home_pane("spawn-65f2-h123") and not home_pane("spawn-65f2-123") and not home_pane("spawn-65f2-chk1") and not home_pane(None)
         everywhere = all_panes(env_d)

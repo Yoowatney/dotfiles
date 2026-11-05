@@ -105,9 +105,9 @@ auto_reason() { # tab id, session id
     [ -n "$2" ] && [ -f "$t" ] || continue
     # -a: a NUL byte would make grep print "Binary file ... matches" instead of the line
     first=$(grep -a -m1 -F '"origin":{"kind":"human"}' "$t")
-    [[ $first == *auto-dispatch* ]] && { echo "is an auto-dispatch session; comment on its board item instead"; return; }
-    # only a session the ambient poll started: its first prompt opens with the marker ("[" may be eaten), so a session
-    # that merely talks about the marker is still told
+    # only a session a job started: its first prompt opens with the marker ("[" may be eaten), so a session that merely
+    # talks about the marker is still told (3 such panes in the 30 days to 2026-11-05 could not be reached at all)
+    [[ $first =~ \"(content|text)\":\"\[?auto-dispatch\] ]] && { echo "is an auto-dispatch session; comment on its board item instead"; return; }
     [[ $first =~ \"content\":\"\[?ambient-round\] ]] &&
       { echo "is a Slack ambient session; it takes rounds only from the ambient poll"; return; }
   done
