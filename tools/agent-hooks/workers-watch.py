@@ -20,14 +20,18 @@ it, close it, look at the board item. One closed through pane-label is marked re
 Such a pane is closed, with one alert, once it has been stopped with its report sent for ORPHAN_TTL, counted from the stop or
 the lead's close, whichever came last (요유 2026-11-05). A pane at work, marked 🔴, without a report or with a live child stays.
 An alert about a Home lead's pane that goes to anyone but its lead carries HOME_NOTE.
+A pane that stopped without a report on a sleep or network error (Claude's `API Error: Your computer went to sleep...`, ENOTFOUND)
+is not news but told WAKE itself at once, before the 15-minute alert (와우 카드 04, 요유 2026-11-05: on 11/05 one sat 77 minutes
+until the main pane said so). See wake(); `{state_dir}/wake.log` keeps one line per wake.
 A pane list that cannot be read is no news: nothing is sent and every record stays. State: `{state_dir}/watch.json`, terminal
 id -> seq, status, since (first tick that saw this state), seen (last tick that saw it), floor (`seen` of the state before:
 a report touched after it belongs to this stop, since the watch sees a new state up to a minute late), opener, home, orphaned,
-lost_at (first tick that found no opener), alerted.
+lost_at (first tick that found no opener), alerted, net (this stop ended on a sleep or network error), wakes and woke (how many
+wakes since the last stop that was no error, and when the last went; both outlive a state).
 By design, two stops inside one tick interval look like one: a report for the first also covers the second.
 An alert nobody took marks nothing, so the next minute sends it again. Fails open: any error exits 0 quietly.
 
-Test env: WORKERS_WATCH_NOW (seconds), WORKERS_WATCH_PANE_TELL (a fake pane-tell).
+Test env: WORKERS_WATCH_NOW (seconds), WORKERS_WATCH_PANE_TELL (a fake pane-tell), WORKERS_WATCH_PROBE (host:port online() tries).
 
     workers-watch.py --selftest
 """
@@ -40,6 +44,8 @@ sys.dont_write_bytecode = True
 import importlib.util
 import json
 import os
+import re
+import socket
 import subprocess
 import time
 
@@ -52,6 +58,78 @@ DOWN = "workers 서버가 꺼져 있습니다: `launchctl kickstart gui/$(id -u)
 ORPHAN_TTL = 3600
 JOB_HELD = 10800
 UNSENT = "보내지 못한 보고가 있다면 ~/.local/state/pane-reports에 있습니다."  # auto-tab-close.py keeps a report it had nobody to send to
+WAKE = "회사맥이 잠들어 응답이 끊겼습니다. 끊긴 곳부터 이어서 하세요."
+WAKE_GAPS = (0, 120, 300, 900, 1800)  # the n-th wake of one pane waits WAKE_GAPS[n] s after the one before; then none
+# What Claude ends a turn on when the Mac slept or the network dropped: every such line in the Claude transcripts on 11/05
+# (sleep 66, ENOTFOUND 42, lost 3, stopped arriving 3, ECONNRESET 3, timed out 2) and ECONNREFUSED from a test pane. Not
+# /login, safeguards or rate limits: going on cannot fix those.
+NET_ERROR = re.compile(r"⏺ (API Error: )?(Your computer went to sleep|Connection (lost|refused|dropped|error)|Can't reach the API server"
+                       r"|The response stopped arriving|Request timed out)"
+                       r"|⏺ API Error: .*\((ENOTFOUND|EAI_AGAIN|ECONN[A-Z]+|ETIMEDOUT|ENET[A-Z]+|EHOSTUNREACH)\)")
+RULE = re.compile(r"─{3,}( .* ─+)?")
+
+
+def read_screen(env, sock, pane):
+    """The pane's recent screen as plain text, lines unwrapped; None when it cannot be read."""
+    try:
+        r = subprocess.run([env.get("HERDR_BIN_PATH") or "herdr", "agent", "read", pane, "--source", "recent-unwrapped", "--lines", "60"],
+                           capture_output=True, text=True, timeout=5, env={**os.environ, **env, "HERDR_SOCKET_PATH": sock})
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def net_error(text) -> bool:
+    """The last message above the input box (Claude's between its two last rules, Codex's on its last › line) is a sleep or
+    network error. An error further up, with work after it, is not. Codex never ends a turn on one: it shows `Reconnecting...
+    waiting for network`, stays working, and goes on by itself once the network is back (test panes 11/05)."""
+    lines = [line.strip() for line in text.replace("\r", "").split("\n")]
+    rules = [i for i, line in enumerate(lines) if len(line) >= 10 and RULE.fullmatch(line)]
+    prompts = [i for i, line in enumerate(lines) if line.startswith("›")]
+    end = rules[-2] if len(rules) >= 2 else prompts[-1] if prompts else len(lines)
+    heads = [line for line in lines[:end] if line and line[0] in "⏺■•❯›"]
+    return bool(heads) and bool(NET_ERROR.match(heads[-1]))
+
+
+def online(env) -> bool:
+    """The API takes a connection again, so a wake will not fail at once.
+    ponytail: DNS has no timeout here, so a stuck resolver can hold this tick up to ~30 s; launchd skips a run that overlaps."""
+    host, _, port = (env.get("WORKERS_WATCH_PROBE") or "api.anthropic.com:443").rpartition(":")
+    try:
+        socket.create_connection((host, int(port)), timeout=3).close()
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def wake(env, sock, rec, pane, address, job, now) -> None:
+    """Tell a pane whose turn ended on the Mac's sleep or a dropped network to go on (와우 카드 04, 요유 2026-11-05): it would
+    otherwise sit until the 15-minute alert and its lead's word. Only the pane hears it, never its lead or the main pane. Once per
+    stop; the next one WAKE_GAPS later; none while the API cannot be reached, so a Mac still offline is tried again next minute."""
+    if "net" not in rec:  # what a stop ended on does not change: its screen is read once
+        text = read_screen(env, sock, pane)
+        if text is None:
+            return
+        rec["net"] = net_error(text)
+        if not rec["net"]:
+            rec["wakes"] = 0
+    n = rec.get("wakes", 0)
+    if not rec["net"] or "woke" in rec["alerted"] or n >= len(WAKE_GAPS) or now - rec.get("woke", 0) < WAKE_GAPS[n] or not online(env):
+        return
+    pt = env.get("WORKERS_WATCH_PANE_TELL") or os.path.join(HERE, "pane-tell")
+    # A dispatch tab refuses pane-tell, and a prompt there without its marker counts as 요유's and lifts its guard for good
+    # (dispatch/guard.sh, job-host-guard.py): typed as it is, on its server, marked.
+    args, extra = ([pt, "--raw", pane, f"[auto-dispatch] {WAKE}"], {"HERDR_SOCKET_PATH": sock}) if job else ([pt, address, WAKE], {})
+    try:
+        ok = subprocess.run(args, env={**os.environ, **env, **extra}, timeout=10, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    if ok:  # "queued" counts: it goes in once the box is empty
+        rec["alerted"].append("woke")
+        rec.update(wakes=n + 1, woke=now)
+        with open(os.path.join(herdr_peers.state_dir(env), "wake.log"), "a") as f:
+            f.write(f"{time.strftime('%F %T', time.localtime(now))} {address} wake {n + 1}\n")
 
 
 def kind(status) -> str:
@@ -137,7 +215,7 @@ def tick(env, now: float) -> list:
             rec = old if old.get("seq") == seq and kind(old.get("status")) == kind(status) else {
                 "seq": seq, "status": status, "since": now, "floor": old.get("seen", 0), "alerted": [],
                 "orphaned": same_lead and bool(old.get("orphaned")),  # a new state of the same pane is no new orphan
-                "lost_at": old.get("lost_at") if same_lead else None}
+                "lost_at": old.get("lost_at") if same_lead else None, "wakes": old.get("wakes", 0), "woke": old.get("woke", 0)}
             name = p.get("label") or a.get("name") or pane
             rec.update(seen=now, name=name, pane=pane, opener=opener, home=home, job=job)  # to say which pane it was once it is gone
             records[term] = rec
@@ -158,8 +236,15 @@ def tick(env, now: float) -> list:
                     rec["alerted"].append("blocked")
             if kind(status) == "ready":
                 reported = reported_since(term, rec["floor"])
+                if reported:
+                    rec["wakes"] = 0
+                else:
+                    try:
+                        wake(env, sock, rec, pane, where.get(term, (pane,))[0], job, now)
+                    except Exception:  # a fault here must not cost the alerts below or the saved state
+                        pass
                 limit = JOB_HELD if job and "🔴" in name else 900
-                if not reported and now - rec["since"] >= limit and "idle" not in rec["alerted"]:
+                if not reported and now - max(rec["since"], rec.get("woke", 0)) >= limit and "idle" not in rec["alerted"]:
                     long = "3시간째" if limit == JOB_HELD else "15분째"
                     text = (f"자동 칸 {name}(workers/{pane})이 보고 없이 {long} 멈춰 있습니다. 화면: `herdr --session workers agent read {pane}`, "
                             f"닫기: `herdr --session workers pane close {pane}`. 입력을 받지 않는 칸이니 보드 항목을 보고 이어 갈 일은 새 칸에 맡기세요. {UNSENT}"
@@ -232,12 +317,16 @@ case "$1 $2" in
   "pane list") cat {d}/$s-panes.json ;;
   "agent list") cat {d}/$s-agents.json ;;
   "notification show") [ "${{NOTIFY_EXIT:-0}}" != 0 ] || echo "$s|$3|$5" >> {d}/notified; exit ${{NOTIFY_EXIT:-0}} ;;
+  "agent read") [ "$s" = workers ] && [ "$4 $5" = "--source recent-unwrapped" ] && cat "{d}/screen-$3.txt" ;;
   "pane close") [ -f {d}/close-fails ] && exit 1; echo "$3" >> {d}/closed; echo '{{"result":{{"type":"ok"}}}}' ;;
   *) exit 2 ;;
 esac
 ''')
         # A refused or failed pane-tell logs nothing: only what was taken is in `told`.
-        script(f"{d}/pane-tell", f'[ "$1" != "${{TELL_REFUSE:-}}" ] || exit 2\n[ "${{TELL_EXIT:-0}}" != 0 ] || echo "$1|$2" >> {d}/told\nexit ${{TELL_EXIT:-0}}\n')
+        # --raw logs as "raw:<pane>@<server>|<text>", the server being the one HERDR_SOCKET_PATH names
+        script(f"{d}/pane-tell", f'[ "$1" != "${{TELL_REFUSE:-}}" ] || exit 2\n'
+                                 f'[ "$1" != --raw ] || {{ s=${{HERDR_SOCKET_PATH%/herdr.sock}}; set -- "raw:$2@${{s##*/}}" "$3"; }}\n'
+                                 f'[ "${{TELL_EXIT:-0}}" != 0 ] || echo "$1|$2" >> {d}/told\nexit ${{TELL_EXIT:-0}}\n')
         env = {"HOME": d, "XDG_STATE_HOME": f"{d}/state", "HERDR_BIN_PATH": f"{d}/herdr", "WORKERS_WATCH_PANE_TELL": f"{d}/pane-tell"}
         main_file = f"{d}/state/orchestrator/main"
 
@@ -277,6 +366,7 @@ esac
             os.remove(main_file)
 
         once = globals()["tick"]
+        last_wakes: list = []
 
         def tick(now, **extra):  # what the fake pane-tell received ("<to>|<alert>") for the alerts tick says it sent
             for log in ("told", "notified", "closed"):
@@ -284,8 +374,13 @@ esac
                     os.remove(f"{d}/{log}")
             sent = once({**env, **extra}, now)
             got = open(f"{d}/told").read().splitlines() if os.path.exists(f"{d}/told") else []
+            last_wakes[:] = [line for line in got if WAKE in line]  # a wake goes to the pane itself and is no alert
+            got = [line for line in got if WAKE not in line]
             assert extra or sorted([line.split("|", 1)[1] for line in got] + [line.split("|", 2)[2] for line in notified()]) == sorted(sent), (got, notified(), sent)
             return [line for line in got if line.split("|", 1)[1] in sent]
+
+        def wakes():  # "<to>|<text>" of the wakes the last tick sent
+            return list(last_wakes)
 
         def notified():  # "<server>|<title>|<body>" of the herdr notifications the last tick showed
             return open(f"{d}/notified").read().splitlines() if os.path.exists(f"{d}/notified") else []
@@ -511,6 +606,99 @@ esac
         told = tick(72360, TELL_REFUSE="w5:p8"); assert told[0].startswith("w5:p3|") and herdr_peers.HOME_NOTE in told[0], f"its lead cannot hear: {told}"
         agents(agent("w1:pX", "term_X", "working", seq=9, **K)); tick(72400); panes_on_workers(); agents(); touch_reported("term_X", 72420); tick(72440)
         os.remove(f"{d}/state/orchestrator/watch.json"); result("default-panes", "panes", LEADS)
+
+        # 요유 2026-11-05 (와우 카드 04): a pane whose turn ended on the Mac's sleep or a dropped network is told to go on at once,
+        # not after the 15-minute alert. Only the pane hears it, and it is no alert.
+        import threading
+        listening = socket.socket(); listening.bind(("127.0.0.1", 0)); listening.listen(8)
+
+        def answer():  # a backlog nobody takes from fills up, and the probe would read the API as down
+            while True:
+                try:
+                    listening.accept()[0].close()
+                except OSError:
+                    return
+
+        threading.Thread(target=answer, daemon=True).start()
+        closed_port = socket.socket(); closed_port.bind(("127.0.0.1", 0)); dead_port = closed_port.getsockname()[1]; closed_port.close()
+        env["WORKERS_WATCH_PROBE"] = f"127.0.0.1:{listening.getsockname()[1]}"
+        offline = {"WORKERS_WATCH_PROBE": f"127.0.0.1:{dead_port}"}
+        RULE_LINE = "─" * 40
+
+        def screen(pane, *lines):  # a Claude screen: the history, then the input box between two rules
+            write(f"{d}/screen-{pane}.txt", "\n".join(("❯ 이어서 확인해 줘",) + lines + ("", "✻ Cooked for 17s · done 1:09 PM",
+                                                      "   0 tokens · current: 2.1.318", RULE_LINE, "❯ ", RULE_LINE, "  [Opus 5.5] │ munice", "")))
+
+        SLEPT = "⏺ API Error: Your computer went to sleep mid-response. The response above may be incomplete."
+        rec = lambda: watch()["term_V"]
+        w = {"name": "spawn-L-1"}
+        panes_on_workers(label("w1:pV", "🟢 🫡 확인")); agents(agent("w1:pV", "term_V", "working", seq=1, **w)); tick(90000)
+        screen("w1:pV", "⏺ 확인하고 있습니다.", SLEPT); agents(agent("w1:pV", "term_V", "idle", seq=3, **w))
+        assert tick(90060) == [] and wakes() == [f"workers/w1:pV|{WAKE}"], f"told at once, the pane alone: {wakes()}"
+        assert tick(90120) == [] and wakes() == [], "once per stop"
+        # The same pane stops on it again: the next wake waits WAKE_GAPS after the last one.
+        agents(agent("w1:pV", "term_V", "working", seq=5, **w)); tick(90130); agents(agent("w1:pV", "term_V", "idle", seq=7, **w))
+        assert tick(90179) == [] and wakes() == [], "not inside the gap"
+        assert tick(90180) == [] and len(wakes()) == 1 and rec()["wakes"] == 2
+        # The network is still down: nothing goes, and the wake goes the first minute the API answers.
+        agents(agent("w1:pV", "term_V", "working", seq=9, **w)); tick(90200); agents(agent("w1:pV", "term_V", "idle", seq=11, **w))
+        assert tick(90500, **offline) == [] and wakes() == [] and tick(90540, **offline) == [] and wakes() == []
+        assert tick(90560) == [] and len(wakes()) == 1, "back online: told"
+        # A wake that did not move it: the 15-minute alert, counted from the wake, not from the stop.
+        assert tick(91459) == [] and "보고 없이 15분째" in tick(91460)[0]
+        # A stop that is no error resets the count: the next error is told at once.
+        screen("w1:pV", SLEPT, "❯ 이어서 하세요", "⏺ 다 했습니다.")  # the old error is still on the screen, above
+        agents(agent("w1:pV", "term_V", "working", seq=13, **w)); tick(91500); agents(agent("w1:pV", "term_V", "idle", seq=15, **w))
+        assert tick(91560) == [] and wakes() == [] and rec()["wakes"] == 0, "an error above later work is no error"
+        screen("w1:pV", "⏺ API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)")
+        agents(agent("w1:pV", "term_V", "working", seq=17, **w)); tick(91600); agents(agent("w1:pV", "term_V", "idle", seq=19, **w))
+        assert tick(91610) == [] and len(wakes()) == 1, "told at once again"
+        # Each next wake waits longer; after the last gap no more wakes, and the alert takes over.
+        for n, gap in enumerate(WAKE_GAPS[1:], start=1):
+            t = rec()["woke"]
+            agents(agent("w1:pV", "term_V", "working", seq=20 + 2 * n, **w)); tick(t + 1)
+            agents(agent("w1:pV", "term_V", "idle", seq=21 + 2 * n, **w))
+            assert tick(t + gap - 1) == [] and wakes() == [] and tick(t + gap) == [] and len(wakes()) == 1, n
+        agents(agent("w1:pV", "term_V", "working", seq=41, **w)); tick(99000); agents(agent("w1:pV", "term_V", "idle", seq=43, **w))
+        assert tick(99060) == [] and wakes() == [], f"{len(WAKE_GAPS)} wakes, then none"
+        told = tick(105000); assert wakes() == [] and "보고 없이 15분째" in told[0], told
+        touch_reported("term_V", 105010)
+        # Errors that a wake cannot fix, a pane that reported, and a stop that is no error are left alone.
+        for i, last in enumerate(("⏺ API Error: Opus 5.5's safeguards flagged this message (https://www.anthropic.com/legal/aup).",
+                                  "⏺ Please run /login · API Error: 403 Access to this model requires an access grant",
+                                  "⏺ 연결이 끊겼던 이유를 정리했습니다: API Error: Connection refused (ECONNREFUSED)")):
+            panes_on_workers(label("w1:pX", "🟢 🫡 다른 오류")); screen("w1:pX", last)
+            agents(agent("w1:pX", "term_X", "working", seq=100 + 2 * i, **w)); tick(110000 + 100 * i)
+            agents(agent("w1:pX", "term_X", "idle", seq=101 + 2 * i, **w))
+            assert tick(110060 + 100 * i) == [] and wakes() == [], last
+        screen("w1:pX", SLEPT); agents(agent("w1:pX", "term_X", "working", seq=110, **w)); tick(111000); touch_reported("term_X", 111010)
+        agents(agent("w1:pX", "term_X", "idle", seq=111, **w)); assert tick(111060) == [] and wakes() == [], "it reported: done, not cut off"
+        # A Codex pane waits for the network itself (Reconnecting... waiting for network) and goes on; its screen is no error.
+        write(f"{d}/screen-w1:pCX.txt", "› 1+1은?\n• Reconnecting... 4/5\n  └ Stream disconnected before completion: Connection refused (os error 61)\n"
+                                        "• 2\n  Worked for 6m 51s • 13:16\n› Ask Codex to do anything\n  GPT-6.1-Sol high Fast\n")
+        panes_on_workers(label("w1:pCX", "🟢 🫡 Codex")); agents({**agent("w1:pCX", "term_CX", "idle", seq=1, **w), "agent": "codex"})
+        assert tick(112000) == [] and wakes() == [] and watch()["term_CX"]["net"] is False, "read, and no error"
+        touch_reported("term_CX", 112010)
+        # A wake nobody took is sent again the next minute; a screen that cannot be read is tried again.
+        panes_on_workers(label("w1:pY", "🟢 🫡 재시도")); agents(agent("w1:pY", "term_Y", "idle", seq=1, **w))
+        assert tick(113000) == [] and wakes() == [], "no screen yet"
+        screen("w1:pY", SLEPT); assert tick(113060, TELL_EXIT="1") == [] and wakes() == []
+        assert tick(113120) == [] and len(wakes()) == 1
+        touch_reported("term_Y", 113130)
+        # A dispatch tab takes no pane-tell prompt, and a prompt without its marker would lift its guard for good: --raw, marked.
+        panes_on_workers(label("w1:pJX", "🟢 api#820 작업")); screen("w1:pJX", SLEPT); agents(agent("w1:pJX", "term_JX", "idle", seq=1, name="auto-api-820"))
+        assert tick(114000) == [] and wakes() == [f"raw:w1:pJX@workers|[auto-dispatch] {WAKE}"], wakes()
+        touch_reported("term_JX", 114010)
+        # A fault in the wake costs nothing else: the dialog alert goes out and the state is saved.
+        real, globals()["net_error"] = globals()["net_error"], lambda text: 1 / 0
+        try:
+            panes_on_workers(label("w1:pZ", "🟢 🫡 고장")); agents(agent("w1:pZ", "term_Z", "idle", seq=1, **w), agent("w1:pQ", "term_Q", "blocked", seq=1, **w))
+            screen("w1:pZ", SLEPT); tick(115000)
+            assert len(tick(115060)) == 1 and "term_Q" in watch(), "the dialog alert and the saved state"
+        finally:
+            globals()["net_error"] = real
+        listening.close(); del env["WORKERS_WATCH_PROBE"]
+        os.remove(f"{d}/state/orchestrator/watch.json"); panes_on_workers(); agents(); tick(115120)  # leaves no log behind
 
         # end to end, the way launchd runs it: python3 -I drops the script folder from sys.path
         panes_on_workers(label("w1:p6", "🟢 🫡 시험")); agents(agent("w1:p6", "term_6", "blocked", seq=11))
