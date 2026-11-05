@@ -2,18 +2,20 @@
 """Count, per KST day, what the main-pane trial is judged by (design §9, api#1002): 요유's own messages, the panes they answered in,
 and progress questions, from this Mac's Claude and Codex session records.
 
-    trial-count [--since 2026-11-05] [--until 2026-11-11] [--base 2026-10-21:2026-11-04] [--list]
-    trial-count --selftest
+    trial-count.py [--since 2026-11-05] [--until 2026-11-11] [--base 2026-10-21:2026-11-04] [--list]
+    trial-count.py --selftest
 
 It counts the baseline window again with the same method, so the two columns compare like for like. The 11/04 baseline
 (`2026-11-04-manager-layer-need.html`) sorted 195 regex hits by hand into 35 progress questions and 14 "왜 내가" pushbacks
 (49); its regex was not kept, so `questions` here is the regex of that study's progress_q.py, and `--list` prints the hits
 for the same hand sorting. Sessions are sorted as that study's extract.py did: sub-panes (a lead's instruction), test and
 headless sessions are left out, and relayed text is not 요유's. One difference: since 2026-11-05 요유 also writes to the main
-pane through Slack #0-yoyooyo, relayed by main-channel; those are counted apart (`slack`, `reactions`), never as typed.
+pane through Slack #0-yoyooyo, relayed by main-channel; those are counted apart (`slack`, `reactions`), never as typed, and
+`panes` counts only the panes 요유 typed in (design §9: the panes 요유 answered in their own herdr list).
 
 ponytail: this Mac only (the baseline had 136 of 3,612 records from 집맥, none of them 요유's own lines); a /clear splits one
-pane into two sessions, as it did in the baseline. Session records are kept 30 days (Claude's default cleanupPeriodDays).
+pane into two sessions, as it did in the baseline. Records can go before Claude's 30 days: between 11/04 and 11/05, 37 of the
+baseline's 요유 lines went with their files (gomgom sessions, munice job tabs), so recount both windows on the same day.
 """
 from __future__ import annotations
 
@@ -123,7 +125,7 @@ def count(home: str, since: str, until: str, listing: list | None = None) -> dic
             day = at.strftime("%Y-%m-%d")
             row = days.setdefault(day, {"typed": 0, "slack": 0, "reactions": 0, "panes": 0, "questions": 0})
             row[what] += 1
-            if what != "reactions":
+            if what == "typed":
                 panes.setdefault(day, set()).add(path)
             if what != "reactions" and len(body) <= 300 and "<pasted_content" not in body and any(q.search(body) for q in QUESTION):
                 row["questions"] += 1
@@ -154,6 +156,7 @@ def selftest():
                         ("2026-11-05T16:00:00Z", "꺼도 돼?")])  # 11/06 01:00 KST
         claude("other", [("2026-11-05T02:00:00Z", "내가 할 거 있어?"), ("2026-11-05T02:01:00Z", "x" * 400 + " 어디까지"),
                          ("2026-11-05T02:02:00Z", "[ambient-round] work.md 를 읽고 어디까지 했는지 이어서")])
+        claude("slackonly", [("2026-11-05T05:00:00Z", relay + "[Slack #0-yoyooyo 요유] 좋아 (ts 3.4)")])
         claude("sub", [("2026-11-05T03:00:00Z", "일입니다. 이 칸은 리드 밑 칸입니다. 어디까지"), ("2026-11-05T03:01:00Z", "계속")])
         claude("headless", [("2026-11-05T03:00:00Z", "어디까지 했어?")], entrypoint="sdk-cli")
         claude("old", [("2026-11-03T03:00:00Z", "다 됐어?")])
@@ -167,8 +170,8 @@ def selftest():
         got = count(d, "2026-11-05", "2026-11-06")
         day5, day6 = got["2026-11-05"], got["2026-11-06"]
         assert day5["typed"] == 4, day5  # main 1, other 2 (the long one too), codex 1; not the sub-pane, headless, relays or notices
-        assert day5["slack"] == 1 and day5["reactions"] == 1, day5
-        assert day5["panes"] == 3, "main, other and the Codex session"
+        assert day5["slack"] == 2 and day5["reactions"] == 1, day5
+        assert day5["panes"] == 3, "main, other and the Codex session: not a pane that only got Slack words"
         assert day5["questions"] == 3, "slack 어디까지, 내가 할 거, 얼마나 남았어; the 400-character one is skipped"
         assert day6 == {"typed": 1, "slack": 0, "reactions": 0, "panes": 1, "questions": 1}, day6
         assert "2026-11-03" not in got, "outside the window"
