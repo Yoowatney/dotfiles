@@ -51,7 +51,7 @@ STRIP = [
     re.compile(r'"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’|「[^」\n]*」'),  # quoted text
 ]
 SHARE = re.compile(r"요유[ \t]*몫[ \t]*\**[ \t]*[:：][ \t]*\**([^·\n]*)")  # horizontal space only: never the next line
-NONE = re.compile(r"^(?:없음|없습니다|none)\b", re.I)
+NONE = re.compile(r"^(?:없음|없습니다|none)\b(?![ \t]*[,，])", re.I)  # "없음, 시험 실행" still lists work
 # Short, since Claude prints it under the report. A note such as "그대로 둡니다" would bury the report (요유 2026-10-28),
 # and a rewrite prints it twice (요유 2026-10-31), so a turn with nothing to do ends without a word.
 # The aside: on 10/29 a session answered this question by adding why only 요유 could do it, and 유요 had another way (api#975).
@@ -552,7 +552,8 @@ def share_items(text: str, aside: bool = False) -> list:
     """The items of every 요유 몫 value, each without its aside unless asked (its commas then split it, which comparing allows)."""
     text = STRIP[2].sub(" ", STRIP[0].sub(" ", unicodedata.normalize("NFC", text)))
     values = [m.group(1) if aside else ASIDE.sub(" ", m.group(1)) for m in SHARE_FULL.finditer(text)]
-    return [i.strip() for v in values if not NONE.match(v.strip(" \t*_.,;")) for i in ITEM.split(v) if i.strip(" \t*_.,;")]
+    return [i.strip() for v in values if not NONE.match(v.strip(" \t*_.,;")) for i in ITEM.split(v)
+            if i.strip(" \t*_.,;") and not NONE.match(i.strip(" \t*_.,;"))]
 
 
 def asked_before(payload: dict, text: str, env) -> bool:
@@ -868,6 +869,10 @@ def selftest():
     assert (decide(p("`w5:pKR` 확인\n남은 것: 요유 몫: 값 넣기 · 유요 몫: 없음"), cli) or "").endswith(DO_REASON), \
         "a rewrite for a name keeps the 요유 몫 question without telling it to stay silent"
     assert leaves_yoyoo_work("남은 것: 요유 몫: 결정 하나 · 유요 몫: 없음"), "auto-tab-close keeps a pane with a decision left"
+    # 2026-11-05: "없음, 시험 실행" passed as empty. A comma right after 없음 lists work; one inside the reason after "없음." does not.
+    assert decide(p("남은 것: 요유 몫: 없음, 시험 실행 · 유요 몫: 없음 · 세션: 닫아도 됨"), cli) == REASON, "work after '없음,' is asked"
+    assert decide(p("남은 것: 요유 몫: 없음, 두 안 중 하나 고르기 · 유요 몫: 없음"), cli) is None, "its 없음 is no work beside a decision"
+    assert not leaves_yoyoo_work("남은 것: 요유 몫: 없음. 보고 싶으면 말씀해 주세요, 한 번 보내 드립니다 · 세션: 닫아도 됨"), "a reason's comma"
     # 요유 2026-11-04 (api#993): a 요유 몫 that only points at the board made them read the issue history on GitHub.
     for t in ("남은 것: 요유 몫: https://github.com/munice-dev/nightly_api/issues/993 의 질문에 답하기 · 유요 몫: 없음",
               "남은 것: 요유 몫: #993 질문에 답하기 · 유요 몫: 없음",
