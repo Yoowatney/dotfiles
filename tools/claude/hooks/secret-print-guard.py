@@ -23,7 +23,13 @@ SECRET_PATH = re.compile(
     HOME + r"/(?:\.codex/config\.toml|\.claude\.json"
     r"|\.config/[^\s'\"]*?(?:\.env|token|secret|key|cred)[^\s'\"/]*)"
     # any repo env file (.env, .env.staging, ...) except examples; values can span lines (PEM keys)
-    r"|(?:^|(?<=[\s'\"=/:(]))\.env(?:\.(?!example|sample|template)[\w.-]+)?(?=$|[\s'\"|;&)<>])",
+    r"|(?:^|(?<=[\s'\"=/:(]))(?:\.env(?:\.(?!example|sample|template)[\w.-]+)?"
+    # the same values in a tracked file (`envs/env.mjs`), and key files by their usual names
+    # ponytail: by name only; `rg -n TOKEN packages/` or a key file under another name still prints.
+    r"|env\.(?:mjs|cjs|js|ts|json|ya?ml)"
+    r"|\.runtimeconfig\.json"
+    r"|[\w.-]*(?:credential|service[-_]?account|adminsdk)[\w.-]*\.json"
+    r"|[\w.-]+(?<![-._]pub)\.(?:pem|p12|p8|pfx))(?=$|[\s'\"|;&)<>?])",
     re.I,
 )
 # A search of the folder that holds a secret file prints that file too (`rg -n slack ~/.codex`, `~/.codex/*.toml`).
@@ -87,7 +93,9 @@ READERS = {
 }
 GREPS = {"grep", "rg", "egrep"}
 QUIET_GREP = {"--files-with-matches", "--files-without-match", "--count", "--quiet", "--files"}
-SPLIT = re.compile(r"\|\||&&|[;|\n]")
+GIT_QUIET = {"--stat", "--shortstat", "--numstat", "--name-only", "--name-status", "--quiet"}
+GIT_PATCH = re.compile(r"^(?:-p|-u|-U\d*|-c|--cc|--patch.*|--unified.*)$")
+SPLIT =re.compile(r"\|\||&&|[;|\n]")
 HEREDOC = re.compile(r"<<-?\s*['\"]?([\w.-]+)['\"]?([^\n]*)\n(.*?)\n\s*\1\s*(?=\n|$)", re.S)
 # ponytail: a heredoc handed to bash/sh is still read as text; check its body like a command if one leaks that way.
 INTERPRETER = re.compile(r"(?:^|[\s(/])(?:python[\d.]*|node|ruby|perl|deno|bun)(?=[\s;&|)]|$)")
@@ -95,6 +103,28 @@ INTERPRETER = re.compile(r"(?:^|[\s(/])(?:python[\d.]*|node|ruby|perl|deno|bun)(
 
 def is_reader(x: str) -> bool:
     return x in READERS or x.rstrip("0123456789.") in READERS  # python3.12 is python
+
+
+def git_prints_file(w: list[str]) -> str | None:
+    """The git subcommand when it prints a file's lines; their quiet forms and a plain `git log` only name the file."""
+    i = 1
+    while i < len(w) and w[i].startswith("-"):  # `git -C dir show`
+        i += 2 if w[i] in {"-C", "-c", "--git-dir", "--work-tree"} else 1
+    sub, rest = w[i] if i < len(w) else "", w[i + 1:]
+    flags, patch = set(rest), any(GIT_PATCH.match(a) for a in rest)
+    if sub == "log":
+        return sub if patch or any(a.startswith("-L") for a in rest) else None
+    if sub == "blame":
+        return sub  # `blame -s` only shortens the columns
+    if sub == "cat-file":
+        return None if flags & {"-s", "-t", "-e"} else sub
+    if sub == "grep":
+        return None if QUIET_GREP & flags or any(re.match(r"^-[a-zA-Z]*[lLcq]", a) for a in rest) else sub
+    if sub in {"show", "diff"}:
+        # `git show --stat HEAD:env.mjs` prints the blob whatever the flag, and `--stat -p` prints the patch too.
+        blob = sub == "show" and any(":" in a and SECRET_PATH.search(a) for a in rest)
+        return None if GIT_QUIET & flags and not (patch or blob) else sub
+    return None
 
 
 def heredoc(m: re.Match, text: str) -> str:
@@ -282,9 +312,13 @@ def bash_problem(cmd: str) -> str | None:
             SECRET_VAR.search(cmd) or re.search(r"authorization", cmd, re.I)
         ):
             return "curl -v/--trace는 Authorization 헤더를 그대로 출력함"
-        if verb == "git" and len(w) > 1 and w[1] in {"show", "cat-file"} and SECRET_PATH.search(segment):
-            return "`git show`가 비밀 파일 내용을 출력함. 있는지만 볼 때는 `git ls-tree`를 쓸 것"
-        readers = [b for b in (x.rsplit("/", 1)[-1] for x in w) if is_reader(b)]
+        if verb == "git":  # `diff` and `grep` here are subcommands, not the readers listed below
+            if SECRET_PATH.search(segment) and (sub := git_prints_file(w)):
+                return f"`git {sub}`가 비밀 파일 내용을 출력함. 있는지만 볼 때는 `git ls-tree`나 `git log --oneline`을 쓸 것"
+            continue
+        if verb == "gh" and w[1:2] == ["api"] and SECRET_PATH.search(segment):
+            return "`gh api`가 비밀 파일 내용을 돌려줌. 값은 `VAR=$(...)`로 변수에 담아서만 쓸 것"
+        readers =[b for b in (x.rsplit("/", 1)[-1] for x in w) if is_reader(b)]
         if readers and (SECRET_PATH.search(segment) or SECRET_DIR.search(segment)):
             if set(readers) <= GREPS and (
                 QUIET_GREP & set(w) or any(re.match(r"^-[a-zA-Z]*[lLcq]", a) for a in w[1:])
@@ -308,7 +342,31 @@ def tool_problem(payload: dict) -> str | None:
     return None
 
 
+def git_quiet_forms_print_nothing():
+    """The git forms the guard lets through, run on a real repo: a flag that only looks quiet fails here."""
+    import pathlib
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        def git(*a):
+            return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=d, capture_output=True, text=True).stdout
+        git("init", "-q")
+        for line in ("CANARY 1\n", "CANARY 2\n"):
+            pathlib.Path(d, "env.mjs").write_text(line)
+            git("add", ".")
+            git("commit", "-qm", "m")
+        for c in (
+            "git log --oneline -5 -- env.mjs", "git log --stat -- env.mjs", "git ls-tree HEAD env.mjs",
+            "git diff --stat HEAD~1 -- env.mjs", "git diff --name-only HEAD~1 -- env.mjs", "git diff --quiet HEAD~1 -- env.mjs",
+            "git grep -l CANARY -- env.mjs", "git grep -c CANARY -- env.mjs", "git cat-file -s HEAD:env.mjs",
+            "git cat-file -t HEAD:env.mjs", "git show --stat HEAD -- env.mjs", "git show --name-only HEAD -- env.mjs",
+        ):
+            assert bash_problem(c) is None, f"should allow: {c}"
+            assert "CANARY" not in git(*c.split()[1:]), f"prints the file: {c}"
+
+
 def selftest():
+    git_quiet_forms_print_nothing()
     TC = "https://bigquerydatatransfer.googleapis.com/v1/projects/p/locations/l/transferConfigs"
     deny = [
         "cat ~/.codex/config.toml",
@@ -433,6 +491,46 @@ def selftest():
         "rg -n xoxb ~/.codex/*.toml",
         "cd ~/.codex && rg slack config.toml",
         "cd /Users/yoyoo/.codex; sed -n '140,150p' config.toml",
+        # 2026-11-06: a repo keeps its values in a tracked `envs/env.mjs`, and `sed -n` printed them into a session
+        "sed -n 75,90p packages/utils/src/envs/env.mjs",
+        "cd /x/app; sed -n 75,90p packages/utils/src/envs/env.mjs; ls",
+        "grep -n -i key packages/utils/src/envs/env.mjs | head",
+        "git show origin/main:packages/utils/src/envs/env.mjs | grep -n -i key",
+        "git show origin/main:env.mjs | sed -E 's/[0-9a-f]{32}/<HEX32>/g'",
+        "cat apps/admin/env.ts",
+        "cat env.js env.cjs",
+        "jq . config/env.json",
+        "python3 - <<'PY'\nprint(open('packages/utils/src/envs/env.mjs').read())\nPY",
+        # the same kind: key files by their usual names
+        "cat android/credential-prod.json",
+        "cat gcp-credentials.json",
+        "cat functions/.runtimeconfig.json",
+        "jq . service-account.json",
+        "cat serviceAccountKey.json",
+        "cat service_account.json",
+        "head x-firebase-adminsdk-abc12.json",
+        "cat key.pem",
+        "cat AuthKey_ABC.p8",
+        "gh api repos/o/r/contents/android/credential-prod.json",
+        "gh api repos/o/r/contents/.env?ref=main --jq .content | base64 -d",
+        # the same kind: every git command that prints a file's lines, not only `git show`
+        "git -C /x/app show origin/main:packages/utils/src/envs/env.mjs",
+        "git grep -n KEY origin/main -- packages/utils/src/envs/env.mjs",
+        "git grep -n TOKEN -- .env.staging",
+        "git diff HEAD~1 -- packages/utils/src/envs/env.mjs",
+        "git log -p -- .env.production",
+        "git log --oneline -p -- packages/utils/src/envs/env.mjs",
+        "git log -L 1,9:env.mjs",
+        "git blame env.mjs",
+        "git cat-file -p HEAD:env.mjs",
+        # found by the Codex review: flags that look quiet and still print the lines
+        "git show --stat HEAD:env.mjs",
+        "git show --name-only HEAD:env.mjs",
+        "git blame -s env.mjs",
+        "git diff --stat -p -- env.mjs",
+        "git cat-file blob HEAD:env.mjs",
+        "git log -U3 -- env.mjs",
+        "git log --patch-with-stat -- env.mjs",
     ]
     allow = [
         "T=$(python3 -I -c 'import re,os;print(open(os.path.expanduser(\"~/.codex/config.toml\")).read())')",
@@ -523,6 +621,36 @@ def selftest():
         "ls -la ~/.codex ~/.config",
         "cd ~/.codex && cat hooks.json",
         "cd ~/.dotfiles && cat tools/mise/config.toml",
+        "grep -c -i key packages/utils/src/envs/env.mjs",
+        "rg -l KEY packages/utils/src/envs/env.mjs",
+        "ls -la packages/utils/src/envs/env.mjs",
+        "wc -l packages/utils/src/envs/env.mjs",
+        "git ls-tree origin/main packages/utils/src/envs/env.mjs",
+        "git log --oneline -5 -- packages/utils/src/envs/env.mjs",
+        "git log --stat -- .env.staging",
+        "git diff --stat -- packages/utils/src/envs/env.mjs",
+        "git diff --name-only HEAD~1 -- .env",
+        "git grep -l KEY origin/main -- env.mjs",
+        "git grep -ci KEY origin/main -- env.mjs",
+        "git cat-file -s HEAD:env.mjs",
+        "git show --stat HEAD -- env.mjs",
+        "git add packages/utils/src/envs/env.mjs",
+        "git commit -m \"guard env.mjs\" -- packages/utils/src/envs/env.mjs",
+        "git status --short packages/utils/src/envs/env.mjs",
+        "git diff origin/main",
+        "cat packages/utils/src/types/environment.d.ts",
+        "cat src/config/getenv.mjs",
+        "cat scripts/dev-env.ts",
+        "cat credentials.ts",
+        "cat package.json tsconfig.json",
+        "cat keys.pem.md",
+        "cat luke-pub.pem old-key.pub.pem",
+        "openssl x509 -in ca.pem -noout -dates",
+        "cat >> notes.md <<'EOF'\nsed -n 1,9p env.mjs 금지\ncat service-account.json 금지\nEOF",
+        "gh issue comment 1 --body 'see env.mjs and credential-prod.json'",
+        "gh api repos/o/r/contents/README.md",
+        "K=$(gh api repos/o/r/contents/android/credential-prod.json --jq .content); echo ${#K}",
+        "T=$(sed -n 1,9p packages/utils/src/envs/env.mjs); echo ${#T}",
     ]
     for c in deny:
         assert bash_problem(c), f"should deny: {c}"
@@ -534,6 +662,11 @@ def selftest():
     assert not tool_problem({"tool_name": "Grep", "tool_input": {"path": "/Users/yoyoo/.claude.json"}})
     assert tool_problem({"tool_name": "Read", "tool_input": {"file_path": "/Users/yoyoo/work/x/.env.staging"}})
     assert not tool_problem({"tool_name": "Read", "tool_input": {"file_path": "/Users/yoyoo/work/x/.env.example"}})
+    assert tool_problem({"tool_name": "Read", "tool_input": {"file_path": "/x/app/packages/utils/src/envs/env.mjs"}})
+    assert tool_problem({"tool_name": "Read", "tool_input": {"file_path": "/x/old/android/credential-prod.json"}})
+    assert tool_problem({"tool_name": "Grep", "tool_input": {"path": "/x/envs/env.mjs", "output_mode": "content"}})
+    assert not tool_problem({"tool_name": "Grep", "tool_input": {"path": "/x/envs/env.mjs", "output_mode": "count"}})
+    assert not tool_problem({"tool_name": "Read", "tool_input": {"file_path": "/x/types/environment.d.ts"}})
     print("selftest ok")
 
 
