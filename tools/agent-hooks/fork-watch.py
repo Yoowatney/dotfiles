@@ -374,8 +374,11 @@ def tick(env, main: Main, now: float, limit: int):
     """One round. Returns what it logged, or None when the count is under the limit."""
     procs = list_procs()
     stamp = time.strftime("%F %T", time.localtime(now))
-    with open(state_file(env, "heartbeat"), "w") as f:  # every round: an old time here means the watch stopped
-        f.write(f"{stamp} 사용자 프로세스 {len(procs):,}개, 기준 {limit:,}개\n")
+    try:  # every round: an old time here means the watch stopped; one it cannot write (a full disk) stops nothing else
+        with open(state_file(env, "heartbeat"), "w") as f:
+            f.write(f"{stamp} 사용자 프로세스 {len(procs):,}개, 기준 {limit:,}개\n")
+    except OSError:
+        pass
     by = {p.pid: p for p in procs}
     main_pid = main.get(env, by, now)
     if not over(len(procs), limit):
@@ -586,6 +589,12 @@ def selftest() -> None:
             assert tick(e, Main(ask=lambda env: 0), 2000.0, 3000) is None
             beat = read(state_file(e, "heartbeat"))
             assert beat.startswith(stamp(2000.0)) and beat.count("\n") == 1, beat
+            # a heartbeat that cannot be written (a full disk, Codex review) never keeps a runaway from being stopped
+            os.remove(state_file(e, "heartbeat"))
+            os.mkdir(state_file(e, "heartbeat"))
+            table = base + panes3 + bomb35
+            line = tick(e, Main(ask=lambda env: 0), 3000.0, 3000)
+            assert line and " 끔 " in line and len(stopped) == 3501, (line, len(stopped))
         finally:
             g["list_procs"], g["stop_group"], herdr_peers.all_panes = saved
 
