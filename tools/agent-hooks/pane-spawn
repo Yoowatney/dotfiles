@@ -26,16 +26,18 @@
 # through the Slack MCP's read tools, and processes with ps. With --kind claude, or once Codex's week is past 70% used, it is
 # Claude Sonnet, which may write anywhere.
 # --kind auto is that same choice for a pane that does the job: Codex until its week is past 70% used, then Claude. A lead opens
-# a pane that posts nothing to Slack (code, tests, docs) with it (요유 2026-11-05); a pane that posts to Slack stays Claude.
+# a pane for code, tests or docs with it (요유 2026-11-05). The main pane posts to Slack; its work panes only report results.
 # The main pane opens a Claude pane that does the job only with --why, the reason Codex cannot do it (api#1036): a Codex work pane
-# writes nothing outside its folder, so gcloud cannot refresh its login there, and backend-bot posts and GCP commands fail
-# (2026-11-05). Without one it is refused and sent to --kind auto. Check panes and every other caller need no reason.
+# writes nothing outside its folder, so gcloud cannot refresh its login there and GCP commands fail (2026-11-05). A missing
+# reason or any reason mentioning Slack (case-insensitive) or 슬랙 is refused and sent to --kind auto. --why gcp and other
+# reasons still pass. Check panes and every other caller skip this check.
 # Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
 H=${HERDR_BIN_PATH:-herdr}
 USAGE='usage: pane-spawn [--new-tab] [--check] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
-  --kind auto: Codex until its week is past 70% used, then Claude. Open a pane that posts nothing to Slack (code, tests, docs) with it.
-  --why: in the main pane, why a pane that does the job must be Claude: slack (it posts to Slack), gcp (it runs gcloud or other
-    GCP commands) or another reason in one line. A Claude pane without one is refused there.
+  --kind auto: Codex until its week is past 70% used, then Claude. Use it for code, tests and docs; work panes report results.
+  --why: in the main pane, why a pane that does the job must be Claude: gcp (it runs gcloud or other GCP commands) or another
+    reason in one line. A Claude pane without one, or with a reason mentioning Slack (any case) or 슬랙, is refused there.
+    Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요
   --check: a check pane (main pane only): Codex, read-only, by the same 70% rule; --kind claude for a check that must write.'
 MIN_ROWS=${PANE_SPAWN_MIN_ROWS:-16} # a 46-row window holds 4 panes of 11-12 rows, which still show about 5 lines of work (2026-11-04); a fifth would leave 5-6
 die() { echo "pane-spawn: $*" >&2; exit 2; }
@@ -186,7 +188,12 @@ mainfile=$state/orchestrator/main
 workers_help="start it with: launchctl kickstart gui/$(id -u)/com.yoyoo.herdr-workers"
 if [ "term_$term" = "$(cat "$mainfile" 2>/dev/null)" ]; then
   [ -z "$same" ] || die "the main pane does no work, so it never adds a pane to its own tab"
-  [ -n "$check" ] || [ "$asked" != claude ] || [[ "$why" == *[![:space:]]* ]] || die "the main pane opens a Claude pane only with --why, the reason Codex cannot do the job: --why slack (it posts to Slack), --why gcp (it runs gcloud or other GCP commands; a Codex work pane cannot write gcloud's login files) or --why \"<one line>\". Any other pane: --kind auto (Codex until its week is past 70% used)."
+  if [ -z "$check" ] && [ "$asked" = claude ]; then
+    [[ "$why" == *[![:space:]]* ]] || die "the main pane opens a Claude pane only with --why, the reason Codex cannot do the job: --why gcp (it runs gcloud or other GCP commands; a Codex work pane cannot write gcloud's login files) or --why \"<one line>\". Any other pane: --kind auto (Codex until its week is past 70% used)."
+    case "$why" in
+      *[sS][lL][aA][cC][kK]* | *슬랙*) die "Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요" ;;
+    esac
+  fi
   main=1 hidden=1
   prompt+=' 보고 첫 줄에 이 칸에서 한 일을 한 문장으로 쓰세요. 메인 칸에는 그 줄과 `남은 것:` 줄만 가고 전문은 파일로 남습니다.'
 elif [[ "${label:-}" != *🫡* ]] && [ -z "${MUNICE_AUTO_DISPATCH:-}${MUNICE_AMBIENT:-}" ]; then
