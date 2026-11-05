@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Claude tokens per hour from the session transcripts: the main pane's and every session's together.
+
+    claude-usage [YYYY-MM-DD] [--hours 17-21] [--json]   one day by hour (local time), then the --hours window's hourly mean
+    claude-usage YYYY-MM-DD --hours 17-21 --compare BASE  the same window against a baseline written with --json
+    claude-usage --selftest
+
+Counts each API response once (Claude Code writes one line per content block, all with the same message id). Input is
+input_tokens, write is cache_creation_input_tokens, read is cache_read_input_tokens. The main pane is any session whose
+transcript holds the line pane-label-nudge.sh adds there on each message, so its restarts all count. Codex is not counted.
+Read from ~/.claude/projects (CLAUDE_USAGE_DIR overrides); a file older than the day is skipped. Made 2026-11-05: the main pane
+re-read about 370k tokens of conversation for each relayed notice.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+from datetime import datetime, timedelta
+
+MAIN_MARK = '"type":"hook_additional_context","content":["This pane is 요유\'s main pane'  # the hook's own line, not a quote of it
+KEYS = ("input", "write", "read", "output")
+FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+
+
+def scan(root, day):
+    """{hour: {"main": [4 ints], "all": [4 ints]}} for responses that day (local time)."""
+    start = datetime.combine(day, datetime.min.time()).astimezone()
+    end = start + timedelta(days=1)
+    hours = {h: {"main": [0] * 4, "all": [0] * 4} for h in range(24)}
+    for folder, _, files in os.walk(root):
+        for name in files:
+            path = os.path.join(folder, name)
+            try:
+                if not name.endswith(".jsonl") or os.path.getmtime(path) < start.timestamp():
+                    continue
+                seen, main = {}, False
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        if MAIN_MARK in line:
+                            main = True
+                        if '"usage"' not in line:
+                            continue
+                        try:
+                            d = json.loads(line)
+                            m, at = d["message"], datetime.fromisoformat(d["timestamp"].replace("Z", "+00:00"))
+                            u = m["usage"]
+                        except (ValueError, KeyError, TypeError, AttributeError):
+                            continue
+                        if not (start <= at < end) or d.get("type") != "assistant":
+                            continue
+                        n = [int(u.get(k) or 0) for k in FIELDS]
+                        key = m.get("id") or d.get("requestId") or d.get("uuid")
+                        if key not in seen or n[3] >= seen[key][1][3]:  # the last line of a response has the final output count
+                            seen[key] = (at.astimezone().hour, n)
+            except OSError:
+                continue
+            for hour, n in seen.values():
+                for who in ("main", "all") if main else ("all",):
+                    hours[hour][who] = [a + b for a, b in zip(hours[hour][who], n)]
+    return hours
+
+
+def window(hours, lo, hi):
+    """Hourly mean over [lo, hi) for main and all."""
+    span = max(hi - lo, 1)
+    return {who: {k: round(sum(hours[h][who][i] for h in range(lo, hi)) / span) for i, k in enumerate(KEYS)}
+            for who in ("main", "all")}
+
+
+def fmt(n):
+    return f"{n / 1e6:.2f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e3 else str(n)
+
+
+def table(hours, day, lo, hi):
+    out = [f"{day} 시간당 토큰 (입력 / 캐시 쓰기 / 캐시 읽기 / 출력)", "시각   메인 칸                                전체"]
+    for h in range(24):
+        if any(hours[h]["all"]):
+            row = lambda who: " / ".join(f"{fmt(v):>6}" for v in hours[h][who])
+            out.append(f"{h:02d}시  {row('main')}   {row('all')}")
+    w = window(hours, lo, hi)
+    out.append(f"{lo:02d}~{hi:02d}시 시간당 평균: 메인 칸 " + " / ".join(fmt(w["main"][k]) for k in KEYS)
+               + " · 전체 " + " / ".join(fmt(w["all"][k]) for k in KEYS))
+    return "\n".join(out)
+
+
+def compare(now, base):
+    out = [f"{now['day']} {now['hours']}시 시간당 평균, 기준 {base['day']} {base['hours']}시와 비교"]
+    for who, label in (("main", "메인 칸"), ("all", "전체")):
+        parts = []
+        for k, ko in zip(KEYS, ("입력", "캐시 쓰기", "캐시 읽기", "출력")):
+            b, n = base[who][k], now[who][k]
+            parts.append(f"{ko} {fmt(n)} (기준 {fmt(b)}, {n / b * 100:.0f}%)" if b else f"{ko} {fmt(n)} (기준 0)")
+        out.append(f"{label}: " + " · ".join(parts))
+    return "\n".join(out)
+
+
+def selftest():
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        def line(mid, ts, out, read=100, extra=""):
+            return json.dumps({"type": "assistant", "timestamp": ts, "message": {"id": mid, "usage": {
+                "input_tokens": 1, "cache_creation_input_tokens": 10, "cache_read_input_tokens": read, "output_tokens": out}}}) + extra + "\n"
+
+        t = lambda hh: datetime(2026, 11, 5, hh, 30).astimezone().isoformat()
+        with open(f"{d}/main.jsonl", "w") as f:
+            f.write(json.dumps({"attachment": {"type": "hook_additional_context", "content": ["This pane is 요유's main pane. Keep"]}},
+                               ensure_ascii=False, separators=(",", ":")) + "\n")  # as Claude Code writes it
+            f.write(line("a", t(18), 5) + line("a", t(18), 40))  # one response in two lines: counted once, final output
+            f.write(line("b", t(19), 7) + line("c", datetime(2026, 11, 4, 18).astimezone().isoformat(), 9))  # c: another day
+        os.makedirs(f"{d}/sub")
+        with open(f"{d}/sub/other.jsonl", "w") as f:
+            f.write(line("x", t(18), 3, read=1000) + "not json\n" + '{"usage": 1}\n')
+            f.write(json.dumps({"type": "user", "message": {"content": "grep \"This pane is 요유's main pane\""}}, ensure_ascii=False) + "\n")
+        h = scan(d, datetime(2026, 11, 5).date())
+        assert h[18]["main"] == [1, 10, 100, 40] and h[18]["all"] == [2, 20, 1100, 43], h[18]
+        assert h[19]["main"] == [1, 10, 100, 7] and not any(h[17]["all"]), h
+        w = window(h, 18, 20)
+        assert w["main"]["output"] == 24 and w["all"]["read"] == 600, w
+        base = {"day": "2026-11-05", "hours": "18-20", **w}
+        assert "50%" in compare({**base, "main": {**w["main"], "read": 50}}, base), "half the reads"
+    print("selftest ok")
+
+
+def main(argv):
+    if "--selftest" in argv:
+        return selftest()
+    args = [a for a in argv if not a.startswith("--")]
+    opt = lambda name: argv[argv.index(name) + 1] if name in argv else None
+    day = datetime.strptime(args[0], "%Y-%m-%d").date() if args and args[0][:2] == "20" else datetime.now().date()
+    lo, hi = (int(x) for x in (opt("--hours") or "17-21").split("-"))
+    hours = scan(os.environ.get("CLAUDE_USAGE_DIR") or os.path.expanduser("~/.claude/projects"), day)
+    summary = {"day": str(day), "hours": f"{lo}-{hi}", **window(hours, lo, hi),
+               "by_hour": {f"{h:02d}": hours[h] for h in range(24) if any(hours[h]["all"])}}
+    if opt("--compare"):
+        with open(opt("--compare"), encoding="utf-8") as f:
+            print(compare(summary, json.load(f)))
+    elif "--json" in argv:
+        print(json.dumps(summary, ensure_ascii=False, indent=1))
+    else:
+        print(table(hours, day, lo, hi))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
