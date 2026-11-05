@@ -257,9 +257,13 @@ def stop_group(members, keep_for, wait: float = 3.0) -> list:
         for p in new:
             stopped[(p.pid, p.start)] = p
         add(new)
+    now = fresh()  # only the processes they still are: one ended meanwhile may have left its pid to another
+    for p in now:
+        stopped.setdefault((p.pid, p.start), p)
+    add(now)
     group = list(stopped.values())
-    _signal(group, signal.SIGTERM)
-    _signal(group, signal.SIGCONT)
+    _signal(now, signal.SIGTERM)
+    _signal(now, signal.SIGCONT)
     end = time.time() + wait
     while time.time() < end and fresh():
         time.sleep(0.1)
@@ -305,7 +309,8 @@ class Main:
     """The main pane's shell as (pid, start), asked again when the file changes, every minute while herdr could not tell,
     and every 5 minutes while the shell it knew is gone or the file names no pane."""
 
-    def __init__(self):
+    def __init__(self, ask=None):
+        self.ask = ask or main_shell
         self.mtime = self.start = None
         self.asked = 0.0
         self.pid = 0
@@ -321,8 +326,12 @@ class Main:
         again = 60 if self.pid is None else 300
         if mtime != self.mtime or (mtime is not None and not fg_of(by, self.pid, self.start) and now - self.asked >= again):
             self.mtime, self.asked = mtime, now
-            self.pid = main_shell(env) if mtime is not None else 0
-            self.start = by[self.pid].start if self.pid in by else None
+            self.pid = self.ask(env) if mtime is not None else 0
+            if self.pid and self.pid not in by:  # it may have started after the round's table was read
+                by = {p.pid: p for p in list_procs()}
+            if self.pid and self.pid not in by:
+                self.pid = None  # not known: keep every pane's front, ask again in a minute
+            self.start = by[self.pid].start if self.pid else None
         return None if self.pid is None else fg_of(by, self.pid, self.start)
 
 
@@ -471,6 +480,18 @@ def selftest() -> None:
     table = {p.pid: p for p in [P(110, 100, tpgid=111), P(111, 110, tpgid=111)]}
     assert fg_of(table, 110, 110) == 111 and fg_of(table, 110, 999) == 0 and fg_of(table, 77, 77) == 0
     assert fg_of({110: P(110, 100, tpgid=110)}, 110, 110) == 110 and fg_of({110: P(110, 100, tpgid=4242)}, 110, 110) == 110
+    # Main.get(): a shell herdr names but no table shows (Codex review: it appeared between the two) is not "no main pane":
+    # it counts as not known (None), so keepers() keeps every pane's front; a shell herdr cannot name (None) the same
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "orchestrator"))
+        with open(os.path.join(d, "orchestrator", "main"), "w") as f:
+            f.write("term_x\n")
+        e = {"XDG_STATE_HOME": d}
+        assert Main(ask=lambda env: 1).get(e, {}, 0.0) is None, "pid 1 is in no table of ours"
+        assert Main(ask=lambda env: None).get(e, {}, 0.0) is None
+        assert Main(ask=lambda env: 110).get(e, {110: P(110, 100, tpgid=111), 111: P(111, 110)}, 0.0) == 111
+        assert Main(ask=lambda env: 0).get(e, {}, 0.0) == 0, "no main pane"
 
     # every killable group under a protected node is weighed, not just the biggest protected one: the orphan group
     # (-122, 93) beats the protected main pane's whole tree (106), whose own children are 1 each
