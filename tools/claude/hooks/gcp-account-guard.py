@@ -24,6 +24,7 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -44,6 +45,10 @@ OPENING_ITEM = re.compile(r"\s*(?:<?@\w+>?\s+)*`?" + TAG)  # a decision reply op
 GRANT_END = r"`?(?:[ \t]?(?:해줘|해요|해|합니다|할게|함))?(?:[ \t]*(?:ㄱㄱ|고고))?(?=[ \t]*(?:$|\n|[.,!~)'\"]))"
 TAGS = re.compile(TAG)
 DOUBT = re.compile(r"(?:^|\s)(?:절대|안|못|never|not|no)\s*$|만\s*$", re.I)  # `절대 prod 허용`, `이것만 prod 허용`: unclear, so no grant
+# An item written any way but TAG (`#973`, `PR #973`, `973번`, `api＃973`, an issue link), an item left out, the grant taken
+# back: unclear, so no grant (api#1026 review). ponytail: words, so `1번 추천대로 prod 허용` is refused too; 요유 writes it again.
+LOOSE = re.compile(r"[#＃]\s*\d|\d\s*번|/(?:issues|pull)/\d")
+RETRACT = re.compile(r"빼고|제외|보류|아니다|아냐|아니야|철회|(?:^|[.!?,\n]\s*)(?:취소|됐어|그만)", re.I)
 
 
 def granted(word: str, prompt: str) -> set[str] | None:
@@ -51,6 +56,8 @@ def granted(word: str, prompt: str) -> set[str] | None:
     else the items it covers: "" for everything, `api#973` when said right after that item or in words that open with it,
     as 요유 answers a decision reply (api#1026). A scope counts only in that exact form: an item the words name that no grant
     is bound to (`*api#973* prod 허용`, `api#973만 prod 허용`, an item elsewhere), or a grant bound and one not, grants nothing."""
+    if LOOSE.search(TAGS.sub("", prompt)) or RETRACT.search(prompt):
+        return None
     items, opening = set(), OPENING_ITEM.match(prompt)
     for m in re.finditer(rf"(?:^|[\s`'\"(,])`?{re.escape(word)}{GRANT_END}", prompt):
         before = prompt[:m.start() + 1]
@@ -93,7 +100,9 @@ SLACK_NOTE = "메인 칸은 Slack ✅로도 이 명령 하나를 한 번 실행�
 # They stop accidents (a wrong config, a script that grabs the admin ADC), not a session set on
 # getting around them: a script can still read the credential store without naming it here.
 # Global options may sit between the words of a subcommand: `gcloud config --quiet unset ...`, `firebase -P p login`.
-OPTS = r"(?:\s+--?[\w-]+(?:[= ](?!-)(?:'[^']*'|\"[^\"]*\"|\S+))?)*"
+# Each option reads one way only (`--a` is never `-` + `-a`, a quoted value never also a bare one): the old form backtracked
+# exponentially on `--a --a ...`, past the hook's time limit (api#1026 review).
+OPTS = r"(?:\s+--?\w[\w-]*(?:[= ](?!-)(?:'[^']*'|\"[^\"]*\"|[^\s'\"]\S*))?)*"
 SELECT = [  # one command, another identity
     # Picking the config, not mentioning it: notes and commit messages may name it.
     (re.compile(r"(?:--configuration[= ]+|CLOUDSDK_ACTIVE_CONFIG_NAME=)['\"]?munice-admin"), "요유 계정 구성(munice-admin)"),
@@ -128,11 +137,12 @@ KEYS = [  # matched per shell segment, after joining `\` continuations
     (re.compile(rf"\borg-policies{OPTS}\s+(?:disable-enforce|enable-enforce|set-policy|allow|deny|delete|reset|create"
                 r"|update|set-custom-constraint|delete-custom-constraint)\b"), "조직 정책 바꾸기"),
     # POST to the keys collection creates; /keys/<id> (delete) and /keys/<id>:disable stay allowed.
-    (re.compile(rf"{SA}:upload|{SA}/[^\s/:'\"]+:enable|{POSTS}.*{SA}(?![/\w:])"), "서비스 계정 키 API"),
+    # `^`: the look-ahead runs once per segment, not at every position (it was quadratic on a long one: api#1026 review)
+    (re.compile(rf"{SA}:upload|{SA}/[^\s/:'\"]+:enable|^{POSTS}.*{SA}(?![/\w:])"), "서비스 계정 키 API"),
     # Client libraries. Lower-case `create...` keeps log filters on `v1.CreateServiceAccountKey` readable.
     (re.compile(r"\.keys(?:\(\))?\s*\.(?:create|upload|enable)\(|\b(?:create|upload|enable)"
                 r"(?:_service_account_key|ServiceAccountKey)\b"), "서비스 계정 키 API"),
-    (re.compile(r"[.:](?:set|clear)OrgPolicy\b|\bOrgPolicyClient\b|" + POSTS + r".*orgpolicy\.googleapis\.com"),
+    (re.compile(r"[.:](?:set|clear)OrgPolicy\b|\bOrgPolicyClient\b|^" + POSTS + r".*orgpolicy\.googleapis\.com"),
      "조직 정책 API"),
 ]
 # A commit message, a PR body or a search may name a key command; such a segment only carries text.
@@ -188,6 +198,10 @@ WORD_CHAR = re.compile(r"[\w\-=./:,@%+]")
 STAGING_ENV = {"CLOUDSDK_ACTIVE_CONFIG_NAME", "CLOUDSDK_CORE_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS"}
 FEED = re.compile(r'\s*printf\s+%s\s+"\$\{\w+\}"\s*')  # a secret comes in on stdin (api#992)
 PROJECT_FLAG = {"gcloud": {"--project"}, "firebase": {"--project", "-P"}}  # the project the call runs in, nothing else
+SIDE_PROJECT = re.compile(r"--[\w-]*project(?:-id)?")  # --billing-project, --topic-project...: staging too, never the target
+# Groups that act on projects, settings or logins named by position, not by --project (api#1026 review).
+OTHER_SCOPE = {"projects", "config", "auth", "organizations", "billing", "resource-manager"}
+ACCOUNT_PROJECT = re.compile(r"@([\w-]+)\.iam\.gserviceaccount\.com|(\d+)-compute@|service-(\d+)@")
 
 
 def shell_words(line: str) -> list[str] | None:
@@ -238,17 +252,19 @@ def staging_only(cmd: str) -> bool:
     if not words or words[0] not in ("gcloud", "firebase"):
         return False
     flags, projects, paths = PROJECT_FLAG[words[0]], [], []
+    if words[0] == "gcloud" and OTHER_SCOPE & set(words):
+        return False
     for prev, w in zip([""] + words, words):
         flag, eq, value = w.partition("=")
-        if flag in ("--flags-file", "--impersonate-service-account"):
-            return False
+        if flag in ("--flags-file", "--impersonate-service-account") or (w != "-P" and re.match(r"-[^-]*P", w)):
+            return False  # firebase reads `-Pvalue` and `-jP value` as a project too
         if prev in flags:
             projects.append(w)
         elif eq and flag in flags:
             projects.append(value)
-        elif prev == "--billing-project" or (eq and flag == "--billing-project"):
-            paths.append(value if eq else w)  # billed to: staging too, but not where the call runs
-        paths += re.findall(r"projects/([^/]+)", w)
+        elif SIDE_PROJECT.fullmatch(prev) or (eq and SIDE_PROJECT.fullmatch(flag)):
+            paths.append(value if eq else w)  # billed to, a topic's project: staging too, but not where the call runs
+        paths += re.findall(r"projects/([^/]+)", w) + [g for m in ACCOUNT_PROJECT.findall(w) for g in m if g]
         if any(not any(s in b for s in STAGING_IDS) for b in re.findall(r"gs://([^/]*)", w)):
             return False  # a bucket's name, not --project, says whose it is
     # A `projects/<id>` path may sit in any value (a description), so only the project flag says where the call runs.
@@ -297,32 +313,44 @@ def latest_turn(transcript_path: str) -> tuple[str, bool, int]:
         f = open(transcript_path, encoding="utf-8", errors="replace")
     except OSError:
         return last, relayed, at
+    def obj(x):
+        return x if isinstance(x, dict) else {}
     with f:
         for n, line in enumerate(f):
-            if '"human"' not in line and '"role": "user"' not in line and '"role":"user"' not in line:
+            if not any(k in line for k in ('"human"', '"role": "user"', '"role":"user"', '"queued_command"', '"origin"')):
                 continue
             try:
-                d = json.loads(line)
+                d = obj(json.loads(line))
             except ValueError:
                 continue
-            queued = d.get("attachment") if d.get("type") == "attachment" else None
-            if d.get("type") == "user" and (d.get("origin") or {}).get("kind") == "human":
-                content = (d.get("message") or {}).get("content")
-            elif (isinstance(queued, dict) and queued.get("type") == "queued_command" and queued.get("commandMode") == "prompt"
-                  and (queued.get("origin") or {}).get("kind") == "human"):
+            msg, queued, kind = obj(d.get("message")), obj(d.get("attachment")), obj(d.get("origin")).get("kind")
+            content, typed = None, True
+            if d.get("type") == "user" and kind == "human":
+                content = msg.get("content")
+            elif d.get("type") == "attachment" and queued.get("type") == "queued_command":
                 # Claude records a message typed while it works this way, not as a user line: a third of the main pane's
                 # relays arrived so on 11/05 (review). It starts a turn like any other.
-                content = queued.get("prompt")
-            elif d.get("type") == "response_item" and (d.get("payload") or {}).get("role") == "user":
-                content = d["payload"].get("content")
+                content, mode, by = queued.get("prompt"), queued.get("commandMode"), obj(queued.get("origin")).get("kind")
+                if mode == "bash" and by == "human":
+                    continue  # 요유's `!` command is no prompt
+                typed = mode == "prompt" and by == "human"
+            elif d.get("type") == "user" and not d.get("isMeta"):
+                cs = msg.get("content")
+                if isinstance(cs, list) and any(obj(p).get("type") == "tool_result" for p in cs):
+                    continue  # a tool's answer, inside the turn
+                typed = False  # a background task's notice, a compact summary, a headless prompt: no person typed it
+            elif d.get("type") == "response_item" and obj(d.get("payload")).get("role") == "user":
+                content = obj(d.get("payload")).get("content")
             else:
                 continue
             if isinstance(content, list):
-                content = "\n".join(p.get("text", "") for p in content if isinstance(p, dict))
+                content = "\n".join(t for t in (obj(p).get("text") for p in content) if isinstance(t, str))
             text = content if isinstance(content, str) else ""
             # Codex sends its instruction files as user messages too; a person never types these. They still start a new
             # turn, so the last turn's words end there (api#1026 review: a typed line opening so kept the old grant).
-            if text.lstrip().startswith(("# AGENTS.md", "<environment_context>", "<user_instructions>", "<hook_prompt", "<user_action>")):
+            # So does any prompt no person typed: it ends the turn whose grant came before it (second review).
+            if not typed or text.lstrip().startswith(("# AGENTS.md", "<environment_context>", "<user_instructions>",
+                                                      "<hook_prompt", "<user_action>")):
                 last, relayed, at = "", False, n
             else:
                 # pane-tell lands in the input box, so it reads as human origin. It is another session's words.
@@ -331,8 +359,9 @@ def latest_turn(transcript_path: str) -> tuple[str, bool, int]:
 
 
 # Typing into another pane's input box: what arrives there reads as 요유's own typing.
-TYPES_INTO = re.compile(r"\bherdr\b.*\b(?:send-text|send-keys|run|prompt)\b|\bpane-tell\b.*\s--raw\b|\btmux\b.*\bsend-keys\b"
-                        r"|\bosascript\b.*\bkeystroke\b", re.S)
+# (program, then the verb after it): one search each, not `prog.*verb`, which was quadratic on a long command (review)
+TYPES_INTO = [(re.compile(p), re.compile(v)) for p, v in ((r"\bherdr\b", r"\b(?:send-text|send-keys|run|prompt)\b"),
+              (r"\bpane-tell\b", r"\s--raw\b"), (r"\btmux\b", r"\bsend-keys\b"), (r"\bosascript\b", r"\bkeystroke\b"))]
 FORGE = ("다른 칸 입력창에 `prod 허용`·`staging 허용`을 치는 명령: 받는 칸은 그 글을 요유가 직접 친 글로 읽으므로 어떤 세션도 "
          "치지 않습니다(`cla`로도 안 풀림). 전할 말은 허용 문구 없이 pane-tell로 보낼 것. 허락은 요유가 Slack에 직접 씀. api#1026")
 
@@ -343,7 +372,7 @@ def types_grant(cmd: str) -> bool:
         bare = re.sub(r"['\"\\]", "", segment)
         if TEXT_ONLY.match(segment) and not SUBST.search(LITERAL.sub("", segment)):
             continue  # a commit message or a search that only names one
-        if TYPES_INTO.search(bare) and "허용" in bare:
+        if "허용" in bare and any((m := prog.search(bare)) and verb.search(bare, m.end()) for prog, verb in TYPES_INTO):
             return True
     return False
 
@@ -818,7 +847,7 @@ def selftest():
     assert scoped(f"{stg_cmd.replace('miraclenight-dev', 'miraclenight-f06c6')} # cf#12", stg_item), "staging stays staging"
     # api#1026 review, named for the report: a staging grant is judged on what the shell runs; a scope counts only in its
     # exact form; any new prompt ends the turn; text shaped like a machine's is no typed grant; no session types a grant
-    admin = "--configuration=munice-admin"
+    admin, adc = "--configuration=munice-admin", "GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gcloud/adc-munice-admin.json"
     stg_refused = {
         "staging_variable_project_with_comment": f'TARGET=miraclenight-f06\'\'c6; gcloud {admin} run services list --project="$TARGET" # --project=miraclenight-dev',
         "staging_variable_project": f'gcloud {admin} run services list --project="$TARGET" # --project=miraclenight-dev',
@@ -839,6 +868,13 @@ def selftest():
         "staging_path_in_value": f"gcloud {admin} run services update api --description=projects/miraclenight-dev",
         "staging_gcloud_dash_p": f"gcloud {admin} run services update api -P miraclenight-dev",
         "staging_line_after_comment": f"gcloud {admin} secrets list --project=miraclenight-dev # staging\ngcloud {admin} run services update api",
+        # second review: firebase reads `-Pvalue` and `-jP value`; other projects by position, side flag or account email
+        "staging_firebase_attached_p": f"{adc} firebase deploy --only functions -P miraclenight-dev -Pproduction",
+        "staging_firebase_clustered_p": f"{adc} firebase deploy --only functions -P miraclenight-dev -jP production",
+        "staging_projects_group": f"gcloud {admin} projects delete munice-tfstate --project=miraclenight-dev",
+        "staging_side_project_flag": f"gcloud {admin} pubsub subscriptions create s --topic=t --topic-project=munice-tfstate --project=miraclenight-dev",
+        "staging_config_group": f"gcloud {admin} config set core/log_http_redact_token false --project=miraclenight-dev",
+        "staging_other_sa_email": f"gcloud {admin} iam service-accounts describe a@munice-tfstate.iam.gserviceaccount.com --project=miraclenight-dev",
     }
     checks: dict = {name: (lambda c=c: bool(stg(c))) for name, c in stg_refused.items()}
 
@@ -853,7 +889,49 @@ def selftest():
         "scope_mixed": lambda: bool(scoped(tagged, claude_transcript("api#973 prod 허용. 그리고 prod 허용"))),
         "negation_before_word": lambda: bool(scoped(tagged, claude_transcript("절대 prod 허용."))),
         "only_before_word": lambda: bool(scoped(tagged, claude_transcript("이것만 prod 허용"))),
+        # second review: an item named any other way, an item left out, or the grant taken back grants nothing
+        "scope_loose_item": lambda: all(granted(UNLOCK, t) is None for t in (
+            "#973 prod 허용", "PR #973 prod 허용", "973번 prod 허용", "api #973 prod 허용", "api＃973 prod 허용",
+            "https://github.com/munice-dev/nightly_api/issues/973 prod 허용")),
+        "scope_except": lambda: all(granted(UNLOCK, t) is None for t in (
+            "api#973 빼고 prod 허용", "api#973 제외하고 prod 허용", "api#973은 보류, prod 허용")),
+        "negation_after_word": lambda: all(granted(UNLOCK, t) is None for t in ("prod 허용. 아 아니다 취소", "prod 허용. 취소")),
     })
+
+    def appended(path, *rows):
+        with open(path, "a") as f:
+            for row in rows:
+                f.write((row if isinstance(row, str) else json.dumps(row, ensure_ascii=False)) + "\n")
+        return path
+    note = {"type": "user", "origin": {"kind": "task-notification"}, "message": {"role": "user", "content": "<task-notification>"}}
+    auto = {"type": "attachment", "attachment": {"type": "queued_command", "prompt": "계속", "commandMode": "prompt",
+                                                  "origin": {"kind": "auto-continuation"}}}
+    queued_note = {"type": "attachment", "attachment": {"type": "queued_command", "prompt": "<task-notification>",
+                                                        "commandMode": "task-notification", "origin": {"kind": "task-notification"}}}
+    checks.update({  # second review: any prompt no person typed ends the turn too
+        "task_notification_ends_turn": lambda: bool(scoped(tagged, appended(claude_transcript("prod 허용"), note))),
+        "auto_continuation_ends_turn": lambda: bool(scoped(tagged, appended(claude_transcript("prod 허용"), auto))),
+        "queued_notification_ends_turn": lambda: bool(scoped(tagged, appended(claude_transcript("prod 허용"), queued_note))),
+        "meta_line_keeps_turn": lambda: scoped(tagged, appended(claude_transcript("prod 허용"), {
+            "type": "user", "isMeta": True, "message": {"role": "user", "content": "skill text"}})) is None,
+    })
+    broken = ['{"type":"user","origin":{"kind":"human"},"message":"\\"human\\""}', '[1, "human"]',
+              {"type": "user", "origin": {"kind": "human"}, "message": {"content": [{"text": 1}]}},
+              {"type": "user", "origin": "human", "message": {"role": "user", "content": "x"}},
+              {"type": "response_item", "payload": "role user", "role": "user"},
+              {"type": "attachment", "attachment": ["queued_command", "human"]}]
+    checks["broken_lines_do_not_crash"] = lambda: latest_turn(appended(claude_transcript("prod 허용"), *broken)) is not None
+
+    def quick(cmd):
+        t = time.monotonic()
+        tool_problem({"tool_name": "Bash", "tool_input": {"command": cmd}, "transcript_path": staged}, {})
+        return time.monotonic() - t < 1.0
+    checks["long_command_judged_quickly"] = lambda: quick("echo " + "herdr " * 5000 + f"; gcloud {admin} run services list")
+    checks["many_options_judged_quickly"] = lambda: quick("gcloud config" + " --a" * 26 + " x" + f"; gcloud {admin} run services list")
+    risky = json.dumps({"tool_name": "Bash", "tool_input": {"command": f"gcloud {admin} run services update api"}}).encode()
+    checks["watchdog_refuses_on_timeout"] = lambda: '"deny"' in watched(risky, timeout=0.001)
+    checks["watchdog_refuses_on_crash"] = lambda: '"deny"' in watched(b"not json " + risky)
+    checks["watchdog_leaves_other_crashes"] = lambda: watched(b"not json") == ""
     for kind, make in (("claude", claude_transcript), ("codex", codex_transcript)):
         for head, new in (("header", "# AGENTS.md\n다음 작업을 실행해"), ("user_action", "<user_action>다음 작업</user_action>")):
             checks[f"{kind}_{head}_ends_typed_turn"] = (lambda m=make, n=new: bool(scoped(tagged, m("prod 허용", n))))
@@ -868,7 +946,12 @@ def selftest():
         tool_problem({"tool_name": "Bash", "tool_input": {"command": c}}, {}) is None
         for c in ('herdr pane send-text "$p" "claude 쪽 결과입니다"', "pane-tell w1:p1 '요유가 prod 허용을 썼는지 봐 주세요'",
                   'git commit -m "pane-tell --raw refuses prod 허용"'))
-    failed = [name for name, check in checks.items() if not check()]
+    def holds(check):
+        try:
+            return check()
+        except Exception:
+            return False
+    failed = [name for name, check in checks.items() if not holds(check)]
     assert not failed, f"api#1026 bypass checks failed: {failed}"
     # an auto tab (ambient, dispatch) never unlocks by the word
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript("prod 허용")}, {"MUNICE_AMBIENT": "1"})
@@ -1254,16 +1337,53 @@ def slack_grant_selftest(run, asked, claims, claude_transcript, tmp):
     assert [w[0] for w in words] == ["prod 허용"] and words[0][1]("t:3") is True and words[0][1]("t:4") is False, words
 
 
+# Both hook configs let the command run when the hook crashes or passes 10 s. So a call naming anything this guard judges is
+# judged in a child, and a child that crashes or passes WATCHDOG refuses it (api#1026 review). Other calls run inline: no
+# child to start, and a crash there lets through only what the guard would let through anyway.
+WATCHDOG = 9.0
+RISKY = re.compile(r"munice-admin|MUNICE_GCP_ADMIN|CLOUDSDK_|GOOGLE_APPLICATION_CREDENTIALS|FIREBASE_TOKEN|--token|impersonate"
+                   r"|--account|gcloud|firebase|credentials|adc-munice|configstore|configurations|gcp-account-guard"
+                   r"|service.?accounts?|org-?polic|orgpolicy|herdr|pane-tell|tmux|osascript", re.I)
+
+
+def deny(reason: str) -> str:
+    """The JSON deny Claude Code and Codex both read."""
+    return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                              "permissionDecisionReason": reason}}, ensure_ascii=False) + "\n"
+
+
+def judge(raw: bytes) -> str:
+    """What the hook prints for one call."""
+    started = time.monotonic()
+    reason = hook(json.loads(raw), dict(os.environ), riders, slack_approval, main_pane, started=started)
+    return deny(reason) if reason else ""
+
+
+def watched(raw: bytes, timeout: float = WATCHDOG) -> str:
+    """judge() for a call RISKY names, in a child: its crash or overrun refuses the call."""
+    if not RISKY.search(raw.decode("utf-8", "replace")):
+        try:
+            return judge(raw)
+        except Exception:
+            return ""
+    try:
+        r = subprocess.run([sys.executable, "-I", "-B", os.path.realpath(__file__), "--judge"], input=raw, capture_output=True,
+                           timeout=timeout)
+        if r.returncode == 0:
+            return r.stdout.decode("utf-8", "replace")
+        why = "판정 중 오류(%s)" % (r.stderr.decode("utf-8", "replace").strip().splitlines() or ["?"])[-1][:200]
+    except subprocess.TimeoutExpired:
+        why = "판정이 %g초 안에 끝나지 않음" % timeout
+    except OSError as e:
+        why = "판정을 시작하지 못함(%s)" % type(e).__name__
+    return deny(f"gcp-account-guard: {why}. 판정하지 못한 명령은 실행하지 않습니다: 명령을 나누거나 줄여서 다시 할 것(api#1026).")
+
+
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         selftest()
         sys.exit()
-    started = time.monotonic()
-    hook_input = json.load(sys.stdin)
-    reason = hook(hook_input, dict(os.environ), riders, slack_approval, main_pane, started=started)
-    if reason:  # JSON deny: Claude Code and Codex both read it
-        print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }}, ensure_ascii=False))
+    if "--judge" in sys.argv:
+        sys.stdout.write(judge(sys.stdin.buffer.read()))
+        sys.exit()
+    sys.stdout.write(watched(sys.stdin.buffer.read()))
