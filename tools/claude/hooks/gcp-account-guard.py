@@ -102,7 +102,7 @@ SLACK_NOTE = "메인 칸은 Slack ✅로도 이 명령 하나를 한 번 실행�
 # Global options may sit between the words of a subcommand: `gcloud config --quiet unset ...`, `firebase -P p login`.
 # Each option reads one way only (`--a` is never `-` + `-a`, a quoted value never also a bare one): the old form backtracked
 # exponentially on `--a --a ...`, past the hook's time limit (api#1026 review).
-OPTS = r"(?:\s+--?\w[\w-]*(?:[= ](?!-)(?:'[^']*'|\"[^\"]*\"|[^\s'\"]\S*))?)*"
+OPTS = r"(?:\s+--?\w[\w-]*(?:[= ](?!-)(?:'[^']*'|\"[^\"]*\"|[^\s'\"])+)?)*"  # a value joins quoted pieces: 'a'b
 SELECT = [  # one command, another identity
     # Picking the config, not mentioning it: notes and commit messages may name it.
     (re.compile(r"(?:--configuration[= ]+|CLOUDSDK_ACTIVE_CONFIG_NAME=)['\"]?munice-admin"), "요유 계정 구성(munice-admin)"),
@@ -201,6 +201,25 @@ PROJECT_FLAG = {"gcloud": {"--project"}, "firebase": {"--project", "-P"}}  # the
 SIDE_PROJECT = re.compile(r"--[\w-]*project(?:-id)?")  # --billing-project, --topic-project...: staging too, never the target
 # Groups that act on projects, settings or logins named by position, not by --project (api#1026 review).
 OTHER_SCOPE = {"projects", "config", "auth", "organizations", "billing", "resource-manager"}
+GLOBAL_VALUED = {"--account", "--billing-project", "--configuration", "--flags-file", "--flatten", "--format",
+                 "--impersonate-service-account", "--project", "--trace-token", "--verbosity", "--access-token-file"}
+GLOBAL_BOOL = {"--quiet", "-q", "--log-http", "--no-log-http", "--user-output-enabled", "--no-user-output-enabled"}
+
+
+def gcloud_group(words: list[str]) -> str | None:
+    """The group a gcloud call runs (past alpha/beta), or None when a flag before it is not a global one."""
+    skip = False
+    for w in words[1:]:
+        if skip:
+            skip = False
+        elif w.startswith("-"):
+            flag = w.partition("=")[0]
+            if flag not in GLOBAL_VALUED | GLOBAL_BOOL:
+                return None
+            skip = "=" not in w and flag in GLOBAL_VALUED
+        elif w not in ("alpha", "beta", "preview"):
+            return w
+    return None
 ACCOUNT_PROJECT = re.compile(r"@([\w-]+)\.iam\.gserviceaccount\.com|(\d+)-compute@|service-(\d+)@")
 
 
@@ -252,7 +271,7 @@ def staging_only(cmd: str) -> bool:
     if not words or words[0] not in ("gcloud", "firebase"):
         return False
     flags, projects, paths = PROJECT_FLAG[words[0]], [], []
-    if words[0] == "gcloud" and OTHER_SCOPE & set(words):
+    if words[0] == "gcloud" and gcloud_group(words) in OTHER_SCOPE | {None}:
         return False
     for prev, w in zip([""] + words, words):
         flag, eq, value = w.partition("=")
@@ -875,8 +894,16 @@ def selftest():
         "staging_side_project_flag": f"gcloud {admin} pubsub subscriptions create s --topic=t --topic-project=munice-tfstate --project=miraclenight-dev",
         "staging_config_group": f"gcloud {admin} config set core/log_http_redact_token false --project=miraclenight-dev",
         "staging_other_sa_email": f"gcloud {admin} iam service-accounts describe a@munice-tfstate.iam.gserviceaccount.com --project=miraclenight-dev",
+        "staging_beta_projects_group": f"gcloud {admin} beta projects delete munice-tfstate --project=miraclenight-dev",
+        "staging_group_after_flag_value": f"gcloud --project miraclenight-dev {admin} config set core/x y",
     }
     checks: dict = {name: (lambda c=c: bool(stg(c))) for name, c in stg_refused.items()}
+    # third Codex review: a group word in a value is no group, and a joined quoted value is still one option
+    checks["staging_group_word_in_value_ok"] = lambda: all(stg(c) is None for c in (
+        f"gcloud {admin} run services update api --description auth --project=miraclenight-dev",
+        f"gcloud {admin} secrets describe config --project=miraclenight-dev"))
+    checks["persist_joined_quoted_value"] = lambda: all((bash_problem(c) or ("", False))[1] is True for c in (
+        "gcloud auth --project='miraclenight-'dev login", "gcloud config --verbosity='de'bug set account a@b.com"))
 
     def both_refused(text):
         p = claude_transcript(text)
