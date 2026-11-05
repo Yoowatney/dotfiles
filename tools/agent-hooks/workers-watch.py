@@ -37,8 +37,9 @@ By design, two stops inside one tick interval look like one: a report for the fi
 An alert nobody took marks nothing, so the next minute sends it again. Fails open: any error exits 0 quietly.
 
 It also restarts the main pane through `main-refresh --now` once its conversation (the last response's usage in its transcript)
-passes MAIN_REFRESH_AT tokens, at most once an hour for the pane, counting a restart anyone made (the lead, 2026-11-05), and only
+passes MAIN_REFRESH_AT tokens, after an hour since a restart anyone made, and only
 when it answered something after its first 15 minutes (its handoff load alone passes the line); see refresh_main(). State: `{state_dir}/main-size.json`, each call also a line in main-refresh's `{state_dir}/refresh.log`.
+An active refresh owns its queued request and retries; a run that stopped without a restart is tried again next minute.
 
 Test env: WORKERS_WATCH_NOW (seconds), WORKERS_WATCH_PANE_TELL (a fake pane-tell), WORKERS_WATCH_PROBE (host:port online() tries),
 WORKERS_WATCH_MAIN_REFRESH (a fake main-refresh).
@@ -76,6 +77,7 @@ ORPHAN_TTL = 3600
 STOPPED = 900
 MAIN_REFRESH_AT = 150_000  # tokens in the main pane's conversation (the lead, 2026-11-05); a fresh one reached 141k in 40 s on 11/05
 MAIN_REFRESH_GAP = 3600
+MAIN_REFRESH_RETRY = 60
 MAIN_REFRESH_SETTLE = 900  # a session's first 15 minutes are its handoff load, not conversation
 USAGE = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 JOB_HELD = 10800
@@ -216,7 +218,7 @@ def born(path) -> float:
 
 def refresh_main(env, now, where, main) -> None:
     """main-refresh --now once the main pane's conversation passes MAIN_REFRESH_AT tokens: it re-reads all of it for each
-    message (11/05: about 370k a notice). Once an hour at most for the pane, counting a restart anyone else made."""
+    message (11/05: about 370k a notice). An hour after any restart; stopped attempts retry next minute."""
     sid = ((where.get(main, ("", {}))[1].get("agent_session") or {}).get("value") or "") if main else ""
     found = glob.glob(os.path.join(env.get("HOME") or os.path.expanduser("~"), ".claude", "projects", "*", glob.escape(sid) + ".jsonl")) if sid else []
     if not found:
@@ -229,7 +231,11 @@ def refresh_main(env, now, where, main) -> None:
         asked = {}
     asked = asked if isinstance(asked, dict) else {}
     start = born(found[0])
-    if now - max(float(asked.get(main) or 0), start) < MAIN_REFRESH_GAP:
+    if now - start < MAIN_REFRESH_GAP or now - float(asked.get(main) or 0) < MAIN_REFRESH_RETRY:
+        return
+    lock = os.path.join(herdr_peers.state_dir(env), "refresh.lock")
+    # main-refresh recovers locks older than two hours itself. Never spawn competing waits for a live run.
+    if os.path.isdir(lock) and now - os.path.getmtime(lock) < 7200:
         return
     size, at = last_usage(found[0])
     # A fresh session is past the line once its handoff is loaded (11/05: 141k in 40 s), so a pane that has answered nothing
@@ -937,7 +943,8 @@ esac
         os.remove(f"{d}/state/orchestrator/watch.json"); panes_on_workers(); agents(); tick(120000)
 
         # The main pane re-reads its whole conversation for each message, so past MAIN_REFRESH_AT tokens (the last response's
-        # usage) it is restarted through main-refresh --now, with the workers server's variables dropped, once an hour at most.
+        # usage) it is restarted through main-refresh --now, with the workers server's variables dropped. Failed attempts
+        # retry next minute, while a completed restart still gives the new session an hour.
         script(f"{d}/main-refresh", f'echo "$* ${{HERDR_SOCKET_PATH-none}} ${{HERDR_SESSION-none}}" >> {d}/refreshed\n')
         env["WORKERS_WATCH_MAIN_REFRESH"] = f"{d}/main-refresh"
         iso = lambda at: time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(at))
@@ -970,7 +977,12 @@ esac
         tick(130060, HERDR_SOCKET_PATH=DEF, HERDR_SESSION="workers")
         assert refreshed() == ["--now none none"], "over it: main-refresh --now, without the server variables"
         assert "150001" in open(f"{d}/state/orchestrator/refresh.log").read(), "and the log says why"
-        tick(130660); assert refreshed(0.5) == [], "once an hour at most"
+        tick(130090); assert refreshed(0.5) == [], "a skipped attempt is not retried twice within a minute"
+        tick(130120); assert refreshed() == ["--now none none"], "a skipped attempt is retried next minute, not next hour"
+        lock = f"{d}/state/orchestrator/refresh.lock"
+        os.mkdir(lock); os.utime(lock, (130120, 130120))
+        tick(130660); assert refreshed(0.5) == [], "an active refresh keeps its queued request and handoff wait"
+        os.rmdir(lock)
         tick(133700); assert refreshed() == ["--now none none"], "an hour later again"
         conversation("s2", 140000 - 600, 160000); tick(140000)
         assert refreshed(0.5) == [], "a session restarted ten minutes ago by anyone is given its hour"

@@ -35,8 +35,13 @@ echo "\$*" >> "$SANDBOX/told"
 echo "\${HERDR_PANE_ID:-unset}" > "$SANDBOX/tell-env"
 if [ "\$1" = --box-ready ]; then
   n=\$((\$(cat "$SANDBOX/box-n" 2>/dev/null || echo 0) + 1)); echo "\$n" > "$SANDBOX/box-n"
+  if [ "\$n" = 1 ] && [ -n "\${BOX_RECENT_FIRST:-}" ]; then
+    echo '{"type":"user","message":{"content":"new work during readiness wait"}}' >> "\$(cat "$SANDBOX/state/agent-handoff/w5:p3.md.transcript")"
+    exit 1
+  fi
   [ "\$n" != 1 ] || [ -z "\${BOX_LATE_FIRST:-}" ] || echo 09 > "$SANDBOX/hour"
   if [ "\$n" -ge 2 ]; then
+    [ -z "\${BOX_DROP_ONCE:-}" ] || [ "\$n" != 2 ] || rm -f "$SANDBOX/state/agent-handoff/w5:p3.md"
     [ -z "\${BOX_TURN:-}" ] || echo '{"type":"user","message":{"content":"typed during the box check"}}' >> "\$(cat "$SANDBOX/state/agent-handoff/w5:p3.md.transcript")"
     [ -z "\${BOX_WORK:-}" ] || echo working > "$SANDBOX/status"
     [ -z "\${BOX_LATE:-}" ] || echo 09 > "$SANDBOX/hour"
@@ -46,8 +51,28 @@ if [ "\$1" = --box-ready ]; then
 fi
 [ ! -f "$SANDBOX/tell-fails" ] || exit 1
 case "\$2" in *"handoff save"*)
+  n=\$((\$(cat "$SANDBOX/request-n" 2>/dev/null || echo 0) + 1)); echo "\$n" > "$SANDBOX/request-n"
   t=\$(cat "$SANDBOX/state/agent-handoff/\${HANDOFF_KEY:-w5:p3}.md.transcript")
+  if [ -n "\${DELIVER_AFTER:-}" ]; then
+    # A real queued request returns before delivery or the eventual handoff save.
+    if [ -n "\${QUEUED_STALE:-}" ]; then
+      echo unrelated-handoff > "$SANDBOX/state/agent-handoff/\${HANDOFF_KEY:-w5:p3}.md"
+      echo working > "$SANDBOX/status"
+    fi
+    ( sleep "\$DELIVER_AFTER"
+      jq -nc --arg c "\$2" '{type: "user", message: {content: \$c}}' >> "\$t"
+      if [ -n "\${QUEUED_STALE:-}" ]; then echo idle > "$SANDBOX/status"; sleep 1; fi
+      echo working > "$SANDBOX/status"
+      sleep 0.1
+      printf '%s\\n%s\\n' "\${2##* }" delivered-handoff > "$SANDBOX/state/agent-handoff/\${HANDOFF_KEY:-w5:p3}.md"
+      echo idle > "$SANDBOX/status"
+    ) >/dev/null 2>&1 &
+    echo "queued for test"; exit 0
+  fi
   jq -nc --arg c "\$2" '{type: "user", message: {content: \$c}}' >> "\$t"
+  if [ -n "\${NEW_TURN_ONCE:-}" ] && [ "\$n" = 1 ]; then
+    echo '{"type":"attachment","attachment":{"type":"queued_command","prompt":"new work must reach the next handoff"}}' >> "\$t"
+  fi
   case "\${NEW_TURN:-}" in
     yes) echo '{"type":"user","message":{"content":"a new message"}}' >> "\$t" ;;
     mention) echo '{"type":"user","message":{"content":"이 [main-refresh] 메시지는 무슨 뜻인가요?"}}' >> "\$t" ;;
@@ -60,7 +85,7 @@ case "\$2" in *"handoff save"*)
   esac
   [ -z "\${GO_LATE:-}" ] || echo 09 > "$SANDBOX/hour"
   [ -z "\${WORK_AFTER:-}" ] || echo working > "$SANDBOX/status"
-  if [ "\${HANDOFF_AFTER:-0}" != never ]; then ( sleep "\${HANDOFF_AFTER:-0}"; if [ -n "\${HANDOFF_EMPTY:-}" ]; then : > "$SANDBOX/state/agent-handoff/\${HANDOFF_KEY:-w5:p3}.md"; else echo handoff > "$SANDBOX/state/agent-handoff/\${HANDOFF_KEY:-w5:p3}.md"; fi ); fi
+  if [ "\${HANDOFF_AFTER:-0}" != never ]; then ( sleep "\${HANDOFF_AFTER:-0}"; if [ -n "\${HANDOFF_EMPTY:-}" ]; then : > "$SANDBOX/state/agent-handoff/\${HANDOFF_KEY:-w5:p3}.md"; else printf '%s\\n%s\\n' "\${2##* }" "handoff-\$n" > "$SANDBOX/state/agent-handoff/\${HANDOFF_KEY:-w5:p3}.md"; fi ); fi
   if [ -n "\${QUEUED:-}" ]; then echo "queued (box busy)"; else echo "told x"; fi ;;
 esac
 exit 0
@@ -83,9 +108,9 @@ chmod +x "$SANDBOX/herdr" "$SANDBOX/pane-tell" "$SANDBOX/bin/date" "$SANDBOX/pg/
 
 S="$SANDBOX/state"
 mr() { # every call is sandboxed: state dir, herdr, pane-tell
-  rm -f "$SANDBOX/told" "$SANDBOX/herdr-log" "$SANDBOX/box-n" "$S/orchestrator/refresh.log"; : > "$SANDBOX/alerts"
+  rm -f "$SANDBOX/told" "$SANDBOX/herdr-log" "$SANDBOX/box-n" "$SANDBOX/request-n" "$S/orchestrator/refresh.log"; : > "$SANDBOX/alerts"
   env XDG_STATE_HOME="$S" HERDR_BIN_PATH="$SANDBOX/herdr" MAIN_REFRESH_PANE_TELL="$SANDBOX/pane-tell" \
-    MAIN_REFRESH_POLL=0 MAIN_REFRESH_QUIET=0 MAIN_REFRESH_DEADLINE="${MAIN_REFRESH_DEADLINE:-5}" MAIN_REFRESH_HANDOFF_WAIT="${MAIN_REFRESH_HANDOFF_WAIT:-5}" \
+    MAIN_REFRESH_POLL=0.05 MAIN_REFRESH_QUIET=0 MAIN_REFRESH_RETRY_QUIET=0 MAIN_REFRESH_DEADLINE="${MAIN_REFRESH_DEADLINE:-5}" MAIN_REFRESH_HANDOFF_WAIT="${MAIN_REFRESH_HANDOFF_WAIT:-5}" \
     "$@" /bin/bash "$SUBJECT" ${MR_ARGS:-} >/dev/null 2>&1
 }
 told() { [ -f "$SANDBOX/told" ] && awk '{print $1, $2, $3}' "$SANDBOX/told" | paste -sd'|' - || true; }
@@ -134,9 +159,9 @@ rm_stamp; mr BOX_FULL_AFTER=1 MAIN_REFRESH_HOUR=05
 check "box full after the request: no /clear" "$(told)|$(cleared)" "--box-ready w5:p3 claude|w5:p3 [main-refresh] 새벽|--box-ready w5:p3 claude|0"
 [ ! -f "$S/agent-handoff/w5:p3.md" ] && [ -f "$S/agent-handoff/w5:p3.md.skipped" ] || fail "a skipped run sets its memo aside"
 rm_stamp
-# A queued request is not a delivered one, even if a handoff turns up anyway.
+# A queued result is followed until its request and handoff are visible, in the daily run too.
 mr QUEUED=1 MAIN_REFRESH_HOUR=05
-check "queued request: no /clear, announced" "$(cleared)|$(grep -c '대기열' "$S/orchestrator/refresh.log")" "0|1"
+check "queued request with delivered transcript and fresh handoff: /clear" "$(cleared)|$(grep -c '대기열' "$S/orchestrator/refresh.log")" "1|1"
 rm_stamp; mr HANDOFF_EMPTY=1 MAIN_REFRESH_HOUR=05 MAIN_REFRESH_HANDOFF_WAIT=0.3
 check "an empty handoff does not count" "$(cleared)" 0
 rm_stamp; mr NEW_TURN=yes MAIN_REFRESH_HOUR=05
@@ -240,8 +265,8 @@ rm -f "$S"/agent-handoff/*.md; now MAIN_REFRESH_HOUR=09; check "--now runs again
 rm_stamp; status working; ( sleep 1; echo idle > "$SANDBOX/status" ) & now MAIN_REFRESH_DEADLINE= MAIN_REFRESH_HOUR=09; wait
 check "--now waits for a busy pane to rest" "$(cleared)" 1
 # Words that reach the pane while it saves are recorded as a queued_command attachment, not a user line (review, 2026-11-05).
-rm_stamp; now NEW_TURN=queued MAIN_REFRESH_HOUR=09
-check "--now with words queued during the save: no /clear" "$(cleared)|$(grep -c '새 대화' "$S/orchestrator/refresh.log")" "0|1"
+rm_stamp; now NEW_TURN=queued MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.5
+check "--now with words queued during every save: no /clear" "$(cleared)|$(grep -q '새 대화' "$S/orchestrator/refresh.log" && echo 1 || echo 0)" "0|1"
 rm_stamp; mr NEW_TURN=queued MAIN_REFRESH_HOUR=05; check "the night run too" "$(cleared)" 0
 rm_stamp; now NEW_TURN=compact MAIN_REFRESH_HOUR=09; check "a compaction summary is no new message" "$(cleared)" 1
 # Another run cleared the pane meanwhile: this run's checks read the old session, so it stops.
@@ -256,19 +281,19 @@ check "a stale lock: goes ahead" "$(cleared)" 1
 [ ! -d "$S/orchestrator/refresh.lock" ] || fail "a run removes its lock"
 # A pane-tell message queued for the main pane is tied to its session: a clear would strand it.
 rm_stamp; ( exec -a "pane-tell --deliver msg term_M sid-main term_x " sleep 5 ) & pend=$!
-now MAIN_REFRESH_HOUR=09; kill "$pend" 2>/dev/null; wait "$pend" 2>/dev/null
-check "a message waiting for the main pane: no /clear" "$(cleared)|$(grep -c '기다리는 글' "$S/orchestrator/refresh.log")" "0|1"
+now MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.5; kill "$pend" 2>/dev/null; wait "$pend" 2>/dev/null
+check "a message waiting for the main pane: no /clear" "$(cleared)|$(grep -c '대기 중인 글' "$S/orchestrator/refresh.log")" "0|1"
 # A message that lands while the last checks run (here: during pgrep) is still caught: the transcript is read last.
-rm_stamp; now PATH="$SANDBOX/pg:$PATH" MAIN_REFRESH_HOUR=09
-check "a message during the last checks: no /clear" "$(cleared)|$(grep -c '새 대화' "$S/orchestrator/refresh.log")" "0|1"
+rm_stamp; now PATH="$SANDBOX/pg:$PATH" MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=2
+check "a message during the last checks: no /clear" "$(cleared)|$(grep -q '새 대화' "$S/orchestrator/refresh.log" && echo 1 || echo 0)" "0|1"
 # Started in the main pane's background, main-refresh must not be listed as a job to start again: it would loop.
 rm_stamp; now MAIN_REFRESH_HOUR=09; check "the request leaves main-refresh itself out" "$(grep -c 'main-refresh 자신은 빼고' "$SANDBOX/told")" 1
 rm_stamp; : > "$STAMP"; now MAIN_REFRESH_HOUR=05; check "--now ignores the daily stamp" "$(cleared)" 1
-rm_stamp; now BOX_FULL=1 MAIN_REFRESH_HOUR=09
-check "--now with words in the box: no request, no /clear" "$(told)|$(cleared)" "--box-ready w5:p3 claude|0"
-rm_stamp; now NEW_TURN=yes MAIN_REFRESH_HOUR=09
-check "--now with a message after the save: no /clear" "$(cleared)|$(grep -c '새 대화' "$S/orchestrator/refresh.log")" "0|1"
-# Its quiet default is 60 s, not the night's 600: a turn 2 minutes old goes ahead, one that just ended waits.
+rm_stamp; now BOX_FULL=1 MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.5
+check "--now with words in the box: no request, no /clear" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "0|0"
+rm_stamp; now NEW_TURN=yes MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.5
+check "--now with a message after every save: no /clear" "$(cleared)|$(grep -q '새 대화' "$S/orchestrator/refresh.log" && echo 1 || echo 0)" "0|1"
+# Its quiet default is 5 s, not the night's 600: a turn 2 minutes old goes ahead, one that just ended waits.
 rm_stamp; touch "$SANDBOX/sid-main.jsonl"; now MAIN_REFRESH_QUIET= MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.3
 check "--now right after a turn: not asked" "$(told)|$(cleared)" "|0"
 rm_stamp; touch -t "$(date -v-2M +%Y%m%d%H%M.%S)" "$SANDBOX/sid-main.jsonl"; now MAIN_REFRESH_QUIET= MAIN_REFRESH_HOUR=09
@@ -276,12 +301,30 @@ check "--now 2 minutes after a turn: clears" "$(cleared)" 1
 rm_stamp; touch -t "$(date -v-2M +%Y%m%d%H%M.%S)" "$SANDBOX/sid-main.jsonl"; mr MAIN_REFRESH_QUIET= MAIN_REFRESH_HOUR=05 MAIN_REFRESH_DEADLINE=0.3
 check "the night run still waits 10 minutes" "$(told)|$(cleared)" "|0"
 touch -t 202001010000 "$SANDBOX/sid-main.jsonl"
+rm_stamp; now BOX_RECENT_FIRST=1 MAIN_REFRESH_QUIET=5 MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=2
+check "a turn during readiness wait must get its own quiet interval" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "0|0"
+rm_stamp; touch -t "$(date -v-10S +%Y%m%d%H%M.%S)" "$SANDBOX/sid-main.jsonl"; now MAIN_REFRESH_QUIET= MAIN_REFRESH_HOUR=09
+check "--now accepts a short quiet interval instead of waiting a minute" "$(cleared)" 1
 
 # A pane on a named herdr server keeps its handoff in that server's folder, as `handoff` writes it.
 rm_stamp; mkdir -p "$S/agent-handoff/workers"; mv "$S/agent-handoff/w5:p3.md.transcript" "$S/agent-handoff/workers/"
 now HERDR_SOCKET_PATH="$SANDBOX/sessions/workers/herdr.sock" HANDOFF_KEY=workers/w5:p3 MAIN_REFRESH_HOUR=09
 check "a named server's handoff folder: found, cleared" "$(cleared)" 1
 rm -rf "$S/agent-handoff/workers"; set_main
+
+# Regression: the queued request arrives later, then the pane saves and rests. No second caller is needed.
+rm_stamp; now DELIVER_AFTER=0.2 MAIN_REFRESH_HOUR=09
+check "queued delivery is followed through to /clear" "$(cleared)|$(cat "$SANDBOX/request-n")|$(tail -n 1 "$S/agent-handoff/w5:p3.md" 2>/dev/null)" "1|1|delivered-handoff"
+rm_stamp; now DELIVER_AFTER=0.2 QUEUED_STALE=1 MAIN_REFRESH_HOUR=09
+check "a save before queued delivery cannot answer that request" "$(cleared)|$(tail -n 1 "$S/agent-handoff/w5:p3.md" 2>/dev/null)" "1|delivered-handoff"
+sleep 1.2 # reap the delayed fake delivery even when the assertion above fails
+rm_stamp; now BOX_DROP_ONCE=1 MAIN_REFRESH_HOUR=09
+check "a handoff removed during the final checks must be saved again" "$(cleared)|$(cat "$SANDBOX/request-n")|$(tail -n 1 "$S/agent-handoff/w5:p3.md" 2>/dev/null)" "1|2|handoff-2"
+# Regression: words received after the request require a new handoff; clearing the first would lose them.
+rm_stamp; now NEW_TURN_ONCE=1 MAIN_REFRESH_HOUR=09
+check "new work triggers another handoff and then /clear" "$(cleared)|$(cat "$SANDBOX/request-n")|$(tail -n 1 "$S/agent-handoff/w5:p3.md" 2>/dev/null)" "1|2|handoff-2"
+# The next answer must belong to a distinct request, even when the previous text is still last in the transcript.
+check "each retry has a distinct request" "$(grep 'handoff save' "$SANDBOX/told" | sort -u | wc -l | tr -d ' ')" 2
 
 [ "$fails" = 0 ] && echo "all ok"
 exit "$fails"
