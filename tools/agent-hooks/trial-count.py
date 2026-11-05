@@ -11,11 +11,14 @@ It counts the baseline window again with the same method, so the two columns com
 for the same hand sorting. Sessions are sorted as that study's extract.py did: sub-panes (a lead's instruction), test and
 headless sessions are left out, and relayed text is not 요유's. One difference: since 2026-11-05 요유 also writes to the main
 pane through Slack #0-yoyooyo, relayed by main-channel; those are counted apart (`slack`, `reactions`), never as typed, and
-`panes` counts only the panes 요유 typed in (design §9: the panes 요유 answered in their own herdr list).
+`panes` counts only the panes 요유 typed in (design §9: the panes 요유 answered in their own herdr list). What 요유 types while
+the agent works is a `queued_command` attachment, not a user line; those are counted too (about 5 a day in the baseline).
 
-ponytail: this Mac only (the baseline had 136 of 3,612 records from 집맥, none of them 요유's own lines); a /clear splits one
-pane into two sessions, as it did in the baseline. Records can go before Claude's 30 days: between 11/04 and 11/05, 37 of the
-baseline's 요유 lines went with their files (gomgom sessions, munice job tabs), so recount both windows on the same day.
+ponytail: this Mac only. The 11/04 study also read 집맥: 136 of its 3,612 rows, 58 of them 요유's lines. 37 of those (gomgom 22,
+munice job tabs 10, other munice sessions 5) are in files only 집맥 has, so this count is lower by them; the other 21 were two
+10/23 sessions whose file was on both Macs, which the study counted twice. No 회사맥 file went missing (all 516 the study read
+were there on 11/05), and Claude keeps records 30 days, so a recount on 11/11 still reads from 10/21. A /clear splits one pane
+into two sessions, as it did in the baseline.
 """
 from __future__ import annotations
 
@@ -31,7 +34,8 @@ sys.dont_write_bytecode = True
 KST = dt.timezone(dt.timedelta(hours=9))
 INJECT = ("[pane-tell:", "[handoff:", "ambient-round]", "[auto-dispatch]", "Stop hook feedback", "[main-refresh]",
           "This session is being continued from a previous conversation", "[Request interrupted", "Caveat:",
-          "<task-notification>", "<system-reminder>", "<local-command", "<bash-", "<command-name>")
+          "<task-notification>", "<system-reminder>", "<local-command", "<bash-", "<command-name>",
+          "Here is a note offered by a side agent")
 SUBPANE = "이 칸은 리드 밑 칸입니다"
 TEST = re.compile(r"도구를 쓰지 말고|한 단어만 답하|Without using tools|^\s*Call mcp__|훅 테스트|이 시험|시험입니다|"
                   r"^\s*(test|테스트)\b|그대로 (출력|답)하|This is a hook test", re.I)
@@ -54,7 +58,7 @@ def sessions(home: str, since_ts: float):
             continue
         rows, ep = [], ""
         for line in open(path, errors="replace"):
-            if '"type":"user"' not in line and '"type": "user"' not in line:
+            if '"type":"user"' not in line and '"type": "user"' not in line and '"queued_command"' not in line:
                 continue
             try:
                 r = json.loads(line)
@@ -64,7 +68,16 @@ def sessions(home: str, since_ts: float):
             if r.get("uuid") in seen or r.get("isMeta") or r.get("isSidechain"):
                 continue
             seen.add(r.get("uuid"))
-            c = (r.get("message") or {}).get("content")
+            a = r.get("attachment") if isinstance(r.get("attachment"), dict) else {}
+            if r.get("type") == "attachment" and a.get("type") == "queued_command":
+                # typed while the agent worked; the rest is a background task, another session or /goal
+                if a.get("commandMode", "prompt") != "prompt" or (a.get("origin") or {}).get("kind", "human") != "human":
+                    continue
+                c = a.get("prompt")
+            elif r.get("type") == "user":  # not an agent's line that quotes one
+                c = (r.get("message") or {}).get("content")
+            else:
+                continue
             if isinstance(c, list):
                 c = "" if any(isinstance(x, dict) and x.get("type") == "tool_result" for x in c) else \
                     "\n".join(x.get("text") or "" for x in c if isinstance(x, dict) and x.get("type") == "text")
@@ -157,6 +170,20 @@ def selftest():
         claude("other", [("2026-11-05T02:00:00Z", "내가 할 거 있어?"), ("2026-11-05T02:01:00Z", "x" * 400 + " 어디까지"),
                          ("2026-11-05T02:02:00Z", "[ambient-round] work.md 를 읽고 어디까지 했는지 이어서")])
         claude("slackonly", [("2026-11-05T05:00:00Z", relay + "[Slack #0-yoyooyo 요유] 좋아 (ts 3.4)")])
+        with open(os.path.join(proj, "main.jsonl"), "a") as f:  # typed while the agent worked: Claude keeps it as an attachment
+            for i, (ts, prompt, mode, origin) in enumerate((
+                    ("2026-11-05T01:10:00Z", "하고나서 QA까지하자", "prompt", "human"),
+                    ("2026-11-05T01:11:00Z", [{"type": "text", "text": "[Image #1] 이거 남았어?"}, {"type": "image", "source": {}}], "prompt", "human"),
+                    ("2026-11-05T01:12:00Z", relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#1]'에 :x: (ts 1)", "prompt", "human"),
+                    ("2026-11-05T01:13:00Z", "Here is a note offered by a side agent:  > Heads up · 어디까지", "prompt", "human"),
+                    ("2026-11-05T01:14:00Z", "<task-notification> x </task-notification>", "task-notification", "task-notification"),
+                    ("2026-11-05T01:15:00Z", "<cross-session-message from=\"x\">어디까지</cross-session-message>", "prompt", "peer"),
+                    ("2026-11-05T01:16:00Z", "Goal set: [auto-dispatch] 보드 일을 끝내세요", "prompt", "auto-continuation"))):
+                f.write(json.dumps({"type": "attachment", "uuid": f"q{i}", "timestamp": ts, "attachment": {
+                    "type": "queued_command", "prompt": prompt, "commandMode": mode, "origin": {"kind": origin}}}, ensure_ascii=False) + "\n")
+            f.write(json.dumps({"type": "assistant", "uuid": "a0", "timestamp": "2026-11-05T01:17:00Z", "message": {"content": [  # its search
+                {"type": "text", "text": "어디까지 셌는지 봅니다"}, {"type": "tool_use", "input": {"pattern": "queued_command"}}]}},
+                ensure_ascii=False) + "\n")
         claude("sub", [("2026-11-05T03:00:00Z", "일입니다. 이 칸은 리드 밑 칸입니다. 어디까지"), ("2026-11-05T03:01:00Z", "계속")])
         claude("headless", [("2026-11-05T03:00:00Z", "어디까지 했어?")], entrypoint="sdk-cli")
         claude("old", [("2026-11-03T03:00:00Z", "다 됐어?")])
@@ -169,12 +196,16 @@ def selftest():
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         got = count(d, "2026-11-05", "2026-11-06")
         day5, day6 = got["2026-11-05"], got["2026-11-06"]
-        assert day5["typed"] == 4, day5  # main 1, other 2 (the long one too), codex 1; not the sub-pane, headless, relays or notices
-        assert day5["slack"] == 2 and day5["reactions"] == 1, day5
+        # main 1 + 2 typed while it worked, other 2 (the long one too), codex 1; not the sub-pane, headless, relays, notices,
+        # a side agent's note, another session's message or /goal's
+        assert day5["typed"] == 6, day5
+        assert day5["slack"] == 2 and day5["reactions"] == 2, day5
         assert day5["panes"] == 3, "main, other and the Codex session: not a pane that only got Slack words"
-        assert day5["questions"] == 3, "slack 어디까지, 내가 할 거, 얼마나 남았어; the 400-character one is skipped"
+        assert day5["questions"] == 4, "slack 어디까지, 내가 할 거, 얼마나 남았어, 이거 남았어; the 400-character one is skipped"
         assert day6 == {"typed": 1, "slack": 0, "reactions": 0, "panes": 1, "questions": 1}, day6
         assert "2026-11-03" not in got, "outside the window"
+    assert options(["--list", "--since", "2026-11-04"]) == {"--list": True, "--since": "2026-11-04"}, "a flag before a pair"
+    assert options(["--since", "2026-11-04", "--list", "--until", "2026-11-05"])["--until"] == "2026-11-05"
     print("selftest ok")
 
 
@@ -197,12 +228,22 @@ def table(home: str, since: str, until: str, base: str, listing: list | None) ->
     return "\n".join(lines)
 
 
+def options(argv: list) -> dict:
+    """`--name value` and bare `--name`, in any order: pairing argv two by two dropped --since after --list."""
+    out, i = {}, 0
+    while i < len(argv):
+        takes = i + 1 < len(argv) and not argv[i + 1].startswith("--")
+        out[argv[i]] = argv[i + 1] if takes else True
+        i += 2 if takes else 1
+    return out
+
+
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         selftest()
         sys.exit()
-    args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
-    hits = [] if "--list" in sys.argv else None
+    args = options(sys.argv[1:])
+    hits = [] if "--list" in args else None
     print(table(os.path.expanduser("~"), args.get("--since", "2026-11-05"), args.get("--until", dt.datetime.now(KST).strftime("%Y-%m-%d")),
                 args.get("--base", "2026-10-21:2026-11-04"), hits))
     if hits is not None:

@@ -5,8 +5,12 @@ On the night of 2026-11-05 the main pane ran check, fix, check, fix, check, fix 
 panes and three fix panes, and the third fix undid what the first two fixed. Its rules said "the fix's report gets a new check
 pane" with no limit (daily wow 2026-11-05, card 01). Now two fixes of one job are the limit: the third is refused, and the pane
 asks 요유 (the main pane through `decide`, whose 22:00~08:00 queue makes it a morning question; a pane under a lead through its
-`남은 것:` report). Repeating the call does not pass. 요유's own words after the refusal do: typed in the pane, or relayed from
-#0-yoyooyo by main-channel.
+`남은 것:` report). Repeating the call does not pass. 요유's own words after the refusal do: typed in the pane (also while the
+agent works), or relayed from #0-yoyooyo by main-channel, where of reactions only ✅ answers (❌ is "no", 💤 "ask tomorrow").
+An answer opens one fix of one job: the job whose refusal came last before it, or, when the words name a board item (a
+reaction on `[결정 api#1002]`), the job whose refusal that item's `decide` came after. Once that fix's pane opened, the
+next fix of the job is refused again. The first version let any words of 요유's open every job until the 05:00 /clear, and
+❌ opened it too (check pane, 2026-11-05 13:18).
 
 One job is one lineage, not one name: every round that night got a new name. The links are the report entries a spawn cites
 ("the 02:37:40 entry", "(02:37:40 항목)", as the short report hands them over). An entry's header names its pane's address,
@@ -16,6 +20,9 @@ to that work's own spawn, counts the fixes before it.
 
 ponytail: a fix sent to a pane that is already open (pane-tell) is no spawn and is not counted, and a /clear starts a new
 session record, so the count starts over; both would need a record kept outside the session, add it when a loop goes that way.
+Unrelated words with no item in them, typed or ✅ on a post with no item, still answer the latest refusal: the hook cannot
+read what they mean. Items match by number alone (api#7 and cf#7 are one), and only a `decide` whose command or output
+shows the item's URL ties it to a refusal.
 gcp-account-guard.py calls check(), for the reason pane-fit-guard.py gives. Fails open.
 
     fix-round-guard.py --selftest
@@ -32,9 +39,13 @@ sys.dont_write_bytecode = True  # no __pycache__ in the dotfiles at every tool c
 MARK = "fix-round:"
 LIMIT = 2  # fixes of one job before 요유 is asked (요유's wow card: "두 번까지, 세 번째는 열지 않고 멈춥니다")
 REASON = (MARK + " 같은 일의 고치기와 확인이 이미 두 번 돌았습니다({chain}). 세 번째 고치기 칸은 열지 않습니다. 지금까지 고친 것과 남은 결함을 "
-          "`고를 것`·`추천`·`바뀌는 것` 세 줄로 묶어 요유에게 물으세요. 메인 칸은 그 일의 보드 항목에 `main-channel.py decide`로 올리고(22~08시에는 "
-          "아침 8시에 나갑니다), 리드 밑 칸은 `남은 것:` 보고로 리드에게 올립니다. 이 거절 뒤에 요유가 직접 치거나 #0-yoyooyo에서 답하면 같은 명령이 "
-          "통과합니다. 그냥 다시 실행해서는 통과하지 않습니다.")
+          "`고를 것`·`추천`·`바뀌는 것` 세 줄로 묶어 요유에게 물으세요. 메인 칸은 그 일의 보드 항목으로 "
+          "`python3 /Users/yoyoo/work/munice/munice-claude/.agents/skills/agent-board/main/main-channel.py decide --board <url>`을 부릅니다"
+          "(22~08시에는 아침 8시에 나갑니다). 보드 항목이 없는 일이면 먼저 `echo \"<본문>\" | bash /Users/yoyoo/work/munice/.agents/skills/agent-board/board.sh "
+          "create nightly_api \"<제목>\" yoyoo`(인프라 일은 terraform)로 항목을 만들고, 맨 처음 출력되는 URL을 `decide --board`에 넘깁니다. 제목과 본문에는 "
+          "로컬 경로(보고 파일 경로 포함)를 쓰지 않습니다. 리드 밑 칸은 `남은 것:` 보고로 리드에게 올립니다. 이 거절 뒤에 요유가 칸에 직접 치거나 "
+          "#0-yoyooyo에서 답하면(반응은 ✅만 답으로 칩니다. ❌와 💤는 답이 아닙니다) 이 일의 고치기 칸이 하나만 열립니다. 그 칸이 열린 뒤의 고치기는 다시 "
+          "물어야 합니다. 그냥 다시 실행해서는 통과하지 않습니다.")
 SPAWN = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?pane-spawn((?:\s+--[\w-]+(?:\s+[^\s\"'-]\S*)?)*)\s+"
                    r"(\"(?:\\.|[^\"\\])*\"|'[^']*')")
 CITE = re.compile(r"(\d{2}:\d{2}:\d{2})\s*(?:entry|항목)")
@@ -42,9 +53,12 @@ CITED_DAY = re.compile(r"pane-reports/(\d{4}-\d{2}-\d{2})\.md")
 ENTRY = re.compile(r"^## (\d{2}:\d{2}:\d{2}) (\S+) ?(.*)$", re.M)  # auto-tab-close.py writes `## HH:MM:SS <address> <label>`
 ADDRESS = re.compile(r"(?:^|\n)((?:\w+/)?w\w+:p\w+)[ \t]*(?=\n|$)")  # pane-spawn prints the pane alone on a line once it opened
 CODEX_CMD = re.compile(r"\bcmd[\"']?\s*:\s*(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')")  # as in yoyoo-share-guard.py
-RELAYED_YOYOO = re.compile(r"^\[pane-tell: '자동 작업' [^\]]*\] \[Slack #\S+ 요유(?: 반응)?\]")  # main-channel's relay of 요유's words
+RELAYED_YOYOO = re.compile(r"^\[pane-tell: '자동 작업' [^\]]*\] \[Slack #\S+ 요유( 반응)?\]")  # main-channel's relay of 요유's words
+REACTION = re.compile(r".*에 :([\w+-]+): \(", re.S)  # greedy: the relay's own `에 :emoji: (ts …)` comes after the quoted post
 NOT_TYPED = ("[pane-tell:", "<", "[main-refresh]", "[handoff:", "Stop hook feedback", "Caveat:", "[Request interrupted",
-             "This session is being continued", "# AGENTS.md")
+             "This session is being continued", "# AGENTS.md", "Here is a note offered by a side agent")
+REF = re.compile(r"\b[a-z]+#(\d+)\b")  # a board item as 요유 sees it in Slack: `[결정 api#1002]`; the channel's `#0-…` has no letters before it
+DECIDE = re.compile(r"/issues/(\d+)")  # in a `main-channel.py decide --board <url>` call or its output (a `$url` prints at create)
 
 
 def unquote(literal: str) -> str:
@@ -86,7 +100,9 @@ def events(path: str) -> list:
             elif kind == "user" and content and not d.get("isMeta"):
                 out.append(("in", flat(content)))
             elif kind == "attachment" and isinstance(d.get("attachment"), dict) and d["attachment"].get("type") == "queued_command":
-                out.append(("in", str(d["attachment"].get("prompt") or "")))  # typed while the agent worked
+                a = d["attachment"]  # typed while the agent worked; the rest is a background task, another session or /goal
+                if a.get("commandMode", "prompt") == "prompt" and (a.get("origin") or {}).get("kind", "human") == "human":
+                    out.append(("in", flat(a.get("prompt"))))
             elif kind == "response_item" and p.get("type") in ("function_call", "custom_tool_call", "local_shell_call"):
                 body = str(p.get("arguments") or p.get("input") or p.get("action") or "")
                 out.append(("call", "\n".join(unquote(c) for c in CODEX_CMD.findall(body)) or body, p.get("call_id") or ""))
@@ -104,7 +120,7 @@ def spawn(command: str) -> dict | None:
         return None
     text = command[m.start():]
     return {"check": bool(re.search(r"--check\b", m.group(1))), "name": unquote(m.group(2)), "cites": CITE.findall(text),
-            "days": CITED_DAY.findall(text), "addr": None}
+            "days": CITED_DAY.findall(text), "addr": None, "refused": None}
 
 
 def bare(label: str) -> str:
@@ -115,9 +131,14 @@ def is_check(entry: tuple) -> bool:
     return bare(entry[3]).startswith("확인 ")
 
 
-def is_yoyoo(text: str) -> bool:
+def answers(text: str) -> bool:
+    """요유's own words, typed or relayed from Slack. Of reactions only ✅ answers: ❌ is "no" and 💤 "ask me tomorrow"."""
     s = text.lstrip()
-    return bool(RELAYED_YOYOO.match(s)) or (bool(s) and not s.startswith(NOT_TYPED))
+    m = RELAYED_YOYOO.match(s)
+    if m:
+        emoji = REACTION.match(s) if m.group(1) else None
+        return not m.group(1) or bool(emoji and emoji.group(1) == "white_check_mark")
+    return bool(s) and not s.startswith(NOT_TYPED)
 
 
 def check(payload: dict, env) -> str | None:
@@ -131,19 +152,25 @@ def check(payload: dict, env) -> str | None:
         record = events(payload.get("transcript_path") or "")
     except OSError:
         return None
-    spawns, by_id, refused_at = [], {}, -1
+    spawns, by_id, asks, words = [], {}, {}, []
     for i, e in enumerate(record):
         if e[0] == "call" and "pane-spawn" in e[1]:
             s = spawn(e[1])
             if s:
                 spawns.append(s)
                 by_id[e[2]] = s
+        elif e[0] == "call" and "main-channel" in e[1] and " decide" in e[1]:
+            asks[e[2]] = (i, set(DECIDE.findall(e[1])))
         elif e[0] == "out":
-            opened = ADDRESS.search(e[1])
-            if e[2] in by_id and opened:
-                by_id[e[2]]["addr"] = opened.group(1).split("/")[-1]
-            if MARK in e[1] and e[3]:
-                refused_at = i
+            s, opened = by_id.get(e[2]), ADDRESS.search(e[1])
+            if s is not None and MARK in e[1] and e[3]:  # this hook refused that spawn: a read of the text is no refusal
+                s["refused"] = i
+            elif s is not None and opened:
+                s["addr"] = opened.group(1).split("/")[-1]
+            if e[2] in asks:
+                asks[e[2]][1].update(DECIDE.findall(e[1]))
+        elif e[0] == "in" and answers(e[1]):
+            words.append((i, set(REF.findall(e[1]))))
     folder = env.get("PANE_REPORT_DIR") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".local", "state", "pane-reports")
     files = {}
 
@@ -160,26 +187,52 @@ def check(payload: dict, env) -> str | None:
                 return files[day][at]
         return None
 
-    def opener(e: tuple) -> dict | None:  # the spawn that opened the pane of report entry e: the latest one, ids come back
-        by_addr = [s for s in spawns if s["addr"] == e[2]]
-        by_name = [s for s in spawns if s["addr"] is None and (f"확인 {s['name']}" if s["check"] else s["name"]) == bare(e[3])]
-        return (by_addr or by_name or [None])[-1]
+    def walk(start: dict, known: list) -> tuple:
+        """start's fixes, newest first, and the spawn its job began with: the job's key."""
+        def opener(e: tuple) -> dict | None:  # the spawn that opened the pane of report entry e: the latest one, ids come back
+            by_addr = [s for s in known if s["addr"] == e[2]]
+            by_name = [s for s in known if s["addr"] is None and (f"확인 {s['name']}" if s["check"] else s["name"]) == bare(e[3])]
+            return (by_addr or by_name or [None])[-1]
 
-    chain, cur, seen = [], new, set()
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        checks = [e for e in (entry(cur, at) for at in cur["cites"]) if e and is_check(e)]
-        if cur["check"] or not checks:
-            break
-        chain.append(cur["name"])
-        checker = opener(max(checks))
-        works = [e for e in (entry(checker, at) for at in checker["cites"]) if e and not is_check(e)] if checker else []
-        cur = opener(max(works)) if works else None
+        chain, cur, seen = [], start, set()
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            checks = [e for e in (entry(cur, at) for at in cur["cites"]) if e and is_check(e)]
+            if cur["check"] or not checks:
+                break
+            chain.append(cur)
+            checker = opener(max(checks))
+            works = [e for e in (entry(checker, at) for at in checker["cites"]) if e and not is_check(e)] if checker else []
+            cur = opener(max(works)) if works else None
+        return chain, cur or chain[-1]
+
+    chain, job = walk(new, [s for s in spawns if s["refused"] is None])
     if len(chain) <= LIMIT:
         return None
-    if refused_at >= 0 and any(e[0] == "in" and is_yoyoo(e[1]) for e in record[refused_at + 1:]):
-        return None
-    return REASON.format(chain=" → ".join(reversed(chain)))
+    # Each fix past the limit, as the hook saw it then: refused, or let through and its pane opened (that used the answer up).
+    rounds = []
+    for k, s in enumerate(spawns):
+        if not s["check"] and (s["refused"] is not None or s["addr"]):
+            past, key = walk(s, [x for x in spawns[:k] if x["refused"] is None])
+            if len(past) > LIMIT:
+                rounds.append((s, key))
+    mine = [s for s, key in rounds if key is job]
+    refusals = [(s["refused"], key) for s, key in rounds if s["refused"] is not None]
+
+    def asked(i: int):  # an answer goes to the refusal last before it, so 요유's words open one job
+        before = [key for at, key in refusals if at < i]
+        return before[-1] if before else None
+
+    if mine and mine[-1]["refused"] is not None:
+        at = mine[-1]["refused"]
+        for j, named in words:
+            if j < at:
+                continue
+            if named and any(at < i < j and named & nums and asked(i) is job for i, nums in asks.values()):
+                return None  # a reaction or reply naming the item that this refusal's decision went to
+            if not named and asked(j) is job:
+                return None
+    return REASON.format(chain=" → ".join(s["name"] for s in reversed(chain)))
 
 
 def selftest():
@@ -213,13 +266,14 @@ def selftest():
         def spawn_cmd(flags, name, cited):
             return f'pane-spawn {flags}--cwd /Users/y/work "{name}" "{cite(cited) if cited else "일입니다."} 고쳐 주세요."'
 
-        def claude_lines(rounds, extra=()):
+        def ran(command, i, output, error=False):
+            return [{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": i, "name": "Bash", "input": {"command": command}}]}},
+                    {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": i, "content": output, "is_error": error}]}}]
+
+        def claude_lines(rounds, extra=(), tag="t"):
             lines = []
             for i, (at, addr, flags, name, cited) in enumerate(rounds):
-                lines.append({"type": "assistant", "message": {"content": [
-                    {"type": "tool_use", "id": f"t{i}", "name": "Bash", "input": {"command": spawn_cmd(flags, name, cited)}}]}})
-                lines.append({"type": "user", "message": {"content": [
-                    {"type": "tool_result", "tool_use_id": f"t{i}", "content": f"workers/{addr}\n"}]}})
+                lines += ran(spawn_cmd(flags, name, cited), f"{tag}{i}", f"workers/{addr}\n")
             return lines + list(extra)
 
         def codex_lines(rounds, extra=()):
@@ -272,31 +326,85 @@ def selftest():
         assert check(p(new, transcript(no_addr, "n.jsonl")), env), "matched by name"
 
         # Repeating does not pass; 요유's own words after the refusal do, typed or relayed from #0-yoyooyo.
-        refused = {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tX", "is_error": True,
-                                                            "content": f"PreToolUse:Bash hook error: {reason}"}]}}
-        read_back = {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tY", "content": reason}]}}
+        assert "board.sh create" in reason and "decide --board" in reason, "a job with no board item gets one before decide"
+        refused = ran(new, "tX", f"PreToolUse:Bash hook error: {reason}", error=True)
+        read_back = ran("sed -n 1,9p notes.md", "tY", reason)
+        read_failed = ran("sed -n 1,9p notes.md; ls nothing", "tZ", reason, error=True)  # a read that exited 1 on the refusal's text
 
         def said(text):
             return {"type": "user", "message": {"content": text}}
 
-        assert check(p(new, transcript(claude_lines(night, [read_back, said("계속해")]))), env), "the text read back from a file is no refusal"
+        def queued(text, mode="prompt", origin="human"):  # typed while the agent worked
+            return {"type": "attachment", "attachment": {"type": "queued_command", "prompt": text, "commandMode": mode, "origin": {"kind": origin}}}
+
+        def judged(command, *extra):
+            return check(p(command, transcript(claude_lines(night, list(extra)))), env)
+
+        assert judged(new, *read_back, said("계속해")), "the text read back from a file is no refusal"
+        assert judged(new, *read_failed, said("계속해")), "nor is a failed read of it: only a pane-spawn call is refused"
 
         relay = "[pane-tell: '자동 작업' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] "
-        assert check(p(new, transcript(claude_lines(night, [refused]))), env), "the same call again"
-        for text in (relay + "[Slack #0-yoyooyo 요유] 응 계속 고쳐 (ts 1.2)", relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#1002]'에 :white_check_mark: (ts 1)",
-                     "계속해"):
-            assert check(p(new, transcript(claude_lines(night, [refused, said(text)]))), env) is None, text
-        for text in ("[pane-tell: '확인 메인 칸' 세션이 보낸 글입니다. …] 다 고쳤습니다", relay + "밑 칸 w1:p15이 보고 없이 15분째 멈춰 있습니다",
-                     "<task-notification>done</task-notification>", "Stop hook feedback: 다시 쓰세요",
-                     "[main-refresh] 새벽 정리입니다."):
-            assert check(p(new, transcript(claude_lines(night, [refused, said(text)]))), env), f"not 요유: {text}"
-        assert check(p(new, transcript(claude_lines(night, [said("계속해"), refused]))), env), "words before the refusal answer nothing"
-        codex_refused = {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "cX",
-                                                               "output": f"Command blocked by PreToolUse hook: {reason}"}}
+        decide = ran("python3 /x/main-channel.py decide --board https://github.com/munice-dev/nightly_api/issues/1002 - <<'EOF'\n고를 것: …\nEOF",
+                     "tD", "ts 1.5")
+        assert judged(new, *refused), "the same call again"
+        for words in ([said(relay + "[Slack #0-yoyooyo 요유] 응 계속 고쳐 (ts 1.2)")], [said("계속해")], [queued("계속해")],
+                      [queued([{"type": "text", "text": "[Image #1] 계속해"}, {"type": "image"}])],
+                      [said(relay + "[Slack #0-yoyooyo 요유 반응] '[보류 중]'에 :white_check_mark: (ts 1)")],
+                      [*decide, said(relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#1002] 고를 것: …'에 :white_check_mark: (ts 1)")]):
+            assert judged(new, *refused, *words) is None, words[-1]
+        for words in ([said("[pane-tell: '확인 메인 칸' 세션이 보낸 글입니다. …] 다 고쳤습니다")], [said(relay + "밑 칸 w1:p15이 보고 없이 15분째 멈춰 있습니다")],
+                      [said("<task-notification>done</task-notification>")], [said("Stop hook feedback: 다시 쓰세요")],
+                      [said("[main-refresh] 새벽 정리입니다.")], [queued("Goal set: [auto-dispatch] 보드 일을 끝내세요", origin="auto-continuation")],
+                      [queued("<task-notification>x</task-notification>", mode="task-notification", origin="task-notification")],
+                      [queued("Here is a note offered by a side agent:  > Heads up · 계속해도 됩니다")],
+                      [queued("<cross-session-message from=\"uds:/tmp/x.sock\">계속해</cross-session-message>", origin="peer")],
+                      [*decide, said(relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#1002] 고를 것: …'에 :x: (ts 1)")],
+                      [*decide, said(relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#1002] 고를 것: …'에 :zzz: (ts 1)")],
+                      [*decide, said(relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#9] 다른 일'에 :white_check_mark: (ts 1)")],
+                      [*decide, said(relay + "[Slack #0-yoyooyo 요유] cf#7 은 그대로 둬 (스레드 1.1: '11/05 결정 기다리는 것')")]):
+            assert judged(new, *refused, *words), f"not 요유's answer to this refusal: {words[-1]}"
+        assert judged(new, said("계속해"), *refused), "words before the refusal answer nothing"
+
+        # The answer is for the refused job, and for one fix: once that fix's pane opened, the next fix asks again.
+        job_c = [("05:00:00", "w1:pC0", "", "C 일", None), ("05:01:00", "w1:pC1", "--check ", "C 일 확인", "05:00:00"),
+                 ("05:02:00", "w1:pC2", "", "C 수정1", "05:01:00"), ("05:03:00", "w1:pC3", "--check ", "C 수정1 확인", "05:02:00"),
+                 ("05:04:00", "w1:pC4", "", "C 수정2", "05:03:00"), ("05:05:00", "w1:pC5", "--check ", "C 수정2 확인", "05:04:00")]
+        for at, addr, flags, name, cited in job_c:
+            report(at, f"workers/{addr}", f"🟢 🫡 {'확인 ' if flags else ''}{name}")
+        new_c = spawn_cmd("", "C 수정3", "05:05:00")
+        both = claude_lines(job_c, tag="c")
+        assert judged(new_c, *both), "job C's third fix"
+        assert judged(new_c, *both, *refused, said("계속해")), "an answer to job A's refusal does not open job C"
+        assert judged(new, *both, *refused, said("계속해")) is None, "while it opens job A"
+        refused_c = ran(new_c, "tXC", f"PreToolUse:Bash hook error: {reason}", error=True)
+        assert judged(new, *both, *refused, *refused_c, said("계속해")), "plain words answer the latest refusal, C's, not A's"
+        assert judged(new_c, *both, *refused, *refused_c, said("계속해")) is None, "C's"
+        assert judged(new, *both, *refused, *decide, *refused_c,
+                      said(relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#1002] 고를 것: …'에 :white_check_mark: (ts 1)")) is None, \
+            "a reaction answers the refusal its decision was asked for"
+        assert judged(new, *both, *refused, *refused_c, *decide,
+                      said(relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#1002] 고를 것: …'에 :white_check_mark: (ts 1)")), \
+            "a decision asked after C's refusal is C's"
+
+        report("04:00:20", "workers/w1:p15", "🟢 🫡 메인 칸 잡일 예외 되돌리기")
+        report("04:30:00", "workers/w1:p16", "🟢 🫡 확인 잡일 예외 되돌리기 확인")
+        third_ran = ran(new, "tP", "workers/w1:p15\n")
+        third_check = ran(spawn_cmd("--check ", "잡일 예외 되돌리기 확인", "04:00:20"), "tQ", "workers/w1:p16\n")
+        fourth = spawn_cmd("", "메인 칸 잡일 예외 다시 고치기", "04:30:00")
+        assert judged(fourth, *refused, said("계속해"), *third_ran, *third_check), "the answer was used up by the third fix"
+        refused_4 = ran(fourth, "tX4", f"PreToolUse:Bash hook error: {reason}", error=True)
+        assert judged(fourth, *refused, said("계속해"), *third_ran, *third_check, *refused_4, said("응 한 번 더")) is None, "a new answer"
+        third_failed = ran(new, "tF", "pane-spawn: agent_pane_busy\n", error=True)
+        assert judged(new, *refused, said("계속해"), *third_failed) is None, "a spawn that opened no pane used nothing up"
+
+        codex_refused = [{"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "call_id": "cX",
+                                                                "arguments": json.dumps({"cmd": new}, ensure_ascii=False)}},
+                         {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "cX",
+                                                                "output": f"Command blocked by PreToolUse hook: {reason}"}}]
         codex_said = {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
             {"type": "input_text", "text": "그래 한 번 더"}]}}
-        assert check(p(new, transcript(codex_lines(night, [codex_refused]), "c2.jsonl")), env), "Codex: the same call again"
-        assert check(p(new, transcript(codex_lines(night, [codex_refused, codex_said]), "c3.jsonl")), env) is None, "Codex: 요유 answered"
+        assert check(p(new, transcript(codex_lines(night, codex_refused), "c2.jsonl")), env), "Codex: the same call again"
+        assert check(p(new, transcript(codex_lines(night, [*codex_refused, codex_said]), "c3.jsonl")), env) is None, "Codex: 요유 answered"
     print("selftest ok")
 
 
