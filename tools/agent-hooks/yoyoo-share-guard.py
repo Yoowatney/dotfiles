@@ -77,6 +77,10 @@ PROBLEM_REASON = ("yoyoo-share-guard: 문제 보고에 '원인:', '조치:', '�
 SHARE_FULL = re.compile(r"요유[ \t]*몫[ \t]*\**[ \t]*[:：][ \t]*\**(.*?)[ \t]*(?=·[ \t]*\**(?:유요[ \t]*몫|세션)|$)", re.M)
 ITEM = re.compile(r",|，|·|\s그리고\s")
 ASIDE = re.compile(r"\([^)]*\)|（[^）]*）")  # the reason a session gives, and its commas, are not items
+# But an aside that adds work holds more items: "설계 승인(그리고 시험 실행)", "없음(새 작업: 시험 실행)" (2026-11-05).
+# ponytail: its opening words only; one that adds work without them ("없음(시험은 돌려야 함)") still reads as a reason.
+ADDED = re.compile(r"[(（][ \t]*(?:그리고[ \t]+|새[ \t]*작업[ \t]*[:：][ \t]*)([^)）]*)[)）]")
+RECORD = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.I)  # a session id, as Claude and Codex name them
 DECISION = re.compile(r"(?:결정(?:하기| 입력)?|정하기|고르기|선택|승인|답하기|판단|여부)$")
 DELEGATED = re.compile(r"머지|맡기|공유|리뷰|검토|댓글")  # standing permission: these are 유요's own steps, however they are worded
 # A step worded as a decision: `프로덕션 승격 승인` is 유요's step, or one bounce from it (요유 2026-11-01, api#975). A real 요유 call
@@ -217,7 +221,7 @@ def misses_problem_line(text: str) -> bool:
 def leaves_yoyoo_work(text: str) -> bool:
     text = prose(text)
     for m in SHARE.finditer(text):
-        value = m.group(1).strip(" \t*_.,;")
+        value = ADDED.sub(r", \1", m.group(1)).strip(" \t*_.,;")
         if value and not NONE.match(value):
             return True
     return False
@@ -551,7 +555,8 @@ def only_decisions(text: str) -> bool:
 def share_items(text: str, aside: bool = False) -> list:
     """The items of every 요유 몫 value, each without its aside unless asked (its commas then split it, which comparing allows)."""
     text = STRIP[2].sub(" ", STRIP[0].sub(" ", unicodedata.normalize("NFC", text)))
-    values = [m.group(1) if aside else ASIDE.sub(" ", m.group(1)) for m in SHARE_FULL.finditer(text)]
+    values = [ADDED.sub(r", \1", m.group(1)) for m in SHARE_FULL.finditer(text)]
+    values = [v if aside else ASIDE.sub(" ", v) for v in values]
     return [i.strip() for v in values if not NONE.match(v.strip(" \t*_.,;")) for i in ITEM.split(v)
             if i.strip(" \t*_.,;") and not NONE.match(i.strip(" \t*_.,;"))]
 
@@ -563,6 +568,7 @@ def asked_before(payload: dict, text: str, env) -> bool:
     Claude Code ran one more turn for the empty reply. Items, not the whole value: replayed on that session, 42 asks fall to 26,
     27 with the whole value. Asides count: new work can sit in one ("PR 읽기(그리고 시험 실행)"); dropping them made it 23.
     ponytail: one small file per asked session; asking prunes those untouched for a week, so a session open longer is asked once more.
+    Only files named as a session id go: the folder may hold anything else.
     """
     session, home = os.path.basename(payload.get("session_id") or ""), env.get("HOME")
     items = {" ".join(i.strip(" \t*_.,;").split()) for i in share_items(text, aside=True)}
@@ -576,8 +582,11 @@ def asked_before(payload: dict, text: str, env) -> bool:
             new = items - set(f.read().splitlines())
             f.write("".join(f"{i}\n" for i in sorted(new)))
         for old in os.scandir(folder) if new else ():  # it asks anyway, so a failed prune changes nothing
-            if old.stat().st_mtime < time.time() - 7 * 86400:
-                os.remove(old.path)
+            try:
+                if RECORD.fullmatch(old.name) and old.stat().st_mtime < time.time() - 7 * 86400:
+                    os.remove(old.path)
+            except OSError:
+                pass  # a folder, or a file gone already: the others still go
     except OSError:
         return False
     return not new
@@ -873,6 +882,11 @@ def selftest():
     assert decide(p("남은 것: 요유 몫: 없음, 시험 실행 · 유요 몫: 없음 · 세션: 닫아도 됨"), cli) == REASON, "work after '없음,' is asked"
     assert decide(p("남은 것: 요유 몫: 없음, 두 안 중 하나 고르기 · 유요 몫: 없음"), cli) is None, "its 없음 is no work beside a decision"
     assert not leaves_yoyoo_work("남은 것: 요유 몫: 없음. 보고 싶으면 말씀해 주세요, 한 번 보내 드립니다 · 세션: 닫아도 됨"), "a reason's comma"
+    # 2026-11-05: work added in an aside hid there. "없음(새 작업: …)" passed as empty and "설계 승인(그리고 …)" as a decision.
+    for v in ("없음(새 작업: 시험 실행)", "설계 승인(그리고 시험 실행)", "없음（그리고 PR 읽기）"):
+        assert decide(p(f"남은 것: 요유 몫: {v} · 유요 몫: 없음 · 세션: 닫아도 됨"), cli) == REASON, f"work in an aside is asked: {v}"
+    for v in ("없음(보드가 감시)", "없음(새 작업 없음)", "설계 승인(추천: A안, 그리고 B안은 버림)"):
+        assert decide(p(f"남은 것: 요유 몫: {v} · 유요 몫: 없음 · 세션: 닫아도 됨"), cli) is None, f"a reason is no work: {v}"
     # 요유 2026-11-04 (api#993): a 요유 몫 that only points at the board made them read the issue history on GitHub.
     for t in ("남은 것: 요유 몫: https://github.com/munice-dev/nightly_api/issues/993 의 질문에 답하기 · 유요 몫: 없음",
               "남은 것: 요유 몫: #993 질문에 답하기 · 유요 몫: 없음",
@@ -902,14 +916,25 @@ def selftest():
         assert decide(p(f"왜: 막혀서\n{held}", session_id="s1"), home) == WHAT_REASON, "a due rewrite does not bring it back"
         assert decide(p(held.replace("없음 · 세션", "PR 대기 · 세션"), session_id="s1"), home) is None, "유요 몫 is not part of it"
         assert decide(p(held.replace("데이터셋을", "값 넣기, 데이터셋을"), session_id="s1"), home) == REASON, "a new item is asked"
-        assert decide(p(held, session_id="s2"), home) == REASON, "another session is asked"
-        for first, then in (("PR 읽기", "PR 읽기(그리고 테스트 실행)"), ("시험하기(PR 1)", "시험하기(PR 2)")):
+        uid = "{:08x}-0000-4000-8000-000000000000".format  # Claude's and Codex's session ids
+        assert decide(p(held, session_id=uid(2)), home) == REASON, "another session is asked"
+        for first, then in (("PR 읽기", "PR 읽기(그리고 테스트 실행)"), ("시험하기(PR 1)", "시험하기(PR 2)"),
+                            ("설계 승인", "설계 승인(그리고 시험 실행)")):
             share = lambda v: p(f"남은 것: 요유 몫: {v} · 유요 몫: 없음 · 세션: 닫아도 됨", session_id="s5")
-            assert decide(share(first), home) == decide(share(then), home) == REASON, f"new work in an aside: {then}"
+            assert decide(share(first), home) == (None if is_decision(first) else REASON), first
+            assert decide(share(then), home) == REASON, f"new work in an aside: {then}"
+        # 2026-11-05 check pane: pruning took a note that was no record, and stopped at a folder it could not remove.
         folder = os.path.join(d, ".local", "state", "share-guard")
-        os.utime(os.path.join(folder, "s2"), (0, 0))
-        assert decide(p(held, session_id="s6"), home) == REASON
-        assert "s2" not in os.listdir(folder) and "s6" in os.listdir(folder), "a record a week old is pruned"
+        stale = [uid(n) for n in range(10, 30)]
+        os.makedirs(os.path.join(folder, uid(9)))
+        for name in (*stale, "keep-notes.txt"):
+            open(os.path.join(folder, name), "w").close()
+        for name in (uid(2), uid(9), *stale, "keep-notes.txt"):
+            os.utime(os.path.join(folder, name), (0, 0))
+        assert decide(p(held, session_id=uid(6)), home) == REASON
+        kept = set(os.listdir(folder))
+        assert uid(6) in kept and not kept & {uid(2), *stale}, "records a week old are pruned, past one that will not go"
+        assert {"keep-notes.txt", uid(9)} <= kept, "only session records are pruned"
         assert decide(p(held), home) == decide(p(held), home) == REASON, "no session id: asked every time, as before"
         assert decide(p(held, session_id="s3"), cli) == decide(p(held, session_id="s3"), cli) == REASON, "no HOME: as before"
         locked = os.path.join(d, "locked")
