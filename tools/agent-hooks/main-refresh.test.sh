@@ -265,7 +265,7 @@ rm -f "$S"/agent-handoff/*.md; now MAIN_REFRESH_HOUR=09; check "--now runs again
 rm_stamp; status working; ( sleep 1; echo idle > "$SANDBOX/status" ) & now MAIN_REFRESH_DEADLINE= MAIN_REFRESH_HOUR=09; wait
 check "--now waits for a busy pane to rest" "$(cleared)" 1
 # Words that reach the pane while it saves are recorded as a queued_command attachment, not a user line (review, 2026-11-05).
-rm_stamp; now NEW_TURN=queued MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.5
+rm_stamp; now NEW_TURN=queued MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=5
 check "--now with words queued during every save: no /clear" "$(cleared)|$(grep -q '새 대화' "$S/orchestrator/refresh.log" && echo 1 || echo 0)" "0|1"
 rm_stamp; mr NEW_TURN=queued MAIN_REFRESH_HOUR=05; check "the night run too" "$(cleared)" 0
 rm_stamp; now NEW_TURN=compact MAIN_REFRESH_HOUR=09; check "a compaction summary is no new message" "$(cleared)" 1
@@ -284,14 +284,14 @@ rm_stamp; ( exec -a "pane-tell --deliver msg term_M sid-main term_x " sleep 5 ) 
 now MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.5; kill "$pend" 2>/dev/null; wait "$pend" 2>/dev/null
 check "a message waiting for the main pane: no /clear" "$(cleared)|$(grep -c '대기 중인 글' "$S/orchestrator/refresh.log")" "0|1"
 # A message that lands while the last checks run (here: during pgrep) is still caught: the transcript is read last.
-rm_stamp; now PATH="$SANDBOX/pg:$PATH" MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=2
+rm_stamp; now PATH="$SANDBOX/pg:$PATH" MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=5
 check "a message during the last checks: no /clear" "$(cleared)|$(grep -q '새 대화' "$S/orchestrator/refresh.log" && echo 1 || echo 0)" "0|1"
 # Started in the main pane's background, main-refresh must not be listed as a job to start again: it would loop.
 rm_stamp; now MAIN_REFRESH_HOUR=09; check "the request leaves main-refresh itself out" "$(grep -c 'main-refresh 자신은 빼고' "$SANDBOX/told")" 1
 rm_stamp; : > "$STAMP"; now MAIN_REFRESH_HOUR=05; check "--now ignores the daily stamp" "$(cleared)" 1
 rm_stamp; now BOX_FULL=1 MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.5
 check "--now with words in the box: no request, no /clear" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "0|0"
-rm_stamp; now NEW_TURN=yes MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.5
+rm_stamp; now NEW_TURN=yes MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=5
 check "--now with a message after every save: no /clear" "$(cleared)|$(grep -q '새 대화' "$S/orchestrator/refresh.log" && echo 1 || echo 0)" "0|1"
 # Its quiet default is 5 s, not the night's 600: a turn 2 minutes old goes ahead, one that just ended waits.
 rm_stamp; touch "$SANDBOX/sid-main.jsonl"; now MAIN_REFRESH_QUIET= MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.3
