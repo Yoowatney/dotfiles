@@ -166,6 +166,8 @@ command -v "$H" >/dev/null 2>&1 || die "herdr not found"
 command -v jq >/dev/null 2>&1 || die "jq not found"
 if [ "${1:-}" = --raw ]; then
   [ $# -eq 3 ] && [ -n "$2" ] && [ -n "$3" ] || die 'usage: pane-tell --raw <pane id> "<message>"'
+  # no mark, so the receiver reads it as 요유's own typing: an unlock word never goes this way (api#1026)
+  case "$3" in *"prod 허용"* | *"staging 허용"*) die "--raw never types prod 허용 or staging 허용: send it without --raw, marked" ;; esac
   row=$("$H" pane get "$2" 2>/dev/null | jq -r '.result.pane | [(.pane_id // ""), (.agent // ""), (.terminal_id // ""), (.agent_session.value // "")] | @tsv')
   [ -n "$(cut -f1 <<<"$row")" ] || { echo "pane-tell: no pane \"$2\"" >&2; exit 3; }
   tell "$(cut -f1 <<<"$row")" "$(cut -f2 <<<"$row")" "$3" "$(cut -f3 <<<"$row")" "$(cut -f4 <<<"$row")" ""
