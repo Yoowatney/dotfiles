@@ -13,11 +13,16 @@ it reads as a session 요유 opened and never closes. A test that needs one uses
 here because Codex runs a new hook only after 요유 trusts it, and this command is already trusted. Jobs that run outside an
 agent's Bash tool (the dispatch job) never reach this hook.
 
-Recursive `rm` and `git push --no-verify` live here for the same reason. Claude's deny list is a list of spellings and Codex
-does not read it, and a session whose `rm -rf` was refused went on with `rm -r -f` and then one file at a time.
+Recursive `rm` and the git commands on Claude's deny list that lose work or skip hooks (force push, `reset --hard`,
+`clean -f`, `add -f`, `filter-branch`/`filter-repo`, `--no-verify`) live here for the same reason. Claude's deny list matches
+spellings from the front and Codex does not read it: a session whose `rm -rf` was refused went on with `rm -r -f`, and in the
+30 days to 2026-11-05 Claude sessions sent `git push -q --force-with-lease`, `git reset -q --hard` and `git clean -n -fd` past
+it. So options are read in any order, in clusters and as the abbreviations git accepts (`reset --har` ran).
+`git rebase -i` stays on the list only: it waits on an editor and loses nothing.
 Scripts a command runs and `trap` cleanups are not seen, so hooks and jobs that clean up after themselves keep working.
-ponytail: `$(rm -r x)`, a heredoc fed to bash, `case` arms, function bodies, `find -exec sudo rm`, `find -delete`, `ssh host rm`
-and `git -c core.hooksPath=` get past it. Add one when a session reaches for it; a determined caller beats any command check.
+ponytail: `$(rm -r x)`, a heredoc fed to bash, `case` arms, function bodies, `find -exec sudo rm`, `find -delete`, `ssh host rm`,
+git aliases, `-c clean.requireForce=false` and `git -c core.hooksPath=` get past it. Add one when a session reaches for it;
+a determined caller beats any command check.
 
     no-sed-inplace.py --selftest
 """
@@ -107,13 +112,56 @@ def removes_recursively(w: list[str]) -> bool:
     return False
 
 
-def skips_push_hook(w: list[str]) -> bool:
+NO_VERIFY = ("no-verify: `git push --no-verify`와 `git commit --no-verify`(`-n`)는 막혀 있음. "
+             "훅이나 push 전 시험이 실패하면 고치거나 그대로 보고할 것")
+FORCE_PUSH = "git-force-push: 강제 push(`-f`, `--force`, `--force-with-lease`, `+브랜치`)는 막혀 있음. 원격 기록을 덮어씀"
+REWRITE = "git-rewrite: `git filter-branch`와 `git filter-repo`는 막혀 있음. 저장소 기록 전체를 다시 씀"
+RESET_HARD = "git-reset-hard: `git reset --hard`는 막혀 있음. 커밋하지 않은 변경이 지워짐. 치워 둘 것은 `git stash`"
+CLEAN = ("git-clean: `git clean -f`는 막혀 있음. 추적하지 않는 파일이 지워짐. "
+         "미리 보기는 `-f` 없이 `git clean -n -d`, 지워도 되는 파일은 `trash <경로>`")
+ADD_FORCE = ("git-add-force: `git add -f`는 막혀 있음. .gitignore가 막아 둔 파일(비밀값 파일 등)이 커밋됨. "
+             "꼭 넣을 파일이면 .gitignore를 고칠 것")
+# Per refused subcommand: letters that count inside a short cluster (-fd, -anm), long names, and letters whose value follows
+# in the same word, so the letters after them are text (`-m"done"` is the message "done", not -n).
+# git takes any unique start of a long name (`reset --har` ran), so a word that starts a refused name counts.
+GIT_BANS = {
+    "push": ({"f": FORCE_PUSH}, {"--force": FORCE_PUSH, "--force-with-lease": FORCE_PUSH, "--no-verify": NO_VERIFY}, "o"),
+    "commit": ({"n": NO_VERIFY}, {"--no-verify": NO_VERIFY}, "mFCctS"),
+    "reset": ({}, {"--hard": RESET_HARD}, ""),
+    "clean": ({"f": CLEAN}, {"--force": CLEAN}, "e"),
+    "add": ({"f": ADD_FORCE}, {"--force": ADD_FORCE}, ""),
+}
+
+
+def git_problem(w: list[str]) -> str | None:
+    """The refusal for a git command that loses work or skips hooks, read the way git reads its options, in any order."""
+    if name(w[0]) in ("git-filter-repo", "git-filter-branch"):
+        return REWRITE
     if name(w[0]) != "git":
-        return False
+        return None
     k = 1
     while k < len(w) and w[k].startswith("-"):
         k += 2 if w[k] in ("-C", "-c", "--git-dir", "--work-tree") else 1
-    return k < len(w) and w[k] == "push" and "--no-verify" in w[k + 1:]
+    sub, args = (w[k], w[k + 1:]) if k < len(w) else ("", [])
+    if sub in ("filter-branch", "filter-repo"):
+        return REWRITE
+    if sub not in GIT_BANS:
+        return None
+    short, longs, valued = GIT_BANS[sub]
+    for word in args[:args.index("--")] if "--" in args else args:  # after `--` a word is a file name
+        if word.startswith("--"):
+            opt = word.split("=", 1)[0]
+            found = next((v for n, v in longs.items() if len(opt) > 2 and n.startswith(opt)), None)
+        elif word.startswith("-"):
+            letters = re.split(f"[{re.escape(valued)}]", word[1:])[0] if valued else word[1:]
+            found = next((short[c] for c in letters if c in short), None)
+        else:
+            continue
+        if found:
+            return found
+    if sub == "push" and any(word.startswith("+") for word in args):  # `+main` forces, after `--` too
+        return FORCE_PUSH
+    return None
 
 
 def code_only(cmd: str) -> str:
@@ -144,8 +192,9 @@ def bash_problem(cmd: str) -> str | None:
             return ("no-recursive-rm: 재귀 삭제(`rm -r`)는 막혀 있음. production 일이 아니라 명령 형식 문제라 멈추지 않아도 됨. "
                     "지워도 되는 임시 파일이나 다시 만들어지는 산출물이면 `trash <경로>`로 휴지통에 옮기고 하던 일을 그대로 이어 갈 것. "
                     "휴지통으로 옮길 수 없거나 지워도 되는지 모르면 형태를 바꿔 다시 실행하지 말고 그대로 보고할 것")
-        if skips_push_hook(w):
-            return "no-push-bypass: `git push --no-verify`는 막혀 있음. push 전 시험이 실패하면 고치거나 그대로 보고할 것"
+        reason = git_problem(w)
+        if reason:
+            return reason + ". 형태를 바꿔 다시 실행하지 말 것"
     return None
 
 
@@ -363,6 +412,116 @@ def selftest():
     ]
     for c in deny:
         assert "no-verify" in (bash_problem(c) or ""), f"should deny: {c}"
+    for c in allow:
+        assert bash_problem(c) is None, f"should allow: {c} -> {bash_problem(c)}"
+
+    # Claude's deny list matches spellings from the front: `git clean -n -fd` ran past `git clean -fd:*` and
+    # `git reset --har` past `git reset --hard:*` (2026-11-05), and Codex has no list at all.
+    deny = {
+        "git-force-push": [
+            "git push -f",
+            "git push origin main -f",
+            "git push -uf origin main",
+            "git push --force origin main",
+            "git push origin main --force",
+            "git push --force-with-lease",
+            "git push origin main --force-with-lease=main:abc123",
+            "git push --force-w origin main",
+            "git push origin +main",
+            "git push origin '+HEAD:main'",
+            "git push -- origin +main",
+            "git -C repo push -f",
+            "git -c x=y push --force",
+            "git --no-pager push origin -f",
+            "cd repo && git push origin main -f",
+            "bash -c 'git push -f'",
+        ],
+        "no-verify": [
+            "git commit --no-verify -m x",
+            "git commit -m x --no-verify",
+            "git commit -n -m x",
+            "git commit -m x -n",
+            "git commit -nm x",
+            "git commit -anm x",
+            "git commit --no-veri -m x",
+            "git -C repo commit -n -m x",
+        ],
+        "git-reset-hard": [
+            "git reset --hard",
+            "git reset HEAD~1 --hard",
+            "git reset -q --hard origin/main",
+            "git reset --har",
+            "git -C repo reset --hard",
+            "git --no-pager reset --hard",
+            "timeout 5 git reset --hard",
+            "ls; git reset --hard @{u}",
+        ],
+        "git-clean": [
+            "git clean -f",
+            "git clean -fd",
+            "git clean -df",
+            "git clean -xdf",
+            "git clean -d -f",
+            "git clean -d --force",
+            "git clean --forc -d",
+            "git clean -n -fd",
+            "git clean -fd -n",
+            "git -C repo clean -fdx",
+            "ls && git clean -ffdx",
+        ],
+        "git-add-force": [
+            "git add -f .env",
+            "git add .env -f",
+            "git add -Af",
+            "git add -fA",
+            "git add --force x",
+            "git add x --force",
+            "git add --forc x",
+            "git -C repo add -f x",
+        ],
+        "git-rewrite": [
+            "git filter-branch --tree-filter 'rm -f x' HEAD",
+            "git filter-repo --path x",
+            "git -C repo filter-repo --invert-paths --path x",
+            "git-filter-repo --path x",
+            "/opt/homebrew/bin/git-filter-repo --path x",
+        ],
+    }
+    allow = [
+        "git push",
+        "git push -u origin main",
+        "git push --follow-tags origin main",
+        "git push --dry-run origin main",
+        "git push origin main:main",
+        "git commit -m 'git push -f'",
+        "echo git push --force",
+        "git commit -m x",
+        "git commit -am x",
+        'git commit -m"done"',
+        "git commit -m 'fix -n flag'",
+        "git commit --amend --no-edit",
+        "git commit -F msg.txt",
+        "git log -n 5",
+        "git reset",
+        "git reset --soft HEAD~1",
+        "git reset HEAD file",
+        "git reset -- --hard",
+        "git clean -n",
+        "git clean -nd",
+        "git clean -n -d",
+        "git add .",
+        "git add -A",
+        "git add -p",
+        "git add -- -f",
+        "git add -N x",
+        "brew info git-filter-repo",
+        "echo git filter-branch",
+        "git log --grep filter-branch",
+        "git rebase -i HEAD~3",  # stays on Claude's list only: it waits on an editor, it loses nothing
+    ]
+    for kind, cmds in deny.items():
+        for c in cmds:
+            assert kind in (bash_problem(c) or ""), f"should deny as {kind}: {c} -> {bash_problem(c)}"
     for c in allow:
         assert bash_problem(c) is None, f"should allow: {c} -> {bash_problem(c)}"
     print("selftest ok")
