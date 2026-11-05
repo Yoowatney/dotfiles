@@ -557,9 +557,10 @@ def selftest() -> None:
 
     # tick() over the limit on the flat runaway: nothing stopped, one log line, the main pane told, a notification; every
     # round, a quiet one too, overwrites the heartbeat file, so a watch that stopped shows (check pane 2026-11-05).
-    # The table, herdr and stop_group are fakes here: a regression stops nobody real.
+    # The table, herdr, stop_group and this watch's own pid are fakes here: a regression stops nobody real, and the real pid
+    # cannot land on a fake member (20000-23499 is bomb35) and protect the runaway (a pre-push failed so, 2026-11-05).
     g = globals()
-    saved = g["list_procs"], g["stop_group"], herdr_peers.all_panes
+    saved = g["list_procs"], g["stop_group"], herdr_peers.all_panes, os.getpid
     with tempfile.TemporaryDirectory() as d:
         os.makedirs(os.path.join(d, "orchestrator"))
         with open(os.path.join(d, "orchestrator", "main"), "w") as f:
@@ -576,6 +577,7 @@ def selftest() -> None:
             g["list_procs"] = lambda: table
             g["stop_group"] = lambda members, keep_for: stopped.extend(members) or members
             herdr_peers.all_panes = lambda env: {"term_m": ("default/w1:p1", {})}
+            os.getpid = lambda: 300  # this watch's place in `base`
             line = tick(e, Main(ask=lambda env: 0), 1000.0, 3000)
             assert line and "못 찾음" in line and not stopped, (line, len(stopped))
             log = read(state_file(e, "kills.log")).splitlines()
@@ -596,7 +598,7 @@ def selftest() -> None:
             line = tick(e, Main(ask=lambda env: 0), 3000.0, 3000)
             assert line and " 끔 " in line and len(stopped) == 3501, (line, len(stopped))
         finally:
-            g["list_procs"], g["stop_group"], herdr_peers.all_panes = saved
+            g["list_procs"], g["stop_group"], herdr_peers.all_panes, os.getpid = saved
 
     # the kernel table: every row matches ps, and this process is in it
     rows = list_procs()
