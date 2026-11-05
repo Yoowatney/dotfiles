@@ -39,6 +39,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import unicodedata
 
 sys.dont_write_bytecode = True  # no __pycache__ in the dotfiles at every stop
@@ -547,10 +548,10 @@ def only_decisions(text: str) -> bool:
     return bool(items) and all(is_decision(i) for i in items)
 
 
-def share_items(text: str) -> list:
-    """The items of every 요유 몫 value, each without its aside."""
+def share_items(text: str, aside: bool = False) -> list:
+    """The items of every 요유 몫 value, each without its aside unless asked (its commas then split it, which comparing allows)."""
     text = STRIP[2].sub(" ", STRIP[0].sub(" ", unicodedata.normalize("NFC", text)))
-    values = [ASIDE.sub(" ", m.group(1)) for m in SHARE_FULL.finditer(text)]
+    values = [m.group(1) if aside else ASIDE.sub(" ", m.group(1)) for m in SHARE_FULL.finditer(text)]
     return [i.strip() for v in values if not NONE.match(v.strip(" \t*_.,;")) for i in ITEM.split(v) if i.strip(" \t*_.,;")]
 
 
@@ -558,12 +559,12 @@ def asked_before(payload: dict, text: str, env) -> bool:
     """This session was asked about every 요유 몫 item already; asking records the new ones. No session id or HOME: ask.
 
     요유 2026-11-05: the main pane kept one data deletion in 요유 몫 for hours. Asked at each report, it ended without a word and
-    Claude Code ran one more turn for the empty reply. Items, not the whole value: replayed on that session, 42 asks fall to 23,
-    27 with the whole value, since the aside (a link, a recommendation) changed between reports.
-    ponytail: one small file per asked session, never cleaned; prune by age if ~/.local/state/share-guard ever matters.
+    Claude Code ran one more turn for the empty reply. Items, not the whole value: replayed on that session, 42 asks fall to 26,
+    27 with the whole value. Asides count: new work can sit in one ("PR 읽기(그리고 시험 실행)"); dropping them made it 23.
+    ponytail: one small file per asked session; asking prunes those untouched for a week, so a session open longer is asked once more.
     """
     session, home = os.path.basename(payload.get("session_id") or ""), env.get("HOME")
-    items = {" ".join(i.strip(" \t*_.,;").split()) for i in share_items(text)}
+    items = {" ".join(i.strip(" \t*_.,;").split()) for i in share_items(text, aside=True)}
     if not (session and home and items):
         return False
     folder = os.path.join(home, ".local", "state", "share-guard")
@@ -573,6 +574,9 @@ def asked_before(payload: dict, text: str, env) -> bool:
             f.seek(0)
             new = items - set(f.read().splitlines())
             f.write("".join(f"{i}\n" for i in sorted(new)))
+        for old in os.scandir(folder) if new else ():  # it asks anyway, so a failed prune changes nothing
+            if old.stat().st_mtime < time.time() - 7 * 86400:
+                os.remove(old.path)
     except OSError:
         return False
     return not new
@@ -889,11 +893,18 @@ def selftest():
         linked = held.replace("것입니다", "것입니다(https://example.com/list?record=1)")
         assert decide(p(held, session_id="s1"), home) == REASON, "asked the first time"
         assert decide(p(held, session_id="s1"), home) is None, "the same 요유 몫 is not asked again"
-        assert decide(p("다시 정리했습니다.\n\n" + linked, session_id="s1"), home) is None, "nor with a new aside in another report"
+        assert decide(p("다시 정리했습니다.\n\n" + linked, session_id="s1"), home) == REASON, "a new aside is asked: it may hold new work"
         assert decide(p(f"왜: 막혀서\n{held}", session_id="s1"), home) == WHAT_REASON, "a due rewrite does not bring it back"
         assert decide(p(held.replace("없음 · 세션", "PR 대기 · 세션"), session_id="s1"), home) is None, "유요 몫 is not part of it"
         assert decide(p(held.replace("데이터셋을", "값 넣기, 데이터셋을"), session_id="s1"), home) == REASON, "a new item is asked"
         assert decide(p(held, session_id="s2"), home) == REASON, "another session is asked"
+        for first, then in (("PR 읽기", "PR 읽기(그리고 테스트 실행)"), ("시험하기(PR 1)", "시험하기(PR 2)")):
+            share = lambda v: p(f"남은 것: 요유 몫: {v} · 유요 몫: 없음 · 세션: 닫아도 됨", session_id="s5")
+            assert decide(share(first), home) == decide(share(then), home) == REASON, f"new work in an aside: {then}"
+        folder = os.path.join(d, ".local", "state", "share-guard")
+        os.utime(os.path.join(folder, "s2"), (0, 0))
+        assert decide(p(held, session_id="s6"), home) == REASON
+        assert "s2" not in os.listdir(folder) and "s6" in os.listdir(folder), "a record a week old is pruned"
         assert decide(p(held), home) == decide(p(held), home) == REASON, "no session id: asked every time, as before"
         assert decide(p(held, session_id="s3"), cli) == decide(p(held, session_id="s3"), cli) == REASON, "no HOME: as before"
         locked = os.path.join(d, "locked")
