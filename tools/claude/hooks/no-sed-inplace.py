@@ -217,6 +217,32 @@ def bash_problem(cmd: str) -> str | None:
     return None
 
 
+# A gh write (issue/PR text, a comment, `gh api` with a body) that copies 요유's own words from #0-yoyooyo is refused: the
+# team reads GitHub (lead 2026-11-05, after five comments quoted 요유). The check and the words it reads belong to the munice
+# agent board, which board.sh runs too; it lives here for the Codex trust reason above. No file there (another Mac) or any
+# error lets the command run.
+QUOTE_GUARD = "/Users/yoyoo/work/munice/.agents/skills/agent-board/main/quote_guard.py"
+
+
+def _quotes():
+    spec = importlib.util.spec_from_file_location("quote_guard", QUOTE_GUARD)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def quote_problem(cmd: str, cwd: str | None) -> str | None:
+    if not re.search(r"\bgh\b", cmd) or not os.path.isfile(QUOTE_GUARD):
+        return None
+    try:
+        import time
+        why = _quotes().gh_refusal(cmd, cwd or os.getcwd(), time.time())
+    except Exception:  # noqa: BLE001 - a broken check must not stop every gh call
+        return None
+    return "quote-guard: " + why if why else None
+
+
 def selftest():
     deny = [
         "sed -i '' 's/a/b/' file.txt",
@@ -575,6 +601,21 @@ def selftest():
             assert kind in (bash_problem(c) or ""), f"should deny as {kind}: {c} -> {bash_problem(c)}"
     for c in allow:
         assert bash_problem(c) is None, f"should allow: {c} -> {bash_problem(c)}"
+    if os.path.isfile(QUOTE_GUARD):  # 요유's words from #0-yoyooyo stay off GitHub through gh too
+        import tempfile
+        import time
+        old = os.environ.get("XDG_STATE_HOME")
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["XDG_STATE_HOME"] = d
+            try:
+                _quotes().remember([{"ts": "%.6f" % (time.time() - 60), "text": "7일동안 모니터링해보자는 뜻임~"}], time.time())
+                said = 'gh issue comment 1 -R a/b --body "요유가 7일동안 모니터링해보자는 뜻이라고 함"'
+                assert "유요의 말로" in (quote_problem(said, d) or ""), said
+                for c in ('gh issue comment 1 --body "요유가 7일 감시를 허락했습니다"', "gh search issues '7일동안 모니터링해보자는 뜻'",
+                          "echo '7일동안 모니터링해보자는 뜻' > a.md"):
+                    assert quote_problem(c, d) is None, c
+            finally:
+                os.environ.pop("XDG_STATE_HOME") if old is None else os.environ.update(XDG_STATE_HOME=old)
     print("selftest ok")
 
 
@@ -583,7 +624,8 @@ if __name__ == "__main__":
         selftest()
         sys.exit()
     payload = json.load(sys.stdin)
-    reason = bash_problem((payload.get("tool_input") or {}).get("command") or "") if payload.get("tool_name") == "Bash" else None
+    cmd = (payload.get("tool_input") or {}).get("command") or ""
+    reason = bash_problem(cmd) or quote_problem(cmd, payload.get("cwd")) if payload.get("tool_name") == "Bash" else None
     if reason:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
