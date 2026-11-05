@@ -51,8 +51,11 @@ name=$1 prompt=$2
 prompt+=$'\n\n이 칸은 리드 밑 칸입니다. 요유는 이 칸을 보지 않으니 요유에게 직접 묻거나 `prod 허용`, `staging 허용`, `/clear`를 부탁하지 마세요. 질문, 결정 요청, 보고는 답을 `남은 것:` 줄로 끝내면 이 칸을 연 리드에게 갑니다. 보고는 리드가 읽으니 요유에게 쓰는 형식(설명 페이지, `무엇을:`/`왜:`, `원인:`/`조치:`/`재발 방지:`)은 쓰지 말고, 리드가 확인할 결과와 근거를 편하게 적으세요.'
 shift 2
 [ "${1:-}" != -- ] || shift
+env_args=()
 case "$kind" in
-  claude) ready='.result.agent.agent_session.value' ;;
+  # Every Claude pane opened here works under a lead, so the advisor tool (a full uncached resend of the conversation per call)
+  # is off: the pane's shell carries the variable, and the agent and its subagents inherit it. Sessions opened by hand keep it.
+  claude) ready='.result.agent.agent_session.value' env_args=(--env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1) ;;
   codex) ready='.result.agent.interactive_ready' ;; # Codex reports no session id before its first prompt
   *) die "$USAGE" ;;
 esac
@@ -66,6 +69,12 @@ if [ -n "$check" ]; then
   python3 -I "$(dirname "$(readlink -f "$0")")/herdr_peers.py" --delegates-checks "term_$term" || die "--check is for the main pane; any other lead checks a pane's result itself (직접 확인: run the test or command, or look at the changed behavior or data)"
   name="확인 $name"
   prompt+=' 이 칸은 확인 칸입니다. 다른 칸이 다 했다고 보고한 일을 확인만 합니다. 코드나 설정을 고치지 말고, 테스트나 명령을 직접 실행하거나 바뀐 동작과 데이터를 직접 보세요. 다른 칸의 보고를 다시 읽는 것은 확인이 아닙니다. 다른 칸을 열지 마세요. 보고 첫 줄에 실행한 명령, 본 결과, 통과 여부를 모두 쓰세요.'
+  # A check runs a command and reads what changed, so a Claude check pane runs Sonnet at high effort, which costs about half
+  # (2026-11-05). A --model or --effort the caller passes after -- wins. Revert: delete this block.
+  if [ "$kind" = claude ]; then
+    case " $* " in *" --effort "* | *" --effort="*) ;; *) set -- --effort high "$@" ;; esac
+    case " $* " in *" --model "* | *" --model="*) ;; *) set -- --model claude-sonnet-5-5 "$@" ;; esac
+  fi
 fi
 main= hidden= sock= addr=
 mainfile="${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main"
@@ -101,9 +110,9 @@ open_pane() { # <a pane whose tab takes the new one, or empty> <workspace> <name
         else ($all | map(.rect.x) | max) as $x | ($all | map(select(.rect.x == $x)) | max_by([.rect.height, .rect.y])) as $t
           | if $t.rect.height < $min then empty else "\($t.pane_id) down" end
         end' 2>/dev/null)
-    [ -z "$target" ] || pane=$("${call[@]}" pane split --pane "$target" --direction "$direction" --cwd "$cwd" --no-focus | jq -r '.result.pane.pane_id // empty')
+    [ -z "$target" ] || pane=$("${call[@]}" pane split --pane "$target" --direction "$direction" --cwd "$cwd" --no-focus "${env_args[@]}" | jq -r '.result.pane.pane_id // empty')
   fi
-  [ -n "$pane" ] || pane=$("${call[@]}" tab create --workspace "$2" --cwd "$cwd" --label "$(tab_name "$3")" --no-focus | jq -r '.result.root_pane.pane_id // empty')
+  [ -n "$pane" ] || pane=$("${call[@]}" tab create --workspace "$2" --cwd "$cwd" --label "$(tab_name "$3")" --no-focus "${env_args[@]}" | jq -r '.result.root_pane.pane_id // empty')
   echo "$pane"
 }
 owner=${label#🔴}; owner=${owner#🟢}; owner=${owner# }; owner=${owner#👑}; owner=${owner#🫡}; owner=${owner# }; owner=${owner:-$name}

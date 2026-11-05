@@ -129,6 +129,14 @@ hasnt "tab create" "--same-tab opens no tab"
 SESSIONLESS=1 ps --kind codex "조사" "지시" -- -m gpt-5 >/dev/null
 has "--kind codex --pane w1:new --timeout 120000 -- -m gpt-5" "codex with its arguments"
 has "agent prompt w1:new 지시" "codex gets the instruction"
+hasnt "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" "a codex pane keeps its environment"
+
+# A Claude pane opened here runs without the advisor tool: the pane's shell gets the variable, so the agent and its subagents do.
+ps "조사" "지시" >/dev/null
+has "pane split --pane w7:p3 --direction right --cwd $PWD --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1" "a split pane has no advisor"
+hasnt "--model" "an ordinary pane keeps the caller's model"
+ps --new-tab "조사" "지시" >/dev/null
+has "tab create --workspace w7 --cwd $PWD --label 조사 --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1" "a pane in a new tab has none either"
 
 # A pane that was not ready for the first start is tried again.
 FAIL_START=1 ps "재시도" "지시" >/dev/null
@@ -218,11 +226,22 @@ has "고치지 말고" "a check pane changes nothing"
 has "다른 칸의 보고를 다시 읽는 것은 확인이 아닙니다" "rereading a report is no check"
 has "보고 첫 줄에" "its first line is what the main pane reads"
 [ "$out" = "workers/w1:new" ] || fail "a check pane's address names its server: $out"
+has "[workers] tab create --workspace w2 --cwd $PWD --label 확인 api#1 로그인 --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1" "a workers pane has no advisor"
+has "--kind claude --pane w1:new --timeout 120000 -- --model claude-sonnet-5-5 --effort high" "a check pane runs Sonnet at high effort"
 ps --cwd /tmp --check "로그인" "돌려 보세요" >/dev/null
 has "확인 칸입니다" "options in any order"
+ps --check "로그인" "돌려 보세요" -- --model opus >/dev/null
+has "-- --effort high --model opus" "the caller's model wins"
+hasnt "claude-sonnet-5-5" "and no second model"
+ps --check "로그인" "돌려 보세요" -- --model=opus --effort=xhigh >/dev/null
+hasnt "claude-sonnet-5-5" "the caller's --model= wins"
+hasnt "--effort high" "so does the caller's --effort="
 ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
 has "agent start spawn-65f21913323dc21-chk" "any agent kind"
 has "--kind codex" "any agent kind"
+hasnt "--model" "a codex check pane keeps its model"
+hasnt "--effort" "and its effort"
+hasnt "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" "and its environment"
 
 # Every other lead checks results itself, as does a pane under it, and a main-pane file that is stale or gone is no main pane.
 for state in other stale missing; do
