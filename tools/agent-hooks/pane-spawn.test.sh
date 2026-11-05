@@ -235,19 +235,42 @@ has "고치지 말고" "a check pane changes nothing"
 has "다른 칸의 보고를 다시 읽는 것은 확인이 아닙니다" "rereading a report is no check"
 has "보고 첫 줄에" "its first line is what the main pane reads"
 [ "$out" = "workers/w1:new" ] || fail "a check pane's address names its server: $out"
-# 2026-11-05: a check pane runs on Codex's spare weekly allowance, in Codex's read-only sandbox, so a write fails instead of
+# 2026-11-05: a check pane runs on Codex's spare weekly allowance, in Codex's sandbox, so a write to the repo fails instead of
 # relying on the instruction. Nobody answers its approval prompts, so a blocked command fails at once.
-has "--kind codex --pane w1:new --timeout 120000 -- --sandbox read-only --ask-for-approval never" "a check pane is a sandboxed Codex"
-has "읽기 전용 샌드박스" "it hears what the sandbox blocks"
+SANDBOXED="--sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=true"
+has "--kind codex --pane w1:new --timeout 120000 -- $SANDBOXED" "a check pane is a sandboxed Codex with the network"
+has "Codex 샌드박스" "it hears what the sandbox blocks"
 hasnt "--model" "a codex check pane keeps its model"
 hasnt "--effort" "and its effort"
 hasnt "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" "and its environment"
-ps --cwd /tmp --check "로그인" "돌려 보세요" >/dev/null
+# It may write only in a fixed empty folder outside any repo, besides temp: a test runs, and the repo stays as it was. Codex asks
+# whether to trust a repo it does not know after it reports ready, and the instruction pane-spawn types then answers yes and
+# is lost (2026-11-05, ~/.dotfiles). That folder is no repo, so nothing asks; the repo goes in the instruction instead.
+CHECK_DIR="$SANDBOX/home/.local/state/pane-spawn/check"
+has "tab create --workspace w2 --cwd $CHECK_DIR --label 확인 api#1 로그인" "it starts in the fixed folder"
+[ -d "$CHECK_DIR" ] || fail "the fixed folder is made"
+has "$PWD" "the folder to check, by absolute path, in the instruction"
+has "$PWD/AGENTS.md" "Codex reads no rules of a folder it did not start in, so it is told where they are"
+ps --cwd /work/repo --check "로그인" "돌려 보세요" >/dev/null
 has "확인 칸입니다" "options in any order"
+has "--cwd $CHECK_DIR " "a --cwd the caller gives is checked from the fixed folder too"
+has "/work/repo" "and named in the instruction"
 ps --check "로그인" "돌려 보세요" -- -m gpt-5 >/dev/null
-has "-- --sandbox read-only --ask-for-approval never -m gpt-5" "the caller's Codex arguments follow the sandbox"
+has "-- $SANDBOXED -m gpt-5" "the caller's Codex arguments follow the sandbox"
 ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
-has "--kind codex --pane w1:new --timeout 120000 -- --sandbox read-only" "--kind codex is the same"
+has "--kind codex --pane w1:new --timeout 120000 -- $SANDBOXED" "--kind codex is the same"
+SESSIONLESS=1 ps --kind codex --cwd /work/repo "조사" "지시" >/dev/null
+has "--cwd /work/repo " "a Codex pane that does the job starts where it is told"
+# 2026-11-05: Codex runs commands with mise's shims first on PATH. A test that swaps HOME then hid mise's config and installs from
+# it: python3 re-ran its own shim for ever, or met mise's trust error. Every Codex pane gets mise's folders by absolute path.
+# Values already set win, so this suite run inside a Codex pane (which has them, and needs them to reach python3) expects those.
+H=$SANDBOX/home
+MISE_ENV="--env MISE_CONFIG_DIR=${MISE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$H/.config}/mise} --env MISE_DATA_DIR=${MISE_DATA_DIR:-${XDG_DATA_HOME:-$H/.local/share}/mise} --env MISE_STATE_DIR=${MISE_STATE_DIR:-$H/.local/state/mise} --env MISE_CACHE_DIR=${MISE_CACHE_DIR:-$H/Library/Caches/mise}"
+has "--no-focus $MISE_ENV" "a Codex pane keeps mise's folders when a test swaps HOME"
+ps --check "로그인" "돌려 보세요" >/dev/null
+has "--no-focus $MISE_ENV" "so does a Codex check pane"
+ps "조사" "지시" >/dev/null
+hasnt "MISE_" "a Claude pane runs commands without the shims first, so it needs none"
 ps "조사" "지시" >/dev/null
 has "--kind claude" "a pane that does the job is still Claude"
 hasnt "--sandbox" "and has no sandbox"
@@ -256,7 +279,8 @@ out=$(ps --check --kind claude "api#1 로그인" "npm test를 돌려 보세요")
 has "[workers] tab create --workspace w2 --cwd $PWD --label 확인 api#1 로그인 --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1" "a workers pane has no advisor"
 has "--kind claude --pane w1:new --timeout 120000 -- --model claude-sonnet-5-5 --effort high" "a Claude check pane runs Sonnet at high effort"
 hasnt "--sandbox" "a Claude check pane gets no Codex flag"
-hasnt "읽기 전용 샌드박스" "nor the sandbox note"
+hasnt "Codex 샌드박스" "nor the sandbox note"
+has "--cwd $PWD " "and starts where it is told"
 has "확인 칸입니다" "it is still a check pane"
 ps --check --kind claude "로그인" "돌려 보세요" -- --model opus >/dev/null
 has "-- --effort high --model opus" "the caller's model wins"
