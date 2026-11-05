@@ -22,11 +22,16 @@
 # or data, and changes nothing (요유 2026-11-05, api#1002). The agent name carries `chk`, which a rename does not change, so its
 # report asks for no other check (auto-tab-close.py). Only a pane herdr_peers.delegates_checks says yes to may open one (the main
 # pane today); any other lead checks results itself, so there it is bad usage and opens nothing. A check pane is Codex in its
-# sandbox, which writes only in a fixed empty folder and temp and has the network; with --kind claude, or once Codex's week is
-# past 70% used, it is Claude Sonnet, which may write anywhere.
+# sandbox, which writes only in a fixed empty folder and temp and has no network: it reads GitHub through gh-read, Slack
+# through the Slack MCP's read tools, and processes with ps. With --kind claude, or once Codex's week is past 70% used, it is
+# Claude Sonnet, which may write anywhere.
+# --kind auto is that same choice for a pane that does the job: Codex until its week is past 70% used, then Claude. A lead opens
+# a pane that posts nothing to Slack (code, tests, docs) with it (요유 2026-11-05); a pane that posts to Slack stays Claude.
 # Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
 H=${HERDR_BIN_PATH:-herdr}
-USAGE='usage: pane-spawn [--new-tab] [--check] [--kind claude|codex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]'
+USAGE='usage: pane-spawn [--new-tab] [--check] [--kind claude|codex|auto] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
+  --kind auto: Codex until its week is past 70% used, then Claude. Open a pane that posts nothing to Slack (code, tests, docs) with it.
+  --check: a check pane (main pane only): Codex, read-only, by the same 70% rule; --kind claude for a check that must write.'
 MIN_ROWS=${PANE_SPAWN_MIN_ROWS:-16} # a 46-row window holds 4 panes of 11-12 rows, which still show about 5 lines of work (2026-11-04); a fifth would leave 5-6
 die() { echo "pane-spawn: $*" >&2; exit 2; }
 # Every reader takes a tab named "자동 …" or "알아서 …" for a job's: pane-tell refuses its panes, and no mark goes on it. A work name that
@@ -48,6 +53,7 @@ while [ $# -gt 0 ]; do
     --same-tab) same=1; shift ;;
     --new-tab) new_tab=1; shift ;;
     --check) check=1; shift ;;
+    -h | --help) echo "$USAGE"; exit 0 ;;
     --kind | --cwd)
       [ $# -ge 2 ] || die "$USAGE"
       if [ "$1" = --kind ]; then kind=$2; else cwd=$2; fi
@@ -58,12 +64,13 @@ while [ $# -gt 0 ]; do
 done
 [ $# -ge 2 ] && [ -n "$1" ] && [ -n "$2" ] || die "$USAGE"
 # A check pane runs on Codex's spare weekly allowance (2026-11-05) until that week is past 70% used. A check that must write to
-# GitHub, Slack or the board, or to the repo it checks, passes --kind claude: the Codex pane below is told not to or cannot.
-if [ -n "$check" ] && [ -z "$kind" ]; then
+# GitHub, Slack or the board, or to the repo it checks, passes --kind claude: the Codex pane below cannot.
+[ -z "$check" ] || [ -n "$kind" ] || kind=auto
+if [ "$kind" = auto ]; then
   kind=codex used=$(codex_week_used)
   if awk -v u="${used:-0}" 'BEGIN { exit !(u > 70) }'; then
     kind=claude
-    echo "pane-spawn: Codex has used ${used}% of its week, so this check pane runs Claude" >&2
+    echo "pane-spawn: Codex has used ${used}% of its week, so this pane runs Claude" >&2
   fi
 fi
 kind=${kind:-claude}
@@ -117,11 +124,51 @@ if [ -n "$check" ]; then
     # absolute path. Nobody answers its approval prompts, so a blocked write fails at once. That folder is no repo, so Codex asks
     # nothing on the way in: in a repo it does not trust yet it asks after it reports ready, and the instruction typed then
     # answers yes and is lost (2026-11-05, ~/.dotfiles).
-    # ponytail: the network that gh reads need lets GitHub, Slack and board writes out as well; only the instruction stops those.
-    target=$cwd cwd=$state/pane-spawn/check
-    mkdir -p "$cwd" || die "cannot make $cwd"
-    set -- --sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=true "$@"
-    prompt+=" 확인할 폴더는 $target 입니다. $target/AGENTS.md 가 있으면 먼저 읽으세요. 이 칸은 Codex 샌드박스 안에서 빈 작업 폴더 $cwd 를 쓰므로, 확인할 폴더는 절대경로로 읽으세요. 파일은 작업 폴더와 임시 폴더에만 쓸 수 있고, 확인할 폴더를 비롯한 다른 곳은 쓰기가 막힙니다. 네트워크는 열려 있어 gh 조회는 되지만, GitHub·Slack·보드에 글을 쓰지는 마세요. 막혀서 확인하지 못한 항목은 통과로 쓰지 말고, 무엇이 막혀 못 했는지 쓰세요."
+    # The sandbox has no network: with it, a command that can read Slack or GitHub can post or merge as well, and only the
+    # instruction stopped that. Reads leave through tools outside the sandbox that do no writes (요유 2026-11-05):
+    # - Codex rules in the folder's .codex, which the sandbox cannot write, let gh-read, ps and pgrep run outside it, each
+    #   only by its real path: Codex resolves an absolute path by its last part, so without host_executable a gh-read or ps
+    #   the agent wrote in temp would run outside too. ego-browser, which the user's own rules let out, drives a browser that
+    #   may be signed in to Slack, so here it is forbidden (the strictest rule wins). The folder is trusted, or Codex would
+    #   skip its rules. A rule is a prefix of one plain command, so `ps | grep` and `cd x && gh-read` run in the sandbox.
+    # - MCP servers and plugins run outside the sandbox too. Every server the user's config names is off but two that keep
+    #   only their read tools, and Codex's connectors (apps) and plugins are off.
+    # ponytail: a check that needs the network for anything else (bq, curl, a package download) fails here; such a check
+    # opens with --kind claude. An allow rule added later to ~/.codex/rules applies here too.
+    target=$cwd cwd=$state/pane-spawn/check here=$(dirname "$(readlink -f "$0")")
+    mkdir -p "$cwd/.codex/rules" || die "cannot make $cwd"
+    rules=$(mktemp "$cwd/.codex/rules/.check.XXXXXX") && cat > "$rules" <<EOF && mv -f "$rules" "$cwd/.codex/rules/check.rules" || die "cannot write $cwd/.codex/rules/check.rules"
+# Written by pane-spawn for its Codex check panes at each start; a change here is lost.
+prefix_rule(pattern=["$here/gh-read"], decision="allow")
+host_executable(name="ps", paths=["/bin/ps"])
+prefix_rule(pattern=["ps"], decision="allow")
+host_executable(name="pgrep", paths=["/usr/bin/pgrep"])
+prefix_rule(pattern=["pgrep"], decision="allow")
+prefix_rule(pattern=["ego-browser"], decision="forbidden")
+EOF
+    mcp=$(python3 -I - "${CODEX_HOME:-$HOME/.codex}/config.toml" <<'EOF'
+import json, os, re, sys, tomllib
+read_tools = {"slack": ["slack_list_channels", "slack_get_channel_history", "slack_get_thread_replies", "slack_get_users", "slack_get_user_profile"],
+              "munice": ["ask_code", "ask_data"]}
+servers = tomllib.load(open(sys.argv[1], "rb")).get("mcp_servers", {}) if os.path.exists(sys.argv[1]) else {}
+for name in servers:
+    # Codex splits a -c path at every dot and keeps quotes as part of the name, so `mcp_servers."x"` is a new, broken server.
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        sys.exit(f"pane-spawn: -c cannot name the MCP server {name!r}")
+    keep = read_tools.get(name)
+    if not keep:
+        print("-c", f"mcp_servers.{name}.enabled=false", sep="\n")
+        continue
+    # Codex asks before a tool its server does not mark read-only, and under --ask-for-approval never that is a refusal:
+    # the Slack reads failed so (2026-11-05). Only read tools are left, so they run without asking.
+    print("-c", f"mcp_servers.{name}.enabled_tools={json.dumps(keep)}", "-c", f'mcp_servers.{name}.default_tools_approval_mode="approve"', sep="\n")
+EOF
+    ) || die "cannot turn off every MCP server in Codex's config, so a Codex check pane could write through one; open it with --kind claude"
+    off=(); while IFS= read -r l; do [ -z "$l" ] || off+=("$l"); done <<<"$mcp"
+    # The folder's path has dots (~/.local), which a dotted -c path would split, so its trust goes in as a table.
+    set -- --sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=false \
+      -c "projects={\"$cwd\"={trust_level=\"trusted\"}}" "${off[@]}" --disable apps --disable plugins "$@"
+    prompt+=" 확인할 폴더는 $target 입니다. $target/AGENTS.md 가 있으면 먼저 읽으세요. 이 칸은 Codex 샌드박스 안에서 빈 작업 폴더 $cwd 를 쓰므로, 확인할 폴더는 절대경로로 읽으세요. 파일은 작업 폴더와 임시 폴더에만 쓸 수 있고, 확인할 폴더를 비롯한 다른 곳은 쓰기가 막힙니다. 네트워크도 막혀 있어 curl, gh, bq 는 실패합니다. 읽기는 이렇게 합니다. GitHub는 $here/gh-read 뒤에 gh 명령을 붙여 읽고(issue·pr·run·release view/list, pr diff/checks, search, GET api), 저장소는 -R owner/repo 로 정하세요. Slack은 slack MCP 의 읽기 도구(slack_get_thread_replies, slack_get_channel_history, slack_get_user_profile)로 읽습니다. 프로세스는 ps 나 pgrep 으로 봅니다. 이 명령들은 파이프, 리다이렉트, cd 없이 명령 하나로 실행해야 샌드박스 밖에서 돌고, 걸러 낼 때는 gh 의 --jq 나 ps 의 옵션을 쓰세요. 글쓰기, 댓글, 머지 같은 쓰기는 모두 막힙니다. 막혀서 확인하지 못한 항목은 통과로 쓰지 말고, 무엇이 막혀 못 했는지 쓰세요."
   fi
 fi
 main= hidden= sock= addr=

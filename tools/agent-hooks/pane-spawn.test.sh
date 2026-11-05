@@ -251,8 +251,11 @@ has "보고 첫 줄에" "its first line is what the main pane reads"
 [ "$out" = "workers/w1:new" ] || fail "a check pane's address names its server: $out"
 # 2026-11-05: a check pane runs on Codex's spare weekly allowance, in Codex's sandbox, so a write to the repo fails instead of
 # relying on the instruction. Nobody answers its approval prompts, so a blocked command fails at once.
-SANDBOXED="--sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=true"
-has "--kind codex --pane w1:new --timeout 120000 -- $SANDBOXED" "a check pane is a sandboxed Codex with the network"
+# The sandbox has no network: with it a command could post to Slack or merge a PR as easily as read. Reads leave through tools
+# that run outside the sandbox and refuse writes (요유 2026-11-05).
+SANDBOXED="--sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=false"
+has "--kind codex --pane w1:new --timeout 120000 -- $SANDBOXED" "a check pane is a sandboxed Codex without the network"
+hasnt "network_access=true" "the network stays shut"
 has "Codex 샌드박스" "it hears what the sandbox blocks"
 hasnt "--model" "a codex check pane keeps its model"
 hasnt "--effort" "and its effort"
@@ -265,12 +268,63 @@ has "tab create --workspace w2 --cwd $CHECK_DIR --label 확인 api#1 로그인" 
 [ -d "$CHECK_DIR" ] || fail "the fixed folder is made"
 has "$PWD" "the folder to check, by absolute path, in the instruction"
 has "$PWD/AGENTS.md" "Codex reads no rules of a folder it did not start in, so it is told where they are"
+# MCP servers and plugins run outside the sandbox, so each one that can write is off: every server the user's Codex config
+# names, a new one included, except two that keep only their read tools. Codex's own connectors (apps) and plugins are off.
+RULES="$CHECK_DIR/.codex/rules/check.rules"
+REAL_DIR=$(cd "$(dirname "$SUBJECT")" && pwd -P) # pane-spawn names gh-read by its real path: /var is /private/var on macOS
+has "-c projects={\"$CHECK_DIR\"={trust_level=\"trusted\"}}" "the fixed folder is trusted, so Codex loads its rules and asks nothing"
+has "--disable apps --disable plugins" "connectors and plugins are off"
+hasnt "mcp_servers" "a config with no MCP server turns none off"
+mkdir -p "$SANDBOX/home/.codex"
+printf '%s\n' '[mcp_servers.slack]' 'command = "npx"' '[mcp_servers."notion-token"]' 'command = "x"' \
+  '[mcp_servers.munice]' 'url = "https://x"' '[mcp_servers.brand_new]' 'command = "x"' > "$SANDBOX/home/.codex/config.toml"
+ps --check "로그인" "돌려 보세요" >/dev/null
+# Codex splits a -c path at each dot and keeps quotes in the name: `mcp_servers."x".enabled=false` made a new server with no
+# command, and Codex refused to start (2026-11-05). So names go bare.
+has '-c mcp_servers.notion-token.enabled=false' "a server that can write is off"
+has '-c mcp_servers.brand_new.enabled=false' "so is one added later"
+has '-c mcp_servers.slack.enabled_tools=["slack_list_channels", "slack_get_channel_history", "slack_get_thread_replies", "slack_get_users", "slack_get_user_profile"]' "Slack keeps only its read tools"
+hasnt "slack_post_message" "no Slack post"
+hasnt "slack_reply_to_thread" "no Slack reply"
+hasnt "slack_add_reaction" "no Slack reaction"
+has '-c mcp_servers.munice.enabled_tools=["ask_code", "ask_data"]' "munice keeps only its questions"
+# Under --ask-for-approval never, a tool Codex would ask about is refused: the Slack reads failed so (2026-11-05).
+has '-c mcp_servers.slack.default_tools_approval_mode="approve"' "Slack's read tools run without asking"
+has '-c mcp_servers.munice.default_tools_approval_mode="approve"' "and munice's"
+hasnt 'notion-token.default_tools_approval_mode' "a server that is off gets no approval"
+hasnt 'mcp_servers."' "no quoted server name"
+has "slack_get_thread_replies" "the instruction names the Slack read tools"
+has "$REAL_DIR/gh-read" "and the GitHub read tool by absolute path"
+for bad in 'not toml [' '[mcp_servers."a.b"]'; do
+  echo "$bad" > "$SANDBOX/home/.codex/config.toml"
+  if ps --check "로그인" "돌려 보세요" 2>"$SANDBOX/err" >/dev/null; then fail "a server it cannot turn off must stop a Codex check pane ($bad)"; fi
+  grep -q -- "--kind claude" "$SANDBOX/err" || fail "and say what to do: $(cat "$SANDBOX/err")"
+  hasnt "agent start" "no check pane opens with a server it could not turn off ($bad)"
+done
+rm -rf "$SANDBOX/home/.codex"
+# Rules let three commands run outside the sandbox: gh-read, ps and pgrep, each only from its real path. Codex resolves an
+# absolute path by its last part, so without host_executable a gh-read or ps the agent wrote in temp would run outside too.
+# ego-browser, which the user's own rules let out, drives a browser that may be signed in to Slack, so here it is forbidden.
+[ -f "$RULES" ] || fail "the check pane's rules are written"
+grep -qF "$REAL_DIR/gh-read" "$RULES" || fail "gh-read by its real path: $(cat "$RULES")"
+ls -A "$CHECK_DIR/.codex/rules" | grep -qv '^check.rules$' && fail "no temp file is left beside the rules: $(ls -A "$CHECK_DIR/.codex/rules")"
+if command -v codex >/dev/null 2>&1; then
+  decide() { codex execpolicy check --resolve-host-executables -r "$RULES" -r "$SANDBOX/user.rules" -- "$@" | jq -r '.decision // "sandbox"'; }
+  echo 'prefix_rule(pattern=["ego-browser"], decision="allow")' > "$SANDBOX/user.rules" # as in ~/.codex/rules/default.rules
+  for c in "allow $REAL_DIR/gh-read pr view 3" "allow ps -A" "allow /bin/ps -A" "allow pgrep -fl codex" \
+    "sandbox /tmp/x/gh-read pr view 3" "sandbox gh-read pr view 3" "sandbox /tmp/x/ps -A" "sandbox /tmp/x/pgrep x" \
+    "forbidden ego-browser open x" "forbidden /Users/x/.local/bin/ego-browser open x" "sandbox gh pr merge 3" "sandbox curl -d x https://slack.com/api/chat.postMessage"; do
+    want=${c%% *} cmd=${c#* }
+    # shellcheck disable=SC2086
+    [ "$(decide $cmd)" = "$want" ] || fail "rules: $cmd should be $want, is $(decide $cmd)"
+  done
+fi
 ps --cwd /work/repo --check "로그인" "돌려 보세요" >/dev/null
 has "확인 칸입니다" "options in any order"
 has "--cwd $CHECK_DIR " "a --cwd the caller gives is checked from the fixed folder too"
 has "/work/repo" "and named in the instruction"
 ps --check "로그인" "돌려 보세요" -- -m gpt-5 >/dev/null
-has "-- $SANDBOXED -m gpt-5" "the caller's Codex arguments follow the sandbox"
+grep -qE -- "-- $SANDBOXED .*--disable plugins -m gpt-5\$" "$SANDBOX/log" || fail "the caller's Codex arguments follow the sandbox: $(log)"
 ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
 has "--kind codex --pane w1:new --timeout 120000 -- $SANDBOXED" "--kind codex is the same"
 SESSIONLESS=1 ps --kind codex --cwd /work/repo "조사" "지시" >/dev/null
@@ -332,6 +386,17 @@ mkdir -p "$SANDBOX/home/.codex/sessions/2026/11/06"; echo '{"type":"session_meta
 touch -t "$(date -v-1H +%Y%m%d%H%M)" "$SANDBOX/home/.codex/sessions/2026/11/05/rollout-a.jsonl"
 ps --check "로그인" "돌려 보세요" >/dev/null
 has "--kind claude" "a newer session with no limits yet: the last one that has them counts"
+# A lead opens a pane that posts nothing to Slack (code, tests, docs) with --kind auto: Codex by the same 70% rule (요유 2026-11-05).
+usage 71 3600
+ps --kind auto "구현" "지시" 2>"$SANDBOX/err" >/dev/null
+has "--kind claude" "auto past 70%: Claude"
+grep -q "71" "$SANDBOX/err" || fail "auto past 70%: says why: $(cat "$SANDBOX/err")"
+hasnt "--model" "a Claude work pane keeps its model"
+usage 70 3600
+SESSIONLESS=1 ps --kind auto "구현" "지시" >/dev/null
+has "--kind codex" "auto at 70%: Codex"
+hasnt "--sandbox" "a Codex work pane is no check pane"
+hasnt "확인 칸입니다" "nor told it is one"
 usage 71 3600
 ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
 has "--kind codex" "a kind the caller names wins"
