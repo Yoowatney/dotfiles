@@ -20,9 +20,10 @@ import importlib.util
 import json
 import os
 import re
-import signal
 import sys
+import threading
 import time
+import unicodedata
 
 UNLOCK = "prod 허용"
 # Yoyoo's account for staging alone: every segment that picks it names only the staging project (api#992).
@@ -30,7 +31,7 @@ STAGING_UNLOCK = "staging 허용"
 STAGING_IDS = {"miraclenight-dev", "314440450809"}
 PROD_IDS = re.compile(r"miraclenight-f06c6|498308011792")
 PROJECT_REF = re.compile(r"(?:--project[= ]+|\s-P\s+|CLOUDSDK_CORE_PROJECT=|projects/)['\"]?([\w-]+)")
-TOKEN_PRINT = re.compile(r"\bprint-(?:access|identity)-token\b")  # a printed token reaches every project
+TOKEN_PRINT = re.compile(r"\bprint-(?:access|identity)-token\b|config-helper|access_token")  # a printed token reaches every project
 
 
 def said(word: str, prompt: str) -> bool:
@@ -42,9 +43,14 @@ HOOKS = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "a
 SLACK = os.path.expanduser("~/work/munice/.agents/skills/agent-board/main/slack_approval.py")
 # Both hook configs give 10 s, and a hook that times out lets the command run: the whole verdict ends within HOOK_BUDGET.
 HOOK_BUDGET, SLACK_DEADLINE, SLACK_MIN = 8.0, 6.0, 1.0
-# What a Slack ✅ never lifts (condition 4 of the approval): `cla`'s marker, an agent started on 요유's account, a printed token.
-# ponytail: any mention of claude, codex or anthropic counts, paths and quotes included; a false hit only means the terminal.
-BROAD = re.compile(r"\bMUNICE_GCP_ADMIN=|claude|codex|anthropic|(?<![\w.-])cla(?![\w.-])", re.I)
+# What a Slack ✅ never lifts (condition 4 of the approval): `cla`'s marker, an agent or a shell that outlives the command,
+# IAM grants, credentials that outlive it (tokens, signed JWTs, HMAC keys). Matched on the command and on it with quotes
+# and backslashes removed. ponytail: a word list; a false hit only means the terminal, and 요유 reads the rest in the request.
+SLACK_NEVER = re.compile(
+    r"\bMUNICE_GCP_ADMIN=|claude|codex|anthropic|gemini|aider|opencode|cursor-agent|(?<![\w.-])cla(?![\w.-])"
+    r"|\b(?:tmux|screen|nohup|setsid|disown|launchctl|crontab|mkfifo|socat|nc|ncat)\b"
+    r"|(?<![.@\w-])iam(?![.\w-])|iam-?policy|\bhmac\b|sign-?(?:jwt|blob)|generate(?:access|id)token", re.I)
+BACKGROUND = re.compile(r"(?<![>&|])&(?![&>])")  # `cmd &`; not &&, 2>&1, &> or |&, nor one inside a literal string
 SLACK_NOTE = "메인 칸은 Slack ✅로도 이 명령 하나를 한 번 실행할 수 있습니다(메인 칸 스킬 'Steps only 요유 can unlock')."
 
 # ponytail: text patterns over the whole command, heredoc bodies included (a script there runs).
@@ -98,7 +104,8 @@ KEYS = [  # matched per shell segment, after joining `\` continuations
 # ponytail: a heredoc commit body is still read line by line, so commit long messages with -F <file>.
 TEXT_ONLY = re.compile(r"\s*(?:\w+=\S*\s+)*(?:git\s+(?:commit|tag|grep|log|show)|gh\s+(?:pr|issue|release)\s+"
                        r"(?:create|edit|comment|view)|rg|grep)\b")
-SUBST = re.compile(r"\$\(|`")  # checked after dropping '...' strings, where the shell substitutes nothing
+# What still runs in a TEXT_ONLY segment: $( ), backticks, <( ) and >( ), a command sent to the background, rg --pre.
+SUBST = re.compile(r"\$\(|`|[<>]\(|(?<![>&|])&(?![&>])|--pre\b")  # checked after dropping '...' strings
 SEGMENTS = re.compile(r"&&|\|\||[;|\n]")
 # A key resource written into a .tf file lands its private key in state and makes a key on merge.
 KEY_TF = re.compile(r'resource\s+"google_service_account_key"|"google_service_account_key"\s*:')
@@ -117,8 +124,9 @@ def bash_problem(cmd: str) -> tuple[str, bool | str] | None:
     for segment in SEGMENTS.split(flat):
         if TEXT_ONLY.match(segment) and not SUBST.search(re.sub(r"'[^']*'", "", segment)):
             continue
+        bare = re.sub(r"['\"\\]", "", segment)  # 'cre''ate' and cre\ate run as create
         for pattern, what in KEYS:
-            if pattern.search(segment):
+            if pattern.search(segment) or pattern.search(bare):
                 return what, "key"
     if KEY_TF.search(flat) and TF_SHELL_WRITE.search(flat):
         return "terraform 서비스 계정 키 리소스", "key"
@@ -276,49 +284,59 @@ def riders(hook_input: dict) -> str | None:
 
 
 def main_pane(env: dict) -> bool:
-    """This session runs in the main pane. A moved pane keeps an old HERDR_PANE_ID, which only `pane get` still resolves."""
+    """This session runs in 요유's main pane: on the default server, opened by hand (herdr names every pane a job or
+    pane-spawn opens), and its terminal is the one `pane-label --main` wrote. Any pane can write that file, so it alone
+    proves nothing. A moved pane keeps an old HERDR_PANE_ID, which only `pane get` still resolves."""
     try:
         peers = load(os.path.join(HOOKS, "herdr_peers.py"))
-        terminal = (peers.herdr(env, "pane", "get", env.get("HERDR_PANE_ID") or "-").get("pane") or {}).get("terminal_id")
-        return bool(terminal) and terminal == peers.main_terminal(env)
+        if not env.get("HERDR_PANE_ID") or peers.server_key(env) or env.get("HERDR_SESSION") not in (None, "", "default"):
+            return False
+        pane = peers.herdr(env, "pane", "get", env["HERDR_PANE_ID"]).get("pane") or {}
+        agent = peers.herdr(env, "agent", "get", pane.get("pane_id") or "-").get("agent")
+        terminal = pane.get("terminal_id")
+        return (bool(terminal) and terminal == peers.main_terminal(env) and isinstance(agent, dict)
+                and agent.get("pane_id") == pane.get("pane_id") and not agent.get("name"))
     except Exception:
         return False
 
 
 def slack_liftable(payload: dict, env: dict) -> bool:
     """A refusal a Slack ✅ may lift: one Bash command that picks another identity, outside job tabs, nothing broad."""
-    if payload.get("tool_name") != "Bash" or env.get("MUNICE_AUTO_DISPATCH") == "1" or env.get("MUNICE_AMBIENT") == "1":
+    inp = payload.get("tool_input") or {}
+    if (payload.get("tool_name") != "Bash" or env.get("MUNICE_AUTO_DISPATCH") == "1" or env.get("MUNICE_AMBIENT") == "1"
+            or inp.get("run_in_background")):  # a background run outlives the turn
         return False
-    cmd = (payload.get("tool_input") or {}).get("command") or ""
+    cmd = inp.get("command") or ""
     hit = bash_problem(cmd)
-    return bool(hit) and hit[1] is False and not BROAD.search(cmd) and not TOKEN_PRINT.search(cmd)
-
-
-class Deadline(BaseException):
-    """Not an Exception: code under the alarm that catches errors (an OSError, say) must not swallow it."""
+    if not hit or hit[1] is not False:
+        return False
+    flat = cmd.replace("\\\n", " ")
+    seen = (flat, re.sub(r"['\"\\]", "", flat))
+    # A key command anywhere, TEXT_ONLY segments included: bash_problem lets a commit message name one, a ✅ does not.
+    never = [SLACK_NEVER, TOKEN_PRINT, KEY_TF] + [p for p, _ in KEYS]
+    return not (any(p.search(t) for p in never for t in seen) or BACKGROUND.search(re.sub(r'"[^"$`]*"', "", re.sub(r"'[^']*'", "", flat)))
+                # control and format characters (bidi, zero-width) can make the shown command differ from the one run
+                or any(unicodedata.category(c) in ("Cc", "Cf") for c in cmd if c not in "\n\t"))
 
 
 def slack_approval(cmd: str, deadline: float, path: str = SLACK):
-    """(consume, "") when 요유 approved exactly this command in Slack, else (None, why). Done or refused within the deadline."""
+    """(consume, "") when 요유 approved exactly this command in Slack, else (None, why). Done or refused within the deadline:
+    the read runs on a daemon thread, since a signal cannot stop a C call such as a hung DNS lookup (review)."""
     if not os.path.isfile(path):
         return None, "Slack 승인 모듈이 이 Mac에 없음"
+    box = []
 
-    def expire(*_):
-        raise Deadline()
-    old = signal.signal(signal.SIGALRM, expire)
-    signal.setitimer(signal.ITIMER_REAL, deadline)
-    try:
-        module = load(path)
-        ts, why = module.find(cmd, time.time())
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        return ((lambda: module.consume(ts, cmd)) if ts else None), why
-    except Deadline:
-        return None, f"Slack을 {deadline:g}초 안에 읽지 못함"
-    except Exception as e:
-        return None, f"Slack을 읽지 못함({type(e).__name__})"
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old)
+    def read():
+        try:
+            module = load(path)
+            ts, why = module.find(cmd, time.time())
+            box.append((((lambda: module.consume(ts, cmd)) if ts else None), why))
+        except BaseException as e:
+            box.append((None, f"Slack을 읽지 못함({type(e).__name__})"))
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    worker.join(deadline)
+    return box[0] if box else (None, f"Slack을 {deadline:g}초 안에 읽지 못함")
 
 
 def hook(hook_input: dict, env: dict, riders, approvals, is_main, budget: float = HOOK_BUDGET, started: float | None = None):
@@ -337,7 +355,7 @@ def hook(hook_input: dict, env: dict, riders, approvals, is_main, budget: float 
     left = min(SLACK_DEADLINE, budget - (time.monotonic() - started))
     if left < SLACK_MIN:
         return f"{reason}\n{SLACK_NOTE} 지금 Slack: 훅 시간이 모자라 읽지 않음"
-    # whatever breaks below refuses, a late alarm included: a crashed hook lets the command run
+    # whatever breaks below refuses: a crashed hook lets the command run
     try:
         use, why = approvals((hook_input.get("tool_input") or {}).get("command") or "", left)
     except BaseException as e:
@@ -671,9 +689,9 @@ def slack_selftest(claude_transcript, tmp):
         return check
 
     def run(cmd, *, env=None, found=True, raises=False, consume_raises=False, main=True, rider=None, tool="Bash", prompt="고쳐줘",
-            budget=HOOK_BUDGET, slow_main=0.0):
+            budget=HOOK_BUDGET, slow_main=0.0, background=False):
         calls.clear()
-        payload = {"tool_name": tool, "tool_input": {"command": cmd}, "transcript_path": claude_transcript(prompt), "cwd": "/tmp"}
+        payload = {"tool_name": tool, "tool_input": {"command": cmd, "run_in_background": background}, "transcript_path": claude_transcript(prompt), "cwd": "/tmp"}
         return hook(payload, env or {}, lambda _: rider, approvals(found, raises, consume_raises),
                     lambda _: (time.sleep(slow_main), main)[1], budget=budget)
 
@@ -692,7 +710,8 @@ def slack_selftest(claude_transcript, tmp):
     # one budget for the whole verdict: what is left after the transcript and the pane lookup bounds the Slack read
     assert "시간" in (run(cmd, budget=1.2, slow_main=0.3) or "") and not calls, "too little time left: no Slack read, refused"
     # never asked: another pane, an auto tab, or a refusal a ✅ does not lift
-    for kw in ({"main": False}, {"env": {"MUNICE_AMBIENT": "1"}}, {"env": {"MUNICE_AUTO_DISPATCH": "1"}}, {"tool": "Monitor"}):
+    for kw in ({"main": False}, {"env": {"MUNICE_AMBIENT": "1"}}, {"env": {"MUNICE_AUTO_DISPATCH": "1"}}, {"tool": "Monitor"},
+               {"background": True}):
         assert run(cmd, **kw) and not calls, f"Slack must not be asked: {kw}"
     for c in ("MUNICE_GCP_ADMIN=1 direnv exec . gcloud run services update api",
               "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin claude -p 'prod 고쳐'",
@@ -704,11 +723,40 @@ def slack_selftest(claude_transcript, tmp):
               "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin env codex exec x",
               "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin ~/.local/share/mise/installs/npm-openai-codex/0.166.0/bin/codex exec x",
               "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin cla",
+              # reviews: a key hidden where TEXT_ONLY looked away, split words, a printed token, lasting grants and shells
+              "grep x <(gcloud --configuration=munice-admin iam service-accounts keys create k.json --iam-account=a@x)",
+              "grep -q x /dev/null & gcloud --configuration=munice-admin iam service-accounts keys create k.json --iam-account=a@x",
+              "gcloud --configuration=munice-admin iam service-accounts keys 'cre''ate' k.json --iam-account=a@x",
+              "gcloud --configuration=munice-admin org-policies 'set''-policy' p.yaml",
+              "gcloud --configuration=munice-admin config config-helper --format='value(credential.access_token)'",
+              "gcloud --configuration=munice-admin storage hmac create sa@x",
+              "gcloud --configuration=munice-admin projects add-iam-policy-binding p --member=x --role=roles/owner",
+              "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin tmux new -d zsh",
+              "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin screen -dm zsh",
+              "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin gemini -p x",
+              "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin aider",
+              "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin opencode run x",
+              "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin nohup zsh -c 'sleep 999'",
+              "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin zsh < /tmp/fifo &",
+              'CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin zsh -c "$(cat f) &"',
+              "gcloud --configuration=munice-admin iam roles create r --project p --permissions=x",
+              "rg --pre 'sh -c \"gcloud iam service-accounts keys create k --iam-account=a@x\"' x; "
+              "gcloud --configuration=munice-admin firestore documents list",
+              # a bidi override or a zero-width space: what Slack shows is not what runs
+              "gcloud --configuration=munice-admin firestore documents delete a\u202e/b",
+              "gcloud --configuration=munice-admin firestore documents list\u200b",
               "gcloud --configuration=munice-admin auth print-access-token",
               "gcloud auth login", "gcloud config configurations activate munice-admin",
               "gcloud --configuration=munice-admin iam service-accounts keys create k.json --iam-account=a@x",
               "rm ~/.local/state/gcp-account-guard/slack-approvals/1793850000.000001"):
         assert run(c) and not calls, f"Slack must not lift: {c}"
+    # but a redirect, a quoted & and a plain pipe are ordinary commands
+    for c in ("gcloud --configuration=munice-admin firestore documents list --project p 2>&1 | head",
+              "curl -s 'https://x.example/a?b=1&c=2' -H x | CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin gcloud firestore documents list",
+              'curl -s "https://x.example/a?b=1&c=2" | gcloud --configuration=munice-admin firestore documents list',
+              "gcloud --configuration=munice-admin pubsub topics publish t --message=sa@p.iam.gserviceaccount.com"):
+        assert run(c) is None and calls == [c], f"an ordinary command: {c}"
+        consumed.clear()
     # a command the guard allows anyway never reaches Slack
     assert run("gcloud run services list --project miraclenight-f06c6") is None and not calls
     # a typed unlock comes first: no Slack read
@@ -717,6 +765,35 @@ def slack_selftest(claude_transcript, tmp):
     for tool, key in (("Write", "file_path"), ("Edit", "file_path"), ("Read", "file_path")):
         assert tool_problem({"tool_name": tool, "tool_input": {key: os.path.expanduser(
             "~/.local/state/gcp-account-guard/slack-approvals/1793850000.000001")}, "cwd": "/tmp"}, {"MUNICE_GCP_ADMIN": "1"})
+    # the hidden key commands above are keys in every mode, typed unlock and cla included
+    for c in ("grep x <(gcloud iam service-accounts keys create k.json --iam-account=a@x)",
+              "grep -q x /dev/null & gcloud iam service-accounts keys create k.json --iam-account=a@x",
+              "gcloud iam service-accounts keys 'cre''ate' k.json --iam-account=a@x",
+              'gcloud resource-manager org-policies "disable"-enforce c --project=p'):
+        assert (bash_problem(c) or ("", ""))[1] == "key", f"a key command in disguise: {c} -> {bash_problem(c)}"
+    for c in ("git commit -m 'refuse gcloud iam service-accounts keys create' 2>&1",
+              "rg -n 'service-accounts keys create' ~/.dotfiles 2>&1 | head"):
+        assert bash_problem(c) is None, f"text that only names a key command: {c} -> {bash_problem(c)}"
+    # the main pane: 요유's own pane on the default server, never a pane a job or a lead opened (a file any pane can write)
+    fake = os.path.join(tmp, "herdr")
+    with open(fake, "w") as f:
+        f.write("#!/bin/sh\ncase \"$1 $2\" in\n"
+                "  'pane get') echo '{\"result\":{\"pane\":{\"pane_id\":\"wC:p1\",\"terminal_id\":\"term_M\"}}}' ;;\n"
+                "  'agent get') echo \"{\\\"result\\\":{\\\"agent\\\":{\\\"pane_id\\\":\\\"wC:p1\\\",\\\"name\\\":$NAME}}}\" ;;\n"
+                "  *) exit 1 ;;\nesac\n")
+    os.chmod(fake, 0o755)
+    state = os.path.join(tmp, "state")
+    os.makedirs(os.path.join(state, "orchestrator"), exist_ok=True)
+    open(os.path.join(state, "orchestrator", "main"), "w").write("term_M\n")
+    base = {"HERDR_BIN_PATH": fake, "HERDR_PANE_ID": "wC:p1", "XDG_STATE_HOME": state, "NAME": "null",
+            "HERDR_SOCKET_PATH": os.path.expanduser("~/.config/herdr/herdr.sock")}
+    assert main_pane(base), "요유's main pane"
+    assert not main_pane({**base, "NAME": '"spawn-65f6-1"'}), "a pane pane-spawn opened, even one that wrote the main file"
+    assert not main_pane({**base, "HERDR_SOCKET_PATH": os.path.expanduser("~/.config/herdr/sessions/workers/herdr.sock")})
+    assert not main_pane({**base, "HERDR_PANE_ID": ""}) and not main_pane({**base, "HERDR_BIN_PATH": "/bin/false"})
+    assert not main_pane({**base, "HERDR_SESSION": "workers"})
+    open(os.path.join(state, "orchestrator", "main"), "w").write("term_OTHER\n")
+    assert not main_pane(base), "another terminal is the main pane"
     # the real loader: no module, a module that throws, and one that hangs past the deadline all refuse
     assert slack_approval(cmd, SLACK_DEADLINE, path=os.path.join(tmp, "none.py"))[0] is None
     for body, word in (("def find(c, n):\n    raise ValueError('x')\n", "ValueError"),
@@ -731,7 +808,14 @@ def slack_selftest(claude_transcript, tmp):
                           "def consume(ts, c):\n    return ts == '1793850000.000001'\n")
     found, why = slack_approval(cmd, SLACK_DEADLINE, path=path)
     assert found and found() is True and why == ""
-    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0), "no alarm left running"
+    # a C call no signal can stop (a hung DNS lookup) still ends at the deadline: the read runs beside, not under, the hook
+    # (blocking SIGALRM stands in for it: an alarm-based deadline would hang here for 30 s)
+    path = os.path.join(tmp, "dns.py")
+    open(path, "w").write("import signal, time\ndef find(c, n):\n"
+                          "    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})\n    time.sleep(30)\n")
+    start = time.monotonic()
+    found, why = slack_approval(cmd, 0.5, path=path)
+    assert found is None and "초 안에" in why and time.monotonic() - start < 2, (why, time.monotonic() - start)
 
 
 if __name__ == "__main__":
