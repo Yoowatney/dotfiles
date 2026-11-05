@@ -36,7 +36,12 @@ wakes since the last stop that was no error, and when the last went; both outliv
 By design, two stops inside one tick interval look like one: a report for the first also covers the second.
 An alert nobody took marks nothing, so the next minute sends it again. Fails open: any error exits 0 quietly.
 
-Test env: WORKERS_WATCH_NOW (seconds), WORKERS_WATCH_PANE_TELL (a fake pane-tell), WORKERS_WATCH_PROBE (host:port online() tries).
+It also restarts the main pane through `main-refresh --now` once its conversation (the last response's usage in its transcript)
+passes MAIN_REFRESH_AT tokens, at most once an hour for the pane, counting a restart anyone made (the lead, 2026-11-05), and only
+when it answered something after its first 15 minutes (its handoff load alone passes the line); see refresh_main(). State: `{state_dir}/main-size.json`, each call also a line in main-refresh's `{state_dir}/refresh.log`.
+
+Test env: WORKERS_WATCH_NOW (seconds), WORKERS_WATCH_PANE_TELL (a fake pane-tell), WORKERS_WATCH_PROBE (host:port online() tries),
+WORKERS_WATCH_MAIN_REFRESH (a fake main-refresh).
 
     workers-watch.py --selftest
 """
@@ -46,7 +51,10 @@ import sys
 
 sys.dont_write_bytecode = True
 
+import datetime
+import glob
 import importlib.util
+import itertools
 import json
 import os
 import re
@@ -66,6 +74,10 @@ _spec.loader.exec_module(atc)  # what a pane's Stop hook reads in its last reply
 DOWN = "workers 서버가 꺼져 있습니다: `launchctl kickstart gui/$(id -u)/com.yoyoo.herdr-workers`"
 ORPHAN_TTL = 3600
 STOPPED = 900
+MAIN_REFRESH_AT = 150_000  # tokens in the main pane's conversation (the lead, 2026-11-05); a fresh one reached 141k in 40 s on 11/05
+MAIN_REFRESH_GAP = 3600
+MAIN_REFRESH_SETTLE = 900  # a session's first 15 minutes are its handoff load, not conversation
+USAGE = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 JOB_HELD = 10800
 UNSENT = "보내지 못한 보고가 있다면 ~/.local/state/pane-reports에 있습니다."  # auto-tab-close.py keeps a report it had nobody to send to
 WAKE = "회사맥이 잠들어 응답이 끊겼습니다. 끊긴 곳부터 이어서 하세요."
@@ -167,6 +179,77 @@ def trial(name) -> bool:
     return bool(TRIAL.match(unicodedata.normalize("NFC", name or "")))
 
 
+def stamp(d) -> float:
+    return datetime.datetime.fromisoformat(d["timestamp"].replace("Z", "+00:00")).timestamp()
+
+
+def last_usage(path) -> tuple:
+    """(tokens in the conversation as of its last response, prompt and output; when it came), from the transcript's last 4 MB:
+    a subagent's line or a synthetic one with no usage does not count."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        f.seek(max(0, f.tell() - (4 << 20)))
+        lines = f.read().splitlines()
+    for raw in reversed(lines):
+        if b'"usage"' not in raw:
+            continue
+        try:
+            d = json.loads(raw)
+            n, at = sum(int(d["message"]["usage"].get(k) or 0) for k in USAGE), stamp(d)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+        if d.get("type") == "assistant" and not d.get("isSidechain") and n:
+            return n, at
+    return 0, 0.0
+
+
+def born(path) -> float:
+    """When the session started: its transcript's first timestamp (a restart, any caller's, makes a new transcript)."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in itertools.islice(f, 200):
+            try:
+                return stamp(json.loads(line))
+            except (ValueError, KeyError, TypeError, AttributeError):
+                continue
+    return 0.0
+
+
+def refresh_main(env, now, where, main) -> None:
+    """main-refresh --now once the main pane's conversation passes MAIN_REFRESH_AT tokens: it re-reads all of it for each
+    message (11/05: about 370k a notice). Once an hour at most for the pane, counting a restart anyone else made."""
+    sid = ((where.get(main, ("", {}))[1].get("agent_session") or {}).get("value") or "") if main else ""
+    found = glob.glob(os.path.join(env.get("HOME") or os.path.expanduser("~"), ".claude", "projects", "*", glob.escape(sid) + ".jsonl")) if sid else []
+    if not found:
+        return
+    path = os.path.join(herdr_peers.state_dir(env), "main-size.json")
+    try:
+        with open(path) as f:
+            asked = json.load(f)
+    except (OSError, ValueError):
+        asked = {}
+    asked = asked if isinstance(asked, dict) else {}
+    start = born(found[0])
+    if now - max(float(asked.get(main) or 0), start) < MAIN_REFRESH_GAP:
+        return
+    size, at = last_usage(found[0])
+    # A fresh session is past the line once its handoff is loaded (11/05: 141k in 40 s), so a pane that has answered nothing
+    # since would be restarted every hour all night for nothing: it re-reads only when a message comes.
+    if size <= MAIN_REFRESH_AT or at < start + MAIN_REFRESH_SETTLE:
+        return
+    # From the workers server or launchd alike: the server variables would point main-refresh away from the main pane.
+    child = {k: v for k, v in {**os.environ, **env}.items() if k not in ("HERDR_SOCKET_PATH", "HERDR_SESSION", "HERDR_PANE_ID")}
+    try:
+        subprocess.Popen([env.get("WORKERS_WATCH_MAIN_REFRESH") or os.path.join(HERE, "main-refresh"), "--now"], env=child,
+                         start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return  # not started: tried again next minute
+    with open(path + ".tmp", "w") as f:
+        json.dump({main: now}, f)
+    os.replace(path + ".tmp", path)
+    with open(os.path.join(herdr_peers.state_dir(env), "refresh.log"), "a") as f:
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))} 메인 칸 대화 {size} 토큰: workers-watch가 main-refresh --now 부름\n")
+
+
 def keep_trial(env, old, term, now) -> bool:
     """A test pane gone without a report is no news for the main pane, but its lead may still be waiting on that report: one
     entry in the pane report day file says where its session is (11/05 check: it used to vanish without a trace)."""
@@ -204,6 +287,10 @@ def tick(env, now: float) -> list:
     if where is None:  # no way to know who is there, so no alert and no record changes
         return []
     main = herdr_peers.main_terminal(env)
+    try:
+        refresh_main(env, now, where, main)
+    except Exception:  # a fault here must not cost the alerts below
+        pass
     path = os.path.join(herdr_peers.state_dir(env), "watch.json")
     try:
         with open(path) as f:
@@ -848,6 +935,56 @@ esac
         panes_on_workers(label("w1:pT", "🟢 🫡 임시저장 API 수정")); agents(agent("w1:pT", "term_T", "idle", seq=7)); tick(119000)
         assert len(tick(119900)) == 1, "`임시저장` is a work name, not a test pane"
         os.remove(f"{d}/state/orchestrator/watch.json"); panes_on_workers(); agents(); tick(120000)
+
+        # The main pane re-reads its whole conversation for each message, so past MAIN_REFRESH_AT tokens (the last response's
+        # usage) it is restarted through main-refresh --now, with the workers server's variables dropped, once an hour at most.
+        script(f"{d}/main-refresh", f'echo "$* ${{HERDR_SOCKET_PATH-none}} ${{HERDR_SESSION-none}}" >> {d}/refreshed\n')
+        env["WORKERS_WATCH_MAIN_REFRESH"] = f"{d}/main-refresh"
+        iso = lambda at: time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(at))
+
+        def conversation(sid, born, *sizes, side=0, last=0):  # the main pane's transcript: first line at `born`, then responses
+            rows = [{"type": "user", "timestamp": iso(born), "message": {"content": "hi"}}]
+            for n in sizes:  # the last response `last`, else an hour after `born`
+                rows.append({"type": "assistant", "timestamp": iso(last or born + 3600), "message": {"id": f"m{n}", "usage": {
+                    "input_tokens": 2, "cache_creation_input_tokens": 98, "cache_read_input_tokens": n - 200, "output_tokens": 100}}})
+            if side:  # a subagent's line and a synthetic one after it say nothing about the main conversation
+                rows += [{"type": "assistant", "isSidechain": True, "timestamp": iso(born + 70), "message": {"usage": {"cache_read_input_tokens": side}}},
+                         {"type": "assistant", "timestamp": iso(born + 80), "message": {"model": "<synthetic>", "usage": {"input_tokens": 0}}}]
+            write(f"{d}/.claude/projects/-w/{sid}.jsonl", "".join(json.dumps(r) + "\n" for r in rows))
+            result("default-panes", "panes", [{"pane_id": "w5:p3", "terminal_id": "term_M", "label": "👑 메인", "agent": "claude",
+                                               "agent_session": {"value": sid}}])
+
+        def refreshed(wait=3.0):  # main-refresh runs on its own: wait a moment for the fake to write
+            end = time.time() + wait
+            while time.time() < end and not os.path.exists(f"{d}/refreshed"):
+                time.sleep(0.05)
+            got = open(f"{d}/refreshed").read().splitlines() if os.path.exists(f"{d}/refreshed") else []
+            if got:
+                os.remove(f"{d}/refreshed")
+            return got
+
+        panes_on_workers(); agents()
+        conversation("s1", 100000, 120000, 149999); tick(130000)
+        assert refreshed(0.5) == [], "under the line: no restart"
+        conversation("s1", 100000, 120000, 150001)
+        tick(130060, HERDR_SOCKET_PATH=DEF, HERDR_SESSION="workers")
+        assert refreshed() == ["--now none none"], "over it: main-refresh --now, without the server variables"
+        assert "150001" in open(f"{d}/state/orchestrator/refresh.log").read(), "and the log says why"
+        tick(130660); assert refreshed(0.5) == [], "once an hour at most"
+        tick(133700); assert refreshed() == ["--now none none"], "an hour later again"
+        conversation("s2", 140000 - 600, 160000); tick(140000)
+        assert refreshed(0.5) == [], "a session restarted ten minutes ago by anyone is given its hour"
+        conversation("s3", 100000, 140000, side=900000); tick(150000)
+        assert refreshed(0.5) == [], "a subagent's or a synthetic line is not the conversation's size"
+        conversation("s5", 150000 - 7200, 170000, last=150000 - 7200 + 600); tick(150000)
+        assert refreshed(0.5) == [], "a pane quiet since its handoff load is no restart: a fresh one is past the line already"
+        result("default-panes", "panes", [{"pane_id": "w5:p3", "terminal_id": "term_M", "label": "👑 메인", "agent": "claude"}])
+        tick(160000); assert refreshed(0.5) == [], "no session id: nothing to measure"
+        conversation("s4", 100000, 200000); env["WORKERS_WATCH_MAIN_REFRESH"] = f"{d}/nowhere"; tick(170000)
+        env["WORKERS_WATCH_MAIN_REFRESH"] = f"{d}/main-refresh"; tick(170060)
+        assert refreshed() == ["--now none none"], "a call that could not start is tried again next minute"
+        result("default-panes", "panes", [{"pane_id": "w5:p3", "terminal_id": "term_M", "label": "👑 메인", "agent": "claude"}])
+        del env["WORKERS_WATCH_MAIN_REFRESH"]
 
         # end to end, the way launchd runs it: python3 -I drops the script folder from sys.path
         panes_on_workers(label("w1:p6", "🟢 🫡 시험")); agents(agent("w1:p6", "term_6", "blocked", seq=11))
