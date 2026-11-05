@@ -104,8 +104,12 @@ KEYS = [  # matched per shell segment, after joining `\` continuations
 # ponytail: a heredoc commit body is still read line by line, so commit long messages with -F <file>.
 TEXT_ONLY = re.compile(r"\s*(?:\w+=\S*\s+)*(?:git\s+(?:commit|tag|grep|log|show)|gh\s+(?:pr|issue|release)\s+"
                        r"(?:create|edit|comment|view)|rg|grep)\b")
-# What still runs in a TEXT_ONLY segment: $( ), backticks, <( ) and >( ), a command sent to the background, rg --pre.
-SUBST = re.compile(r"\$\(|`|[<>]\(|(?<![>&|])&(?![&>])|--pre\b")  # checked after dropping '...' strings
+# What still runs in a TEXT_ONLY segment: $( ), backticks, <( ) and >( ), a command sent to the background. Checked after
+# dropping '...' and "..." strings with no $ or backtick, which the shell reads as text (Codex review: `rg "keys create.*&"`).
+SUBST = re.compile(r"\$\(|`|[<>]\(|(?<![>&|])&(?![&>])")
+LITERAL = re.compile(r"'[^']*'|\"[^\"$`]*\"")
+# rg runs what --pre names; checked with only the quote marks removed, since `'--pre'` is still the option
+PRE = re.compile(r"\s*(?:\w+=\S*\s+)*rg\b.*--pre\b", re.S)
 SEGMENTS = re.compile(r"&&|\|\||[;|\n]")
 # A key resource written into a .tf file lands its private key in state and makes a key on merge.
 KEY_TF = re.compile(r'resource\s+"google_service_account_key"|"google_service_account_key"\s*:')
@@ -122,9 +126,9 @@ def bash_problem(cmd: str) -> tuple[str, bool | str] | None:
     """(what, persists) for the first refused part of a command; persists is "key" for KEYS."""
     flat = cmd.replace("\\\n", " ")
     for segment in SEGMENTS.split(flat):
-        if TEXT_ONLY.match(segment) and not SUBST.search(re.sub(r"'[^']*'", "", segment)):
-            continue
         bare = re.sub(r"['\"\\]", "", segment)  # 'cre''ate' and cre\ate run as create
+        if TEXT_ONLY.match(segment) and not SUBST.search(LITERAL.sub("", segment)) and not PRE.search(bare):
+            continue
         for pattern, what in KEYS:
             if pattern.search(segment) or pattern.search(bare):
                 return what, "key"
@@ -769,10 +773,13 @@ def slack_selftest(claude_transcript, tmp):
     for c in ("grep x <(gcloud iam service-accounts keys create k.json --iam-account=a@x)",
               "grep -q x /dev/null & gcloud iam service-accounts keys create k.json --iam-account=a@x",
               "gcloud iam service-accounts keys 'cre''ate' k.json --iam-account=a@x",
-              'gcloud resource-manager org-policies "disable"-enforce c --project=p'):
+              'gcloud resource-manager org-policies "disable"-enforce c --project=p',
+              "rg '--pre' 'sh -c \"gcloud iam service-accounts keys create k --iam-account=a@x\"' x"):
         assert (bash_problem(c) or ("", ""))[1] == "key", f"a key command in disguise: {c} -> {bash_problem(c)}"
     for c in ("git commit -m 'refuse gcloud iam service-accounts keys create' 2>&1",
-              "rg -n 'service-accounts keys create' ~/.dotfiles 2>&1 | head"):
+              "rg -n 'service-accounts keys create' ~/.dotfiles 2>&1 | head",
+              'rg -n "service-accounts keys create.*&" ~/.dotfiles',
+              'git commit -m "refuse <(gcloud iam service-accounts keys create) & --pre forms"'):
         assert bash_problem(c) is None, f"text that only names a key command: {c} -> {bash_problem(c)}"
     # the main pane: 요유's own pane on the default server, never a pane a job or a lead opened (a file any pane can write)
     fake = os.path.join(tmp, "herdr")
