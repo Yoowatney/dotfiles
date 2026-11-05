@@ -616,15 +616,30 @@ def main_channels(env) -> set:
 def posting_command(command: str):
     """Recognize one post, optionally with cd before it and main-channel done after it.
 
+    A first main-channel post/reply may also have only an exit-status echo after it.
     Arbitrary compound shell output cannot prove which command printed a ts, so it must not clear this check.
     """
     post = None
-    for step in COMMANDS.split(HEREDOC.sub("", command)):
+    for document in HEREDOC.finditer(command):
+        # Only quoted literal input is safe to omit; keep extra shell commands out of the omitted header.
+        header = document[0].split("\n", 1)[0]
+        if not document[1] or not re.fullmatch(r"<<-?[ \t]*(['\"])(\w+)\1[ \t]*", header):
+            return None
+    steps = [step for step in COMMANDS.split(HEREDOC.sub("", command)) if step.strip()]
+    for index, step in enumerate(steps):
         try:
-            args = shlex.split(step)
+            lexer = shlex.shlex(step, posix=True, punctuation_chars="|&<>()`")
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            args = list(lexer)
         except ValueError:
             return None
+        if any(re.fullmatch(r"[|&<>()`]+", arg) or "$(" in arg or "`" in arg for arg in args):
+            return None  # Another shell command or redirection could have supplied the timestamp.
         if not args:
+            continue
+        if (args == ["echo", "post exit $?"] and index == 1 and len(steps) == 2
+                and post and post[0] == "main-channel.py"):
             continue
         if args[0] == "cd" and len(args) == 2 and post is None:
             continue
@@ -659,7 +674,10 @@ def posted_reply(command: str, name: str, output: str, targets: set, channels: s
     if any(v.get("ok") is False or v.get("isError") or v.get("scheduled_message_id") or
            v.get("exit_code") not in (None, 0) for v in objects):
         return set()
-    timestamp = any(SLACK_TS.fullmatch(line.strip()) for v in values if isinstance(v, str) for line in v.splitlines())
+    lines = [line.strip() for v in values if isinstance(v, str) for line in v.splitlines()]
+    if any(re.fullmatch(r"post exit [1-9]\d*", line) for line in lines):
+        return set()
+    timestamp = any(SLACK_TS.fullmatch(line) for line in lines)
     post = posting_command(command) if timestamp else None
     if post:
         script, args, assignments = post

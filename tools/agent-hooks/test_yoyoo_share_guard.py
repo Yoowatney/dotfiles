@@ -156,6 +156,47 @@ class ThreadCallTests(unittest.TestCase):
         command = POST + " && python3 /skills/main-channel.py done --thread 1794000000.000100"
         self.assertIsNone(self.reason([incoming(), call(command), result("1794000002.000300\nchecked: 1794000000.000100\n")]))
 
+    def test_first_post_followed_by_exit_echo_passes(self):
+        command = POST + '; echo "post exit $?"'
+        self.assertIsNone(self.reason([incoming(), call(command), result("1794000002.000300\npost exit 0\n")]))
+
+    def test_first_reply_followed_by_exit_echo_passes(self):
+        command = "python3 /skills/main-channel.py reply --channel CTEAM --thread 1794000000.000100 /tmp/reply.md"
+        self.assertIsNone(self.reason([incoming(), call(command + '; echo "post exit $?"'),
+                                      result("1794000002.000300\npost exit 0\n")]))
+
+    def test_exit_echo_requires_post_as_first_command(self):
+        for prefix in ("false && ", "cd /tmp; ", 'echo "1794000002.000300"; '):
+            with self.subTest(prefix=prefix):
+                command = prefix + POST + '; echo "post exit $?"'
+                self.assertIsNotNone(self.reason([incoming(), call(command), result("1794000002.000300\npost exit 0\n")]))
+
+    def test_exit_echo_without_timestamp_returns_turn(self):
+        command = POST + '; echo "post exit $?"'
+        self.assertIsNotNone(self.reason([incoming(), call(command), result("아침 8시에 올림\npost exit 0\n")]))
+
+    def test_exit_echo_does_not_allow_arbitrary_following_command(self):
+        for suffix in ('; echo "1794000002.000300"', '; echo "post exit $?"; cat /tmp/ts'):
+            with self.subTest(suffix=suffix):
+                self.assertIsNotNone(self.reason([incoming(), call(POST + suffix), result()]))
+
+    def test_exit_echo_does_not_allow_pipeline_or_background_command(self):
+        for operator in ("|", "&"):
+            with self.subTest(operator=operator):
+                command = POST + " " + operator + ' cat /tmp/fake-ts; echo "post exit $?"'
+                self.assertIsNotNone(self.reason([incoming(), call(command), result("1794000002.000300\npost exit 0\n")]))
+
+    def test_nonzero_post_exit_returns_turn_even_with_timestamp(self):
+        command = POST + '; echo "post exit $?"'
+        self.assertIsNotNone(self.reason([incoming(), call(command), result("1794000002.000300\npost exit 1\n")]))
+
+    def test_exit_echo_does_not_allow_process_or_command_substitution(self):
+        for extra in ("> >(cat /tmp/fake-ts)", "2> >(cat /tmp/fake-ts)", "`cat /tmp/fake-ts`", "$(cat /tmp/fake-ts)",
+                      '"$(cat /tmp/fake-ts >&2)"', '"`cat /tmp/fake-ts >&2`"'):
+            with self.subTest(extra=extra):
+                command = POST + " " + extra + '; echo "post exit $?"'
+                self.assertIsNotNone(self.reason([incoming(), call(command), result("1794000002.000300\npost exit 0\n")]))
+
     def test_unexecuted_post_and_echo_returns_turn(self):
         self.assertIsNotNone(self.reason([incoming(), call("false && " + POST + "; echo 1794000002.000300"), result()]))
 
@@ -170,6 +211,16 @@ class ThreadCallTests(unittest.TestCase):
     def test_main_helper_heredoc_post_passes(self):
         command = "python3 /skills/main-channel.py post - --new <<'EOF'\nReply\nEOF"
         self.assertIsNone(self.reason([incoming(), call(command), result()]))
+
+    def test_heredoc_cannot_hide_other_commands(self):
+        commands = [
+            "python3 /skills/main-channel.py post - <<'EOF'; cat /tmp/fake-ts\nReply\nEOF",
+            "python3 /skills/main-channel.py post - <<EOF\n$(cat /tmp/fake-ts >&2)\nEOF",
+        ]
+        for command in commands:
+            for suffix in ("", '\necho "post exit $?"'):
+                with self.subTest(command=command, suffix=suffix):
+                    self.assertIsNotNone(self.reason([incoming(), call(command + suffix), result()]))
 
     def test_fake_helper_in_heredoc_returns_turn(self):
         command = "cat <<'EOF'\n" + POST + "\nEOF"
