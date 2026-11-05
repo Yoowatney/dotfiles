@@ -10,6 +10,7 @@ when `원인:`, `조치:` and `재발 방지:` do not come in equal numbers.
 Only the `요유 몫:` value counts, up to `·` or the end of its line; `없음` passes, and so does a reply without the line.
 Code, quotes and blockquotes are ignored (a report about the format is not a report). Skipped for headless Claude runs
 (claude -p / SDK) and on the second stop of a turn (stop_hook_active), so it blocks at most once. Fails open.
+A session is asked about each 요유 몫 item once (asked_before): an open decision rides in every report until 요유 answers.
 A report whose 요유 몫 holds only decisions is not asked at all (only_decisions); auto-tab-close still sees it as work left.
 It also sends back names 요유 cannot read: a pane's herdr id (`w5:pKR`, 27 reports in 14 days; the reason carries the
 pane's name) and the machine names the global rule bans. A last report (it has `남은 것:`) also comes back while a test pane
@@ -542,10 +543,39 @@ def only_decisions(text: str) -> bool:
     ponytail: word endings, so "할지 결정" also passes a step 유요 should just take. Replayed on the 102 fires of 10/28-10/31
     this drops 42 of 77 idle fires and 10 of 25 that did work, about 5 of them real wins. Ask once per session if those come back.
     """
+    items = share_items(text)
+    return bool(items) and all(is_decision(i) for i in items)
+
+
+def share_items(text: str) -> list:
+    """The items of every 요유 몫 value, each without its aside."""
     text = STRIP[2].sub(" ", STRIP[0].sub(" ", unicodedata.normalize("NFC", text)))
     values = [ASIDE.sub(" ", m.group(1)) for m in SHARE_FULL.finditer(text)]
-    items = [i.strip() for v in values if not NONE.match(v.strip(" \t*_.,;")) for i in ITEM.split(v) if i.strip(" \t*_.,;")]
-    return bool(items) and all(is_decision(i) for i in items)
+    return [i.strip() for v in values if not NONE.match(v.strip(" \t*_.,;")) for i in ITEM.split(v) if i.strip(" \t*_.,;")]
+
+
+def asked_before(payload: dict, text: str, env) -> bool:
+    """This session was asked about every 요유 몫 item already; asking records the new ones. No session id or HOME: ask.
+
+    요유 2026-11-05: the main pane kept one data deletion in 요유 몫 for hours. Asked at each report, it ended without a word and
+    Claude Code ran one more turn for the empty reply. Items, not the whole value: replayed on that session, 42 asks fall to 23,
+    27 with the whole value, since the aside (a link, a recommendation) changed between reports.
+    ponytail: one small file per asked session, never cleaned; prune by age if ~/.local/state/share-guard ever matters.
+    """
+    session, home = os.path.basename(payload.get("session_id") or ""), env.get("HOME")
+    items = {" ".join(i.strip(" \t*_.,;").split()) for i in share_items(text)}
+    if not (session and home and items):
+        return False
+    folder = os.path.join(home, ".local", "state", "share-guard")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, session), "a+", encoding="utf-8") as f:
+            f.seek(0)
+            new = items - set(f.read().splitlines())
+            f.write("".join(f"{i}\n" for i in sorted(new)))
+    except OSError:
+        return False
+    return not new
 
 
 def decide(payload: dict, env, claude: bool = False) -> str | None:
@@ -565,7 +595,7 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
               stale_thread_reason(payload, text, env), *formats[4:])
     rewrites = [r for r in checks if r]
     left = leaves_yoyoo_work(text)
-    if left and not only_decisions(text):
+    if left and not only_decisions(text) and not asked_before(payload, text, env):
         rewrites.append(DO_REASON if rewrites else REASON)  # a rewrite that is due must not be told to stay silent
     elif not left and asks_back(text):
         rewrites.append(DO_REASON if rewrites else ASK_REASON)
@@ -849,6 +879,29 @@ def selftest():
               "남은 것: 요유 몫: 훅을 만들지 결정 · 유요 몫: 없음",
               "요유 몫은 보드 질문을 가리키기만 하면 안 됩니다."):
         assert decide(p(t), cli) is None, f"the decision is stated: {t[:60]!r}"
+
+    # 요유 2026-11-05: the main pane carried one data deletion in 요유 몫 report after report. Asked each time, it ended without a word,
+    # and Claude Code ran another turn for the empty reply, more than six times. Each 요유 몫 item is asked about once a session.
+    with tempfile.TemporaryDirectory() as d:
+        home = {**cli, "HOME": d}
+        held = ("남은 것: 요유 몫: 데이터셋을 지울지 정해 주세요. 추천은 메인 칸에 `prod 허용`을 쳐서 읽기 기록을 먼저 보고, "
+                "아무도 읽지 않았으면 지우는 것입니다 · 유요 몫: 없음 · 세션: 닫아도 됨")
+        linked = held.replace("것입니다", "것입니다(https://example.com/list?record=1)")
+        assert decide(p(held, session_id="s1"), home) == REASON, "asked the first time"
+        assert decide(p(held, session_id="s1"), home) is None, "the same 요유 몫 is not asked again"
+        assert decide(p("다시 정리했습니다.\n\n" + linked, session_id="s1"), home) is None, "nor with a new aside in another report"
+        assert decide(p(f"왜: 막혀서\n{held}", session_id="s1"), home) == WHAT_REASON, "a due rewrite does not bring it back"
+        assert decide(p(held.replace("없음 · 세션", "PR 대기 · 세션"), session_id="s1"), home) is None, "유요 몫 is not part of it"
+        assert decide(p(held.replace("데이터셋을", "값 넣기, 데이터셋을"), session_id="s1"), home) == REASON, "a new item is asked"
+        assert decide(p(held, session_id="s2"), home) == REASON, "another session is asked"
+        assert decide(p(held), home) == decide(p(held), home) == REASON, "no session id: asked every time, as before"
+        assert decide(p(held, session_id="s3"), cli) == decide(p(held, session_id="s3"), cli) == REASON, "no HOME: as before"
+        locked = os.path.join(d, "locked")
+        os.makedirs(locked, mode=0o500)
+        try:
+            assert decide(p(held, session_id="s4"), {**cli, "HOME": locked}) == REASON, "an unwritable record asks"
+        finally:
+            os.chmod(locked, 0o700)
 
     with tempfile.TemporaryDirectory() as d:
         wrote = {**cli, "EXPLAIN_STATE": d}
