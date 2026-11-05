@@ -663,6 +663,11 @@ esac
         assert tick(99060) == [] and wakes() == [], f"{len(WAKE_GAPS)} wakes, then none"
         told = tick(105000); assert wakes() == [] and "보고 없이 15분째" in told[0], told
         touch_reported("term_V", 105010)
+        # A report resets the count (the screen still holds the error, so only the report can): the next error is told at once.
+        assert tick(105060) == [] and rec()["wakes"] == 0, "a report resets the count"
+        agents(agent("w1:pV", "term_V", "working", seq=45, **w)); tick(105100); agents(agent("w1:pV", "term_V", "idle", seq=47, **w))
+        assert tick(105160) == [] and len(wakes()) == 1, "after a report the next error is told at once"
+        touch_reported("term_V", 105170)
         # Errors that a wake cannot fix, a pane that reported, and a stop that is no error are left alone.
         for i, last in enumerate(("⏺ API Error: Opus 5.5's safeguards flagged this message (https://www.anthropic.com/legal/aup).",
                                   "⏺ Please run /login · API Error: 403 Access to this model requires an access grant",

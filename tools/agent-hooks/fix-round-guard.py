@@ -7,10 +7,12 @@ pane" with no limit (daily wow 2026-11-05, card 01). Now two fixes of one job ar
 asks 요유 (the main pane through `decide`, whose 22:00~08:00 queue makes it a morning question; a pane under a lead through its
 `남은 것:` report). Repeating the call does not pass. 요유's own words after the refusal do: typed in the pane (also while the
 agent works), or relayed from #0-yoyooyo by main-channel, where of reactions only ✅ answers (❌ is "no", 💤 "ask tomorrow").
-An answer opens one fix of one job: the job whose refusal came last before it, or, when the words name a board item (a
-reaction on `[결정 api#1002]`), the job whose refusal that item's `decide` came after. Once that fix's pane opened, the
-next fix of the job is refused again. The first version let any words of 요유's open every job until the 05:00 /clear, and
-❌ opened it too (check pane, 2026-11-05 13:18).
+An answer opens one fix of one job. Plain words open the job whose refusal came last before them. A ✅, and words that name
+a board item, open a job only through its question: the first `decide` called after its refusal, unless another job's
+refusal came first; they come after it and name its item (a ✅ on `[결정 api#1002]`). A ✅ on any other post opens nothing.
+Once that fix's pane opened, the next fix of the job is refused again. The first version let any words of 요유's open every
+job until the 05:00 /clear, and ❌ opened it too (check pane, 2026-11-05 13:18); the second let a ✅ on any decision asked
+between the refusal and the next one open it (lead, 2026-11-05).
 
 One job is one lineage, not one name: every round that night got a new name. The links are the report entries a spawn cites
 ("the 02:37:40 entry", "(02:37:40 항목)", as the short report hands them over). An entry's header names its pane's address,
@@ -20,9 +22,11 @@ to that work's own spawn, counts the fixes before it.
 
 ponytail: a fix sent to a pane that is already open (pane-tell) is no spawn and is not counted, and a /clear starts a new
 session record, so the count starts over; both would need a record kept outside the session, add it when a loop goes that way.
-Unrelated words with no item in them, typed or ✅ on a post with no item, still answer the latest refusal: the hook cannot
-read what they mean. Items match by number alone (api#7 and cf#7 are one), and only a `decide` whose command or output
-shows the item's URL ties it to a refusal.
+Unrelated words with no item in them still answer the latest refusal: the hook cannot read what they mean. A decide for
+another item called first after the refusal takes the job's question, and a ✅ on its `[보류 중 …]` re-ask ("keep paused")
+still matches; only the job's own item in its spawn would tell them apart. Items match by number alone (api#7 and cf#7 are
+one), and only a `decide` whose command or output shows the item's URL ties it to a refusal. A decide before the job's
+latest refusal (the spawn tried again before the answer) is no longer its question: that errs locked.
 gcp-account-guard.py calls check(), for the reason pane-fit-guard.py gives. Fails open.
 
     fix-round-guard.py --selftest
@@ -39,12 +43,12 @@ sys.dont_write_bytecode = True  # no __pycache__ in the dotfiles at every tool c
 MARK = "fix-round:"
 LIMIT = 2  # fixes of one job before 요유 is asked (요유's wow card: "두 번까지, 세 번째는 열지 않고 멈춥니다")
 REASON = (MARK + " 같은 일의 고치기와 확인이 이미 두 번 돌았습니다({chain}). 세 번째 고치기 칸은 열지 않습니다. 지금까지 고친 것과 남은 결함을 "
-          "`고를 것`·`추천`·`바뀌는 것` 세 줄로 묶어 요유에게 물으세요. 메인 칸은 그 일의 보드 항목으로 "
+          "`고를 것`·`추천`·`바뀌는 것` 세 줄로 묶어 요유에게 물으세요. 메인 칸은 다른 결정보다 먼저 그 일의 보드 항목으로 "
           "`python3 /Users/yoyoo/work/munice/munice-claude/.agents/skills/agent-board/main/main-channel.py decide --board <url>`을 부릅니다"
-          "(22~08시에는 아침 8시에 나갑니다). 보드 항목이 없는 일이면 먼저 `echo \"<본문>\" | bash /Users/yoyoo/work/munice/.agents/skills/agent-board/board.sh "
+          "(22~08시에는 아침 8시에 나갑니다). 이 거절 뒤 처음 부른 decide가 이 일의 질문입니다. 보드 항목이 없는 일이면 먼저 `echo \"<본문>\" | bash /Users/yoyoo/work/munice/.agents/skills/agent-board/board.sh "
           "create nightly_api \"<제목>\" yoyoo`(인프라 일은 terraform)로 항목을 만들고, 맨 처음 출력되는 URL을 `decide --board`에 넘깁니다. 제목과 본문에는 "
           "로컬 경로(보고 파일 경로 포함)를 쓰지 않습니다. 리드 밑 칸은 `남은 것:` 보고로 리드에게 올립니다. 이 거절 뒤에 요유가 칸에 직접 치거나 "
-          "#0-yoyooyo에서 답하면(반응은 ✅만 답으로 칩니다. ❌와 💤는 답이 아닙니다) 이 일의 고치기 칸이 하나만 열립니다. 그 칸이 열린 뒤의 고치기는 다시 "
+          "#0-yoyooyo에서 답하면(반응은 이 일의 질문 글에 단 ✅만 답으로 칩니다. ❌와 💤는 답이 아닙니다) 이 일의 고치기 칸이 하나만 열립니다. 그 칸이 열린 뒤의 고치기는 다시 "
           "물어야 합니다. 그냥 다시 실행해서는 통과하지 않습니다.")
 SPAWN = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?pane-spawn((?:\s+--[\w-]+(?:\s+[^\s\"'-]\S*)?)*)\s+"
                    r"(\"(?:\\.|[^\"\\])*\"|'[^']*')")
@@ -55,7 +59,7 @@ ADDRESS = re.compile(r"(?:^|\n)((?:\w+/)?w\w+:p\w+)[ \t]*(?=\n|$)")  # pane-spaw
 CODEX_CMD = re.compile(r"\bcmd[\"']?\s*:\s*(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')")  # as in yoyoo-share-guard.py
 RELAYED_YOYOO = re.compile(r"^\[pane-tell: '자동 작업' [^\]]*\] \[Slack #\S+ 요유( 반응)?\]")  # main-channel's relay of 요유's words
 REACTION = re.compile(r".*에 :([\w+-]+): \(", re.S)  # greedy: the relay's own `에 :emoji: (ts …)` comes after the quoted post
-NOT_TYPED = ("[pane-tell:", "<", "[main-refresh]", "[handoff:", "Stop hook feedback", "Caveat:", "[Request interrupted",
+NOT_TYPED = ("[pane-tell:", "[auto-dispatch]", "<", "[main-refresh]", "[handoff:", "Stop hook feedback", "Caveat:", "[Request interrupted",
              "This session is being continued", "# AGENTS.md", "Here is a note offered by a side agent")
 REF = re.compile(r"\b[a-z]+#(\d+)\b")  # a board item as 요유 sees it in Slack: `[결정 api#1002]`; the channel's `#0-…` has no letters before it
 DECIDE = re.compile(r"/issues/(\d+)")  # in a `main-channel.py decide --board <url>` call or its output (a `$url` prints at create)
@@ -131,14 +135,15 @@ def is_check(entry: tuple) -> bool:
     return bare(entry[3]).startswith("확인 ")
 
 
-def answers(text: str) -> bool:
-    """요유's own words, typed or relayed from Slack. Of reactions only ✅ answers: ❌ is "no" and 💤 "ask me tomorrow"."""
+def answers(text: str) -> str:
+    """"react" for 요유's ✅ relayed from Slack, "word" for their own words, typed or relayed, else "". ❌ is "no" and 💤 "ask me
+    tomorrow": no answer."""
     s = text.lstrip()
     m = RELAYED_YOYOO.match(s)
-    if m:
-        emoji = REACTION.match(s) if m.group(1) else None
-        return not m.group(1) or bool(emoji and emoji.group(1) == "white_check_mark")
-    return bool(s) and not s.startswith(NOT_TYPED)
+    if m and m.group(1):
+        emoji = REACTION.match(s)
+        return "react" if emoji and emoji.group(1) == "white_check_mark" else ""
+    return "word" if m or (s and not s.startswith(NOT_TYPED)) else ""
 
 
 def check(payload: dict, env) -> str | None:
@@ -169,8 +174,8 @@ def check(payload: dict, env) -> str | None:
                 s["addr"] = opened.group(1).split("/")[-1]
             if e[2] in asks:
                 asks[e[2]][1].update(DECIDE.findall(e[1]))
-        elif e[0] == "in" and answers(e[1]):
-            words.append((i, set(REF.findall(e[1]))))
+        elif e[0] == "in" and (said := answers(e[1])):
+            words.append((i, set(REF.findall(e[1])), said == "react"))
     folder = env.get("PANE_REPORT_DIR") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".local", "state", "pane-reports")
     files = {}
 
@@ -225,12 +230,17 @@ def check(payload: dict, env) -> str | None:
 
     if mine and mine[-1]["refused"] is not None:
         at = mine[-1]["refused"]
-        for j, named in words:
+        # This refusal's question: the first decide after it, unless another job's refusal came first. Wrong, it stays locked.
+        first, item = min((a for a in asks.values() if a[0] > at), key=lambda a: a[0], default=(at, set()))
+        if asked(first) is not job:
+            item = set()
+        for j, named, react in words:
             if j < at:
                 continue
-            if named and any(at < i < j and named & nums and asked(i) is job for i, nums in asks.values()):
-                return None  # a reaction or reply naming the item that this refusal's decision went to
-            if not named and asked(j) is job:
+            if named or react:  # a ✅, or words naming an item, answer that question alone
+                if named & item and j > first:
+                    return None
+            elif asked(j) is job:
                 return None
     return REASON.format(chain=" → ".join(s["name"] for s in reversed(chain)))
 
@@ -346,22 +356,32 @@ def selftest():
         relay = "[pane-tell: '자동 작업' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] "
         decide = ran("python3 /x/main-channel.py decide --board https://github.com/munice-dev/nightly_api/issues/1002 - <<'EOF'\n고를 것: …\nEOF",
                      "tD", "ts 1.5")
+        other = ran("python3 /x/main-channel.py decide --board https://github.com/munice-dev/nightly_api/issues/1003 - <<'EOF'\n고를 것: …\nEOF",
+                    "tD2", "ts 1.6")  # another decision the main pane asked in the same window
+        yes = relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#1002] 고를 것: …'에 :white_check_mark: (ts 1)"
         assert judged(new, *refused), "the same call again"
         for words in ([said(relay + "[Slack #0-yoyooyo 요유] 응 계속 고쳐 (ts 1.2)")], [said("계속해")], [queued("계속해")],
                       [queued([{"type": "text", "text": "[Image #1] 계속해"}, {"type": "image"}])],
-                      [said(relay + "[Slack #0-yoyooyo 요유 반응] '[보류 중]'에 :white_check_mark: (ts 1)")],
-                      [*decide, said(relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#1002] 고를 것: …'에 :white_check_mark: (ts 1)")]):
+                      [*decide, said(yes)], [*decide, *other, said(yes)],
+                      [*decide, said(relay + "[Slack #0-yoyooyo 요유] api#1002 추천대로 (스레드 1.1: '11/05 결정 기다리는 것')")]):
             assert judged(new, *refused, *words) is None, words[-1]
         for words in ([said("[pane-tell: '확인 메인 칸' 세션이 보낸 글입니다. …] 다 고쳤습니다")], [said(relay + "밑 칸 w1:p15이 보고 없이 15분째 멈춰 있습니다")],
                       [said("<task-notification>done</task-notification>")], [said("Stop hook feedback: 다시 쓰세요")],
                       [said("[main-refresh] 새벽 정리입니다.")], [queued("Goal set: [auto-dispatch] 보드 일을 끝내세요", origin="auto-continuation")],
                       [queued("<task-notification>x</task-notification>", mode="task-notification", origin="task-notification")],
                       [queued("Here is a note offered by a side agent:  > Heads up · 계속해도 됩니다")],
+                      [said("[auto-dispatch] work.md 를 읽고 진행해 줘")],  # a job typed it: dispatch/run.sh, workers-watch's wake
+                      [queued("[auto-dispatch] 회사맥이 잠들어 응답이 끊겼습니다. 끊긴 곳부터 이어서 하세요.")],
                       [queued("<cross-session-message from=\"uds:/tmp/x.sock\">계속해</cross-session-message>", origin="peer")],
                       [*decide, said(relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#1002] 고를 것: …'에 :x: (ts 1)")],
                       [*decide, said(relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#1002] 고를 것: …'에 :zzz: (ts 1)")],
                       [*decide, said(relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#9] 다른 일'에 :white_check_mark: (ts 1)")],
-                      [*decide, said(relay + "[Slack #0-yoyooyo 요유] cf#7 은 그대로 둬 (스레드 1.1: '11/05 결정 기다리는 것')")]):
+                      [*decide, said(relay + "[Slack #0-yoyooyo 요유] cf#7 은 그대로 둬 (스레드 1.1: '11/05 결정 기다리는 것')")],
+                      # Only a ✅ on the first decision asked after the refusal: a ✅ elsewhere cannot be on it.
+                      [said(relay + "[Slack #0-yoyooyo 요유 반응] '[보류 중]'에 :white_check_mark: (ts 1)")],
+                      [*decide, said(relay + "[Slack #0-yoyooyo 요유 반응] '11/05 결정 기다리는 것'에 :white_check_mark: (ts 1)")],
+                      [*decide, *other, said(relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#1003] 다른 일'에 :white_check_mark: (ts 1)")],
+                      [*other, *decide, said(yes)], [said(yes), *decide]):
             assert judged(new, *refused, *words), f"not 요유's answer to this refusal: {words[-1]}"
         assert judged(new, said("계속해"), *refused), "words before the refusal answer nothing"
 
