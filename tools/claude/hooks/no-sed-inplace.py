@@ -131,15 +131,17 @@ GIT_BANS = {
     "clean": ({"f": CLEAN}, {"--force": CLEAN}, "e"),
     "add": ({"f": ADD_FORCE}, {"--force": ADD_FORCE}, ""),
 }
-# git's global options (`man git`, 2.50.1), which must be skipped to find the subcommand. git takes no abbreviation of these
-# and no attached short value (`--git-d`, `--no-pa`, `-C.` are "unknown option"), so an option outside both lists runs on no
-# git here. It is refused rather than guessed: a newer git's option could take the next word as its value, and reading that
-# word as the subcommand let `git --namespace foo push -f` through (2026-11-05). `--super-prefix` left git, but an older git
-# still takes a value after it. A `--name=value` word holds its own value.
-GIT_VALUED = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--attr-source", "--super-prefix"}
+# git's global options, which must be skipped to find the subcommand: `man git` plus every option-shaped string in the git
+# 2.50.1 binary tried in front of `status`, which added the undocumented `--shallow-file` and `--no-literal-pathspecs`.
+# git takes no abbreviation of these and no attached short value (`--git-d`, `--no-pa`, `-C.` are "unknown option"), so an
+# option outside both lists runs on no git here. It is refused rather than guessed: a newer git's option could take the next
+# word as its value, and reading that word as the subcommand let `git --namespace foo push -f` through (2026-11-05).
+# `--super-prefix` left git, but an older git still takes a value after it. A `--name=value` word holds its own value.
+GIT_VALUED = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--attr-source", "--shallow-file",
+              "--super-prefix"}
 GIT_FLAGS = {"-v", "--version", "-h", "--help", "--exec-path", "--html-path", "--man-path", "--info-path", "-p", "--paginate",
              "-P", "--no-pager", "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "--no-advice", "--bare",
-             "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs"}
+             "--literal-pathspecs", "--no-literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs"}
 GLOBAL_OPTION = ("git-global-option: 이 훅이 모르는 git 전역 옵션 `{}`이 하위 명령 앞에 있어 하위 명령을 읽을 수 없음. "
                  "지금 git은 이 옵션을 받지 않음. 값을 받는 새 옵션이면 `--옵션=값`처럼 붙여 쓸 것. "
                  "값을 받지 않는 새 옵션이면 훅의 목록에 넣도록 그대로 보고할 것")
@@ -455,6 +457,7 @@ def selftest():
             # a global option whose value is the next word (2026-11-05: --namespace and --config-env got through)
             "git --namespace foo push -f origin main",
             "git --super-prefix x/ push -f",
+            "git --shallow-file x push -f",
             "git -C '' push -f",
             "git --git-dir=.git --work-tree . push --force",
         ],
@@ -563,6 +566,7 @@ def selftest():
         "git --list-cmds=main",
         "git --no-advice -P log",
         "git --no-optional-locks status --porcelain",
+        "git --no-literal-pathspecs status",
         "git --bare -C repo.git log",
         "git --new-option=x status",  # its value is in the word, so the subcommand is still read
     ]
