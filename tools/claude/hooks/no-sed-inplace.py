@@ -608,11 +608,12 @@ def selftest():
         with tempfile.TemporaryDirectory() as d:
             os.environ["XDG_STATE_HOME"] = d
             try:
-                _quotes().remember([{"ts": "%.6f" % (time.time() - 60), "text": "7일동안 모니터링해보자는 뜻임~"}], time.time())
-                said = 'gh issue comment 1 -R a/b --body "요유가 7일동안 모니터링해보자는 뜻이라고 함"'
+                # a made-up sentence: this file is public
+                _quotes().remember([{"ts": "%.6f" % (time.time() - 60), "text": "시험용으로 지어낸 문장이라는 뜻임~"}], time.time())
+                said = 'gh -R a/b issue comment 1 --body "요유가 시험용으로 지어낸 문장이라는 뜻이라고 함"'
                 assert "유요의 말로" in (quote_problem(said, d) or ""), said
-                for c in ('gh issue comment 1 --body "요유가 7일 감시를 허락했습니다"', "gh search issues '7일동안 모니터링해보자는 뜻'",
-                          "echo '7일동안 모니터링해보자는 뜻' > a.md"):
+                for c in ('gh issue comment 1 --body "요유가 시험 문장을 허락했습니다"', "gh search issues '시험용으로 지어낸 문장'",
+                          "echo '시험용으로 지어낸 문장이라는 뜻' > a.md"):
                     assert quote_problem(c, d) is None, c
             finally:
                 os.environ.pop("XDG_STATE_HOME") if old is None else os.environ.update(XDG_STATE_HOME=old)
