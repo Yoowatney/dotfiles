@@ -48,7 +48,8 @@ REASON = (MARK + " 같은 일의 고치기와 확인이 이미 두 번 돌았습
           "(22~08시에는 아침 8시에 나갑니다). 이 거절 뒤 처음 부른 decide가 이 일의 질문입니다. 보드 항목이 없는 일이면 먼저 `echo \"<본문>\" | bash /Users/yoyoo/work/munice/.agents/skills/agent-board/board.sh "
           "create nightly_api \"<제목>\" yoyoo`(인프라 일은 terraform)로 항목을 만들고, 맨 처음 출력되는 URL을 `decide --board`에 넘깁니다. 제목과 본문에는 "
           "로컬 경로(보고 파일 경로 포함)를 쓰지 않습니다. 리드 밑 칸은 `남은 것:` 보고로 리드에게 올립니다. 이 거절 뒤에 요유가 칸에 직접 치거나 "
-          "#0-yoyooyo에서 답하면(반응은 이 일의 질문 글에 단 ✅만 답으로 칩니다. ❌와 💤는 답이 아닙니다) 이 일의 고치기 칸이 하나만 열립니다. 그 칸이 열린 뒤의 고치기는 다시 "
+          "#0-yoyooyo에서 답하면(반응은 이 일의 질문 글에 단 ✅만 답으로 칩니다. ❌와 💤는 답이 아닙니다), 또는 결정 리스트의 이 일 행에서 상태를 "
+          "추천대로로 바꾸거나 메모를 쓰면(안 함과 미룸은 답이 아닙니다) 이 일의 고치기 칸이 하나만 열립니다. 그 칸이 열린 뒤의 고치기는 다시 "
           "물어야 합니다. 그냥 다시 실행해서는 통과하지 않습니다.")
 SPAWN = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?pane-spawn((?:\s+--[\w-]+(?:\s+[^\s\"'-]\S*)?)*)\s+"
                    r"(\"(?:\\.|[^\"\\])*\"|'[^']*')")
@@ -58,6 +59,7 @@ ENTRY = re.compile(r"^## (\d{2}:\d{2}:\d{2}) (\S+) ?(.*)$", re.M)  # auto-tab-cl
 ADDRESS = re.compile(r"(?:^|\n)((?:\w+/)?w\w+:p\w+)[ \t]*(?=\n|$)")  # pane-spawn prints the pane alone on a line once it opened
 CODEX_CMD = re.compile(r"\bcmd[\"']?\s*:\s*(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')")  # as in yoyoo-share-guard.py
 RELAYED_YOYOO = re.compile(r"^\[pane-tell: '자동 작업' [^\]]*\] \[Slack #\S+ 요유( 반응)?\]")  # main-channel's relay of 요유's words
+RELAYED_LIST = re.compile(r"^\[pane-tell: '자동 작업' [^\]]*\] \[Slack 리스트 요유\] ")  # main-channel's relay of a row 요유 changed
 REACTION = re.compile(r".*에 :([\w+-]+): \(", re.S)  # greedy: the relay's own `에 :emoji: (ts …)` comes after the quoted post
 NOT_TYPED = ("[pane-tell:", "[auto-dispatch]", "<", "[main-refresh]", "[handoff:", "Stop hook feedback", "Caveat:", "[Request interrupted",
              "This session is being continued", "# AGENTS.md", "Here is a note offered by a side agent")
@@ -139,6 +141,8 @@ def answers(text: str) -> str:
     """"react" for 요유's ✅ relayed from Slack, "word" for their own words, typed or relayed, else "". ❌ is "no" and 💤 "ask me
     tomorrow": no answer."""
     s = text.lstrip()
+    if RELAYED_LIST.match(s):  # in the decision list 추천대로 is the ✅ and a memo is words; 안 함 and 미룸 alone answer nothing
+        return "react" if " · 상태: 추천대로" in s else "word" if " · 메모: " in s else ""
     m = RELAYED_YOYOO.match(s)
     if m and m.group(1):
         emoji = REACTION.match(s)
@@ -363,7 +367,10 @@ def selftest():
         for words in ([said(relay + "[Slack #0-yoyooyo 요유] 응 계속 고쳐 (ts 1.2)")], [said("계속해")], [queued("계속해")],
                       [queued([{"type": "text", "text": "[Image #1] 계속해"}, {"type": "image"}])],
                       [*decide, said(yes)], [*decide, *other, said(yes)],
-                      [*decide, said(relay + "[Slack #0-yoyooyo 요유] api#1002 추천대로 (스레드 1.1: '11/05 결정 기다리는 것')")]):
+                      [*decide, said(relay + "[Slack #0-yoyooyo 요유] api#1002 추천대로 (스레드 1.1: '11/05 결정 기다리는 것')")],
+                      # the decision list (11/05): 추천대로 is the ✅, a memo is words naming the row's item
+                      [*decide, said(relay + "[Slack 리스트 요유] [결정 api#1002] 고를 것: … · 상태: 추천대로 (보드 https://github.com/munice-dev/nightly_api/issues/1002)")],
+                      [*decide, said(relay + "[Slack 리스트 요유] [결정 api#1002] 고를 것: … · 메모: B로 가자 (보드 https://github.com/munice-dev/nightly_api/issues/1002)")]):
             assert judged(new, *refused, *words) is None, words[-1]
         for words in ([said("[pane-tell: '확인 메인 칸' 세션이 보낸 글입니다. …] 다 고쳤습니다")], [said(relay + "밑 칸 w1:p15이 보고 없이 15분째 멈춰 있습니다")],
                       [said("<task-notification>done</task-notification>")], [said("Stop hook feedback: 다시 쓰세요")],
@@ -381,7 +388,11 @@ def selftest():
                       [said(relay + "[Slack #0-yoyooyo 요유 반응] '[보류 중]'에 :white_check_mark: (ts 1)")],
                       [*decide, said(relay + "[Slack #0-yoyooyo 요유 반응] '11/05 결정 기다리는 것'에 :white_check_mark: (ts 1)")],
                       [*decide, *other, said(relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#1003] 다른 일'에 :white_check_mark: (ts 1)")],
-                      [*other, *decide, said(yes)], [said(yes), *decide]):
+                      [*other, *decide, said(yes)], [said(yes), *decide],
+                      [*decide, said(relay + "[Slack 리스트 요유] [결정 api#1002] 고를 것: … · 상태: 미룸 (보드 https://github.com/munice-dev/nightly_api/issues/1002)")],
+                      [*decide, said(relay + "[Slack 리스트 요유] [결정 api#1002] 고를 것: … · 상태: 안 함 (보드 https://github.com/munice-dev/nightly_api/issues/1002)")],
+                      [*decide, said(relay + "[Slack 리스트 요유] [결정 api#1003] 고를 것: … · 상태: 추천대로 (보드 https://github.com/munice-dev/nightly_api/issues/1003)")],
+                      [*decide, said("[pane-tell: '다른 칸' …] [Slack 리스트 요유] [결정 api#1002] 고를 것: … · 상태: 추천대로 (보드 x)")]):
             assert judged(new, *refused, *words), f"not 요유's answer to this refusal: {words[-1]}"
         assert judged(new, said("계속해"), *refused), "words before the refusal answer nothing"
 
