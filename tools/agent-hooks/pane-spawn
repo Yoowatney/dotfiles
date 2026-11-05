@@ -21,7 +21,8 @@
 # --check opens a check pane: a fresh pane, not the one that did the job, runs the test or command, or looks at the changed behavior
 # or data, and changes nothing (요유 2026-11-05, api#1002). The agent name carries `chk`, which a rename does not change, so its
 # report asks for no other check (auto-tab-close.py). Only a pane herdr_peers.delegates_checks says yes to may open one (the main
-# pane today); any other lead checks results itself, so there it is bad usage and opens nothing.
+# pane today); any other lead checks results itself, so there it is bad usage and opens nothing. A check pane is Codex in its
+# read-only sandbox; with --kind claude, or once Codex's week is past 70% used, it is Claude Sonnet, which may write.
 # Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
 H=${HERDR_BIN_PATH:-herdr}
 USAGE='usage: pane-spawn [--new-tab] [--check] [--kind claude|codex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]'
@@ -31,7 +32,16 @@ die() { echo "pane-spawn: $*" >&2; exit 2; }
 # starts that way made an ordinary pane unreachable (요유 2026-11-05), so no tab it names starts that way.
 tab_name() { case "$1" in "자동 "* | "알아서 "*) echo "일 $1" ;; *) echo "$1" ;; esac; }
 
-same= new_tab= check= kind=claude cwd=$PWD
+# Codex's weekly use in percent, from the newest session record that has one: 0 once that week has reset, nothing if none says.
+codex_week_used() {
+  local f
+  for f in $(find "$HOME/.codex/sessions" -name '*.jsonl' -mtime -8 -print0 2>/dev/null | xargs -0 ls -t 2>/dev/null | head -5); do
+    grep -h '"rate_limits"' "$f" | jq -r --argjson now "$(date +%s)" '.payload.rate_limits | objects | (.primary, .secondary)
+      | select(.window_minutes? == 10080) | if .resets_at < $now then 0 else .used_percent end' 2>/dev/null | tail -1 | grep . && return
+  done
+}
+
+same= new_tab= check= kind= cwd=$PWD
 while [ $# -gt 0 ]; do
   case "$1" in
     --same-tab) same=1; shift ;;
@@ -46,6 +56,16 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ $# -ge 2 ] && [ -n "$1" ] && [ -n "$2" ] || die "$USAGE"
+# A check pane runs on Codex's spare weekly allowance (2026-11-05) until that week is past 70% used. A check that must write to
+# GitHub, Slack or the board passes --kind claude, since Codex's read-only sandbox below blocks those writes.
+if [ -n "$check" ] && [ -z "$kind" ]; then
+  kind=codex used=$(codex_week_used)
+  if awk -v u="${used:-0}" 'BEGIN { exit !(u > 70) }'; then
+    kind=claude
+    echo "pane-spawn: Codex has used ${used}% of its week, so this check pane runs Claude" >&2
+  fi
+fi
+kind=${kind:-claude}
 name=$1 prompt=$2
 # 요유 talks only to the lead (2026-11-01), so a new pane hears it here and not from each lead's memory.
 prompt+=$'\n\n이 칸은 리드 밑 칸입니다. 요유는 이 칸을 보지 않으니 요유에게 직접 묻거나 `prod 허용`, `staging 허용`, `/clear`를 부탁하지 마세요. 질문, 결정 요청, 보고는 답을 `남은 것:` 줄로 끝내면 이 칸을 연 리드에게 갑니다. 보고는 리드가 읽으니 요유에게 쓰는 형식(설명 페이지, `무엇을:`/`왜:`, `원인:`/`조치:`/`재발 방지:`)은 쓰지 말고, 리드가 확인할 결과와 근거를 편하게 적으세요.'
@@ -74,6 +94,12 @@ if [ -n "$check" ]; then
   if [ "$kind" = claude ]; then
     case " $* " in *" --effort "* | *" --effort="*) ;; *) set -- --effort high "$@" ;; esac
     case " $* " in *" --model "* | *" --model="*) ;; *) set -- --model claude-sonnet-5-5 "$@" ;; esac
+  else
+    # A check changes nothing, so the sandbox enforces it, not the instruction: Codex's read-only sandbox blocks every file write and
+    # all network, so gh, Slack and board writes too. Nobody answers its approval prompts, so a blocked command fails at once.
+    # ponytail: no network also means no gh reads and no temp files (mktemp fails); such a check passes --kind claude.
+    set -- --sandbox read-only --ask-for-approval never "$@"
+    prompt+=' 이 칸은 Codex 읽기 전용 샌드박스에서 돕니다. 파일 쓰기(임시 파일 포함)와 네트워크(gh 포함)가 막힙니다. 막혀서 확인하지 못한 항목은 통과로 쓰지 말고, 무엇이 막혀 못 했는지 쓰세요.'
   fi
 fi
 main= hidden= sock= addr=

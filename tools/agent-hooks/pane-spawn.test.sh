@@ -226,22 +226,70 @@ has "고치지 말고" "a check pane changes nothing"
 has "다른 칸의 보고를 다시 읽는 것은 확인이 아닙니다" "rereading a report is no check"
 has "보고 첫 줄에" "its first line is what the main pane reads"
 [ "$out" = "workers/w1:new" ] || fail "a check pane's address names its server: $out"
-has "[workers] tab create --workspace w2 --cwd $PWD --label 확인 api#1 로그인 --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1" "a workers pane has no advisor"
-has "--kind claude --pane w1:new --timeout 120000 -- --model claude-sonnet-5-5 --effort high" "a check pane runs Sonnet at high effort"
-ps --cwd /tmp --check "로그인" "돌려 보세요" >/dev/null
-has "확인 칸입니다" "options in any order"
-ps --check "로그인" "돌려 보세요" -- --model opus >/dev/null
-has "-- --effort high --model opus" "the caller's model wins"
-hasnt "claude-sonnet-5-5" "and no second model"
-ps --check "로그인" "돌려 보세요" -- --model=opus --effort=xhigh >/dev/null
-hasnt "claude-sonnet-5-5" "the caller's --model= wins"
-hasnt "--effort high" "so does the caller's --effort="
-ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
-has "agent start spawn-65f21913323dc21-chk" "any agent kind"
-has "--kind codex" "any agent kind"
+# 2026-11-05: a check pane runs on Codex's spare weekly allowance, in Codex's read-only sandbox, so a write fails instead of
+# relying on the instruction. Nobody answers its approval prompts, so a blocked command fails at once.
+has "--kind codex --pane w1:new --timeout 120000 -- --sandbox read-only --ask-for-approval never" "a check pane is a sandboxed Codex"
+has "읽기 전용 샌드박스" "it hears what the sandbox blocks"
 hasnt "--model" "a codex check pane keeps its model"
 hasnt "--effort" "and its effort"
 hasnt "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" "and its environment"
+ps --cwd /tmp --check "로그인" "돌려 보세요" >/dev/null
+has "확인 칸입니다" "options in any order"
+ps --check "로그인" "돌려 보세요" -- -m gpt-5 >/dev/null
+has "-- --sandbox read-only --ask-for-approval never -m gpt-5" "the caller's Codex arguments follow the sandbox"
+ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
+has "--kind codex --pane w1:new --timeout 120000 -- --sandbox read-only" "--kind codex is the same"
+ps "조사" "지시" >/dev/null
+has "--kind claude" "a pane that does the job is still Claude"
+hasnt "--sandbox" "and has no sandbox"
+# A check that must write to GitHub, Slack or the board asks for Claude: Sonnet at high effort, as before.
+out=$(ps --check --kind claude "api#1 로그인" "npm test를 돌려 보세요")
+has "[workers] tab create --workspace w2 --cwd $PWD --label 확인 api#1 로그인 --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1" "a workers pane has no advisor"
+has "--kind claude --pane w1:new --timeout 120000 -- --model claude-sonnet-5-5 --effort high" "a Claude check pane runs Sonnet at high effort"
+hasnt "--sandbox" "a Claude check pane gets no Codex flag"
+hasnt "읽기 전용 샌드박스" "nor the sandbox note"
+has "확인 칸입니다" "it is still a check pane"
+ps --check --kind claude "로그인" "돌려 보세요" -- --model opus >/dev/null
+has "-- --effort high --model opus" "the caller's model wins"
+hasnt "claude-sonnet-5-5" "and no second model"
+ps --check --kind claude "로그인" "돌려 보세요" -- --model=opus --effort=xhigh >/dev/null
+hasnt "claude-sonnet-5-5" "the caller's --model= wins"
+hasnt "--effort high" "so does the caller's --effort="
+
+# Past 70% of Codex's week, read from the newest Codex session record, a check pane runs Claude Sonnet again and says why.
+usage() { # <used percent> <seconds until reset> [secondary]: a Codex session record as Codex writes it
+  mkdir -p "$SANDBOX/home/.codex/sessions/2026/11/05"
+  local week; week=$(jq -n --argjson u "$1" --argjson r "$(($(date +%s) + $2))" '{used_percent: $u, window_minutes: 10080, resets_at: $r}')
+  local five='{"used_percent": 99, "window_minutes": 300, "resets_at": 1}'
+  if [ -n "${3:-}" ]; then local p=$five s=$week; else local p=$week s=null; fi
+  { echo '{"type":"session_meta","payload":{}}'
+    jq -nc --argjson p "$p" --argjson s "$s" '{type: "event_msg", payload: {type: "token_count", rate_limits: {limit_id: "codex", primary: $p, secondary: $s}}}'; } > "$SANDBOX/home/.codex/sessions/2026/11/05/rollout-a.jsonl"
+}
+usage 71 3600
+ps --check "로그인" "돌려 보세요" 2>"$SANDBOX/err" >/dev/null
+has "--kind claude --pane w1:new --timeout 120000 -- --model claude-sonnet-5-5 --effort high" "71%: a Claude Sonnet check pane"
+hasnt "--sandbox" "71%: no Codex flags"
+grep -q "71" "$SANDBOX/err" || fail "71%: says why: $(cat "$SANDBOX/err")"
+usage 70 3600
+ps --check "로그인" "돌려 보세요" >/dev/null
+has "--kind codex" "70% is not past 70%"
+usage 90 -60
+ps --check "로그인" "돌려 보세요" >/dev/null
+has "--kind codex" "a week that has reset since the record starts at 0"
+usage 71 3600 secondary
+ps --check "로그인" "돌려 보세요" >/dev/null
+has "--kind claude" "a plan whose week is the second limit is read there"
+usage 71 3600; echo '{"type":"event_msg","payload":{"type":"token_count","rate_limits":null}}' >> "$SANDBOX/home/.codex/sessions/2026/11/05/rollout-a.jsonl"
+mkdir -p "$SANDBOX/home/.codex/sessions/2026/11/06"; echo '{"type":"session_meta","payload":{}}' > "$SANDBOX/home/.codex/sessions/2026/11/06/rollout-b.jsonl"
+touch -t "$(date -v-1H +%Y%m%d%H%M)" "$SANDBOX/home/.codex/sessions/2026/11/05/rollout-a.jsonl"
+ps --check "로그인" "돌려 보세요" >/dev/null
+has "--kind claude" "a newer session with no limits yet: the last one that has them counts"
+usage 71 3600
+ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
+has "--kind codex" "a kind the caller names wins"
+ps "조사" "지시" >/dev/null
+has "--kind claude" "an ordinary pane never reads the usage"
+rm -rf "$SANDBOX/home/.codex"
 
 # Every other lead checks results itself, as does a pane under it, and a main-pane file that is stale or gone is no main pane.
 for state in other stale missing; do
