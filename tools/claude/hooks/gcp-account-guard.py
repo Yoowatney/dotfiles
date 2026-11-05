@@ -11,6 +11,9 @@ config and `adc-munice-admin.json`. Two kinds of commands are refused:
 terraform#1005.
 In the main pane a refused SELECT also runs once when 요유 put ✅ on a Slack reply that holds exactly this command:
 slack_approval.py (munice-claude) reads Slack itself, never the text relayed into the pane.
+In the main pane `prod 허용`/`staging 허용` written by 요유 in any Slack channel also counts as typed, for the turn its relay
+starts (api#1026): the relay names the message as `글 <channel>/<ts>`, and slack_approval.py reads author, time and words back
+from Slack. `api#973 prod 허용` (an item right before the word, or opening the words) lifts only commands that name the item.
 
     gcp-account-guard.py --selftest
 """
@@ -34,9 +37,30 @@ PROJECT_REF = re.compile(r"(?:--project[= ]+|\s-P\s+|CLOUDSDK_CORE_PROJECT=|proj
 TOKEN_PRINT = re.compile(r"\bprint-(?:access|identity)-token\b|config-helper|access_token")  # a printed token reaches every project
 
 
-def said(word: str, prompt: str) -> bool:
-    """The word said as a grant, not talked about: `prod 허용이라고 하면` or `prod 허용은 언제` grants nothing."""
-    return bool(re.search(rf"(?:^|[\s`'\"(,])`?{re.escape(word)}`?(?:해줘|해요|해|합니다|할게|함)?(?=$|[\s`'\".,!?)])", prompt))
+TAG = r"(?<![A-Za-z0-9#])([A-Za-z]+#\d+)(?!\d)"  # a board item, as 요유 writes one: api#973, API#973
+ITEM = re.compile(TAG + r"`?(?:은|는|이|가|에|에서|도|의|으로|로|을|를)?:?\s*$")  # right before the word: `api#973은 prod 허용`
+OPENING_ITEM = re.compile(r"\s*(?:<?@\w+>?\s+)*`?" + TAG)  # a decision reply opens with its item, a call with the bot
+# The word ends its clause: `prod 허용 말고`, `prod 허용 안 해`, `prod 허용?` grant nothing, since Slack replies are talk (review).
+GRANT_END = r"`?(?:[ \t]?(?:해줘|해요|해|합니다|할게|함))?(?:[ \t]*(?:ㄱㄱ|고고))?(?=[ \t]*(?:$|\n|[.,!~)'\"]))"
+
+
+def granted(word: str, prompt: str) -> set[str] | None:
+    """None when the word is not said as a grant (`prod 허용이라고 하면`, `prod 허용은 언제`, `prod 허용 말고` grant nothing);
+    else the items it covers: "" for everything, `api#973` when said right after that item or in words that open with it,
+    as 요유 answers a decision reply (api#1026)."""
+    items, opening = set(), OPENING_ITEM.match(prompt)
+    for m in re.finditer(rf"(?:^|[\s`'\"(,])`?{re.escape(word)}{GRANT_END}", prompt):
+        item = ITEM.search(prompt[:m.start() + 1]) or opening
+        items.add(item[1].lower() if item else "")
+    return items or None
+
+
+def in_scope(items: set[str], cmd: str) -> bool:
+    """An item grant lifts only commands that name the item (`... # api#973`). ponytail: the tag says which work a command
+    is for, so a grant on one decision does not drift to the next; a session set on it can still write any tag."""
+    return "" in items or any(re.search(rf"(?<![\w#]){re.escape(i)}(?!\d)", cmd, re.I) for i in items)
+
+
 RELAYED = re.compile(r"\s*(<pasted_content[^>]*>\s*)?\[pane-tell:")
 SPAWNED = "이 칸은 리드 밑 칸입니다."  # pane-spawn ends every instruction with this: a session's words, and they name the unlock phrase
 HOOKS = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "agent-hooks")
@@ -188,21 +212,34 @@ def written_text(tool: str, inp: dict) -> str:
 
 def latest_prompt(transcript_path: str) -> str:
     """Text of the last prompt a person typed: Claude human-origin lines, Codex user messages."""
-    last = ""
+    text, relayed, _ = latest_turn(transcript_path)
+    return "" if relayed else text
+
+
+def latest_turn(transcript_path: str) -> tuple[str, bool, int]:
+    """(text, came by pane-tell, its line) of the last prompt in the input box. A relayed prompt is another session's words
+    (its Slack words count only once read back from Slack); pane-spawn's instruction is a lead's, so its text is blank."""
+    last, relayed, at = "", False, -1
     try:
         f = open(transcript_path, encoding="utf-8", errors="replace")
     except OSError:
-        return ""
+        return last, relayed, at
     with f:
-        for line in f:
+        for n, line in enumerate(f):
             if '"human"' not in line and '"role": "user"' not in line and '"role":"user"' not in line:
                 continue
             try:
                 d = json.loads(line)
             except ValueError:
                 continue
+            queued = d.get("attachment") if d.get("type") == "attachment" else None
             if d.get("type") == "user" and (d.get("origin") or {}).get("kind") == "human":
                 content = (d.get("message") or {}).get("content")
+            elif (isinstance(queued, dict) and queued.get("type") == "queued_command" and queued.get("commandMode") == "prompt"
+                  and (queued.get("origin") or {}).get("kind") == "human"):
+                # Claude records a message typed while it works this way, not as a user line: a third of the main pane's
+                # relays arrived so on 11/05 (review). It starts a turn like any other.
+                content = queued.get("prompt")
             elif d.get("type") == "response_item" and (d.get("payload") or {}).get("role") == "user":
                 content = d["payload"].get("content")
             else:
@@ -212,12 +249,13 @@ def latest_prompt(transcript_path: str) -> str:
             text = content if isinstance(content, str) else ""
             # Codex sends its instruction files as user messages too; a person never types these.
             if not text.lstrip().startswith(("# AGENTS.md", "<environment_context>", "<user_instructions>", "<hook_prompt", "<user_action>")):
-                # pane-tell lands in the input box, so it reads as human origin. It is another session's words and unlocks nothing.
-                last = "" if RELAYED.match(text) or SPAWNED in text else text
-    return last
+                # pane-tell lands in the input box, so it reads as human origin. It is another session's words.
+                last, relayed, at = ("" if SPAWNED in text else text), bool(RELAYED.match(text)), n
+    return last, relayed, at
 
 
-def tool_problem(payload: dict, env: dict) -> str | None:
+def tool_problem(payload: dict, env: dict, prompt: str | None = None) -> str | None:
+    """The refusal, or None. `prompt` stands in for the typed one: 요유's words read back from Slack (api#1026)."""
     tool, inp = payload.get("tool_name"), payload.get("tool_input") or {}
     if tool in ("Bash", "Monitor"):
         hit = bash_problem(inp.get("command") or "")
@@ -249,22 +287,33 @@ def tool_problem(payload: dict, env: dict) -> str | None:
         return None
     # Job-opened tabs get their prompts typed in by a job (ambient pastes Slack threads), so the word proves nothing.
     auto = env.get("MUNICE_AUTO_DISPATCH") == "1" or env.get("MUNICE_AMBIENT") == "1"
-    prompt = "" if auto else latest_prompt(payload.get("transcript_path") or "")
-    if said(UNLOCK, prompt):
+    if auto:
+        prompt = ""
+    elif prompt is None:
+        prompt = latest_prompt(payload.get("transcript_path") or "")
+    cmd = inp.get("command") or "" if tool in ("Bash", "Monitor") else ""
+    prod, staging = granted(UNLOCK, prompt), granted(STAGING_UNLOCK, prompt)
+    if prod is not None and in_scope(prod, cmd):
         return None
-    if said(STAGING_UNLOCK, prompt):
-        if tool in ("Bash", "Monitor") and staging_only(inp.get("command") or ""):
+    items = sorted(((prod or set()) | (staging or set())) - {""})
+    scope = f" 이 허용은 {', '.join(items)} 일에만 걸립니다: 명령 끝에 `# {items[0]}`처럼 그 항목을 적을 것(api#1026)." if items else ""
+    if staging is not None:
+        if staging_only(cmd) and cmd and in_scope(staging, cmd):
             return None
         return (f"{what}: `{STAGING_UNLOCK}` 턴에서는 요유 계정을 고르는 명령마다 staging 프로젝트만 적어야 합니다"
                 "(`--project miraclenight-dev`, firebase는 `-P miraclenight-dev`). prod나 다른 프로젝트를 가리키거나 "
-                f"토큰을 꺼내는 명령은 안 됩니다. prod 쓰기면 요유에게 `{UNLOCK}`을 따로 받을 것. api#992")
+                f"토큰을 꺼내는 명령은 안 됩니다. prod 쓰기면 요유에게 `{UNLOCK}`을 따로 받을 것. api#992{scope}")
+    if prod is not None:
+        return f"{what}: 이 `{UNLOCK}`은 다른 항목의 허락입니다.{scope}"
     if auto:
         return (f"{what}: 자동 탭은 에이전트 계정(staging 쓰기, prod 읽기)으로만 GCP를 쓰고, 이 잠금은 풀 수 없습니다. "
                 "prod 쓰기가 필요하면 무엇을 왜 바꾸는지 보드 항목에 적고 owner를 yoyoo로 넘길 것. terraform#1005")
     return (f"{what}: AI 세션은 에이전트 계정(staging 쓰기, prod 읽기)으로만 GCP를 씁니다. prod 쓰기가 꼭 필요하면 "
-            f"여기서 멈추고, 무엇을 왜 바꾸는지 적은 뒤 요유에게 '`{UNLOCK}`이라고 입력하면 이번 턴만 요유 계정으로 "
-            f"할 수 있다'고 말할 것. staging만 바꾸는 일이면 `{STAGING_UNLOCK}`을 받을 것(staging 프로젝트를 적은 명령만 풀림). 리드 밑 칸이면 요유가 이 칸을 보지 않으니 보고로 리드에게 넘길 것: 리드가 자기 칸에서 "
-            "요유에게 묻고 직접 실행함. 처음부터 prod 작업 세션이면 요유가 `cla`로 띄움. terraform#1005")
+            f"여기서 멈추고, 무엇을 왜 바꾸는지 Slack에 적어 요유에게 `{UNLOCK}`을 받을 것: 요유가 Slack 어느 채널에든 "
+            "쓴 그 글이 메인 칸에 넘어온 턴에서만 요유 계정으로 할 수 있음(가드가 Slack에서 글쓴이와 시각을 직접 확인, "
+            f"30분 안, 한 턴). staging만 바꾸는 일이면 `{STAGING_UNLOCK}`(staging 프로젝트를 적은 명령만 풀림). 리드 밑 칸이면 "
+            "보고로 리드에게 넘길 것: 메인 칸이 요유에게 묻고 직접 실행함. 처음부터 prod 작업 세션이면 요유가 `cla`로 띄움. "
+            "terraform#1005, api#1026")
 
 
 def load(path: str):
@@ -343,19 +392,85 @@ def slack_approval(cmd: str, deadline: float, path: str = SLACK):
     return box[0] if box else (None, f"Slack을 {deadline:g}초 안에 읽지 못함")
 
 
-def hook(hook_input: dict, env: dict, riders, approvals, is_main, budget: float = HOOK_BUDGET, started: float | None = None):
-    """The whole PreToolUse verdict, within `budget` seconds of `started`. On the Slack path the other checks run first:
+def slack_grants(prompt: str, deadline: float, path: str = SLACK):
+    """([(요유's words, claim(turn) -> bool)], why) for the Slack messages a relayed prompt names (api#1026): slack_approval.py
+    reads each from Slack and keeps only 요유's own, typed within 30 minutes. Done or refused within the deadline."""
+    if not os.path.isfile(path):
+        return [], "Slack 승인 모듈이 이 Mac에 없음"
+    box = []
+
+    def read():
+        try:
+            module = load(path)
+            words, why = module.yoyoo_words(prompt, time.time())
+            box.append(([(text, (lambda turn, c=channel, t=ts: module.claim(c, t, turn))) for channel, ts, text in words], why))
+        except BaseException as e:
+            box.append(([], f"Slack을 읽지 못함({type(e).__name__})"))
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    worker.join(deadline)
+    return box[0] if box else ([], f"Slack을 {deadline:g}초 안에 읽지 못함")
+
+
+def relayed_turn(payload: dict, env: dict) -> tuple[str, str] | None:
+    """(prompt, turn id) when this turn's prompt came by pane-tell and a typed word would lift this refusal, else None.
+    In a job tab no word lifts anything (tool_problem), so it never gets here."""
+    path = payload.get("transcript_path") or ""
+    text, relayed, at = latest_turn(path)
+    if not (relayed and text) or tool_problem(payload, env, prompt=UNLOCK) is not None:
+        return None
+    return text, f"{path}:{at}"
+
+
+def slack_grant(hook_input: dict, env: dict, turn: tuple[str, str], grants, left: float) -> str | None:
+    """None when 요유's words in Slack lift this refusal for this turn, else why not."""
+    prompt, turn_id = turn
+    try:
+        words, why = grants(prompt, left)
+    except BaseException as e:
+        return f"Slack을 읽지 못함({type(e).__name__})"
+    used = False
+    for text, claim in words:
+        if tool_problem(hook_input, env, prompt=text) is None:
+            try:
+                if claim(turn_id) is True:
+                    return None
+            except BaseException:
+                pass
+            used = True  # the next one may still count (Codex review)
+    if used:
+        return "그 허용 글은 이미 다른 턴이 썼거나 사용 기록을 남기지 못함: 요유가 Slack에 다시 써야 함"
+    if words:
+        return ("요유의 Slack 글에 이 명령을 푸는 허용 문구가 없음(`staging 허용`은 staging 프로젝트만 적은 명령, "
+                "항목 번호를 붙인 허용은 그 항목을 적은 명령만)")
+    return why
+
+
+def hook(hook_input: dict, env: dict, riders, approvals, is_main, budget: float = HOOK_BUDGET, started: float | None = None,
+         grants=slack_grants):
+    """The whole PreToolUse verdict, within `budget` seconds of `started`. On the Slack paths the other checks run first:
     pane-fit-guard asks the main pane once a message, and its repeat must still find the approval unused."""
     started = time.monotonic() if started is None else started
     reason = tool_problem(hook_input, env)
     if not reason:
         return riders(hook_input)
     reason = f"gcp-account-guard: {reason}"
-    if not (slack_liftable(hook_input, env) and is_main(env)):
+    # 요유 no longer watches the terminal, so a Slack grant lifts only what a ✅ may: nothing that outlives the turn (review)
+    liftable = slack_liftable(hook_input, env)
+    turn = relayed_turn(hook_input, env) if liftable else None
+    if not liftable or not is_main(env):
         return reason
     other = riders(hook_input)
     if other:
         return other
+    if turn:  # 요유's `staging 허용`/`prod 허용` written in Slack and relayed here: read back from Slack, as if typed (api#1026)
+        left = min(SLACK_DEADLINE, budget - (time.monotonic() - started))
+        why = "훅 시간이 모자라 읽지 않음" if left < SLACK_MIN else slack_grant(hook_input, env, turn, grants, left)
+        if why is None:
+            return None
+        reason = f"{reason}\nSlack 허용: {why}"
+    if not liftable:
+        return reason
     left = min(SLACK_DEADLINE, budget - (time.monotonic() - started))
     if left < SLACK_MIN:
         return f"{reason}\n{SLACK_NOTE} 지금 Slack: 훅 시간이 모자라 읽지 않음"
@@ -555,8 +670,54 @@ def selftest():
     for text in ("prod 허용이라고하면 진짜 prod를 허용하는거 같잖아;; staging 허용이라고 하는게 맞지않냐?",
                  "prod 허용은 언제 쓰는 거야?", "staging 허용이란 말 만들었어?"):
         assert tool_problem({**admin_cmd, "transcript_path": claude_transcript(text)}, {}), f"a mention unlocks nothing: {text}"
-    for text in ("prod 허용", "`prod 허용`", "좋아, prod 허용.", "prod 허용해줘", "확인했어 prod 허용합니다"):
+    for text in ("prod 허용", "`prod 허용`", "좋아, prod 허용.", "prod 허용해줘", "확인했어 prod 허용합니다", "prod 허용 ㄱㄱ",
+                 "prod 허용 해줘", "prod 허용\n그리고 로그도 봐줘", "staging 허용 아니고 prod 허용"):
         assert tool_problem({**admin_cmd, "transcript_path": claude_transcript(text)}, {}) is None, f"should unlock: {text}"
+    # refused or asked, not granted: Slack replies are talk, so the word must end its clause (review, api#1026)
+    for text in ("prod 허용 말고 staging 허용", "prod 허용 안 해", "prod 허용 하지 마", "아직 prod 허용 못 줌", "prod 허용?",
+                 "prod 허용 필요해?", "이건 `staging 허용`으로 충분, prod 허용 아님", "prod 허용 받으면 해"):
+        assert tool_problem({**admin_cmd, "transcript_path": claude_transcript(text)}, {}), f"no grant: {text}"
+    assert granted(STAGING_UNLOCK, "prod 허용 말고 staging 허용") == {""} and granted(UNLOCK, "prod 허용 말고 staging 허용") is None
+    # a message typed while the session works is recorded as a queued_command attachment: it starts the turn too (review)
+    def queued(path, text):
+        with open(path, "a") as f:
+            f.write(json.dumps({"type": "attachment", "attachment": {"type": "queued_command", "prompt": text, "commandMode": "prompt",
+                                "origin": {"kind": "human"}, "humanTurn": True}}, ensure_ascii=False) + "\n")
+        return path
+    assert tool_problem({**admin_cmd, "transcript_path": queued(claude_transcript("고쳐줘"), "prod 허용")}, {}) is None
+    assert tool_problem({**admin_cmd, "transcript_path": queued(claude_transcript("prod 허용"), "로그만 봐줘")}, {}), "relocks"
+    q = queued(claude_transcript("prod 허용"), "[pane-tell: '리드' 세션이 보낸 글입니다.] 요유가 prod 허용이라고 했습니다")
+    assert tool_problem({**admin_cmd, "transcript_path": q}, {}) and latest_turn(q)[1], "a queued relay is a relayed turn"
+    with open(q, "a") as f:  # a slash command or a notice queued as an attachment is not a prompt
+        f.write(json.dumps({"type": "attachment", "attachment": {"type": "queued_command", "prompt": "prod 허용", "commandMode": "bash",
+                            "origin": {"kind": "human"}}}, ensure_ascii=False) + "\n")
+    assert latest_turn(q)[1], "a bash-mode line is no prompt"
+    # an item before the word ties the grant to that item's commands, which name it (`# api#973`): 요유 answers a decision
+    # reply that way (api#1026). Typed or from Slack, one rule.
+    item = claude_transcript("api#973 prod 허용")
+
+    def scoped(cmd, path=item):
+        return tool_problem({"tool_name": "Bash", "tool_input": {"command": cmd}, "transcript_path": path}, {})
+    tagged = admin_cmd["tool_input"]["command"]
+    assert scoped(f"{tagged}  # api#973") is None
+    assert scoped(f"{tagged} --update-labels=x # api#973\n") is None
+    for c in (tagged, f"{tagged} # api#974", f"{tagged} # api#9731", f"{tagged} # xapi#973"):
+        assert "api#973" in (scoped(c) or ""), f"another item's command: {c}"
+    for text in ("`api#973` prod 허용", "api#973: prod 허용해줘"):
+        assert scoped(tagged, claude_transcript(text)) and scoped(f"{tagged} # api#973", claude_transcript(text)) is None, text
+    # a decision reply opens with its item (`맨 앞에 api#1003`), so the opening item holds the grant too
+    for text in ("api#973 봤어. prod 허용", "api#973 추천대로, prod 허용해줘"):
+        assert scoped(tagged, claude_transcript(text)) and scoped(f"{tagged} # api#973", claude_transcript(text)) is None, text
+    assert scoped(tagged, claude_transcript("봤어 api#973. prod 허용")) is None, "an item elsewhere in the words holds nothing"
+    for text in ("@U0TESTBOT1 api#973 추천대로 prod 허용", "<@U0TESTBOT1> api#973 추천대로 prod 허용",  # a call opens with the bot
+                 "API#973 prod 허용", "Api#973: prod 허용", "api#973은 prod 허용", "api#973에 prod 허용", "api#973도 prod 허용",
+                 "api#973은 추천대로, prod 허용"):  # an item written loosely still holds the grant (review)
+        assert scoped(tagged, claude_transcript(text)) and scoped(f"{tagged} # api#973", claude_transcript(text)) is None, text
+    assert scoped(f"{tagged} # API#973", item) is None
+    stg_item = claude_transcript("cf#12 staging 허용")
+    stg_cmd = "gcloud --configuration=munice-admin secrets list --project miraclenight-dev"
+    assert scoped(f"{stg_cmd} # cf#12", stg_item) is None and scoped(stg_cmd, stg_item)
+    assert scoped(f"{stg_cmd.replace('miraclenight-dev', 'miraclenight-f06c6')} # cf#12", stg_item), "staging stays staging"
     # an auto tab (ambient, dispatch) never unlocks by the word
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript("prod 허용")}, {"MUNICE_AMBIENT": "1"})
     assert tool_problem({**admin_cmd, "transcript_path": claude_transcript("prod 허용")}, {"MUNICE_AUTO_DISPATCH": "1"})
@@ -692,12 +853,19 @@ def slack_selftest(claude_transcript, tmp):
             return consume, ""
         return check
 
+    asked, claims = [], []
+
+    def no_grants(prompt, deadline):
+        asked.append(prompt)
+        return [], "요유 글 없음"
+
     def run(cmd, *, env=None, found=True, raises=False, consume_raises=False, main=True, rider=None, tool="Bash", prompt="고쳐줘",
-            budget=HOOK_BUDGET, slow_main=0.0, background=False):
+            budget=HOOK_BUDGET, slow_main=0.0, background=False, grants=no_grants, path=None):
         calls.clear()
-        payload = {"tool_name": tool, "tool_input": {"command": cmd, "run_in_background": background}, "transcript_path": claude_transcript(prompt), "cwd": "/tmp"}
+        payload = {"tool_name": tool, "tool_input": {"command": cmd, "run_in_background": background},
+                   "transcript_path": path or claude_transcript(prompt), "cwd": "/tmp"}
         return hook(payload, env or {}, lambda _: rider, approvals(found, raises, consume_raises),
-                    lambda _: (time.sleep(slow_main), main)[1], budget=budget)
+                    lambda _: (time.sleep(slow_main), main)[1], budget=budget, grants=grants)
 
     cmd = "gcloud --configuration=munice-admin firestore documents list --project miraclenight-f06c6"
     assert run(cmd) is None and calls == [cmd], "the main pane runs an approved command"
@@ -764,7 +932,8 @@ def slack_selftest(claude_transcript, tmp):
     # a command the guard allows anyway never reaches Slack
     assert run("gcloud run services list --project miraclenight-f06c6") is None and not calls
     # a typed unlock comes first: no Slack read
-    assert run(cmd, prompt="prod 허용") is None and not calls
+    assert run(cmd, prompt="prod 허용") is None and not calls and not asked
+    slack_grant_selftest(run, asked, claims, claude_transcript, tmp)
     # the used marks are out of reach of the file tools too
     for tool, key in (("Write", "file_path"), ("Edit", "file_path"), ("Read", "file_path")):
         assert tool_problem({"tool_name": tool, "tool_input": {key: os.path.expanduser(
@@ -823,6 +992,90 @@ def slack_selftest(claude_transcript, tmp):
     start = time.monotonic()
     found, why = slack_approval(cmd, 0.5, path=path)
     assert found is None and "초 안에" in why and time.monotonic() - start < 2, (why, time.monotonic() - start)
+
+
+def slack_grant_selftest(run, asked, claims, claude_transcript, tmp):
+    """요유's `staging 허용`/`prod 허용` in Slack, relayed into the main pane (api#1026). A fake grants() stands in for
+    slack_approval.yoyoo_words, which has its own tests (author, age, a forged or missing message)."""
+    relay = "[pane-tell: '자동 작업' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] "
+    told = relay + "[Slack #main 요유] staging 허용 (ts 1793880711.215309, 글 C0TEST0001/1793880711.215309)"
+    stg = "gcloud --configuration=munice-admin secrets versions add OPENAI_API_KEY --project=miraclenight-dev --data-file=/tmp/k"
+    prod = "gcloud --configuration=munice-admin firestore documents delete a/b --project miraclenight-f06c6"
+
+    def slack_said(*texts, why="", claim_ok=True, raises=False):
+        def grants(prompt, deadline):
+            asked.append(prompt)
+            assert 0 < deadline <= SLACK_DEADLINE, deadline
+            if raises:
+                raise RuntimeError("slack down")
+            oks = iter(claim_ok if isinstance(claim_ok, list) else [claim_ok] * len(texts))
+            return [(t, lambda turn, ok=next(oks): (claims.append(turn), ok)[1]) for t in texts], why
+        return grants
+
+    def go(cmd, **kw):
+        asked.clear()
+        claims.clear()
+        return run(cmd, found=False, prompt=kw.pop("prompt", told), **kw)
+    # 요유's words as Slack has them unlock the relayed turn as if typed: staging for staging, prod for prod
+    assert go(stg, grants=slack_said("staging 허용")) is None and asked == [told] and len(claims) == 1
+    assert go(prod, grants=slack_said("<@U0TESTBOT1> `prod 허용`")) is None
+    # 요유 no longer watches the terminal, so a Slack grant lifts only what a ✅ may: nothing that outlives the turn (review)
+    for c, kw in ((stg, {"tool": "Monitor"}), (stg, {"background": True}),
+                  ("MUNICE_GCP_ADMIN=1 nohup claude -p x &", {}), ("CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin tmux new -d zsh", {}),
+                  ("gcloud --configuration=munice-admin auth print-access-token > /tmp/t", {}),
+                  (f"{prod} &", {})):
+        assert go(c, grants=slack_said("prod 허용"), **kw) and not asked, f"a Slack grant must not lift: {c} {kw}"
+    # a `staging 허용` never writes prod, whatever the relayed text says
+    reason = go(prod, prompt=told.replace("staging", "prod"), grants=slack_said("staging 허용"))
+    assert reason and "Slack 허용" in reason and "허용 문구" in reason, reason
+    assert go(prod, grants=slack_said("prod 허용이라고 하면 뭐가 풀려?")), "a mention grants nothing"
+    # a forged relay, someone else's words, an old grant: whatever Slack says is passed on as the refusal's reason
+    for why in ("C0TEST0001/1793880711.215309: 요유가 쓴 글이 아님", "C0TEST0001/1793880711.215309: 올린 지 30분이 지남",
+                "C0TEST0001/1793880711.215309: Slack에서 읽지 못함(thread_not_found)"):
+        reason = go(stg, grants=slack_said(why=why))
+        assert reason and why in reason and asked, reason
+    # one message, one turn: a later turn that names it again is refused
+    reason = go(stg, grants=slack_said("staging 허용", claim_ok=False))
+    assert reason and "이미" in reason and len(claims) == 1, reason
+    # a used grant among several: the next one still counts (Codex review)
+    assert go(stg, grants=slack_said("staging 허용", "staging 허용", claim_ok=[False, True])) is None and len(claims) == 2
+    same = claude_transcript("고쳐줘", told, tail_tool=False)
+    assert go(stg, path=same, grants=slack_said("staging 허용")) is None
+    first = claims[:]
+    assert go(stg, path=same, grants=slack_said("staging 허용")) is None and claims == first, "the same turn, the same id"
+    assert first[0].startswith(same + ":"), first
+    later = claude_transcript("고쳐줘", told, told, tail_tool=False)
+    go(stg, path=later, grants=slack_said("staging 허용"))
+    assert claims[0] != first[0], "a later turn has another id"
+    # an item before the word holds the grant to that item's commands
+    assert go(prod, grants=slack_said("api#973 prod 허용"))
+    assert go(f"{prod} # api#973", grants=slack_said("api#973 prod 허용")) is None
+    # Slack is never asked: another pane, an auto tab, a prompt typed here, a refusal no word lifts, a rider's refusal
+    for kw in ({"main": False}, {"env": {"MUNICE_AMBIENT": "1"}}, {"env": {"MUNICE_AUTO_DISPATCH": "1"}},
+               {"prompt": "고쳐줘 글 C0TEST0001/1793880711.215309"}, {"rider": "pane-fit-guard: 칸으로?"}):
+        assert go(stg, grants=slack_said("staging 허용"), **kw) and not asked, f"Slack must not be asked: {kw}"
+    for c in ("gcloud auth login", "gcloud --configuration=munice-admin iam service-accounts keys create k.json --iam-account=a@x",
+              "cat ~/.config/gcloud/adc-munice-admin.json"):
+        assert go(c, grants=slack_said("prod 허용")) and not asked, f"no word lifts it: {c}"
+    spawned = f"로그 봐 주세요. {told}\n\n{SPAWNED} 요유에게 직접 묻지 마세요."
+    assert go(stg, prompt=spawned, grants=slack_said("staging 허용")) and not asked, "a lead's instruction is no relay"
+    # a Slack failure or too little time refuses
+    assert "Slack을 읽지 못함" in (go(stg, grants=slack_said(raises=True)) or "")
+    assert "시간" in (go(stg, budget=1.2, slow_main=0.3, grants=slack_said("staging 허용")) or "") and not asked
+    # the real loader: no module, one that throws, one that hangs; and one that answers
+    for body, word in ((None, "없음"), ("def yoyoo_words(p, n):\n    raise ValueError('x')\n", "ValueError"),
+                       ("import time\ndef yoyoo_words(p, n):\n    time.sleep(5)\n", "초 안에")):
+        path = os.path.join(tmp, f"g{len(os.listdir(tmp))}.py")
+        if body:
+            open(path, "w").write(body)
+        start = time.monotonic()
+        words, why = slack_grants(told, 0.3, path=path)
+        assert words == [] and word in why and time.monotonic() - start < 2, (why, time.monotonic() - start)
+    path = os.path.join(tmp, "grants_ok.py")
+    open(path, "w").write("def yoyoo_words(p, n):\n    return [('C1', '1.2', 'prod 허용')], ''\n"
+                          "def claim(ch, ts, turn):\n    return (ch, ts, turn) == ('C1', '1.2', 't:3')\n")
+    words, why = slack_grants(told, SLACK_DEADLINE, path=path)
+    assert [w[0] for w in words] == ["prod 허용"] and words[0][1]("t:3") is True and words[0][1]("t:4") is False, words
 
 
 if __name__ == "__main__":
