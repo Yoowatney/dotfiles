@@ -11,6 +11,8 @@ could not start; normal is 650-790). Over LIMIT (4000) it picks the group that g
   those (launchd among them);
 - the candidates are the unprotected children of protected nodes; take the biggest, then walk down into a child while it
   still holds 90 % of that candidate, so a pane's agent survives a runaway in one of its commands;
+- the biggest is stopped only when it holds a quarter of all the user's processes: a runaway spread over thousands of groups
+  leaves a normal pane biggest, and that round is logged and told, nothing killed;
 - the main pane's agent is whatever runs in the front of its shell's terminal, read from the kernel table each round; while
   herdr cannot say which shell that is (not up yet, or no fork left), the front of every herdr pane is kept instead;
 - while a group is stopped, a pid counts only as the process it was (pid and start), and a child launchd adopted out of a
@@ -18,7 +20,8 @@ could not start; normal is 650-790). Over LIMIT (4000) it picks the group that g
 - STOP every member (a frozen fork bomb forks no more; new children are caught in up to 5 rounds), TERM and CONT them,
   KILL what is left after 3 s.
 Then a line in ~/.local/state/fork-watch/kills.log (time, count, the top's command line), the main pane told by pane-tell
-when there is one, and a macOS notification.
+when there is one, and a macOS notification. Over the limit with nothing to stop: the same, once in 10 minutes.
+Every round overwrites ~/.local/state/fork-watch/heartbeat with its time and count: an old time there means the watch stopped.
 
     fork-watch.py              run (launchd)
     fork-watch.py --once       one round, then exit
@@ -51,6 +54,7 @@ _spec.loader.exec_module(herdr_peers)
 LIMIT = 4000
 INTERVAL = 10
 MIN_GROUP = 50  # a pick smaller than this is no runaway: it is logged and nothing is killed
+SHARE = 0.25  # nor one under this share of all the user's processes: beside a runaway spread flat it is a normal pane
 ROOT = 0  # the node above every process; a negative key is a process group whose leader is gone
 Proc = collections.namedtuple("Proc", "pid ppid pgid start stat comm tpgid")
 
@@ -195,10 +199,12 @@ def members_of(rows, ident, pgids, keep) -> list:
 
 def pick(procs, keep, min_group: int = MIN_GROUP):
     """(top node, members) of the group to stop, or None. Candidates are the unprotected children of protected nodes; the
-    biggest one, if it has min_group processes, is walked down into a child while that child still holds 90 % of the
-    candidate: a pane's agent survives a runaway in one of its commands, and 90 % of the group always goes, a chain too.
+    biggest one, if it has min_group processes and SHARE of all, is walked down into a child while that child still holds
+    90 % of the candidate: a pane's agent survives a runaway in one of its commands, and 90 % of the group always goes, a
+    chain too.
     ponytail: a runaway spread flat over many groups under a protected node (each member its own process group) is not
-    found; the pick is then small, falls under min_group and is only reported."""
+    found; the biggest candidate is then a normal one, under SHARE, and the round is only reported. Grouping by command
+    line would find it, if one ever comes."""
     parent, kids = tree(procs)
     size = {}
     order, stack = [], [ROOT]
@@ -213,7 +219,7 @@ def pick(procs, keep, min_group: int = MIN_GROUP):
     if not cands:
         return None
     node = max(cands, key=size.__getitem__)
-    if size[node] < min_group:
+    if size[node] < max(min_group, SHARE * len(procs)):
         return None
     floor = 0.9 * size[node]
     while kids.get(node):
@@ -367,6 +373,9 @@ def notify(env, title, body) -> bool:
 def tick(env, main: Main, now: float, limit: int):
     """One round. Returns what it logged, or None when the count is under the limit."""
     procs = list_procs()
+    stamp = time.strftime("%F %T", time.localtime(now))
+    with open(state_file(env, "heartbeat"), "w") as f:  # every round: an old time here means the watch stopped
+        f.write(f"{stamp} 사용자 프로세스 {len(procs):,}개, 기준 {limit:,}개\n")
     by = {p.pid: p for p in procs}
     main_pid = main.get(env, by, now)
     if not over(len(procs), limit):
@@ -374,13 +383,17 @@ def tick(env, main: Main, now: float, limit: int):
     me = os.getpid()
     keep_for = lambda rows: keepers(rows, argv_of, main_pid, me)
     got = pick(procs, keep_for(procs))
-    stamp = time.strftime("%F %T", time.localtime(now))
     if not got:
-        line = f"{stamp} 못 찾음 | 사용자 프로세스 {len(procs):,}개 > {limit:,} | {MIN_GROUP}개 이상 불어난 묶음이 없어 아무것도 끄지 않음"
+        least = max(MIN_GROUP, int(SHARE * len(procs)))
+        line = (f"{stamp} 못 찾음 | 사용자 프로세스 {len(procs):,}개 > {limit:,} | {least:,}개(전체의 {SHARE:.0%}) 이상인 묶음이 "
+                f"없어 아무것도 끄지 않음")
         if now - main.missed >= 600:
             main.missed = now
             with open(state_file(env, "kills.log"), "a") as f:
                 f.write(line + "\n")
+            tell_main(env, f"fork-watch: 사용자 프로세스가 {len(procs):,}개로 기준 {limit:,}개를 넘었지만, 전체의 {SHARE:.0%} "
+                           f"이상을 차지하는 묶음이 없어 아무것도 끄지 않았습니다. 여러 묶음에 흩어진 폭주일 수 있으니 직접 확인해야 "
+                           f"합니다. 기록: {state_file(env, 'kills.log')}")
             notify(env, "프로세스가 너무 많습니다", f"사용자 프로세스 {len(procs):,}개, 끌 묶음을 찾지 못했습니다")
         return line
     top, members = got
@@ -504,6 +517,28 @@ def selftest() -> None:
     got = pick(base + loop, keep)
     assert got and 700 in {p.pid for p in got[1]}, got
 
+    # a runaway spread flat (3,600 processes, each its own group adopted by launchd) beside three normal panes of 56
+    # (zsh > claude > 54 tools): the biggest candidate is a normal pane, far under a quarter of all, so nothing goes
+    # (check pane 2026-11-05: before, one such pane went each round, its agent too)
+    def pane(shell, n):
+        return [P(shell, 101), P(shell + 1, shell)] + [P(shell + 2 + i, shell + 1, shell + 1) for i in range(n - 2)]
+    panes3 = pane(5000, 56) + pane(5100, 56) + pane(5200, 56)
+    flat = [P(10000 + i, 1) for i in range(3600)]
+    got = pick(base + panes3 + flat, keep)
+    assert got is None, (got[0], len(got[1]))
+    # the same desk with a runaway of 3,500 in one group: it still goes
+    bomb35 = [P(123, 122, 122)] + fan(123, 122, 20000, 5, 699)
+    got = pick(base + panes3 + bomb35, keep)
+    assert got and got[0] == 123 and len(got[1]) == 3501, got and (got[0], len(got[1]))
+
+    # the line is a quarter of all the user's processes: 1,000 of 4,000 goes, 999 does not
+    def desk(n):
+        group = [P(30000, 1)] + [P(30001 + i, 30000, 30000) for i in range(n - 1)]
+        return base + group + [P(40000 + i, 1) for i in range(4000 - len(base) - n)]
+    got = pick(desk(1000), keep)
+    assert got and got[0] == 30000, got and got[0]
+    assert pick(desk(999), keep) is None
+
     # members_of(), the fresh table while a group is stopped (Codex review): a pid counts only as the process it was
     # (pid and start); a process adopted by launchd out of a member's process group counts even when that group's leader
     # is alive and not a member; a protected one never
@@ -516,6 +551,43 @@ def selftest() -> None:
     # the group's own leader, a launchd child above what pick() chose, is no adopted child: it stays
     lead, low = P(140, 1), P(141, 140, 140, start=7)
     assert sorted(p.pid for p in members_of([lead, low, P(142, 1, 140)], {141: 7}, {140}, set())) == [141, 142]
+
+    # tick() over the limit on the flat runaway: nothing stopped, one log line, the main pane told, a notification; every
+    # round, a quiet one too, overwrites the heartbeat file, so a watch that stopped shows (check pane 2026-11-05).
+    # The table, herdr and stop_group are fakes here: a regression stops nobody real.
+    g = globals()
+    saved = g["list_procs"], g["stop_group"], herdr_peers.all_panes
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "orchestrator"))
+        with open(os.path.join(d, "orchestrator", "main"), "w") as f:
+            f.write("term_m\n")
+        for name in ("pt", "nt"):
+            with open(os.path.join(d, name), "w") as f:
+                f.write(f'#!/bin/sh\nprintf "%s|%s\\n" "$1" "$2" >> {d}/{name}.out\n')
+            os.chmod(os.path.join(d, name), 0o755)
+        e = {"XDG_STATE_HOME": d, "FORK_WATCH_PANE_TELL": os.path.join(d, "pt"), "FORK_WATCH_NOTIFY": os.path.join(d, "nt")}
+        read = lambda path: open(path).read() if os.path.exists(path) else ""
+        stamp = lambda t: time.strftime("%F %T", time.localtime(t))
+        table, stopped = base + panes3 + flat, []
+        try:
+            g["list_procs"] = lambda: table
+            g["stop_group"] = lambda members, keep_for: stopped.extend(members) or members
+            herdr_peers.all_panes = lambda env: {"term_m": ("default/w1:p1", {})}
+            line = tick(e, Main(ask=lambda env: 0), 1000.0, 3000)
+            assert line and "못 찾음" in line and not stopped, (line, len(stopped))
+            log = read(state_file(e, "kills.log")).splitlines()
+            assert len(log) == 1 and "못 찾음" in log[0], log
+            told = read(os.path.join(d, "pt.out")).splitlines()
+            assert len(told) == 1 and told[0].startswith("default/w1:p1|fork-watch: "), told
+            assert read(os.path.join(d, "nt.out")).count("\n") == 1
+            beat = read(state_file(e, "heartbeat"))
+            assert beat.startswith(stamp(1000.0)) and beat.count("\n") == 1, beat
+            table = base
+            assert tick(e, Main(ask=lambda env: 0), 2000.0, 3000) is None
+            beat = read(state_file(e, "heartbeat"))
+            assert beat.startswith(stamp(2000.0)) and beat.count("\n") == 1, beat
+        finally:
+            g["list_procs"], g["stop_group"], herdr_peers.all_panes = saved
 
     # the kernel table: every row matches ps, and this process is in it
     rows = list_procs()

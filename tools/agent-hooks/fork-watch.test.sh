@@ -2,12 +2,13 @@
 # Live check for fork-watch.py on a real, small runaway:
 #   fork-watch.test.sh
 # The runaway is a bash function that starts three copies of itself, in its own session (as a Claude Bash tool command
-# runs), under ulimit -u = the user's process count now + 150, so it stops there by itself. The watch runs with its limit
-# at the count + 90 and fakes for pane-tell and the notification, but the real main-pane file, so the real main agent is
-# found and protected and the fake pane-tell gets the real main pane's address.
+# runs), under ulimit -u = twice the user's process count now, so it stops there by itself, near half of all (the watch
+# stops only a group of a quarter or more). The watch runs with its limit 60 under that and fakes for pane-tell and the
+# notification, but the real main-pane file, so the real main agent is found and protected and the fake pane-tell gets the
+# real main pane's address.
 #   case 1: the runaway is alive; the watch stops its top and every member.
 #   case 2: its top is killed first, as TaskStop did on 2026-11-05; the rest, adopted by launchd, is still found and stopped.
-# Refuses to start at 1300 user processes or more; stops the runaway itself if the count passes 1500.
+# Refuses to start at 1300 user processes or more; stops the runaway itself if the count passes its cap + 100.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 T=$(mktemp -d)
@@ -20,7 +21,7 @@ check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; fails=$((fails
 
 base=$(users)
 [ "$base" -lt 1300 ] || { echo "skip: $base user processes already"; exit 1; }
-cap=$((base + 150)) lim=$((base + 90))
+cap=$((base * 2)) lim=$((base * 2 - 60)) stop=$((base * 2 + 100))
 mkdir -p "$T/state/orchestrator"
 cp "$HOME/.local/state/orchestrator/main" "$T/state/orchestrator/main" 2>/dev/null || echo "note: no main pane file"
 printf '#!/bin/sh\nprintf "%%s|%%s\\n" "$1" "$2" >> %s\n' "$T/told" > "$T/pt"
@@ -34,7 +35,7 @@ start() {
   bomb=$!
   for _ in $(seq 60); do
     n=$(users)
-    [ "$n" -gt 1500 ] && { pkill -KILL -g "$bomb"; echo "FAIL over 1500 ($n), runaway stopped"; exit 1; }
+    [ "$n" -gt "$stop" ] && { pkill -KILL -g "$bomb"; echo "FAIL over $stop ($n), runaway stopped"; exit 1; }
     [ "$n" -gt $((lim + 20)) ] && break
     sleep 0.25
   done
@@ -77,4 +78,5 @@ else
   check "no main pane, nobody told" '[ ! -s "$T/told" ]'
 fi
 check "two notifications" '[ "$(grep -c "^프로세스 폭주를 껐습니다|" "$T/notified" 2>/dev/null)" = 2 ]'
+check "the heartbeat file holds one line of the last round" '[ "$(wc -l < "$T/state/fork-watch/heartbeat" 2>/dev/null | tr -d " ")" = 1 ]'
 [ "$fails" = 0 ] && echo "fork-watch live test: ok" || { echo "fork-watch live test: $fails failed"; exit 1; }
