@@ -238,9 +238,9 @@ def tick(env, now: float) -> list:
                 reported = reported_since(term, rec["floor"])
                 if reported:
                     rec["wakes"] = 0
-                else:
+                elif term in where:  # missing from the earlier list it has no address: a bare id would name a default-server pane
                     try:
-                        wake(env, sock, rec, pane, where.get(term, (pane,))[0], job, now)
+                        wake(env, sock, rec, pane, where[term][0], job, now)
                     except Exception:  # a fault here must not cost the alerts below or the saved state
                         pass
                 limit = JOB_HELD if job and "🔴" in name else 900
@@ -685,6 +685,10 @@ esac
         screen("w1:pY", SLEPT); assert tick(113060, TELL_EXIT="1") == [] and wakes() == []
         assert tick(113120) == [] and len(wakes()) == 1
         touch_reported("term_Y", 113130)
+        # A pane missing from the pane list has no address: under launchd a bare id names a pane on the default server.
+        panes_on_workers(); screen("w1:pN", SLEPT); agents(agent("w1:pN", "term_N", "idle", seq=1, **w))
+        assert tick(113500) == [] and wakes() == [], "no address, no wake"
+        touch_reported("term_N", 113510)
         # A dispatch tab takes no pane-tell prompt, and a prompt without its marker would lift its guard for good: --raw, marked.
         panes_on_workers(label("w1:pJX", "🟢 api#820 작업")); screen("w1:pJX", SLEPT); agents(agent("w1:pJX", "term_JX", "idle", seq=1, name="auto-api-820"))
         assert tick(114000) == [] and wakes() == [f"raw:w1:pJX@workers|[auto-dispatch] {WAKE}"], wakes()
