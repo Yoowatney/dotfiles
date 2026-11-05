@@ -16,7 +16,8 @@ It also sends back names 요유 cannot read: a pane's herdr id (`w5:pKR`, 27 rep
 pane's name) and the machine names the global rule bans. A last report (it has `남은 것:`) also comes back while a test pane
 this session opened (`임시 …`) is open: 4 of them stayed idle after this hook's own tests (10/31). A report after an explainer
 page Claude had to write itself because Codex failed comes back unless it says so (요유 2026-10-31). In a Claude session a
-long reply with no page comes back and goes to Codex (요유 2026-11-01); a Codex session writes its own.
+long reply with no page comes back and goes to Codex (요유 2026-11-01); a Codex session writes its own. Not in the main pane: from
+2026-11-05 21:13 요유 reads it through Slack only.
 The first last report after a pane's report reached this session (auto-tab-close's message, read from the session record)
 comes back without a `확인:` line and a command run since that is not a pane chore: a lead passing a pane's "done" on unchecked
 (요유 2026-11-04). It comes before the failure: in 53 such reports by then (tests and other leads' panes left out), a fresh
@@ -674,6 +675,9 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
                PROBLEM_REASON if misses_problem_line(text) else None, LONG_REASON if claude and not job_session(env) and too_long(text) else None]
     if any(formats) and under_lead(payload, env):  # herdr is asked only when a format would send the report back
         formats = []
+    # 요유 2026-11-05 21:13: 요유 reads the main pane through Slack only, so a page for its terminal reply is for nobody (20 rewrites that day)
+    if formats and formats[4] and delegates_checks(payload, env):
+        formats[4] = None
     checks = (*formats[:4], left_open_reason(payload, text, env), relay_reason(payload, text, env), explain_reason(payload, text, env),
               stale_thread_reason(payload, text, env), owed_reason(payload, env), *formats[4:])
     rewrites = [r for r in checks if r]
@@ -961,6 +965,14 @@ def selftest():
             herdr_has(panes, agents)
             assert all(ends(t) for t in formats), f"{label} still reports to 요유"
             assert decide(p(wall, session_id="s1"), herdr_env, claude=True) == LONG_REASON, f"{label}: long goes to a page"
+        # 요유 2026-11-05 21:13: the main pane's terminal is not read, 요유 gets Slack only; a page there re-read its long session 20 times
+        # that day for nobody. Its other formats stay, and Slack posts keep their own rule.
+        herdr_has([me])
+        open(f"{d}/.local/state/orchestrator/main", "w").write("term_aa")
+        assert decide(p(wall, session_id="s1"), herdr_env, claude=True) is None, "the main pane's long reply is not sent to a page"
+        assert ends(formats[0]) == WHAT_REASON, "its other formats are still asked"
+        os.unlink(f"{d}/.local/state/orchestrator/main")
+        assert decide(p(wall, session_id="s1"), herdr_env, claude=True) == LONG_REASON, "without the main-pane file: a page"
         moved = {**me, "pane_id": "w2:p9"}
         herdr_has([moved, test_pane])
         assert ends(), "a moved pane is found by its session"
