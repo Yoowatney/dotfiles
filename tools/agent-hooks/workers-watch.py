@@ -13,6 +13,7 @@ how several leads at once each hear only of their own), else the main pane, else
   restarted between two ticks, or the pane closed), once; then its record goes;
 - a pane whose opener is on no server (its lead closed while it runs), once: closing a lead no longer stops its panes;
 - the workers server down, once while it stays down, unless nobody is there and no pane was seen (a Mac with no workers).
+A test pane (`임시 …`) is news only in a dialog: its lead hears of it from yoyoo-share-guard until it closes (요유 2026-11-05).
 Dispatch tabs run here too (요유 2026-11-05), with no opener, so these reach the main pane, named `자동 칸`. No 🫡 marks them, so their
 record does: an agent that ended is news, and its pane, a bare shell, closes once someone heard. A 🔴 one waits on what it started
 (CI, a long check), so it is news after JOB_HELD instead of 900 s. Nothing can be typed in one, so an alert names what is left: read
@@ -51,6 +52,7 @@ import re
 import socket
 import subprocess
 import time
+import unicodedata
 
 HERE = os.path.dirname(os.path.realpath(__file__))  # python3 -I drops this folder from sys.path
 _spec = importlib.util.spec_from_file_location("herdr_peers", os.path.join(HERE, "herdr_peers.py"))
@@ -74,6 +76,7 @@ NET_ERROR = re.compile(r"⏺ (API Error: )?(Your computer went to sleep|Connecti
                        r"|The response stopped arriving|Request timed out)"
                        r"|⏺ API Error: .*\((ENOTFOUND|EAI_AGAIN|ECONN[A-Z]+|ETIMEDOUT|ENET[A-Z]+|EHOSTUNREACH)\)")
 RULE = re.compile(r"─{3,}( .* ─+)?")
+TRIAL = re.compile(r"[\s🟢🔴👑🫡]*임시 ")  # a lead's test pane (pane-spawn, pane-temp); with the space: `임시저장 API 수정` is a work name
 
 
 def read_screen(env, sock, pane):
@@ -156,6 +159,11 @@ def settle(env, sock, a, rec, pane, reported: bool) -> None:
             return
     if rec["closes"]:
         herdr_peers.herdr(env, "pane", "close", pane, socket=sock)  # {} when it failed: tried again next minute
+
+
+def trial(name) -> bool:
+    """A test pane: yoyoo-share-guard names it at each of its lead's reports until it closes, so its stop or end is no news."""
+    return bool(TRIAL.match(unicodedata.normalize("NFC", name or "")))
 
 
 def kind(status) -> str:
@@ -281,7 +289,7 @@ def tick(env, now: float) -> list:
                     except Exception:
                         pass
                 limit = JOB_HELD if job and "🔴" in name else STOPPED
-                if not reported and now - max(rec["since"], rec.get("woke", 0)) >= limit and "idle" not in rec["alerted"]:
+                if not reported and now - max(rec["since"], rec.get("woke", 0)) >= limit and "idle" not in rec["alerted"] and not trial(name):
                     long = "3시간째" if limit == JOB_HELD else "15분째"
                     text = (f"자동 칸 {name}(workers/{pane})이 보고 없이 {long} 멈춰 있습니다. 화면: `herdr --session workers agent read {pane}`, "
                             f"닫기: `herdr --session workers pane close {pane}`. 입력을 받지 않는 칸이니 보드 항목을 보고 이어 갈 일은 새 칸에 맡기세요. {UNSENT}"
@@ -307,7 +315,7 @@ def tick(env, now: float) -> list:
             # ponytail: pane-spawn names a pane 🫡 before `agent start` (3 tries x 120 s, then it closes the pane), so a 🫡
             # pane never seen with an agent may still be starting: it is news only after a 420 s grace
             if (rec["had_agent"] or now - rec["first"] >= 420) and "ended" not in rec["alerted"] \
-                    and tell(f"{'자동 칸' if job else '밑 칸'} {p.get('label')}의 에이전트가 끝났습니다" + (". 보드 항목을 보고 이어 갈 일은 새 칸에 맡기세요. 빈 칸은 닫습니다." if job else ""), opener, home):
+                    and (trial(p.get("label")) or tell(f"{'자동 칸' if job else '밑 칸'} {p.get('label')}의 에이전트가 끝났습니다" + (". 보드 항목을 보고 이어 갈 일은 새 칸에 맡기세요. 빈 칸은 닫습니다." if job else ""), opener, home)):
                 rec["alerted"].append("ended")
             if job and "ended" in rec["alerted"]:  # a shell and no agent, once someone heard: tried every tick while it is listed
                 herdr_peers.herdr(env, "pane", "close", p.get("pane_id"), socket=sock)
@@ -319,7 +327,7 @@ def tick(env, now: float) -> list:
                 continue
             lost_text = (f"자동 칸 {old.get('name') or term}(workers/{old.get('pane') or '?'})이 보고 없이 사라졌습니다. 보드 항목이 In Progress로 남았을 수 있으니 보고 이어 갈 일은 새 칸에 맡기세요. {UNSENT}"
                          if old.get("job") else f"밑 칸 {old.get('name') or term}(workers/{old.get('pane') or '?'})이 보고 없이 사라졌습니다. {UNSENT}")
-            if not reported_since(old.get("floor", 0), term, old.get("session")) and not tell(lost_text, old.get("opener", ""), old.get("home", False)):
+            if not reported_since(old.get("floor", 0), term, old.get("session")) and not trial(old.get("name")) and not tell(lost_text, old.get("opener", ""), old.get("home", False)):
                 records[term] = old  # told nobody: try again next minute
         state = records  # panes that are gone drop out
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -802,6 +810,19 @@ esac
             globals()["net_error"] = real
         listening.close(); del env["WORKERS_WATCH_PROBE"]
         os.remove(f"{d}/state/orchestrator/watch.json"); panes_on_workers(); agents(); tick(115120)  # leaves no log behind
+
+        # A test pane (`임시 …`) is the lead's own trial, and yoyoo-share-guard names it at each of the lead's reports until it
+        # is closed: its stop, its going and its agent's end are no news (11/05: 12 of the main pane's 24 watch alerts). A dialog still is.
+        panes_on_workers(label("w1:pT", "🟢 🫡 임시 시험")); agents(agent("w1:pT", "term_T", "idle", seq=1)); tick(116000)
+        assert tick(116900) == [], "a test pane stopped without a report is no news"
+        panes_on_workers(); agents(); assert tick(116960) == [] and "term_T" not in watch(), "nor one gone without a report"
+        panes_on_workers(label("w1:pT", "🟢 🫡 임시 시험")); agents(agent("w1:pT", "term_T", "working", seq=3)); tick(117000); agents()
+        assert tick(117060) == [] and tick(117600) == [], "nor its agent's end"
+        panes_on_workers(label("w1:pT", "🟢 🫡 임시 시험")); agents(agent("w1:pT", "term_T", "blocked", seq=5)); tick(118000)
+        assert len(tick(118060)) == 1, "its dialog is news: nobody else can answer it"
+        panes_on_workers(label("w1:pT", "🟢 🫡 임시저장 API 수정")); agents(agent("w1:pT", "term_T", "idle", seq=7)); tick(119000)
+        assert len(tick(119900)) == 1, "`임시저장` is a work name, not a test pane"
+        os.remove(f"{d}/state/orchestrator/watch.json"); panes_on_workers(); agents(); tick(120000)
 
         # end to end, the way launchd runs it: python3 -I drops the script folder from sys.path
         panes_on_workers(label("w1:p6", "🟢 🫡 시험")); agents(agent("w1:p6", "term_6", "blocked", seq=11))

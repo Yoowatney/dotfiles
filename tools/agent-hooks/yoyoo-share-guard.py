@@ -321,7 +321,7 @@ def left_open_reason(payload: dict, text: str, env) -> str | None:
     """The rewrite for panes this session opened and left open at a last report, or None.
 
     A test pane comes back whatever it is doing, any other pane once it stopped: 요유 talks only to the lead (2026-11-01),
-    so reading, answering or closing a pane is never 요유 몫. A pane kept on purpose costs one rewrite: decide() asks once a turn.
+    so reading, answering or closing a pane is never 요유 몫. A pane kept on purpose costs one rewrite per stop, not one each turn.
     """
     if not LAST_REPORT.search(prose(text)):
         return None
@@ -330,14 +330,20 @@ def left_open_reason(payload: dict, text: str, env) -> str | None:
     if not me or pane_name(me).startswith(TEST_PANE):
         return None
     # (address prefix, pane): each server's panes matched with that server's agent names, so a pane id on both never mixes
-    names = agent_names(env)
+    agents = {"": {a.get("pane_id"): a for a in herdr_list(env, "agent")}}
+    names = {k: a.get("name") for k, a in agents[""].items()}
     mine = [("", p) for p in panes if p is not me and opener_of(p, names, env) == me.get("terminal_id")]
     workers = workers_socket(env, me)
     if workers:
-        names = {a.get("pane_id"): a.get("name") for a in herdr_list(env, "agent", workers)}
+        agents["workers/"] = {a.get("pane_id"): a for a in herdr_list(env, "agent", workers)}
+        names = {k: a.get("name") for k, a in agents["workers/"].items()}
         mine += [("workers/", p) for p in herdr_list(env, "pane", workers) if opener_of(p, names, env) == me.get("terminal_id")]
     tests = [(s, p) for s, p in mine if pane_name(p).startswith(TEST_PANE)]
     stopped = [(s, p) for s, p in mine if (s, p) not in tests and p.get("agent_status") != "working"]
+    # Each stop once a session (요유 2026-11-05): herdr's state_change_seq moves when the pane works again
+    stop = lambda s, p: f"stop {s}{p.get('terminal_id') or p.get('pane_id')}:{agents[s].get(p.get('pane_id'), {}).get('state_change_seq', '')}"
+    new = remember(payload, env, {stop(s, p) for s, p in stopped})
+    stopped = [(s, p) for s, p in stopped if stop(s, p) in new]
     listed = lambda group: ", ".join(f"{pane_name(p)}({s}{p.get('pane_id')})" for s, p in group)
     close = lambda group: "`herdr pane close <ID>`" + (
         "(workers 칸은 `herdr --session workers pane close <ID>`)" if any(s for s, _ in group) else "")
@@ -609,16 +615,21 @@ def asked_before(payload: dict, text: str, env) -> bool:
     ponytail: one small file per asked session; asking prunes those untouched for a week, so a session open longer is asked once more.
     Only files named as a session id go: the folder may hold anything else.
     """
-    session, home = os.path.basename(payload.get("session_id") or ""), env.get("HOME")
     items = {" ".join(i.strip(" \t*_.,;").split()) for i in share_items(text, aside=True)}
-    if not (session and home and items):
-        return False
+    return bool(items) and not remember(payload, env, items)
+
+
+def remember(payload: dict, env, keys: set) -> set:
+    """The keys this session had not recorded, now recorded; all of them with no session id or HOME, or when the file fails."""
+    session, home = os.path.basename(payload.get("session_id") or ""), env.get("HOME")
+    if not (session and home and keys):
+        return set(keys)
     folder = os.path.join(home, ".local", "state", "share-guard")
     try:
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, session), "a+", encoding="utf-8") as f:
             f.seek(0)
-            new = items - set(f.read().splitlines())
+            new = set(keys) - set(f.read().splitlines())
             f.write("".join(f"{i}\n" for i in sorted(new)))
         for old in os.scandir(folder) if new else ():  # it asks anyway, so a failed prune changes nothing
             try:
@@ -627,8 +638,8 @@ def asked_before(payload: dict, text: str, env) -> bool:
             except OSError:
                 pass  # a folder, or a file gone already: the others still go
     except OSError:
-        return False
-    return not new
+        return set(keys)
+    return new
 
 
 def decide(payload: dict, env, claude: bool = False) -> str | None:
@@ -816,7 +827,10 @@ def selftest():
         def herdr_has(panes, agents=()):
             herdr_has_on("", panes, agents)
 
-        def ends(text=done):
+        def ends(text=done, fresh=True):  # fresh: this session has been told of no stopped pane yet
+            if fresh:
+                for name in os.listdir(os.path.join(d, ".local", "state", "share-guard")) if os.path.isdir(os.path.join(d, ".local", "state", "share-guard")) else ():
+                    os.remove(os.path.join(d, ".local", "state", "share-guard", name))
             return decide(p(text, session_id="s1"), herdr_env)
 
         herdr_env["PANE_TEMP_DIR"] = d
@@ -863,6 +877,19 @@ def selftest():
         assert ends("계속 진행합니다.") is None, "only a last report is held back"
         herdr_has([{**me, "label": "🟢 임시 시험"}, worker], opened)
         assert ends() is None, "a test pane answers for nothing"
+        # 요유 2026-11-05: a pane the main pane kept open on purpose came back at each of its reports; 26 of its 66 such rewrites
+        # named only panes it had been told of. A stop is told once a session; the same pane stopping again after work is a new stop.
+        at = lambda seq, **more: [{"pane_id": "w1:p3", "name": "spawn-aa-1", "state_change_seq": seq}] + list(more.values())
+        tidy = {**worker, "pane_id": "w1:p4", "terminal_id": "term_ff", "label": "🟢 🫡 정리"}
+        herdr_has([me, worker], at(4))
+        assert "구현(w1:p3)" in (ends() or "") and ends(fresh=False) is None, "the same stop is told once"
+        herdr_has([me, worker, tidy], at(4, tidy={"pane_id": "w1:p4", "name": "spawn-aa-2", "state_change_seq": 1}))
+        r = ends(fresh=False) or ""
+        assert "정리(w1:p4)" in r and "구현(w1:p3)" not in r, f"a newly stopped pane is told alone: {r}"
+        herdr_has([me, worker], at(6))
+        assert "구현(w1:p3)" in (ends(fresh=False) or ""), "it worked and stopped again: a new stop"
+        herdr_has([me, worker, test_pane], at(6, test={"pane_id": "w1:p2", "name": "spawn-aa-3"}))
+        assert "임시 시험 Claude" in (ends(fresh=False) or ""), "an open test pane still comes back at every report"
         # The main pane opens its panes on the workers server: it reads that server too, each server's lists on their own.
         herdr_env["HOME"] = d
         os.makedirs(f"{d}/.local/state/orchestrator", exist_ok=True)
