@@ -27,10 +27,15 @@
 # Claude Sonnet, which may write anywhere.
 # --kind auto is that same choice for a pane that does the job: Codex until its week is past 70% used, then Claude. A lead opens
 # a pane that posts nothing to Slack (code, tests, docs) with it (요유 2026-11-05); a pane that posts to Slack stays Claude.
+# The main pane opens a Claude pane that does the job only with --why, the reason Codex cannot do it (api#1036): a Codex work pane
+# writes nothing outside its folder, so gcloud cannot refresh its login there, and backend-bot posts and GCP commands fail
+# (2026-11-05). Without one it is refused and sent to --kind auto. Check panes and every other caller need no reason.
 # Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
 H=${HERDR_BIN_PATH:-herdr}
-USAGE='usage: pane-spawn [--new-tab] [--check] [--kind claude|codex|auto] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
+USAGE='usage: pane-spawn [--new-tab] [--check] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
   --kind auto: Codex until its week is past 70% used, then Claude. Open a pane that posts nothing to Slack (code, tests, docs) with it.
+  --why: in the main pane, why a pane that does the job must be Claude: slack (it posts to Slack), gcp (it runs gcloud or other
+    GCP commands) or another reason in one line. A Claude pane without one is refused there.
   --check: a check pane (main pane only): Codex, read-only, by the same 70% rule; --kind claude for a check that must write.'
 MIN_ROWS=${PANE_SPAWN_MIN_ROWS:-16} # a 46-row window holds 4 panes of 11-12 rows, which still show about 5 lines of work (2026-11-04); a fifth would leave 5-6
 die() { echo "pane-spawn: $*" >&2; exit 2; }
@@ -47,22 +52,23 @@ codex_week_used() {
   done
 }
 
-same= new_tab= check= kind= cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
+same= new_tab= check= kind= why= cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
 while [ $# -gt 0 ]; do
   case "$1" in
     --same-tab) same=1; shift ;;
     --new-tab) new_tab=1; shift ;;
     --check) check=1; shift ;;
     -h | --help) echo "$USAGE"; exit 0 ;;
-    --kind | --cwd)
+    --kind | --cwd | --why)
       [ $# -ge 2 ] || die "$USAGE"
-      if [ "$1" = --kind ]; then kind=$2; else cwd=$2; fi
+      case "$1" in --kind) kind=$2 ;; --cwd) cwd=$2 ;; --why) why=$2 ;; esac
       shift 2 ;;
     --*) die "$USAGE" ;;
     *) break ;;
   esac
 done
 [ $# -ge 2 ] && [ -n "$1" ] && [ -n "$2" ] || die "$USAGE"
+asked=${kind:-claude} # what the caller chose; auto past 70% turns Claude below, which is pane-spawn's choice, not the caller's
 # A check pane runs on Codex's spare weekly allowance (2026-11-05) until that week is past 70% used. A check that must write to
 # GitHub, Slack or the board, or to the repo it checks, passes --kind claude: the Codex pane below cannot.
 [ -z "$check" ] || [ -n "$kind" ] || kind=auto
@@ -180,6 +186,7 @@ mainfile=$state/orchestrator/main
 workers_help="start it with: launchctl kickstart gui/$(id -u)/com.yoyoo.herdr-workers"
 if [ "term_$term" = "$(cat "$mainfile" 2>/dev/null)" ]; then
   [ -z "$same" ] || die "the main pane does no work, so it never adds a pane to its own tab"
+  [ -n "$check" ] || [ "$asked" != claude ] || [[ "$why" == *[![:space:]]* ]] || die "the main pane opens a Claude pane only with --why, the reason Codex cannot do the job: --why slack (it posts to Slack), --why gcp (it runs gcloud or other GCP commands; a Codex work pane cannot write gcloud's login files) or --why \"<one line>\". Any other pane: --kind auto (Codex until its week is past 70% used)."
   main=1 hidden=1
   prompt+=' 보고 첫 줄에 이 칸에서 한 일을 한 문장으로 쓰세요. 메인 칸에는 그 줄과 `남은 것:` 줄만 가고 전문은 파일로 남습니다.'
 elif [[ "${label:-}" != *🫡* ]] && [ -z "${MUNICE_AUTO_DISPATCH:-}${MUNICE_AMBIENT:-}" ]; then

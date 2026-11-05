@@ -51,7 +51,10 @@ REASON = (MARK + " 같은 일의 고치기와 확인이 이미 두 번 돌았습
           "#0-yoyooyo에서 답하면(반응은 이 일의 질문 글에 단 ✅만 답으로 칩니다. ❌와 💤는 답이 아닙니다), 또는 결정 리스트의 이 일 행에서 상태를 "
           "추천대로로 바꾸거나 메모를 쓰면(안 함과 미룸은 답이 아닙니다) 이 일의 고치기 칸이 하나만 열립니다. 그 칸이 열린 뒤의 고치기는 다시 "
           "물어야 합니다. 그냥 다시 실행해서는 통과하지 않습니다.")
-SPAWN = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?pane-spawn((?:\s+--[\w-]+(?:\s+[^\s\"'-]\S*)?)*)\s+"
+# The options that take a value may have it quoted (`--why "Slack 답글"`, api#1036); any other option's value is one bare word.
+VALUED = r"--(?:why|cwd|kind)\s+(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|\S+)"
+SPAWN = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?pane-spawn("
+                   r"(?:\s+" + VALUED + r"|\s+--[\w-]+(?:\s+[^\s\"'-]\S*)?)*)\s+"
                    r"(\"(?:\\.|[^\"\\])*\"|'[^']*')")
 CITE = re.compile(r"(\d{2}:\d{2}:\d{2})\s*(?:entry|항목)")
 CITED_DAY = re.compile(r"pane-reports/(\d{4}-\d{2}-\d{2})\.md")
@@ -125,7 +128,8 @@ def spawn(command: str) -> dict | None:
     if not m:
         return None
     text = command[m.start():]
-    return {"check": bool(re.search(r"--check\b", m.group(1))), "name": unquote(m.group(2)), "cites": CITE.findall(text),
+    flags = re.sub(VALUED, "", m.group(1))  # a reason that says --check is no flag (Codex review, api#1036)
+    return {"check": bool(re.search(r"--check\b", flags)), "name": unquote(m.group(2)), "cites": CITE.findall(text),
             "days": CITED_DAY.findall(text), "addr": None, "refused": None}
 
 
@@ -436,6 +440,15 @@ def selftest():
             {"type": "input_text", "text": "그래 한 번 더"}]}}
         assert check(p(new, transcript(codex_lines(night, codex_refused), "c2.jsonl")), env), "Codex: the same call again"
         assert check(p(new, transcript(codex_lines(night, [*codex_refused, codex_said]), "c3.jsonl")), env) is None, "Codex: 요유 answered"
+
+    # api#1036: --why takes free text, often quoted; the work name is the first quoted word after the options, not the reason.
+    for cmd in ('pane-spawn --why "Slack 답글" --cwd /w "api#1 고치기" "x"', "pane-spawn --kind claude --why 'gcloud 배포' \"api#1 고치기\" 'x'",
+                'pane-spawn --why slack "api#1 고치기" "x"', 'pane-spawn --check "api#1 고치기" "x"'):
+        assert (spawn(cmd) or {}).get("name") == "api#1 고치기", f"the work name, not an option's value: {cmd}"
+    assert (spawn('pane-spawn --check "api#1 고치기" "x"') or {}).get("check"), "--check is a flag"
+    for cmd in ('pane-spawn --why "Codex --check cannot use network" "api#1 고치기" "x"', "pane-spawn --why '--check' \"a\" \"x\"",
+                'pane-spawn --why --check "a" "x"'):  # Codex review: a reason that says --check made a fix a check, which skips the limit
+        assert (spawn(cmd) or {"check": True})["check"] is False, f"--check in a reason is no flag: {cmd}"
     print("selftest ok")
 
 

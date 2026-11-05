@@ -190,7 +190,7 @@ not_main() { rm -f "$SANDBOX/home/.local/state/orchestrator/main"; }
 workers_up() { jq -n --arg w "$SANDBOX/sessions/workers/herdr.sock" --argjson r "${1:-true}" '{sessions: [{name: "default", running: true, socket_path: "/x/herdr.sock"}, {name: "workers", running: $r, socket_path: $w}]}' > "$SANDBOX/sessions.json"; }
 workers_up; echo '{"result":{"workspaces":[{"workspace_id":"w1","label":"workers"}]}}' > "$SANDBOX/workers-workspaces.json"
 
-is_main; out=$(ps "api#1 설계" "할 일")
+is_main; out=$(ps --why slack "api#1 설계" "할 일")
 has "[workers] tab create --workspace w1 " "a pane the main pane opens goes to workers"
 hasnt "[default] tab create" "nothing opens beside the main pane"
 hasnt "pane split" "the main pane keeps its tab to itself"
@@ -202,19 +202,19 @@ has "[workers] agent prompt w1:new" "the instruction reaches the workers pane"
 has "보고 첫 줄에" "a pane under the main pane learns its first line is its summary"
 [ "$out" = "workers/w1:new" ] || fail "prints an address with the server: $out"
 
-rm "$SANDBOX/workers-workspaces.json"; ps "api#2" "할 일" >/dev/null
+rm "$SANDBOX/workers-workspaces.json"; ps --why slack "api#2" "할 일" >/dev/null
 has "[workers] workspace create --label workers --no-focus" "an empty workers server gets its workspace"
 before "workspace create" "tab create --workspace w2"
 
 # 요유 2026-11-05: a tab named `자동 칸을 workers로 이전` read as a dispatch tab, so pane-tell refused its pane. A work name never
 # starts a job tab's name; the pane keeps the work name as given.
 for word in 자동 알아서; do
-  ps "$word 칸을 workers로 이전" "할 일" >/dev/null
+  ps --why slack "$word 칸을 workers로 이전" "할 일" >/dev/null
   has "[workers] tab create --workspace w2 --cwd $PWD --label 일 $word 칸을 workers로 이전 --no-focus" "the main pane's tab: no job tab's first word ($word)"
   hasnt "--label $word " "no tab starts with $word"
   has "pane rename w1:new 🟢 🫡 $word 칸을 workers로 이전" "the pane keeps the work name"
 done
-ps "자동화 정리" "할 일" >/dev/null
+ps --why slack "자동화 정리" "할 일" >/dev/null
 has "--label 자동화 정리 --no-focus" "자동화 is no job tab's first word"
 not_main; echo '{"result":{"workspaces":[{"workspace_id":"w1","label":"workers"}]}}' > "$SANDBOX/workers-workspaces.json"
 CALLER_LABEL="🟢 자동 칸 정리" ps "구현" "할 일" >/dev/null
@@ -223,17 +223,17 @@ hasnt "--label 자동 " "and none when the tab opens"
 FAIL_SPLIT=1 ps --new-tab "자동 칸 고치기" "할 일" >/dev/null
 hasnt "--label 자동 " "a --new-tab name goes the same way"
 rm -f "$SANDBOX/workers-workspaces.json"; is_main
-ps "api#2-2" "할 일" >/dev/null
+ps --why slack "api#2-2" "할 일" >/dev/null
 
-workers_up false; if ps "api#3" "할 일" 2>"$SANDBOX/err"; then fail "workers down must fail"; fi
+workers_up false; if ps --why slack "api#3" "할 일" 2>"$SANDBOX/err"; then fail "workers down must fail"; fi
 grep -q "com.yoyoo.herdr-workers" "$SANDBOX/err" || fail "says how to start it: $(cat "$SANDBOX/err")"
 hasnt "tab create" "no pane opens anywhere when workers is down"
 workers_up
 
-if ps --same-tab "리뷰" "봐 줘" 2>/dev/null; then fail "the main pane never splits its own tab"; fi
+if ps --same-tab --why slack "리뷰" "봐 줘" 2>/dev/null; then fail "the main pane never splits its own tab"; fi
 hasnt "pane split" "no split beside the main pane"
 
-if FAIL_START=9 ps "실패" "지시" 2>/dev/null; then fail "a failed start must exit non-zero"; fi
+if FAIL_START=9 ps --why slack "실패" "지시" 2>/dev/null; then fail "a failed start must exit non-zero"; fi
 has "[workers] pane close w1:new" "a failed start removes the workers pane"
 
 hasnt "확인 칸입니다" "a pane that does the job is no check pane"
@@ -344,9 +344,9 @@ has "--no-focus $MISE_ENV" "a Codex pane keeps mise's folders when a test swaps 
 ps --check "로그인" "돌려 보세요" >/dev/null
 has "--no-focus $MISE_ENV" "so does a Codex check pane"
 has "[workers] tab create --workspace w2 --cwd $CHECK_DIR --label 확인 로그인 --no-focus $MISE_ENV $NPROC" "and a workers pane, the lower limit"
-ps "조사" "지시" >/dev/null
+ps --why slack "조사" "지시" >/dev/null
 hasnt "MISE_" "a Claude pane runs commands without the shims first, so it needs none"
-ps "조사" "지시" >/dev/null
+ps --why slack "조사" "지시" >/dev/null
 has "--kind claude" "a pane that does the job is still Claude"
 hasnt "--sandbox" "and has no sandbox"
 # A check that must write to GitHub, Slack or the board asks for Claude: Sonnet at high effort, as before.
@@ -406,8 +406,35 @@ hasnt "확인 칸입니다" "nor told it is one"
 usage 71 3600
 ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
 has "--kind codex" "a kind the caller names wins"
-ps "조사" "지시" >/dev/null
+ps --why slack "조사" "지시" >/dev/null
 has "--kind claude" "an ordinary pane never reads the usage"
+# api#1036 (요유 2026-11-05): a pane the main pane opens to do the job is Claude only for a reason Codex cannot cover. A Codex work
+# pane writes nothing outside its folder, so gcloud cannot refresh its login there, and with it every backend-bot post and GCP
+# command fails. Without a reason the main pane is sent to --kind auto. Check panes and every other caller stay as they were.
+refused() { # <case> [pane-spawn options]
+  local why=$1; shift
+  if ps "$@" "구현" "지시" 2>"$SANDBOX/err" >/dev/null; then fail "$why: the main pane's Claude pane needs a reason"; fi
+  grep -qF -- "--kind auto" "$SANDBOX/err" || fail "$why: points to --kind auto: $(cat "$SANDBOX/err")"
+  grep -qF -- "--why" "$SANDBOX/err" || fail "$why: names --why: $(cat "$SANDBOX/err")"
+  hasnt "tab create" "$why: no pane opens"
+  hasnt "pane-label --lead" "$why: nothing is marked"
+}
+usage 50 3600
+refused "no kind, no reason"
+refused "claude, no reason" --kind claude
+refused "an empty reason" --kind claude --why ""
+refused "a blank reason" --why "  "
+ps --kind claude --why slack "Slack 답글" "지시" >/dev/null; has "--kind claude" "a reason opens Claude: Slack"
+ps --why "gcloud로 배포 상태 확인" "배포 확인" "지시" >/dev/null; has "--kind claude" "a reason opens Claude: the default kind"
+SESSIONLESS=1 ps --kind codex "구현" "지시" >/dev/null; has "--kind codex" "Codex needs no reason"
+SESSIONLESS=1 ps --kind auto "구현" "지시" >/dev/null; has "--kind codex" "auto needs no reason"
+usage 71 3600
+ps --kind auto "구현" "지시" 2>/dev/null >/dev/null; has "--kind claude" "auto past 70%: Claude by pane-spawn's choice, no reason"
+ps --check --kind claude "로그인" "돌려 보세요" >/dev/null; has "--kind claude" "a check pane needs no reason"
+not_main
+CALLER_LABEL="🟢 👑 api#1 로그인" ps "설계" "할 일" >/dev/null; has "--kind claude" "a lead other than the main pane needs no reason"
+CALLER_LABEL="🟢 🫡 구현" ps "리뷰" "지시" >/dev/null; has "--kind claude" "nor does a pane under a lead"
+is_main
 rm -rf "$SANDBOX/home/.codex"
 
 # Every other lead checks results itself, as does a pane under it, and a main-pane file that is stale or gone is no main pane.
@@ -478,7 +505,7 @@ hasnt "agent start spawn-65f21913323dc21-h" "a pane of any other lead carries no
 echo '{"result":{"workspaces":[{"workspace_id":"w7","label":"Home"}]}}' > "$SANDBOX/default-workspaces.json"
 CALLER_LABEL="🟢 👑 집 일" ps "조사" "지시" >/dev/null
 has "[workers] agent start spawn-65f21913323dc21-h" "a Home lead's pane is marked"
-is_main; ps "메인 일" "지시" >/dev/null; hasnt "agent start spawn-65f21913323dc21-h" "the main pane is no Home lead, wherever it sits"; not_main
+is_main; ps --why slack "메인 일" "지시" >/dev/null; hasnt "agent start spawn-65f21913323dc21-h" "the main pane is no Home lead, wherever it sits"; not_main
 rm "$SANDBOX/default-workspaces.json"
 CALLER_LABEL="🟢 🫡 구현" CALLER_AGENT="spawn-OTHER-h77" ps "조사" "지시" >/dev/null
 has "[default] agent start spawn-65f21913323dc21-h" "a pane under a Home lead passes the mark on"
@@ -524,12 +551,12 @@ out=$(CALLER_LABEL=$LEAD STUCK_WORKERS=1 PANE_SPAWN_WORKERS_LIMIT=1 ps "리뷰" 
 hasnt "[workers] workspace create" "nothing is created after a list that timed out"
 # The main pane never falls back: it does no work, and neither does its tab.
 is_main
-if STUCK_WORKERS=1 PANE_SPAWN_WORKERS_LIMIT=1 ps "메인 일" "지시" 2>"$SANDBOX/err"; then fail "the main pane fails on a stuck workers"; fi
-if FAIL_WORKERS_TAB=1 ps "메인 일" "지시" 2>"$SANDBOX/err"; then fail "the main pane fails when workers opens nothing"; fi
+if STUCK_WORKERS=1 PANE_SPAWN_WORKERS_LIMIT=1 ps --why slack "메인 일" "지시" 2>"$SANDBOX/err"; then fail "the main pane fails on a stuck workers"; fi
+if FAIL_WORKERS_TAB=1 ps --why slack "메인 일" "지시" 2>"$SANDBOX/err"; then fail "the main pane fails when workers opens nothing"; fi
 hasnt "[default] pane split" "nothing beside the main pane"
 hasnt "[default] tab create" "nothing beside the main pane"
 grep -q "com.yoyoo.herdr-workers" "$SANDBOX/err" || fail "says how to start it: $(cat "$SANDBOX/err")"
-ps "메인 일" "지시" >/dev/null
+ps --why slack "메인 일" "지시" >/dev/null
 has "--label 메인 일 --no-focus" "the main pane's tabs keep the work's name"
 hasnt "tab rename" "and nothing renames them"
 hasnt "agent list" "the main pane's panes share no tab, so it looks for none"
