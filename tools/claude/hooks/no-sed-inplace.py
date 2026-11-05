@@ -610,9 +610,11 @@ def selftest():
             try:
                 # a made-up sentence: this file is public
                 _quotes().remember([{"ts": "%.6f" % (time.time() - 60), "text": "시험용으로 지어낸 문장이라는 뜻임~"}], time.time())
-                said = 'gh -R a/b issue comment 1 --body "요유가 시험용으로 지어낸 문장이라는 뜻이라고 함"'
-                assert "유요의 말로" in (quote_problem(said, d) or ""), said
+                for said in ('gh -R a/b issue comment 1 --body "요유가 시험용으로 지어낸 문장이라는 뜻이라고 함"',
+                             "gh api -X POST repos/a/b/issues/1/comments -f body='시험용으로 지어낸 문장이라는 뜻'"):
+                    assert "유요의 말로" in (quote_problem(said, d) or ""), said
                 for c in ('gh issue comment 1 --body "요유가 시험 문장을 허락했습니다"', "gh search issues '시험용으로 지어낸 문장'",
+                          "gh api -X GET search/issues -f q='시험용으로 지어낸 문장이라는 뜻'",  # GET sends fields as the query
                           "echo '시험용으로 지어낸 문장이라는 뜻' > a.md"):
                     assert quote_problem(c, d) is None, c
             finally:
