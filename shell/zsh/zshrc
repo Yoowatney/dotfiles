@@ -1,3 +1,8 @@
+# Panes pane-spawn opens set this, so a runaway in one stops below the user's
+# process limit (the number and why: tools/agent-hooks/pane-spawn). First, so
+# the rest of this file already runs under it.
+[[ -n ${PANE_SPAWN_NPROC:-} ]] && ulimit -Su "$PANE_SPAWN_NPROC"
+
 # ============================================
 # 1. Instant Prompt (p10k)
 # ============================================

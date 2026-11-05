@@ -88,6 +88,14 @@ case "$kind" in
       --env "MISE_CACHE_DIR=${MISE_CACHE_DIR:-$HOME/Library/Caches/mise}") ;;
   *) die "$USAGE" ;;
 esac
+# On 2026-11-05 a script in one pane looped through a mise shim and spawned processes until the user hit macOS's per-user limit
+# (kern.maxprocperuid, 8000): every pane and launchd job then failed to fork, and only a reboot ended it. macOS compares a
+# process's RLIMIT_NPROC soft limit with all processes of its user, not with its own descendants (checked that day: a fresh shell
+# with its limit 50 below the user's count could not fork once). So zshrc lowers the soft limit of the shell this pane starts,
+# which the agent it types in, Claude or Codex, and all it runs inherit. The user usually has about 750-800 processes, so a
+# runaway in a pane stops at 5000 while sessions opened by hand and launchd jobs keep 3000 to stop it with. The cap counts the
+# whole user, so near 5000 every pane opened here stops forking, not only the runaway one. Panes already open keep 8000.
+env_args+=(--env PANE_SPAWN_NPROC=5000)
 [ -n "${HERDR_PANE_ID:-}" ] || die "run this inside a herdr pane"
 command -v jq >/dev/null 2>&1 || die "jq not found"
 

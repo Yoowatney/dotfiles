@@ -139,6 +139,20 @@ hasnt "--model" "an ordinary pane keeps the caller's model"
 ps --new-tab "조사" "지시" >/dev/null
 has "tab create --workspace w7 --cwd $PWD --label 조사 --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1" "a pane in a new tab has none either"
 
+# 2026-11-05: a runaway in one pane filled the user's process limit (8000) and froze every pane and launchd job. Every pane
+# opened here, Claude or Codex, starts its shell with a lower limit, which the agent and all it runs inherit.
+NPROC="--env PANE_SPAWN_NPROC=5000"
+has "--label 조사 --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 $NPROC" "a Claude pane in a new tab: the lower limit"
+ps "조사" "지시" >/dev/null
+has "--direction right --cwd $PWD --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 $NPROC" "a split Claude pane: the lower limit"
+SESSIONLESS=1 ps --kind codex "조사" "지시" >/dev/null
+has "pane split --pane w7:p3 --direction right --cwd $PWD --no-focus --env MISE_" "a Codex pane"
+has "$NPROC" "a Codex pane: the lower limit"
+# The pane's shell is what lowers it: zshrc reads the variable. Checked on a real zsh with this repo's zshrc.
+mkdir -p "$SANDBOX/zdot" && ln -s "$(cd "$(dirname "$SUBJECT")/../../shell/zsh" && pwd)/zshrc" "$SANDBOX/zdot/.zshrc"
+got=$(PANE_SPAWN_NPROC=4321 ZDOTDIR="$SANDBOX/zdot" zsh -i -c 'ulimit -Su' 2>/dev/null </dev/null | tail -1)
+[ "$got" = 4321 ] || fail "a pane's shell lowers its process limit to PANE_SPAWN_NPROC: got [$got]"
+
 # A pane that was not ready for the first start is tried again.
 FAIL_START=1 ps "재시도" "지시" >/dev/null
 [ "$(cat "$SANDBOX/starts")" = 2 ] || fail "should retry a failed start"
@@ -269,6 +283,7 @@ MISE_ENV="--env MISE_CONFIG_DIR=${MISE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$H/.config
 has "--no-focus $MISE_ENV" "a Codex pane keeps mise's folders when a test swaps HOME"
 ps --check "로그인" "돌려 보세요" >/dev/null
 has "--no-focus $MISE_ENV" "so does a Codex check pane"
+has "[workers] tab create --workspace w2 --cwd $CHECK_DIR --label 확인 로그인 --no-focus $MISE_ENV $NPROC" "and a workers pane, the lower limit"
 ps "조사" "지시" >/dev/null
 hasnt "MISE_" "a Claude pane runs commands without the shims first, so it needs none"
 ps "조사" "지시" >/dev/null
