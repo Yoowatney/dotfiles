@@ -502,6 +502,8 @@ def last_reply(session: str, home: str = "") -> str:
         with open(path, encoding="utf-8") as f:
             for line in reversed(f.read().splitlines()):
                 payload = json.loads(line).get("payload") or {}
+                if payload.get("type") == "task_started":  # a later turn that never completed: no report of its own (Codex review)
+                    return ""
                 if payload.get("type") == "task_complete":
                     return payload.get("last_agent_message") or ""
     return ""
@@ -887,6 +889,13 @@ esac''')
     assert calls.count("--close") == 3 and "pane=w1:p2 --close" in calls and "pane=w1:p3 --close" in calls, calls
     assert calls.count("tell w1:p1") == 3, calls
     assert saved().count(done) == 3, "swept panes keep their reports too"
+    # A Codex pane that reported and then broke off a later turn has no report of its own: the earlier one is not its last word
+    # (Codex review, 2026-11-05), or the watch would close a pane with work left.
+    rollout("sid-z", done)
+    assert last_reply("sid-z", sandbox) == done
+    with open(glob.glob(f"{sandbox}/.codex/sessions/*/*/*/rollout-*-sid-z.jsonl")[0], "a") as f:
+        f.write(json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}) + "\n")
+    assert last_reply("sid-z", sandbox) == "", "a later turn that never completed"
 
     # The 🔴/🟢 mark follows the report's `세션:` line, freed only when the Claude transcript shows nothing still running.
     logs = os.path.join(sandbox, ".claude", "projects", "p")

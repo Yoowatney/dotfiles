@@ -20,8 +20,8 @@ it, close it, look at the board item. One closed through pane-label is marked re
 Such a pane is closed, with one alert, once it has been stopped with its report sent for ORPHAN_TTL, counted from the stop or
 the lead's close, whichever came last (요유 2026-11-05). A pane at work, marked 🔴, without a report or with a live child stays.
 A pane stopped STOPPED s whose own last reply says it may close goes too, whoever its lead is: its close failed, or a herdr
-restart brought it back with no turn left to end (workers/w1:p6G, 2026-11-05). One whose report never got out is relayed first,
-as its Stop hook would (see settle()). auto-tab-close marks a report by terminal and by session: a restart keeps only the session.
+restart brought it back with no turn left to end (workers/w1:p6G, 2026-11-05). Only once its report got out, and never the main
+pane's terminal (see settle()). auto-tab-close marks a report by terminal and by session: a restart keeps only the session.
 An alert about a Home lead's pane that goes to anyone but its lead carries HOME_NOTE.
 A pane that stopped without a report on a sleep or network error (Claude's `API Error: Your computer went to sleep...`, ENOTFOUND)
 is not news but told WAKE itself at once, before the 15-minute alert (와우 카드 04, 요유 2026-11-05: on 11/05 one sat 77 minutes
@@ -140,25 +140,21 @@ def wake(env, sock, rec, pane, address, job, now) -> None:
 
 
 def settle(env, sock, a, rec, pane, reported: bool) -> None:
-    """A pane stopped STOPPED s or more and not held (요유 2026-11-05, workers/w1:p6G): its own close can fail (the Mac was out of
-    processes), and a herdr restart brings a pane back with no turn left to end, so no Stop hook comes again. Its last reply is
-    read once per stop. A report that never got out (its Stop hook failed) goes now the way that hook sends it, closing the pane
-    when it says so. A pane whose report got out and whose last reply says it may close is closed, every minute until it goes.
+    """Close a pane stopped STOPPED s or more, not held, whose report got out and whose own last reply says it may close
+    (요유 2026-11-05, workers/w1:p6G): its own close can fail (the Mac was out of processes), and a herdr restart brings a pane
+    back with no turn left to end, so no Stop hook comes again. A pane whose report never got out is never closed here; it gets
+    the 15-minute alert (its lead, 2026-11-05). The last reply is read once per stop, and again after a read that failed; the
+    close is tried every minute until the pane goes.
     ponytail: after a restart the floor is 0, so any report its session ever sent counts as this stop's."""
+    session = (a.get("agent_session") or {}).get("value") or ""
+    if not reported or not session:
+        return
     if "closes" not in rec:
-        session = (a.get("agent_session") or {}).get("value") or ""
         try:
-            reply = atc.last_reply(session, env.get("HOME") or "") if session else ""
-        except Exception:  # an unreadable transcript is no verdict
-            reply = ""
-        rec["closes"] = atc.should_close(reply)
-        if not reported and atc.LEFT.search(atc.share.prose(reply)):
-            try:
-                atc.finish(reply, {**env, "HERDR_SOCKET_PATH": sock, "HERDR_PANE_ID": pane})
-            except Exception:  # it raises only when the report could not be saved
-                pass
-            return  # its own close is on the way; once someone heard it, the next minute closes what is left
-    if rec["closes"] and reported:
+            rec["closes"] = atc.should_close(atc.last_reply(session, env.get("HOME") or ""))
+        except Exception:  # unreadable now: read again next minute (Codex review)
+            return
+    if rec["closes"]:
         herdr_peers.herdr(env, "pane", "close", pane, socket=sock)  # {} when it failed: tried again next minute
 
 
@@ -254,7 +250,7 @@ def tick(env, now: float) -> list:
             session = (a.get("agent_session") or {}).get("value") or ""
             rec.update(seen=now, name=name, pane=pane, opener=opener, home=home, job=job, session=session)  # to say which pane it was once it is gone
             records[term] = rec
-            held = "🔴" in name or "👑" in name or any(herdr_peers.opener(c.get("name")) == term for c in agents)
+            held = term == main or "🔴" in name or "👑" in name or any(herdr_peers.opener(c.get("name")) == term for c in agents)
             who = "자동 칸" if job else "밑 칸"
             # A lead whose agent ended leaves its pane at a shell, where nobody hears. Restarted between two ticks it is told once for nothing.
             lost = bool(opener) and not where.get(opener, ("", {}))[1].get("agent")
@@ -284,7 +280,6 @@ def tick(env, now: float) -> list:
                         settle(env, sock, a, rec, pane, reported)
                     except Exception:
                         pass
-                    reported = reported_since(rec["floor"], term, session)  # a report it relayed marks the pane
                 limit = JOB_HELD if job and "🔴" in name else STOPPED
                 if not reported and now - max(rec["since"], rec.get("woke", 0)) >= limit and "idle" not in rec["alerted"]:
                     long = "3시간째" if limit == JOB_HELD else "15분째"
@@ -335,7 +330,6 @@ def tick(env, now: float) -> list:
 
 
 def selftest():
-    import glob
     import shutil
     import stat
     import tempfile
@@ -638,61 +632,59 @@ esac
 
         # 요유 2026-11-05 (workers/w1:p6G): a pane whose own report said it may close sat open for two hours. Its close came due
         # while the Mac was out of processes, and the restart brought it back under a new terminal its report mark did not name:
-        # the watch told of it as 15 minutes without a report, and the hour never came. A pane whose last reply closes it goes
-        # 15 minutes after it stopped, whoever its lead is; one whose report never got out is relayed the way its Stop hook would.
+        # the watch told of it as 15 minutes without a report, and the hour never came. A pane whose report got out and whose
+        # last reply closes it goes 15 minutes after it stopped, whoever its lead is. Its lead (2026-11-05): never the main pane,
+        # a 👑, a 🔴, or a pane whose report has not gone out.
         os.remove(f"{d}/state/orchestrator/watch.json"); result("default-panes", "panes", LEADS)
         done_reply = "끝났습니다.\n\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨"
-        script(f"{d}/relay-tell", f'echo "$1|$2" >> {d}/relayed')
-        script(f"{d}/relay-label", f'echo "$HERDR_PANE_ID $*" >> {d}/relayed')
-        relay = {"PANE_REPORT_DIR": f"{d}/reports", "AUTO_TAB_CLOSE_PANE_TELL": f"{d}/relay-tell", "AUTO_TAB_CLOSE_PANE_LABEL": f"{d}/relay-label"}
-        env.update(relay)
 
         def stopped(pane, term, session, reply, text="🟢 🫡 끝남", name="spawn-L-1", status="idle", seq=1):
             """A pane that stopped on `reply`, as both lists show it."""
-            workers_panes[pane] = {"pane_id": pane, "terminal_id": term, "label": text, "agent_session": {"value": session}}
+            workers_panes[pane] = {"pane_id": pane, "terminal_id": term, "label": text, "agent_session": {"value": session}, "agent": "claude"}
             result("workers-panes", "panes", workers_panes.values())
             write(f"{d}/.claude/projects/-w/{session}.jsonl", json.dumps({"type": "assistant", "message": {
                 "id": "m1", "role": "assistant", "content": [{"type": "text", "text": reply}]}}, ensure_ascii=False) + "\n")
             return {"pane_id": pane, "name": name, "terminal_id": term, "agent_status": status, "state_change_seq": seq,
                     "agent_session": {"value": session}}
 
-        def relayed():
-            text = open(f"{d}/relayed").read() if os.path.exists(f"{d}/relayed") else ""
-            if text:
-                os.remove(f"{d}/relayed")
-            return text
-
         panes_on_workers()
         rows = [stopped("w1:pQ", "term_fQ", "sid-Q", done_reply),                      # restarted: its mark is under its session only
                 stopped("w1:pT", "term_fT", "sid-T", done_reply),                      # its close failed, no restart
+                stopped("w1:pR", "term_fR", "sid-R", done_reply),                      # its transcript cannot be read at first
                 stopped("w1:pK", "term_fK", "sid-K", "남은 것: 요유 몫: 머지 결정 · 유요 몫: 없음 · 세션: 닫아도 됨"),
                 stopped("w1:pV", "term_fV", "sid-V", done_reply, text="🔴 🫡 감시 중"),
+                stopped("w1:pP", "term_fP", "sid-P", done_reply, text="🟢 👑 승격된 리드"),
+                stopped("w1:pM", "term_M", "sid-M", done_reply, text="🟢 메인"),        # the main pane's terminal
                 stopped("w1:pW", "term_fW", "sid-W", done_reply),
                 stopped("w1:pC", "term_fC", "sid-C", "진행 중입니다.", name="spawn-fW-1", status="working"),  # pW's live child
-                stopped("w1:pU", "term_fU", "sid-U", done_reply),                      # its Stop hook never ran
+                stopped("w1:pU", "term_fU", "sid-U", done_reply),                      # its report never got out
                 stopped("w1:pN", "term_fN", "sid-N", "진행 중입니다.")]                 # no report at all
         agents(*rows)
         touch_reported("sid-Q", 83990)
-        for t in ("term_fT", "sid-K", "term_fV", "term_fW"):
+        for t in ("term_fT", "sid-R", "sid-K", "term_fV", "sid-P", "term_M", "term_fW"):
             touch_reported(t, 84010)
+        os.chmod(f"{d}/.claude/projects/-w/sid-R.jsonl", 0)
+        ever: set = set()
+
+        def closes():
+            got = closed()
+            ever.update(got)
+            return sorted(got)
+
         tick(84000)
-        assert tick(84899) == [] and closed() == [] and relayed() == "", "not before 15 minutes"
+        assert tick(84899) == [] and closes() == [], "not before 15 minutes"
         told = tick(84900)
-        assert sorted(closed()) == ["w1:pQ", "w1:pT"], f"only a reported pane whose reply closes it, not held: {closed()}"
-        assert [t for t in told if "보고 없이" in t] == [f"w5:p9|밑 칸 🟢 🫡 끝남(workers/w1:pN)이 보고 없이 15분째 멈춰 있습니다. {UNSENT}"], \
-            f"the restarted pane reported, and the relayed one has now: only the pane with no report is news: {told}"
-        out = relayed()
-        assert "default/w5:p9|" in out and "끝났습니다." in out and "w1:pU --close" in out, f"pU is relayed to its lead and closed: {out!r}"
-        assert "sid-U" in open(glob.glob(f"{d}/reports/*.md")[0]).read(), "and its report is kept"
-        assert "w1:pQ" not in out and "w1:pT" not in out, "a pane whose report got out is not told of again"
-        assert tick(84960) == [] and relayed() == "", "a relay is once per stop"
-        assert sorted(closed()) == ["w1:pQ", "w1:pT", "w1:pU"], f"a close that did not take is tried again: {closed()}"
+        assert closes() == ["w1:pQ", "w1:pT"], f"only a reported pane whose reply closes it, not held: {closed()}"
+        assert sorted(t for t in told if "보고 없이" in t) == [f"w5:p9|밑 칸 🟢 🫡 끝남(workers/w1:p{p})이 보고 없이 15분째 멈춰 있습니다. {UNSENT}"
+                                                         for p in "NU"], f"a pane whose report never got out is news, not closed: {told}"
+        os.chmod(f"{d}/.claude/projects/-w/sid-R.jsonl", 0o644)
+        assert tick(84960) == [] and closes() == ["w1:pQ", "w1:pR", "w1:pT"], f"an unreadable transcript is read again; a close that did not take is tried again: {closed()}"
         open(f"{d}/close-fails", "w").close(); tick(85020); os.unlink(f"{d}/close-fails")
-        assert sorted(closed()) == [], "a failed close"
-        tick(85080); assert sorted(closed()) == ["w1:pQ", "w1:pT", "w1:pU"], "is tried again next minute"
-        panes_on_workers(); agents(); tick(85140)
-        for key in ("PANE_REPORT_DIR", "AUTO_TAB_CLOSE_PANE_TELL", "AUTO_TAB_CLOSE_PANE_LABEL"):
-            env.pop(key)
+        assert closes() == [], "a failed close"
+        tick(85080); assert closes() == ["w1:pQ", "w1:pR", "w1:pT"], "is tried again next minute"
+        tick(86000); tick(90000); closes()
+        assert ever == {"w1:pQ", "w1:pR", "w1:pT"}, f"never the main pane, a 👑, a 🔴, a pane with a live child, one left open or unreported: {ever}"
+        panes_on_workers(); agents(); tick(90060)
 
         # 요유 2026-11-05: a Home lead's pane may reach the main pane, which is told to keep it off company Slack and the board.
         os.remove(f"{d}/state/orchestrator/watch.json"); result("default-panes", "panes", [MAIN]); panes_on_workers(label("w1:pX", "🟢 🫡 집 일"))
