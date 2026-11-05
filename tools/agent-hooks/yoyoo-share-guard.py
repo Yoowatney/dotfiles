@@ -23,6 +23,7 @@ comes back without a `확인:` line and a command run since that is not a pane c
 review found no lead that passed a "done" on unchecked.
 A pane that hands checks out (herdr_peers.delegates_checks: the main pane today, 요유 2026-11-05) shows a check pane instead of a
 command of its own; relay_reason says how. Any other pane, a missing or stale main-pane file and a broken herdr get the rule above.
+There a stopped pane rides on the next message instead (note_next): each rewrite re-read its whole long session.
 In the main pane alone, any turn also comes back while 요유's Slack words the relay passed there have no reply after them
 (owed_reason, from the relay's local state).
 A report with nothing left to do ends without a word: the question used to demand a rewrite. Of 102 fires on 10/28-10/31,
@@ -350,10 +351,28 @@ def left_open_reason(payload: dict, text: str, env) -> str | None:
     parts = []
     if tests:
         parts.append(f"yoyoo-share-guard: 이 세션이 띄운 시험용 칸이 아직 열려 있습니다: {listed(tests)}. {close(tests)}로 닫고 보고를 다시 쓰세요.")
-    if stopped:
-        parts.append(f"yoyoo-share-guard: 이 세션이 띄운 칸이 멈춰 있습니다: {listed(stopped)}. 요유는 리드하고만 이야기하니 그 칸을 보거나 답하거나 닫는 일을 요유 몫으로 넘기지 마세요. "
-                     f"남은 일이 있으면 `pane-tell`로 시키고, 요유 결정이 필요하면 이 칸에서 묻고, 없으면 도는 작업이 없는지 확인한 뒤 {close(stopped)}로 닫고 보고를 다시 쓰세요.")
+    todo = ("요유는 리드하고만 이야기하니 그 칸을 보거나 답하거나 닫는 일을 요유 몫으로 넘기지 마세요. 남은 일이 있으면 `pane-tell`로 시키고, "
+            f"요유 결정이 필요하면 이 칸에서 묻고, 없으면 도는 작업이 없는지 확인한 뒤 {close(stopped)}로 닫")
+    # 요유 2026-11-05 (token thread): a rewrite re-reads the main pane's whole long session, so there the next message carries it
+    if stopped and not (delegates_checks(payload, env) and
+                        note_next(payload, env, f"yoyoo-share-guard: 지난 보고 때 이 세션이 띄운 칸이 멈춰 있었습니다: {listed(stopped)}. {todo}으세요.")):
+        parts.append(f"yoyoo-share-guard: 이 세션이 띄운 칸이 멈춰 있습니다: {listed(stopped)}. {todo}고 보고를 다시 쓰세요.")
     return " ".join(parts) or None
+
+
+def note_next(payload: dict, env, text: str) -> bool:
+    """Leave text for the next message, which pane-label-nudge.sh adds and removes. False when it cannot: send it back instead."""
+    session, home = re.sub(r"[^A-Za-z0-9_-]", "_", payload.get("session_id") or ""), env.get("HOME")
+    if not (session and home):
+        return False
+    folder = os.path.join(home, ".local", "state", "next-prompt")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, session), "a", encoding="utf-8") as f:  # append: an unread note is never lost
+            f.write(text + "\n")
+    except OSError:
+        return False
+    return True
 
 
 def unquote(literal: str) -> str:
@@ -899,11 +918,25 @@ def selftest():
         same_id = {**worker, "pane_id": "w1:p3"}  # w1:p3 exists on both servers
         herdr_has([me, same_id], [{"pane_id": "w1:p3", "name": "spawn-aa-1"}])
         herdr_has_on("workers", [{**worker, "label": "🟢 🫡 workers 구현", "terminal_id": "term_ee"}], [{"pane_id": "w1:p3", "name": "spawn-aa-2"}])
-        r = ends() or ""
+        # 요유 2026-11-05 (token thread): each rewrite re-reads the main pane's whole long session, so there the reminder rides on
+        # the next message instead (pane-label-nudge.sh reads and removes the note). Any other lead is still sent back.
+        note = f"{d}/.local/state/next-prompt/s1"
+        assert ends() is None, "the main pane is not sent back for a stopped pane"
+        r = open(note, encoding="utf-8").read()
         assert "구현(w1:p3)" in r and "workers 구현(workers/w1:p3)" in r, f"both stopped panes, each with its own server: {r}"
         assert "herdr --session workers pane close <ID>" in r, "a workers pane is closed on its own server"
+        assert "지난 보고" in r and "다시 쓰" not in r, f"the next turn closes them, it does not rewrite a report: {r}"
+        herdr_has([me, same_id, test_pane], [{"pane_id": "w1:p3", "name": "spawn-aa-1"}, {"pane_id": "w1:p2", "name": "spawn-aa-3"}])
+        assert "임시 시험 Claude" in (ends(fresh=False) or ""), "an open test pane still sends the main pane back"
+        herdr_has([me, same_id], [{"pane_id": "w1:p3", "name": "spawn-aa-1"}])
+        os.remove(note)
+        os.makedirs(note)  # the note cannot be written: sent back as before
+        assert "구현(w1:p3)" in (ends() or ""), "a note it cannot leave is a rewrite"
+        os.rmdir(note)
         herdr_has_on("workers", [{**worker, "label": "🟢 🫡 workers 구현", "terminal_id": "term_ee"}], [{"pane_id": "w1:p3", "name": "spawn-cc-1"}])
-        assert "workers/" not in (ends() or ""), "workers agent names decide workers panes, not the same id's name here"
+        ends()
+        assert "workers/" not in open(note, encoding="utf-8").read(), "workers agent names decide workers panes, not the same id's name here"
+        os.remove(note)
         os.unlink(f"{d}/.local/state/orchestrator/main")
         # An ordinary lead's panes run there too (요유 2026-11-05): it hears the same.
         herdr_has_on("workers", [{**worker, "label": "🟢 🫡 workers 구현", "terminal_id": "term_ee"}], [{"pane_id": "w1:p3", "name": "spawn-aa-2"}])

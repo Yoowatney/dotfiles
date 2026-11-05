@@ -89,14 +89,22 @@ ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_LABEL="cf#543 미국 확장" FAKE_TERM=t
 ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 👑 메인 오케스트레이터" FAKE_TERM=term_M HOME="$SANDBOX/home" | context)
 [[ "$ctx" == *"lookups"* && "$ctx" == *"check"* ]] || fail "the main pane hears that lookups and checks go to panes too: $ctx"
 
-# 요유 2026-11-05 (api#1002): the main pane only hands work out. 요유's Slack words and a pane's report reach it by pane-tell, so
-# every message arms the question there, and the file says it is the question for a pane that hands lookups out.
-rm -f "$SANDBOX/fit/s_1"
+# 요유 2026-11-05 (#0-yoyooyo token thread): pane-fit never refuses the main pane. Each refusal is one more model call over the
+# whole long session (240 that day); the main pane's line above carries the same guidance. A file left from before goes.
+mkdir -p "$SANDBOX/fit"; printf delegates >"$SANDBOX/fit/s_1"
 ask "[pane-tell: '자동 작업' 세션이 보낸 글입니다] [Slack #yoyooyo 요유] 로그 봐 줘" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 👑 메인" FAKE_TERM=term_M HOME="$SANDBOX/home" >/dev/null
-[ "$(cat "$SANDBOX/fit/s_1" 2>/dev/null)" = delegates ] || fail "a relayed message arms the main pane's question"
-rm -f "$SANDBOX/fit/s_1"
-ask "로그 봐 줘" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 👑 메인" FAKE_TERM=term_M HOME="$SANDBOX/home" >/dev/null
-[ "$(cat "$SANDBOX/fit/s_1" 2>/dev/null)" = delegates ] || fail "요유's own message arms it too"
+[ ! -e "$SANDBOX/fit/s_1" ] || fail "a relayed message does not arm the main pane, and an old file goes"
+ctx=$(ask "로그 봐 줘" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 👑 메인" FAKE_TERM=term_M HOME="$SANDBOX/home" | context)
+[ ! -e "$SANDBOX/fit/s_1" ] || fail "요유's own message does not arm it either"
+[[ "$ctx" == *"one-line answer"* && "$ctx" == *"prod 허용"* && "$ctx" == *"pane-tell"* ]] || fail "the main pane hears what stays there: $ctx"
+# What yoyoo-share-guard.py left for the next message instead of sending the main pane's reply back: told once, then gone.
+mkdir -p "$SANDBOX/home/.local/state/next-prompt"
+printf 'yoyoo-share-guard: 지난 보고 때 칸이 멈춰 있었습니다: 구현(workers/w1:p3).\n두 번째 줄.\n' >"$SANDBOX/home/.local/state/next-prompt/s_1"
+ctx=$(ask "[pane-tell: 다른 세션] 보고입니다" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 👑 메인" FAKE_TERM=term_M HOME="$SANDBOX/home" | context)
+[[ "$ctx" == *"main-orchestrator"*"구현(workers/w1:p3). 두 번째 줄."* ]] || fail "the note rides on the next message: $ctx"
+[ ! -e "$SANDBOX/home/.local/state/next-prompt/s_1" ] || fail "and is removed once told"
+ctx=$(ask "로그 봐 줘" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 👑 메인" FAKE_TERM=term_M HOME="$SANDBOX/home" | context)
+[[ "$ctx" != *"구현(workers/w1:p3)"* ]] || fail "told once: $ctx"
 # Every other pane: an empty file, as ever, even one the same session wrote as the main pane a message ago.
 ask "로그 봐 줘" HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 일" FAKE_TERM=term_X HOME="$SANDBOX/home" >/dev/null
 [ -f "$SANDBOX/fit/s_1" ] && [ ! -s "$SANDBOX/fit/s_1" ] || fail "an ordinary pane arms the ordinary question"

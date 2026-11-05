@@ -45,8 +45,8 @@ def delegates_checks(env, terminal) -> bool:
 
     Today only the main pane does (요유 2026-11-05, api#1002); every other lead checks results itself. A main-pane file that is
     missing or stale matches no pane, which is the ordinary rule. To widen the rule, change this function and nothing else: the
-    Stop checks (yoyoo-share-guard.py), what a lead hears (auto-tab-close.py), the question before a lookup (pane-fit-guard.py,
-    through pane-label-nudge.sh) and `pane-spawn --check` all ask here, shell scripts through `--delegates-checks`.
+    Stop checks (yoyoo-share-guard.py), what a lead hears (auto-tab-close.py), the line on each message that replaces pane-fit-guard.py's
+    question (pane-label-nudge.sh) and `pane-spawn --check` all ask here, shell scripts through `--delegates-checks`.
     What is the main pane's alone (the workers server, the short report form, its name) reads main_terminal.
     """
     return bool(terminal) and terminal == main_terminal(env)

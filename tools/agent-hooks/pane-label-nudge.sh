@@ -42,16 +42,20 @@ if [ "${1:-}" = session ]; then
 fi
 
 # A new message from 요유: the next working tool asks whether this work belongs in a pane (pane-fit-guard.py).
-# A pane that hands lookups and checks out (the main pane today) gets its own question, on relayed messages too: 요유's Slack words and
-# a pane's report reach it by pane-tell. The one gate is in herdr_peers.py.
+# Never in a pane that hands lookups and checks out (the main pane today; the one gate is in herdr_peers.py): there each refusal was
+# one more model call over the whole long session, 240 on 2026-11-05, so 요유 had it taken out. The main-pane line below says it instead.
 session=$(jq -r '.session_id // empty' <<<"$input" 2>/dev/null)
 delegates=
-if [ -n "$term" ] && python3 -I "$(dirname "$0")/herdr_peers.py" --delegates-checks "$term" 2>/dev/null; then delegates=delegates; fi
-if [ -n "$session" ] && { [ -z "$machine" ] || [ -n "$delegates" ]; }; then
+if [ -n "$term" ] && python3 -I "$(dirname "$0")/herdr_peers.py" --delegates-checks "$term" 2>/dev/null; then delegates=1; fi
+if [ -n "$session" ]; then
     armed=${PANE_FIT_DIR:-$HOME/.local/state/pane-fit}
     fit="$armed/${session//[^A-Za-z0-9_-]/_}"
-    mkdir -p "$armed" && { printf '%s' "$delegates" >"$fit" && touch "$fit"; } 2>/dev/null
-    find "$armed" -type f -mtime +7 -delete 2>/dev/null
+    if [ -n "$delegates" ]; then
+        rm -f "$fit"
+    elif [ -z "$machine" ]; then
+        mkdir -p "$armed" && { : >"$fit" && touch "$fit"; } 2>/dev/null
+        find "$armed" -type f -mtime +7 -delete 2>/dev/null
+    fi
 fi
 
 name=${label#🔴}; name=${name#🟢}; name=${name# }; name=${name#👑}; name=${name#🫡}
@@ -59,7 +63,7 @@ case "${name# }" in "$PLACEHOLDER"*) label= ;; esac # the session-start name is 
 
 # The mark tells 요유 whether closing this session stops something (요유 2026-10-17): see pane-label.
 if [ -n "$term" ] && [ "$term" = "$(cat "$mainfile" 2>/dev/null)" ]; then
-    msg="This pane is 요유's main pane. Keep its name; never rename it for a task. Follow ~/.claude/skills/main-orchestrator/SKILL.md: hand work to panes with pane-spawn, lookups beyond a one-line answer too, have a fresh check pane (pane-spawn --check) check a pane's report, triage what comes back three ways, and end each answer with the collected decisions."
+    msg="This pane is 요유's main pane. Keep its name; never rename it for a task. Follow ~/.claude/skills/main-orchestrator/SKILL.md: hand work to panes with pane-spawn, lookups beyond a one-line answer too, have a fresh check pane (pane-spawn --check) check a pane's report, triage what comes back three ways, and end each answer with the collected decisions. What stays here: a one-line answer, a step that needs 요유's \`prod 허용\` or \`staging 허용\`, reading a short report, and chores (pane-spawn, pane-tell, the board); decide that before the first tool call of each message."
 elif [ -n "$label" ]; then
     msg="herdr pane label: \"$label\". If this message starts a different task or topic, rename the pane before other work: pane-label \"<issue> <2-4 words>\" (e.g. pane-label \"api#736 Dependabot 정리\"; the 🟢/🔴 mark is kept). Keep the label when a task ends."
     case "$label" in
@@ -79,6 +83,14 @@ if [ -n "$transcript" ] && [ -r "$transcript" ]; then
     if [ "${tokens:-0}" -gt 300000 ] 2>/dev/null; then
         msg="$msg Context is about $((tokens / 1000))k tokens. If this message starts a different task, first leave what the next session needs (board comment, work-log or memory), then pipe a short handoff prompt (Korean, absolute paths, board link) into \`handoff save\` and suggest in one line that 요유 run /clear here: the next session in this pane loads it, so 요유 pastes nothing (Codex does not load it yet: pbcopy the prompt and show it instead)."
     fi
+fi
+
+# What a Stop hook left for this message instead of sending the reply back (yoyoo-share-guard.py note_next: the main pane today).
+# ponytail: a note whose session ends unread stays, a few hundred bytes; prune here if that folder ever grows.
+note="$HOME/.local/state/next-prompt/${session//[^A-Za-z0-9_-]/_}"
+if [ -n "$session" ] && [ -s "$note" ]; then
+    msg="$msg $(tr '\n' ' ' <"$note")"
+    rm -f "$note"
 fi
 
 emit "$msg${correction:+ $correction}"
