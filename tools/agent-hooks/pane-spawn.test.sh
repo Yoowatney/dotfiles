@@ -35,6 +35,7 @@ case "\$1 \$2" in
   "agent start")
     [[ "\$3" =~ ^[a-z][a-z0-9_-]{0,31}\$ ]] || { echo invalid_agent_name; exit 1; } # herdr's rule
     n=\$(cat "$SANDBOX/starts" 2>/dev/null || echo 0); echo \$((n + 1)) > "$SANDBOX/starts"
+    [ -z "\${BLOCKED_START:-}" ] || { echo '{"error":{"code":"agent_not_ready","message":"agent x is blocked during startup and is not ready for prompts"}}'; exit 1; }
     [ "\$n" -ge "\${FAIL_START:-0}" ] ;;
   "agent get")
     if [ -n "\${SESSIONLESS:-}" ]; then jq -n '{result: {agent: {interactive_ready: true}}}'
@@ -147,6 +148,14 @@ has "agent prompt w1:new 지시" "retry delivers"
 if FAIL_START=9 ps "실패" "지시" 2>/dev/null; then fail "a failed start must exit non-zero"; fi
 has "pane close w1:new" "the empty pane goes"
 hasnt "agent prompt" "nothing to prompt"
+
+# An agent held by a dialog as it starts (Codex asks once whether to trust a folder) keeps the name it was given, so a retry
+# could only fail on that name and hide why. It is given up at once, naming the dialog and the way around it.
+if BLOCKED_START=1 ps --kind codex "막힘" "지시" 2>"$SANDBOX/err"; then fail "a start held by a dialog must exit non-zero"; fi
+[ "$(cat "$SANDBOX/starts")" = 1 ] || fail "no retry after a dialog: $(cat "$SANDBOX/starts") starts"
+has "pane close w1:new" "the held pane goes"
+grep -q "trust" "$SANDBOX/err" || fail "names the trust dialog: $(cat "$SANDBOX/err")"
+grep -q -- "--kind claude" "$SANDBOX/err" || fail "names the way around it: $(cat "$SANDBOX/err")"
 
 # Work that never shows fails loudly, with no resend and the pane left open: an instruction Codex dropped looks the same as a
 # wait that failed on an accepted one, and resending that would run the job twice.
