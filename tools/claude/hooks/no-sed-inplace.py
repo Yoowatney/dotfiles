@@ -131,6 +131,18 @@ GIT_BANS = {
     "clean": ({"f": CLEAN}, {"--force": CLEAN}, "e"),
     "add": ({"f": ADD_FORCE}, {"--force": ADD_FORCE}, ""),
 }
+# git's global options (`man git`, 2.50.1), which must be skipped to find the subcommand. git takes no abbreviation of these
+# and no attached short value (`--git-d`, `--no-pa`, `-C.` are "unknown option"), so an option outside both lists runs on no
+# git here. It is refused rather than guessed: a newer git's option could take the next word as its value, and reading that
+# word as the subcommand let `git --namespace foo push -f` through (2026-11-05). `--super-prefix` left git, but an older git
+# still takes a value after it. A `--name=value` word holds its own value.
+GIT_VALUED = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--attr-source", "--super-prefix"}
+GIT_FLAGS = {"-v", "--version", "-h", "--help", "--exec-path", "--html-path", "--man-path", "--info-path", "-p", "--paginate",
+             "-P", "--no-pager", "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "--no-advice", "--bare",
+             "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs"}
+GLOBAL_OPTION = ("git-global-option: 이 훅이 모르는 git 전역 옵션 `{}`이 하위 명령 앞에 있어 하위 명령을 읽을 수 없음. "
+                 "지금 git은 이 옵션을 받지 않음. 값을 받는 새 옵션이면 `--옵션=값`처럼 붙여 쓸 것. "
+                 "값을 받지 않는 새 옵션이면 훅의 목록에 넣도록 그대로 보고할 것")
 
 
 def git_problem(w: list[str]) -> str | None:
@@ -141,7 +153,12 @@ def git_problem(w: list[str]) -> str | None:
         return None
     k = 1
     while k < len(w) and w[k].startswith("-"):
-        k += 2 if w[k] in ("-C", "-c", "--git-dir", "--work-tree") else 1
+        if w[k] in GIT_VALUED:
+            k += 2
+        elif w[k] in GIT_FLAGS or "=" in w[k]:
+            k += 1
+        else:
+            return GLOBAL_OPTION.format(w[k])
     sub, args = (w[k], w[k + 1:]) if k < len(w) else ("", [])
     if sub in ("filter-branch", "filter-repo"):
         return REWRITE
@@ -193,8 +210,8 @@ def bash_problem(cmd: str) -> str | None:
                     "지워도 되는 임시 파일이나 다시 만들어지는 산출물이면 `trash <경로>`로 휴지통에 옮기고 하던 일을 그대로 이어 갈 것. "
                     "휴지통으로 옮길 수 없거나 지워도 되는지 모르면 형태를 바꿔 다시 실행하지 말고 그대로 보고할 것")
         reason = git_problem(w)
-        if reason:
-            return reason + ". 형태를 바꿔 다시 실행하지 말 것"
+        if reason:  # an unknown option may sit in front of a harmless command, so its reason says how to rewrite it
+            return reason if reason.startswith("git-global-option") else reason + ". 형태를 바꿔 다시 실행하지 말 것"
     return None
 
 
@@ -435,6 +452,11 @@ def selftest():
             "git --no-pager push origin -f",
             "cd repo && git push origin main -f",
             "bash -c 'git push -f'",
+            # a global option whose value is the next word (2026-11-05: --namespace and --config-env got through)
+            "git --namespace foo push -f origin main",
+            "git --super-prefix x/ push -f",
+            "git -C '' push -f",
+            "git --git-dir=.git --work-tree . push --force",
         ],
         "no-verify": [
             "git commit --no-verify -m x",
@@ -445,6 +467,7 @@ def selftest():
             "git commit -anm x",
             "git commit --no-veri -m x",
             "git -C repo commit -n -m x",
+            "git -P --namespace foo -C repo commit -n -m x",
         ],
         "git-reset-hard": [
             "git reset --hard",
@@ -455,6 +478,7 @@ def selftest():
             "git --no-pager reset --hard",
             "timeout 5 git reset --hard",
             "ls; git reset --hard @{u}",
+            "git --config-env core.pager=FOO reset --hard",
         ],
         "git-clean": [
             "git clean -f",
@@ -468,6 +492,7 @@ def selftest():
             "git clean -fd -n",
             "git -C repo clean -fdx",
             "ls && git clean -ffdx",
+            "git --attr-source HEAD clean -fd",
         ],
         "git-add-force": [
             "git add -f .env",
@@ -478,6 +503,7 @@ def selftest():
             "git add x --force",
             "git add --forc x",
             "git -C repo add -f x",
+            "git --literal-pathspecs --namespace=x add -f x",
         ],
         "git-rewrite": [
             "git filter-branch --tree-filter 'rm -f x' HEAD",
@@ -485,6 +511,14 @@ def selftest():
             "git -C repo filter-repo --invert-paths --path x",
             "git-filter-repo --path x",
             "/opt/homebrew/bin/git-filter-repo --path x",
+            "git --config-env a.b=C filter-repo --path x",
+        ],
+        # git itself refuses these, so the hook cannot tell whether a newer git's option takes the next word
+        "git-global-option": [
+            "git --new-option x push -f",
+            "git --git-d .git push -f",
+            "git -C. status",
+            "git -- push -f",
         ],
     }
     allow = [
@@ -518,6 +552,19 @@ def selftest():
         "echo git filter-branch",
         "git log --grep filter-branch",
         "git rebase -i HEAD~3",  # stays on Claude's list only: it waits on an editor, it loses nothing
+        "git --namespace foo status",
+        "git --attr-source HEAD log -n 3",
+        "git --config-env core.pager=X diff",
+        "git -C '' status",
+        "git --exec-path",
+        "git --exec-path=/x status",
+        "git --version",
+        "git --help push",
+        "git --list-cmds=main",
+        "git --no-advice -P log",
+        "git --no-optional-locks status --porcelain",
+        "git --bare -C repo.git log",
+        "git --new-option=x status",  # its value is in the word, so the subcommand is still read
     ]
     for kind, cmds in deny.items():
         for c in cmds:
