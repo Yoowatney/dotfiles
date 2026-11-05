@@ -168,8 +168,22 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(len(self.tells), 2, "only the successful delivery is marked as delivered")
 
+    def test_slack_not_posted_report_selects_auto(self):
+        for word in ("Slack", "슬랙"):
+            with self.subTest(word=word):
+                self.finish(DONE + f"\n{word}에는 게시하지 않았습니다")
+                self.assertTrue(self.spawns, "a result must open a check")
+                args = self.spawns[-1][0]
+                self.assertEqual(args[args.index("--kind") + 1], "auto")
+
+    def test_curl_executed_report_selects_claude(self):
+        self.finish(DONE + "\ncurl을 실행해 페이지를 받았습니다.")
+        self.assertEqual(len(self.spawns), 1)
+        args = self.spawns[0][0]
+        self.assertEqual(args[args.index("--kind") + 1], "claude")
+
     def test_network_or_process_evidence_selects_claude(self):
-        for word in ("gcloud", "bq", "Slack 쓰기", "pgrep", "curl", "소켓"):
+        for word in ("gcloud", "bq", "pgrep", "curl", "소켓"):
             with self.subTest(word=word):
                 self.finish(DONE.replace("pytest", word))
                 self.assertTrue(self.spawns, "a result must open a check")

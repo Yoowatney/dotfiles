@@ -336,14 +336,14 @@ def save(reply: str, me: dict, pane: str, env, now=None) -> str:
     return path
 
 
-REMOTE_CHECK = re.compile(r"(?<![a-z0-9_])(?:gcloud|bq|curl|wget|ssh|rsync|pgrep|ps|lsof|netstat|launchctl|launchd|socket|slack)(?![a-z0-9_])|소켓|프로세스|네트워크|슬랙", re.I)
+REMOTE_CHECK = re.compile(r"(?<![a-z0-9_])(?:gcloud|bq|curl|wget|ssh|rsync|pgrep|ps|lsof|netstat|launchctl|launchd|socket)(?![a-z0-9_])|소켓|프로세스|네트워크", re.I)
 QUESTION = re.compile(r"^\s*(?:[-*]\s*)?(?:질문|결정\s*요청|승인\s*요청|선택\s*요청)\s*[:：]|(?:승인|결정|선택)(?:이|을)?\s*(?:필요|부탁|요청)|확인할\s*결과(?:가)?\s*없|[?？](?:\s|$)", re.M)
 RESULT = re.compile(r"완료|마쳤|끝났|통과|고쳤|수정|바꿨|변경|검증|확인했|만들었|추가했|작성했|정리했|PASS|FAIL|tested|finished|implemented", re.I)
 CHECK_TOKEN = re.compile(r"\[ac-([0-9a-f]{16})\]")
 
 
 def check_kind(reply: str):
-    """Conservative word search: even Slack reads use Claude; no semantic classifier or model call."""
+    """Search network/process words; Slack alone keeps auto, with no semantic classifier or model call."""
     match = REMOTE_CHECK.search(unicodedata.normalize("NFC", reply))
     return ("claude", f"보고의 '{match[0]}' 단어: 네트워크·프로세스 확인 가능성") if match else ("auto", "네트워크·프로세스 단어 없음: 기존 자동 선택")
 
