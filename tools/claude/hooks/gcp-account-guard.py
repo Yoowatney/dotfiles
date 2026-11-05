@@ -40,9 +40,12 @@ RELAYED = re.compile(r"\s*(<pasted_content[^>]*>\s*)?\[pane-tell:")
 SPAWNED = "이 칸은 리드 밑 칸입니다."  # pane-spawn ends every instruction with this: a session's words, and they name the unlock phrase
 HOOKS = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "agent-hooks")
 SLACK = os.path.expanduser("~/work/munice/.agents/skills/agent-board/main/slack_approval.py")
-SLACK_DEADLINE = 6.0  # both hook configs give 10 s, and a hook that times out lets the command run
+# Both hook configs give 10 s, and a hook that times out lets the command run: the whole verdict ends within HOOK_BUDGET.
+HOOK_BUDGET, SLACK_DEADLINE, SLACK_MIN = 8.0, 6.0, 1.0
 # What a Slack ✅ never lifts (condition 4 of the approval): `cla`'s marker, an agent started on 요유's account, a printed token.
-BROAD = re.compile(r"\bMUNICE_GCP_ADMIN=|(?:^|[\s;&|(])(?:cla|claude|codex)(?=$|[\s;&|)])")
+# ponytail: any mention of claude, codex or anthropic counts, paths and quotes included; a false hit only means the terminal.
+BROAD = re.compile(r"\bMUNICE_GCP_ADMIN=|claude|codex|anthropic|(?<![\w.-])cla(?![\w.-])", re.I)
+SLACK_NOTE = "메인 칸은 Slack ✅로도 이 명령 하나를 한 번 실행할 수 있습니다(메인 칸 스킬 'Steps only 요유 can unlock')."
 
 # ponytail: text patterns over the whole command, heredoc bodies included (a script there runs).
 # They stop accidents (a wrong config, a script that grabs the admin ADC), not a session set on
@@ -295,7 +298,7 @@ class Deadline(BaseException):
     """Not an Exception: code under the alarm that catches errors (an OSError, say) must not swallow it."""
 
 
-def slack_approval(cmd: str, deadline: float = SLACK_DEADLINE, path: str = SLACK):
+def slack_approval(cmd: str, deadline: float, path: str = SLACK):
     """(consume, "") when 요유 approved exactly this command in Slack, else (None, why). Done or refused within the deadline."""
     if not os.path.isfile(path):
         return None, "Slack 승인 모듈이 이 Mac에 없음"
@@ -318,24 +321,35 @@ def slack_approval(cmd: str, deadline: float = SLACK_DEADLINE, path: str = SLACK
         signal.signal(signal.SIGALRM, old)
 
 
-def hook(hook_input: dict, env: dict, riders, approvals, is_main) -> str | None:
-    """The whole PreToolUse verdict. A Slack approval is used up only once nothing else refuses the call: pane-fit-guard asks
-    the main pane once a message, and its repeat must still find the approval."""
-    reason, use = tool_problem(hook_input, env), None
-    if reason and slack_liftable(hook_input, env) and is_main(env):
-        try:
-            use, why = approvals((hook_input.get("tool_input") or {}).get("command") or "")
-        except BaseException as e:  # a late alarm included: this path never crashes open
-            use, why = None, f"Slack을 읽지 못함({type(e).__name__})"
-        reason = None if use else (
-            f"{reason}\n메인 칸은 Slack ✅로도 이 명령 하나를 한 번 실행할 수 있습니다(메인 칸 스킬 'Steps only 요유 can unlock'). "
-            f"지금 Slack: {why}")
-    if reason:
-        return f"gcp-account-guard: {reason}"
-    reason = riders(hook_input)
-    if reason or not use:
+def hook(hook_input: dict, env: dict, riders, approvals, is_main, budget: float = HOOK_BUDGET, started: float | None = None):
+    """The whole PreToolUse verdict, within `budget` seconds of `started`. On the Slack path the other checks run first:
+    pane-fit-guard asks the main pane once a message, and its repeat must still find the approval unused."""
+    started = time.monotonic() if started is None else started
+    reason = tool_problem(hook_input, env)
+    if not reason:
+        return riders(hook_input)
+    reason = f"gcp-account-guard: {reason}"
+    if not (slack_liftable(hook_input, env) and is_main(env)):
         return reason
-    return None if use() else "gcp-account-guard: 이 Slack 승인은 방금 다른 실행이 썼습니다. 다시 하려면 새 요청에 ✅가 필요합니다."
+    other = riders(hook_input)
+    if other:
+        return other
+    left = min(SLACK_DEADLINE, budget - (time.monotonic() - started))
+    if left < SLACK_MIN:
+        return f"{reason}\n{SLACK_NOTE} 지금 Slack: 훅 시간이 모자라 읽지 않음"
+    # whatever breaks below refuses, a late alarm included: a crashed hook lets the command run
+    try:
+        use, why = approvals((hook_input.get("tool_input") or {}).get("command") or "", left)
+    except BaseException as e:
+        use, why = None, f"Slack을 읽지 못함({type(e).__name__})"
+    if use:
+        try:
+            if use() is True:
+                return None
+        except BaseException:
+            pass
+        why = "이 승인은 쓸 수 없음(이미 한 번 썼거나 사용 기록을 남기지 못함): 새 요청에 ✅가 필요함"
+    return f"{reason}\n{SLACK_NOTE} 지금 Slack: {why}"
 
 
 def selftest():
@@ -640,38 +654,56 @@ def slack_selftest(claude_transcript, tmp):
     """The Slack ✅ route. A fake approvals() stands in for slack_approval.py, which has its own tests."""
     calls, consumed = [], []
 
-    def approvals(found=True, raises=False):
-        def check(cmd):
+    def approvals(found=True, raises=False, consume_raises=False):
+        def check(cmd, deadline):
             calls.append(cmd)
+            assert 0 < deadline <= SLACK_DEADLINE, deadline
             if raises:
                 raise RuntimeError("slack down")
             if not found:
                 return None, "요유의 ✅가 없음"
-            return (lambda: (cmd not in consumed, consumed.append(cmd))[0]), ""
+
+            def consume():
+                if consume_raises:
+                    raise PermissionError("marks dir")
+                return (cmd not in consumed, consumed.append(cmd))[0]
+            return consume, ""
         return check
 
-    def run(cmd, *, env=None, found=True, raises=False, main=True, rider=None, tool="Bash", prompt="고쳐줘"):
+    def run(cmd, *, env=None, found=True, raises=False, consume_raises=False, main=True, rider=None, tool="Bash", prompt="고쳐줘",
+            budget=HOOK_BUDGET, slow_main=0.0):
         calls.clear()
         payload = {"tool_name": tool, "tool_input": {"command": cmd}, "transcript_path": claude_transcript(prompt), "cwd": "/tmp"}
-        return hook(payload, env or {}, lambda _: rider, approvals(found, raises), lambda _: main)
+        return hook(payload, env or {}, lambda _: rider, approvals(found, raises, consume_raises),
+                    lambda _: (time.sleep(slow_main), main)[1], budget=budget)
 
     cmd = "gcloud --configuration=munice-admin firestore documents list --project miraclenight-f06c6"
     assert run(cmd) is None and calls == [cmd], "the main pane runs an approved command"
-    assert "방금" in (run(cmd) or ""), "a second run of the same approval"
+    assert "쓸 수 없음" in (run(cmd) or ""), "a second run of the same approval"
     consumed.clear()
-    # pane-fit-guard asks the main pane once a message; the approval must survive that refusal for the repeat
-    assert run(cmd, rider="pane-fit-guard: 칸으로?") == "pane-fit-guard: 칸으로?" and not consumed
+    # pane-fit-guard asks the main pane once a message: the other checks go first, so its refusal leaves the approval unused
+    assert run(cmd, rider="pane-fit-guard: 칸으로?") == "pane-fit-guard: 칸으로?" and not calls and not consumed
     assert run(cmd) is None and consumed == [cmd]
     consumed.clear()
     reason = run(cmd, found=False)
     assert reason and "요유의 ✅가 없음" in reason and "prod 허용" in reason, "no approval: the typed unlock is still offered"
     assert "Slack을 읽지 못함" in (run(cmd, raises=True) or ""), "a Slack failure refuses"
+    assert "쓸 수 없음" in (run(cmd, consume_raises=True) or "") and not consumed, "a mark that cannot be written refuses"
+    # one budget for the whole verdict: what is left after the transcript and the pane lookup bounds the Slack read
+    assert "시간" in (run(cmd, budget=1.2, slow_main=0.3) or "") and not calls, "too little time left: no Slack read, refused"
     # never asked: another pane, an auto tab, or a refusal a ✅ does not lift
     for kw in ({"main": False}, {"env": {"MUNICE_AMBIENT": "1"}}, {"env": {"MUNICE_AUTO_DISPATCH": "1"}}, {"tool": "Monitor"}):
         assert run(cmd, **kw) and not calls, f"Slack must not be asked: {kw}"
     for c in ("MUNICE_GCP_ADMIN=1 direnv exec . gcloud run services update api",
               "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin claude -p 'prod 고쳐'",
               "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin codex exec 'x'",
+              # a path, quotes or another launcher in front (Codex review P1)
+              "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin /opt/homebrew/bin/claude -p test",
+              'CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin "claude" -p test',
+              "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin npx -y @anthropic-ai/claude-code -p test",
+              "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin env codex exec x",
+              "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin ~/.local/share/mise/installs/npm-openai-codex/0.166.0/bin/codex exec x",
+              "CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin cla",
               "gcloud --configuration=munice-admin auth print-access-token",
               "gcloud auth login", "gcloud config configurations activate munice-admin",
               "gcloud --configuration=munice-admin iam service-accounts keys create k.json --iam-account=a@x",
@@ -686,18 +718,18 @@ def slack_selftest(claude_transcript, tmp):
         assert tool_problem({"tool_name": tool, "tool_input": {key: os.path.expanduser(
             "~/.local/state/gcp-account-guard/slack-approvals/1793850000.000001")}, "cwd": "/tmp"}, {"MUNICE_GCP_ADMIN": "1"})
     # the real loader: no module, a module that throws, and one that hangs past the deadline all refuse
-    assert slack_approval(cmd, path=os.path.join(tmp, "none.py"))[0] is None
+    assert slack_approval(cmd, SLACK_DEADLINE, path=os.path.join(tmp, "none.py"))[0] is None
     for body, word in (("def find(c, n):\n    raise ValueError('x')\n", "ValueError"),
                        ("import time\ndef find(c, n):\n    time.sleep(5)\n", "초 안에")):
         path = os.path.join(tmp, f"m{len(os.listdir(tmp))}.py")
         open(path, "w").write(body)
         start = time.monotonic()
-        found, why = slack_approval(cmd, deadline=0.3, path=path)
+        found, why = slack_approval(cmd, 0.3, path=path)
         assert found is None and word in why and time.monotonic() - start < 2, (why, time.monotonic() - start)
     path = os.path.join(tmp, "ok.py")
     open(path, "w").write("def find(c, n):\n    return '1793850000.000001', ''\n"
                           "def consume(ts, c):\n    return ts == '1793850000.000001'\n")
-    found, why = slack_approval(cmd, path=path)
+    found, why = slack_approval(cmd, SLACK_DEADLINE, path=path)
     assert found and found() is True and why == ""
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0), "no alarm left running"
 
@@ -706,8 +738,9 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:
         selftest()
         sys.exit()
+    started = time.monotonic()
     hook_input = json.load(sys.stdin)
-    reason = hook(hook_input, dict(os.environ), riders, slack_approval, main_pane)
+    reason = hook(hook_input, dict(os.environ), riders, slack_approval, main_pane, started=started)
     if reason:  # JSON deny: Claude Code and Codex both read it
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
