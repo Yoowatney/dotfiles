@@ -17,9 +17,9 @@ closing lines go to the pane that opened it, else a 👑 it can be sure of. A re
 any pane while a pane it opened is alive; one whose panes are gone closes like the rest. A report that keeps the pane open
 (요유 몫 left, `세션: 닫으면 …`, held as above) goes up the same way and the pane stays: an implementer finished with two
 questions for 요유 and its lead never heard (요유 2026-11-01). A reply without `남은 것:` is no report and tells nobody.
-What the pane above hears tells it to check the result itself before passing it up, and yoyoo-share-guard holds its next report
-to that (요유 2026-11-04). A pane that hands checks out (herdr_peers.delegates_checks: the main pane today, 요유 2026-11-05) hears
-to open a fresh check pane instead, and a check pane's report, which pane-spawn --check's agent name tells apart, asks for no other.
+Ordinary leads check results themselves. For herdr_peers.delegates_checks (the main pane), this hook opens a fresh check pane
+without waking the lead, then sends both reports together once. Questions and failures to start a check go straight through.
+A check pane's report, which pane-spawn --check's agent name tells apart, asks for no other check.
 A pane pane-spawn opened runs on the workers herdr server, so its opener is looked up on the other server too. The main pane
 hears a short form (first line, `남은 것:`, the pane's address and the saved file); the whole reply stays in that file. Every
 lead's panes share that server's one workspace: when the opener is gone or cannot hear, the report goes to a 👑 in the same tab or
@@ -48,7 +48,9 @@ idle, not held as above, and a last reply that passes the same test. --sweep --a
 from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
 
 import datetime
+import fcntl
 import glob
+import hashlib
 import importlib.util
 import itertools
 import json
@@ -334,6 +336,152 @@ def save(reply: str, me: dict, pane: str, env, now=None) -> str:
     return path
 
 
+REMOTE_CHECK = re.compile(r"(?<![a-z0-9_])(?:gcloud|bq|curl|wget|ssh|rsync|pgrep|ps|lsof|netstat|launchctl|launchd|socket|slack)(?![a-z0-9_])|소켓|프로세스|네트워크|슬랙", re.I)
+QUESTION = re.compile(r"^\s*(?:[-*]\s*)?(?:질문|결정\s*요청|승인\s*요청|선택\s*요청)\s*[:：]|(?:승인|결정|선택)(?:이|을)?\s*(?:필요|부탁|요청)|확인할\s*결과(?:가)?\s*없|[?？](?:\s|$)", re.M)
+RESULT = re.compile(r"완료|마쳤|끝났|통과|고쳤|수정|바꿨|변경|검증|확인했|만들었|추가했|작성했|정리했|PASS|FAIL|tested|finished|implemented", re.I)
+CHECK_TOKEN = re.compile(r"\[ac-([0-9a-f]{16})\]")
+
+
+def check_kind(reply: str):
+    """Conservative word search: even Slack reads use Claude; no semantic classifier or model call."""
+    match = REMOTE_CHECK.search(unicodedata.normalize("NFC", reply))
+    return ("claude", f"보고의 '{match[0]}' 단어: 네트워크·프로세스 확인 가능성") if match else ("auto", "네트워크·프로세스 단어 없음: 기존 자동 선택")
+
+
+def direct_reason(reply: str) -> str:
+    text = plain(reply)
+    if share.leaves_yoyoo_work(text):
+        return "요유 몫이 있는 보고"
+    if question_request(reply):
+        return "질문·결정 요청 또는 확인할 결과 없음"
+    if not should_close(reply) or not RESULT.search(text):
+        return "완료한 결과를 확인하는 보고가 아님"
+    return ""
+
+
+def question_request(reply: str):
+    # A completed question-handling fix or a URL query is not itself a question to the lead.
+    return QUESTION.search(re.sub(r"https?://\S+", "", share.prose(reply)))
+
+
+def context_file(me: dict, env) -> str:
+    """The label token covers a check finishing before pane-spawn returns; its terminal survives later renames."""
+    folder = os.path.join(herdr_peers.state_dir(env), "automatic-checks")
+    token = CHECK_TOKEN.search(me.get("label") or "")
+    if token:
+        return os.path.join(folder, token[1] + ".json")
+    for path in glob.glob(os.path.join(folder, "*.json")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                if me.get("terminal_id") and json.load(f).get("checker_terminal") == me["terminal_id"]:
+                    return path
+        except (OSError, ValueError):
+            continue
+    return ""
+
+
+def write_context(path: str, context: dict):
+    # Readers take the separate lock; rename also keeps a crash from leaving half a JSON document.
+    temporary = path + f".{os.getpid()}.tmp"
+    with open(temporary, "w", encoding="utf-8") as f:
+        json.dump(context, f, ensure_ascii=False)
+    os.replace(temporary, path)
+
+
+def route_main_report(reply, me, name, lead, to, path, now, env, send):
+    """None: ordinary relay. True: delivered or handed to a check. False: delivery failed; keep it for the watch."""
+    if not herdr_peers.delegates_checks(env, to.get("terminal_id")) or herdr_peers.home_pane(name):
+        return None
+    entry = f"{now:%H:%M:%S} 항목"
+    if share.CHECK_AGENT.match(name or ""):
+        context_path = context_file(me, env)
+        if not context_path or not os.path.isfile(context_path):
+            return None  # a manually opened check still follows the existing route
+        with open(context_path + ".lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            with open(context_path, encoding="utf-8") as f:
+                context = json.load(f)
+            if context.get("check_delivered"):
+                return True
+            interim = not should_close(reply) or share.leaves_yoyoo_work(plain(reply)) or question_request(reply)
+            fingerprint = hashlib.sha256(reply.encode()).hexdigest()
+            if interim and fingerprint in context.get("interim_delivered", []):
+                return True
+            head = ("바로 전달하는 칸의 보고입니다(확인 칸의 질문·대기 보고입니다)." if interim else
+                    f"확인 칸의 마지막 보고입니다(일 칸 보고와 확인 결과를 함께 보냅니다). {share.CHECK_NOTE}:")
+            message = (f"{head}\n"
+                       f"일: {context['job']}\n일 칸 보고: {context['first']}\n확인 결과: {short_report(reply, None)}\n"
+                       f"확인 종류: {context['kind']} ({context['kind_reason']})\n"
+                       f"전체 보고: {context['report']} ({context['entry']})\n확인 전체 보고: {path} ({entry})")
+            sent = send(message)
+            if sent:
+                if interim:
+                    context.setdefault("interim_delivered", []).append(fingerprint)
+                else:
+                    context["check_delivered"] = True
+                write_context(context_path, context)
+            return sent
+    if opener(name) != to.get("terminal_id"):
+        return None  # an absent ordinary lead's pane still reaches main as before
+    reason = direct_reason(reply)
+    body = (f"{short_report(reply, None)}\n칸: {herdr_peers.address(env, me['pane_id'])} {me.get('label') or ''}\n"
+            f"전체 보고: {path} ({entry})")
+    if reason:
+        return send(f"바로 전달하는 칸의 보고입니다(확인 칸을 열지 않습니다). {reason}:\n{body}")
+    key = hashlib.sha256((str(me.get("terminal_id")) + str(me.get("agent_session")) + reply).encode()).hexdigest()[:16]
+    folder = os.path.join(herdr_peers.state_dir(env), "automatic-checks")
+    os.makedirs(folder, exist_ok=True)
+    context_path = os.path.join(folder, key + ".json")
+    with open(context_path + ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if os.path.isfile(context_path):
+            with open(context_path, encoding="utf-8") as f:
+                context = json.load(f)
+            if context.get("handed") or context.get("fallback_delivered"):
+                return True
+        else:
+            kind, kind_reason = check_kind(reply)
+            job = re.sub(r"^[🟢🔴👑🫡\s]+", "", me.get("label") or "") or "일 칸 결과"
+            context = dict(job=job, first=short_report(reply, None).splitlines()[0], report=path, entry=entry,
+                           cwd=me.get("cwd") or os.path.expanduser("~"), kind=kind, kind_reason=kind_reason)
+        # Persist the token before the instruction can reach a very fast check pane.
+        write_context(context_path, context)
+        prompt = (f"전체 보고: {context['report']} ({context['entry']}). 일: {context['job']}. "
+                  f"그 항목의 일 칸 보고가 주장한 항목마다 테스트·명령을 직접 실행하거나 바뀐 동작·데이터를 직접 보세요. "
+                  "보고를 다시 읽는 것은 확인이 아닙니다. 주장 밖의 새 문제를 찾거나 수정하지 마세요. "
+                  "항목별 실행 명령과 실제 결과, 통과·실패·확인 불가를 적고 첫 줄에 전체 판정을 적으세요. "
+                  f"상관 표식 [ac-{key}]는 보고가 끝날 때까지 칸 이름에 남겨 두세요.")
+        receiver_server = lead.split("/", 1)[0] if "/" in lead else herdr_peers.server_key(env)
+        receiver_env = {**env, "HERDR_PANE_ID": to["pane_id"], "HERDR_SOCKET_PATH": herdr_peers.socket_of(env, receiver_server) or ""}
+        for inherited in ("MUNICE_AUTO_DISPATCH", "MUNICE_AMBIENT", "HERDR_WORKSPACE_ID"):
+            receiver_env.pop(inherited, None)
+        spawn = env.get("AUTO_TAB_CLOSE_PANE_SPAWN") or os.path.join(HERE, "pane-spawn")
+        args = [spawn, "--check", "--kind", context["kind"], "--cwd", context["cwd"], f"{context['job']} [ac-{key}]", prompt]
+        # A failed delivery is retried, but never starts a second check for the same saved report.
+        if not context.get("spawn_error"):
+            try:
+                result = subprocess.run(args, env=receiver_env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+                match = re.search(r"^(?:\w+/)?w\w+:p\w+$", result.stdout or "", re.M)
+                if result.returncode == 0 and match:
+                    address = match[0]
+                    server, pid = address.split("/", 1) if "/" in address else ("default", address)
+                    checked = herdr(env, "pane", "get", pid, socket=herdr_peers.socket_of(env, server)).get("pane") or {}
+                    context.update(handed=True, checker_terminal=checked.get("terminal_id"), checker_address=address)
+                    write_context(context_path, context)
+                    return True
+                context["spawn_error"] = (result.stderr or result.stdout or f"exit {result.returncode}").strip()[:1200]
+            except (OSError, subprocess.TimeoutExpired) as error:
+                context["spawn_error"] = str(error)[:1200]
+            write_context(context_path, context)
+        message = (f"바로 전달하는 칸의 보고입니다(확인 칸을 열지 못했습니다). 결과는 아직 확인하지 못했습니다. "
+                   f"확인 칸 시작 실패: {context['spawn_error']}\n확인 종류: {context['kind']} ({context['kind_reason']})\n{body}")
+        sent = send(message)
+        if sent:
+            context["fallback_delivered"] = True
+            write_context(context_path, context)
+        return sent
+
+
 def finish(reply: str, env):
     """Keep the report, tell the pane above, then close unless the report or the pane says to stay. Only a failed save stops
     the close (it raises)."""
@@ -367,6 +515,18 @@ def finish(reply: str, env):
 
     def tell(lead: str, to: dict) -> bool:
         pt = env.get("AUTO_TAB_CLOSE_PANE_TELL") or os.path.join(HERE, "pane-tell")
+        def send(message):
+            try:
+                return subprocess.run([pt, lead, message], env=dict(env), timeout=10, **quiet).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+        if not needs_yoyoo:
+            try:
+                routed = route_main_report(reply, me, name, lead, to, path, now, env, send)
+                if routed is not None:
+                    return routed
+            except (OSError, ValueError, KeyError) as error:
+                return send(f"바로 전달하는 칸의 보고입니다(확인 자동 연결 실패). {error}\n{short_report(reply, None)}\n전체 보고: {path} ({now:%H:%M:%S} 항목)")
         if needs_yoyoo:
             message = f"{share.JOB_NOTE}:\n{short_report(reply)}\n칸: {me.get('label') or ''}\n전체 보고: {path} ({now:%H:%M:%S} 항목)"
             try:
@@ -398,7 +558,7 @@ def finish(reply: str, env):
     if lead and not sent and workers and to.get("terminal_id") != main:  # hidden: no tab of 요유's shows this pane stop, so the main pane hears it
         lead, to = main_pane(env)
         sent = bool(lead) and tell(lead, to)
-    if needs_yoyoo and not sent:  # the file alone would lose it: it stays, unmarked, for the watch to reach someone
+    if (needs_yoyoo or (lead and herdr_peers.delegates_checks(env, to.get("terminal_id")))) and not sent:
         close = False
     # the main pane's watch: this pane is waiting, not stuck. Only workers panes: a personal server is left alone. A dispatch
     # pane that closes reported on the board, and --sweep closes it with no job env for pane-label to see (Codex review)
@@ -614,6 +774,7 @@ esac''')
     sessions(default=f"{sandbox}/herdr.sock")
     fake = script("pane-label", f'echo "reported=$PANE_CLOSE_REPORTED pane=$HERDR_PANE_ID $@" >> {sandbox}/calls')
     fake_tell = script("pane-tell", f'echo "tell $1" >> {sandbox}/calls\n[ "$1" = "${{TELL_REFUSE:-}}" ] && exit 2\necho "$2" > {sandbox}/told\nsleep ${{TELL_SLEEP:-0}}\nexit ${{TELL_EXIT:-0}}')
+    fake_spawn = script("pane-spawn", 'echo "simulated check start failure" >&2\nexit 1')
 
     me = {"pane_id": "w1:p2", "tab_id": "w1:t1", "workspace_id": "w1", "label": "🟢 일", "cwd": "/w",
           "terminal_id": "term_2", "agent_session": {"value": "sid-2"}, "agent_status": "idle"}
@@ -640,6 +801,7 @@ esac''')
                               text=True, env={"PATH": os.environ.get("PATH", ""), "HOME": sandbox, "HERDR_BIN_PATH": fake_herdr,
                                               "PANE_REPORT_DIR": reports, "AUTO_TAB_CLOSE_PANE_LABEL": fake,
                                               "AUTO_TAB_CLOSE_PANE_TELL": fake_tell, "AUTO_TAB_CLOSE_SETTLE": "0",
+                                              "AUTO_TAB_CLOSE_PANE_SPAWN": fake_spawn,
                                               "AUTO_TAB_CLOSE_POLL": "0.02", **env},
                               timeout=10)
 
@@ -664,6 +826,7 @@ esac''')
         text = "".join(open(f).read() for f in glob.glob(f"{reports}/*") if os.path.isfile(f))
         if os.path.isdir(reports):
             shutil.rmtree(reports)
+        shutil.rmtree(f"{sandbox}/.local/state/orchestrator/automatic-checks", ignore_errors=True)
         return text
 
     closed = "reported=1 pane=w1:p2 --close\n"
@@ -1035,8 +1198,8 @@ esac''')
     on_workers = {"HERDR_PANE_ID": "w1:p2", "HERDR_SOCKET_PATH": W}
     assert run(reported, on_workers) == (0, "", "tell default/w5:p3\n" + closed), "a workers pane reports across servers to the main pane"
     told = open(f"{sandbox}/told").read()
-    assert told.startswith("이 칸의 마지막 보고입니다(") and share.DELEGATE_NOTE in told, "share-guard still sees a relayed report"
-    assert share.RELAY_NOTE not in told and "pane-spawn --check" in told, f"요유 2026-11-05: the main pane hands the check to a check pane: {told!r}"
+    assert told.startswith("바로 전달하는 칸의 보고입니다(") and "simulated check start failure" in told, "a failed automatic check preserves the original report"
+    assert share.RELAY_NOTE not in told and share.DELEGATE_NOTE not in told, f"the fallback does not demand a check that failed to open: {told!r}"
     assert "조사를 마쳤습니다." in told and "남은 것: 요유 몫: 없음 · 세션: 닫음" in told
     assert "왜: 칸이 남습니다." not in told, "the main pane gets the short form; the whole reply stays in the file"
     assert "workers/w1:p2" in told and "전체 보고:" in told
@@ -1079,7 +1242,7 @@ esac''')
     herdr_says_on("workers", {"name": "spawn-M-1"}, [me], wagents)
     assert run(long_report, on_workers) == (0, "", "tell default/w5:p3\n" + closed)
     told = open(f"{sandbox}/told").read()
-    assert long_line[:200] in told and long_line[:201] not in told and "통과하지 못했습니다" not in told, f"any other pane's stays cut: {told!r}"
+    assert long_line in told, f"automatic check startup failure preserves the complete first-line verdict: {told!r}"
     saved()
     # Any other lead: the same check-pane name changes nothing, and neither does a main-pane file that names no live pane.
     herdr_says({"name": "spawned"}, [crown])

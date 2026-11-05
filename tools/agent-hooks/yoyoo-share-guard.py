@@ -131,7 +131,7 @@ LABEL_LINE = re.compile(r"^\W*(?:무엇을|왜|확인|남은[ \t]*것|원인|조
 # report up with RELAY_NOTE; the first last report after one arrived needs a `확인:` line and a command run since it arrived.
 RELAY_NOTE = ("요유나 위 칸에 올리기 전에 결과를 이 칸에서 직접 확인하세요(테스트·명령을 다시 실행하거나 바뀐 동작·데이터를 직접 보기). "
               "아래는 하위 칸의 주장입니다. 보고에는 무엇을 직접 확인했고 결과가 어땠는지 '확인:' 줄로 적으세요")
-RELAYED = re.compile(r"(?:^|\] )(이|확인) 칸의 (?:마지막 )?보고입니다\(", re.M)  # auto-tab-close's heads, after pane-tell's mark
+RELAYED = re.compile(r"(?:^|\] )(이|확인|바로 전달하는) 칸의 (?:마지막 )?보고입니다\(", re.M)  # auto-tab-close's heads, after pane-tell's mark
 CHECK_LINE = re.compile(r"(?<![가-힣])확인[ \t]*\**[ \t]*[:：][ \t]*\**([^\n]*)")
 RELAY_REASON = ("yoyoo-share-guard: 하위 칸의 보고를 받은 뒤 처음 쓰는 보고인데, 이 칸에서 결과를 직접 확인한 흔적이 없습니다. "
                 "하위 칸의 '다 했다'는 주장일 뿐입니다. 지금 도구로 직접 확인하세요: 테스트·명령을 다시 실행하거나 바뀐 동작·데이터를 직접 보세요. "
@@ -494,6 +494,8 @@ def relay_reason(payload: dict, text: str, env) -> str | None:
     refused = {i for kind, _, _, i in after if kind == "refused"}
     stated = [v for v in (m.group(1).strip(" \t*_.,;") for m in CHECK_LINE.finditer(prose(text))) if v and not NONE.match(v)]
     if delegates_checks(payload, env):
+        if relayed[1] == "바로 전달하는":
+            return None  # questions, decisions, no result, or a failed automatic spawn: do not ask for a check again
         if relayed[1] == "확인":
             return None if any(BY_CHECK_PANE.search(v) for v in stated) else CHECK_REPORT_REASON
         opened = {i for kind, _, _, i in after if kind == "opened"}
