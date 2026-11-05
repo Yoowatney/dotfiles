@@ -73,6 +73,7 @@ before "pane rename w1:new" "agent start"
 before "pane rename w1:new" "pane-label --sync-tabs"
 before "pane-label --sync-tabs" "agent start"
 has "--kind claude --pane w1:new" "claude by default"
+has "--env CLAUDE_STARTUP_ROLE=worker" "Claude work panes keep their startup profile through clear"
 
 has "agent prompt w1:new 할 일입니다" "instruction delivered"
 has "요유는 이 칸을 보지 않으니" "a new pane learns its reports go to the lead"
@@ -142,9 +143,9 @@ has "tab create --workspace w7 --cwd $PWD --label 조사 --no-focus --env CLAUDE
 # 2026-11-05: a runaway in one pane filled the user's process limit (8000) and froze every pane and launchd job. Every pane
 # opened here, Claude or Codex, starts its shell with a lower limit, which the agent and all it runs inherit.
 NPROC="--env PANE_SPAWN_NPROC=5000"
-has "--label 조사 --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 $NPROC" "a Claude pane in a new tab: the lower limit"
+has "--label 조사 --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 --env CLAUDE_STARTUP_ROLE=worker $NPROC" "a Claude pane in a new tab: the lower limit"
 ps "조사" "지시" >/dev/null
-has "--direction right --cwd $PWD --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 $NPROC" "a split Claude pane: the lower limit"
+has "--direction right --cwd $PWD --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 --env CLAUDE_STARTUP_ROLE=worker $NPROC" "a split Claude pane: the lower limit"
 SESSIONLESS=1 ps --kind codex "조사" "지시" >/dev/null
 has "pane split --pane w7:p3 --direction right --cwd $PWD --no-focus --env MISE_" "a Codex pane"
 has "$NPROC" "a Codex pane: the lower limit"

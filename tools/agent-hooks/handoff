@@ -38,7 +38,14 @@ case "${1:-}" in
     head="The previous session in this pane saved this handoff at $(stat -f '%Sm' -t '%m-%d %H:%M' "$f") before /clear. Unless 요유's first message asks for something else, continue from it. $typed"
     # The JSON shape both Claude and Codex read as SessionStart context. No systemMessage: Claude draws it only
     # with the first turn, so it cannot fill the wait (measured 10/21).
-    jq -n --arg ctx "$head"$'\n\n'"$(cat "$f")" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}' &&
+    # A long handoff is task data, not a rule file. Keep it complete and require a
+    # read before continuing. This defers the text until Read; it does not remove
+    # it from subsequent requests. Short notes retain the original behavior.
+    jq -n --arg head "$head" --arg path "$f.loaded" --rawfile memo "$f" '
+      {hookSpecificOutput: {hookEventName: "SessionStart", additionalContext:
+        ($head + "\n\n" + (if ($memo | length) > 2000
+          then "The complete handoff is saved at " + $path + ". Read it in full before continuing."
+          else $memo end))}}' &&
       mv "$f" "$f.loaded" || exit
     kick "세션 시작 때 받은 인수인계대로 이어서 진행하세요."
     ;;

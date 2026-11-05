@@ -58,6 +58,16 @@ echo "file arg" > "$SANDBOX/h.md"
 ho w1:p3 save "$SANDBOX/h.md" >/dev/null
 check "save takes a file argument" "$(cat "$dir/w1:p3.md")" "file arg"
 
+# Large notes stay complete on disk; loading must not inline an unbounded handoff.
+printf '%03000d\nTAIL_MARKER\n' 0 > "$SANDBOX/large.md"
+ho w1:p9 save "$SANDBOX/large.md" >/dev/null
+ctx=$(ho w1:p9 load | jq -r '.hookSpecificOutput.additionalContext')
+check "large handoff points to its complete saved file" "$(grep -cF "$dir/w1:p9.md.loaded" <<<"$ctx")" 1
+check "large handoff must be read before continuing" "$(grep -c 'Read it in full before continuing' <<<"$ctx")" 1
+check "large handoff stays out of startup context" "$([ ${#ctx} -lt 1500 ] && echo short)" short
+check "large handoff is saved without losing its end" "$(tail -1 "$dir/w1:p9.md.loaded")" TAIL_MARKER
+prompts >/dev/null; rm -f "$SANDBOX/prompts"
+
 # A handoff nobody picked up for a day belongs to work that has moved on.
 printf 'old\n' | ho w1:p4 save >/dev/null
 touch -t "$(date -v-2d +%Y%m%d%H%M)" "$dir/w1:p4.md"

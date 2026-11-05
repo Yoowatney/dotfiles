@@ -1,0 +1,15 @@
+{
+  "common": {
+    "enableWorkflows": false,
+    "enabledPlugins": {
+      "firebase@claude-plugins-official": false,
+      "context7@claude-plugins-official": false,
+      "discord@claude-plugins-official": false,
+      "figma@claude-plugins-official": false
+    }
+  },
+  "roles": {
+    "worker": {},
+    "main": { "enableArtifact": false }
+  }
+}

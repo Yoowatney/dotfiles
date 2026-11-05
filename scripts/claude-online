@@ -28,4 +28,23 @@ if ! dscacheutil -q host -a name "$HOST" 2>/dev/null | grep -q ip_address; then
   [ "$(date +%s)" -lt "$DEADLINE" ] || printf ' timeout — 그냥 실행합니다\n'
 fi
 
-exec claude "$@"
+# CLI settings survive /clear because they belong to this process. Do not narrow
+# setting-sources or use --bare: both would also remove safety hooks and rules.
+# A full session remains available for jobs needing an excluded integration:
+# CLAUDE_STARTUP_PROFILE=full claude ...
+profile_args=()
+role=${CLAUDE_STARTUP_ROLE:-}
+main_file="${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main"
+if [ -z "$role" ] && [ -n "${HERDR_PANE_ID:-}" ] && [ -f "$main_file" ]; then
+  terminal=$(herdr pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.terminal_id // empty')
+  [ -z "$terminal" ] || [ "$(cat "$main_file")" != "$terminal" ] || role=main
+fi
+case "$role" in
+  worker | main)
+    if [ "${CLAUDE_STARTUP_PROFILE:-}" != full ]; then
+      profile="$(cd "$(dirname "$0")/.." && pwd)/tools/claude/startup-profile.json"
+      settings=$(jq -c --arg role "$role" '.common + .roles[$role]' "$profile") || exit 1
+      profile_args=(--settings "$settings")
+    fi ;;
+esac
+exec claude ${profile_args[@]+"${profile_args[@]}"} "$@"

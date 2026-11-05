@@ -91,7 +91,7 @@ env_args=()
 case "$kind" in
   # Every Claude pane opened here works under a lead, so the advisor tool (a full uncached resend of the conversation per call)
   # is off: the pane's shell carries the variable, and the agent and its subagents inherit it. Sessions opened by hand keep it.
-  claude) ready='.result.agent.agent_session.value' env_args=(--env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1) ;;
+  claude) ready='.result.agent.agent_session.value' env_args=(--env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 --env CLAUDE_STARTUP_ROLE=worker) ;;
   # Codex reports no session id before its first prompt. It runs commands with mise's shims first on PATH, so a test that swaps HOME
   # hid mise's config and installs: python3 re-ran its own shim for ever, or failed on mise's trust check (2026-11-05). mise's
   # folders by absolute path keep what it reads the same under any HOME. Codex hands a command only the variables its config lists
