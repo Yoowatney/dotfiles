@@ -17,7 +17,9 @@ echo "\$*" >> "$SANDBOX/herdr-log"
 case "\$1 \$2" in
   "pane list") cat "$SANDBOX/panes" ;;
   "pane get") [ ! -f "$SANDBOX/late-on-get" ] || echo 09 > "$SANDBOX/hour"
-    jq -n --arg s "\$(cat "$SANDBOX/status")" --arg p "\$3" '{result: {pane: {pane_id: \$p, agent_status: \$s}}}' ;;
+    # the session the pane list gives, or the one in cur-sid: a clear that happened meanwhile
+    sid=\$(cat "$SANDBOX/cur-sid" 2>/dev/null || jq -r --arg p "\$3" '.result.panes[] | select(.pane_id == \$p) | .agent_session.value' "$SANDBOX/panes")
+    jq -n --arg s "\$(cat "$SANDBOX/status")" --arg p "\$3" --arg sid "\$sid" '{result: {pane: {pane_id: \$p, agent_status: \$s, agent_session: {value: \$sid}}}}' ;;
   "notification show") echo "\$3" >> "$SANDBOX/alerts" ;;
   "agent prompt") [ ! -f "$SANDBOX/prompt-fails" ] || exit 1 ;;
   *) exit 2 ;;
@@ -52,6 +54,9 @@ case "\$2" in *"handoff save"*)
     meta) echo '{"type":"user","isMeta":true,"message":{"content":"meta line"}}' >> "\$t"
           echo '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}' >> "\$t" ;;
     image) echo '{"type":"user","message":{"content":[{"type":"image"},{"type":"text","text":"hi"}]}}' >> "\$t" ;;
+    queued) echo '{"type":"attachment","attachment":{"type":"queued_command","prompt":"typed while it saved"}}' >> "\$t" ;;
+    compact) echo '{"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued from a previous conversation."}}' >> "\$t" ;;
+    cleared) echo sid-other > "$SANDBOX/cur-sid" ;;
   esac
   [ -z "\${GO_LATE:-}" ] || echo 09 > "$SANDBOX/hour"
   [ -z "\${WORK_AFTER:-}" ] || echo working > "$SANDBOX/status"
@@ -215,7 +220,31 @@ check "--now outside 05-06: asks, then clears" "$(told)|$(cleared)" "--box-ready
 [ ! -f "$STAMP" ] || fail "--now leaves no daily stamp, so 05:00 still runs"
 check "--now names the watches and the background jobs" "$(grep -c '재감시' "$SANDBOX/told")|$(grep -c '백그라운드' "$SANDBOX/told")" "1|1"
 check "--now announces nothing when it went through" "$(cat "$SANDBOX/alerts")" ""
-rm_stamp; now MAIN_REFRESH_HOUR=09; check "--now runs again the same day" "$(cleared)" 1
+rm -f "$S"/agent-handoff/*.md; now MAIN_REFRESH_HOUR=09; check "--now runs again the same day, with what the first left" "$(cleared)" 1
+# Its own wait for rest is 30 minutes, not the night's count down to 07:00 (0 in the day).
+rm_stamp; status working; ( sleep 1; echo idle > "$SANDBOX/status" ) & now MAIN_REFRESH_DEADLINE= MAIN_REFRESH_HOUR=09; wait
+check "--now waits for a busy pane to rest" "$(cleared)" 1
+# Words that reach the pane while it saves are recorded as a queued_command attachment, not a user line (review, 2026-11-05).
+rm_stamp; now NEW_TURN=queued MAIN_REFRESH_HOUR=09
+check "--now with words queued during the save: no /clear" "$(cleared)|$(grep -c '새 대화' "$S/orchestrator/refresh.log")" "0|1"
+rm_stamp; mr NEW_TURN=queued MAIN_REFRESH_HOUR=05; check "the night run too" "$(cleared)" 0
+rm_stamp; now NEW_TURN=compact MAIN_REFRESH_HOUR=09; check "a compaction summary is no new message" "$(cleared)" 1
+# Another run cleared the pane meanwhile: this run's checks read the old session, so it stops.
+rm_stamp; now NEW_TURN=cleared MAIN_REFRESH_HOUR=09; rm -f "$SANDBOX/cur-sid"
+check "a session that changed since the start: no /clear" "$(cleared)|$(grep -c '세션이 바뀌어' "$S/orchestrator/refresh.log")" "0|1"
+# One run at a time: a second call while one waits does nothing; a lock left by a run that died 2 hours ago does not block.
+rm_stamp; mkdir "$S/orchestrator/refresh.lock"; now MAIN_REFRESH_HOUR=09
+check "a run in progress: herdr and pane-tell untouched" "$(told)|$([ -f "$SANDBOX/herdr-log" ] && echo called)|$(grep -c '진행 중' "$S/orchestrator/refresh.log")" "||1"
+[ -d "$S/orchestrator/refresh.lock" ] || fail "the other run's lock stays"
+touch -t 202001010000 "$S/orchestrator/refresh.lock"; now MAIN_REFRESH_HOUR=09
+check "a stale lock: goes ahead" "$(cleared)" 1
+[ ! -d "$S/orchestrator/refresh.lock" ] || fail "a run removes its lock"
+# A pane-tell message queued for the main pane is tied to its session: a clear would strand it.
+rm_stamp; ( exec -a "pane-tell --deliver msg term_M sid-main term_x " sleep 5 ) & pend=$!
+now MAIN_REFRESH_HOUR=09; kill "$pend" 2>/dev/null; wait "$pend" 2>/dev/null
+check "a message waiting for the main pane: no /clear" "$(cleared)|$(grep -c '기다리는 글' "$S/orchestrator/refresh.log")" "0|1"
+# Started in the main pane's background, main-refresh must not be listed as a job to start again: it would loop.
+rm_stamp; now MAIN_REFRESH_HOUR=09; check "the request leaves main-refresh itself out" "$(grep -c 'main-refresh 자신은 빼고' "$SANDBOX/told")" 1
 rm_stamp; : > "$STAMP"; now MAIN_REFRESH_HOUR=05; check "--now ignores the daily stamp" "$(cleared)" 1
 rm_stamp; now BOX_FULL=1 MAIN_REFRESH_HOUR=09
 check "--now with words in the box: no request, no /clear" "$(told)|$(cleared)" "--box-ready w5:p3 claude|0"

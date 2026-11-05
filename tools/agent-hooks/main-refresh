@@ -51,6 +51,14 @@ term=$(cat "$DIR/main" 2>/dev/null)
 [ -n "$term" ] || { log "메인 칸 파일 없음"; exit 0; }
 [ -n "$now" ] || [ ! -f "$DIR/refreshed-$day" ] || exit 0
 in_window || skip "새벽 05~06시가 아니라 건너뜀"
+# One run at a time: a caller may ask again while a run waits (up to an hour). A lock 2 hours old is a dead run's.
+lock=$DIR/refresh.lock
+mkdir -p "$DIR"
+if ! mkdir "$lock" 2>/dev/null; then
+  { [ -n "$(find "$lock" -maxdepth 0 -mmin +120 2>/dev/null)" ] && rmdir "$lock" && mkdir "$lock"; } 2>/dev/null \
+    || { log "다른 실행이 진행 중이라 건너뜀"; exit 0; }
+fi
+trap 'rmdir "$lock" 2>/dev/null' EXIT
 row=$("$H" pane list 2>/dev/null | jq -c --arg t "$term" '[.result.panes[] | select(.terminal_id == $t)][0] // empty')
 id=$(jq -r '.pane_id // empty' <<<"$row" 2>/dev/null)
 [ -n "$id" ] || { log "메인 칸을 찾지 못함 ($term)"; exit 0; }
@@ -82,7 +90,7 @@ late # --box-ready takes a moment; the Mac may have slept across it
 req=$(date +%s)
 # Background jobs outlive the clear and their end reaches the next session (tested 2026-11-05), which must know what each
 # one watches; one that has stopped is started again from its command, never a second copy of one still running.
-what="지금 도는 밑 칸과 각 칸의 일, 모아 둔 결정(보드 링크, 개인 결정 파일), 감시 중인 Slack 스레드와 각각의 재감시 명령, 답을 기다리는 요유 질문과 그 자리, 이 칸에서 백그라운드로 도는 작업과 각각의 재시작 명령(명령 전문, 다음 세션은 pgrep -f로 이미 도는 것을 건너뛰고 다시 건다), 오늘 남은 일"
+what="지금 도는 밑 칸과 각 칸의 일, 모아 둔 결정(보드 링크, 개인 결정 파일), 감시 중인 Slack 스레드와 각각의 재감시 명령, 답을 기다리는 요유 질문과 그 자리, 이 칸에서 백그라운드로 도는 작업(main-refresh 자신은 빼고)과 각각의 재시작 명령(명령 전문, 다음 세션은 pgrep -f로 이미 도는 것을 건너뛰고 다시 건다), 오늘 남은 일"
 if [ -n "$now" ]; then ask="[main-refresh] 대화가 길어 지금 새로 시작합니다. 다음 세션이 이어받도록 ${what}을 handoff save로 남기고 '인계 저장함' 한 줄로 끝내세요. 다른 일은 하지 마세요. 저장하면 /clear가 저절로 옵니다."
 else ask="[main-refresh] 새벽 정리입니다. ${what}을 handoff save로 남기고 '인계 저장함' 한 줄로 끝내세요. 다른 일은 하지 마세요."; fi
 out=$("$TELL" "$id" "$ask" 2>/dev/null) \
@@ -97,10 +105,21 @@ late
 # --box-ready reads the screen twice 0.7 s apart: a sleep or a whole new turn can land in between, so the checks follow it.
 late
 idle || skip "인계 뒤에 칸이 다시 일하고 있어 건너뜀"
+# Another run may have cleared the pane meanwhile: every check above read the old session's transcript.
+[ -z "$sid" ] || [ "$("$H" pane get "$id" 2>/dev/null | jq -r '.result.pane.agent_session.value // empty')" = "$sid" ] \
+  || skip "세션이 바뀌어 건너뜀"
 # The last real user message must still be our whole request (pane-tell prefixes it, so compare the end): a person's
-# later message that merely mentions the marker is a new turn. An array that is not only tool results (an image) is one too.
-last=$(tail -n 200 "$transcript" 2>/dev/null | jq -rs '[.[] | select(.type == "user" and .isMeta != true) | .message.content | if type == "string" then . else (map(select(.type != "tool_result")) | select(length > 0) | "array") end][-1] // ""' 2>/dev/null)
+# later message that merely mentions the marker is a new turn. An array that is not only tool results (an image) is one too,
+# and so are words that came while the pane worked: those are a queued_command attachment, not a user line (review 11/05).
+# A compaction summary is a user line but no message. 2000 lines: a save of 30 tool calls fills 200.
+last=$(tail -n 2000 "$transcript" 2>/dev/null | jq -rs '[.[]
+  | if .type == "attachment" and .attachment.type? == "queued_command" then "queued"
+    elif .type == "user" and .isMeta != true and .isCompactSummary != true then
+      .message.content | if type == "string" then . else (map(select(.type != "tool_result")) | select(length > 0) | "array") end
+    else empty end][-1] // ""' 2>/dev/null)
 [[ "$last" == *"$ask" ]] || skip "인계 뒤에 새 대화가 있어 건너뜀"
+# A pane-tell message queued for this pane waits for its session (pane-tell --deliver): after a clear it would never arrive.
+! pgrep -f -- "--deliver [^ ]+ $term " >/dev/null || skip "메인 칸을 기다리는 글이 있어 건너뜀"
 # Straight through herdr, never pane-tell's queue: a queued /clear would fire hours later and wipe the main pane.
 "$H" agent prompt "$id" /clear >/dev/null 2>&1 || skip "/clear를 보내지 못해 건너뜀"
 [ -n "$now" ] || { mkdir -p "$DIR" && : > "$DIR/refreshed-$day"; }
