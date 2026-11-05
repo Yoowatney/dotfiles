@@ -72,7 +72,7 @@ mr() { # every call is sandboxed: state dir, herdr, pane-tell
   rm -f "$SANDBOX/told" "$SANDBOX/herdr-log" "$SANDBOX/box-n" "$S/orchestrator/refresh.log"; : > "$SANDBOX/alerts"
   env XDG_STATE_HOME="$S" HERDR_BIN_PATH="$SANDBOX/herdr" MAIN_REFRESH_PANE_TELL="$SANDBOX/pane-tell" \
     MAIN_REFRESH_POLL=0 MAIN_REFRESH_QUIET=0 MAIN_REFRESH_DEADLINE="${MAIN_REFRESH_DEADLINE:-5}" MAIN_REFRESH_HANDOFF_WAIT="${MAIN_REFRESH_HANDOFF_WAIT:-5}" \
-    "$@" /bin/bash "$SUBJECT" >/dev/null 2>&1
+    "$@" /bin/bash "$SUBJECT" ${MR_ARGS:-} >/dev/null 2>&1
 }
 told() { [ -f "$SANDBOX/told" ] && awk '{print $1, $2, $3}' "$SANDBOX/told" | paste -sd'|' - || true; }
 cleared() { grep -c '^agent prompt w5:p3 /clear$' "$SANDBOX/herdr-log" 2>/dev/null || true; }
@@ -203,6 +203,38 @@ check "pane-tell fails: no /clear, announced" "$(cleared)|$(grep -c '건너뜀' 
 rm "$SANDBOX/tell-fails"; touch "$SANDBOX/prompt-fails"; rm_stamp; mr MAIN_REFRESH_HOUR=05
 check "agent prompt fails: announced, no stamp" "$(grep -c '건너뜀' "$SANDBOX/alerts")|$([ -f "$STAMP" ] && echo stamped)" "1|"
 rm "$SANDBOX/prompt-fails"
+
+# Both requests name what a restart loses: watches and background jobs, each with the command that starts it again.
+rm_stamp; touch -t 202001010000 "$SANDBOX/sid-main.jsonl"; mr MAIN_REFRESH_HOUR=05
+check "the daily request names the watches and the background jobs" "$(grep -c '재감시' "$SANDBOX/told")|$(grep -c '백그라운드' "$SANDBOX/told")" "1|1"
+
+# --now: at any hour, as often as asked, through the same gates (2026-11-05: nobody types /clear in the main pane any more).
+now() { MR_ARGS=--now mr "$@"; }
+rm_stamp; now MAIN_REFRESH_HOUR=09
+check "--now outside 05-06: asks, then clears" "$(told)|$(cleared)" "--box-ready w5:p3 claude|w5:p3 [main-refresh] 대화가|--box-ready w5:p3 claude|1"
+[ ! -f "$STAMP" ] || fail "--now leaves no daily stamp, so 05:00 still runs"
+check "--now names the watches and the background jobs" "$(grep -c '재감시' "$SANDBOX/told")|$(grep -c '백그라운드' "$SANDBOX/told")" "1|1"
+check "--now announces nothing when it went through" "$(cat "$SANDBOX/alerts")" ""
+rm_stamp; now MAIN_REFRESH_HOUR=09; check "--now runs again the same day" "$(cleared)" 1
+rm_stamp; : > "$STAMP"; now MAIN_REFRESH_HOUR=05; check "--now ignores the daily stamp" "$(cleared)" 1
+rm_stamp; now BOX_FULL=1 MAIN_REFRESH_HOUR=09
+check "--now with words in the box: no request, no /clear" "$(told)|$(cleared)" "--box-ready w5:p3 claude|0"
+rm_stamp; now NEW_TURN=yes MAIN_REFRESH_HOUR=09
+check "--now with a message after the save: no /clear" "$(cleared)|$(grep -c '새 대화' "$S/orchestrator/refresh.log")" "0|1"
+# Its quiet default is 60 s, not the night's 600: a turn 2 minutes old goes ahead, one that just ended waits.
+rm_stamp; touch "$SANDBOX/sid-main.jsonl"; now MAIN_REFRESH_QUIET= MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.3
+check "--now right after a turn: not asked" "$(told)|$(cleared)" "|0"
+rm_stamp; touch -t "$(date -v-2M +%Y%m%d%H%M.%S)" "$SANDBOX/sid-main.jsonl"; now MAIN_REFRESH_QUIET= MAIN_REFRESH_HOUR=09
+check "--now 2 minutes after a turn: clears" "$(cleared)" 1
+rm_stamp; touch -t "$(date -v-2M +%Y%m%d%H%M.%S)" "$SANDBOX/sid-main.jsonl"; mr MAIN_REFRESH_QUIET= MAIN_REFRESH_HOUR=05 MAIN_REFRESH_DEADLINE=0.3
+check "the night run still waits 10 minutes" "$(told)|$(cleared)" "|0"
+touch -t 202001010000 "$SANDBOX/sid-main.jsonl"
+
+# A pane on a named herdr server keeps its handoff in that server's folder, as `handoff` writes it.
+rm_stamp; mkdir -p "$S/agent-handoff/workers"; mv "$S/agent-handoff/w5:p3.md.transcript" "$S/agent-handoff/workers/"
+now HERDR_SOCKET_PATH="$SANDBOX/sessions/workers/herdr.sock" HANDOFF_KEY=workers/w5:p3 MAIN_REFRESH_HOUR=09
+check "a named server's handoff folder: found, cleared" "$(cleared)" 1
+rm -rf "$S/agent-handoff/workers"; set_main
 
 [ "$fails" = 0 ] && echo "all ok"
 exit "$fails"
