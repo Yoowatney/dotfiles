@@ -558,7 +558,8 @@ if __name__ == "__main__":
     hook_input = json.load(sys.stdin)
     reason = tool_problem(hook_input, dict(os.environ))
     reason = (f"gcp-account-guard: {reason}" if reason else
-              rider("pane-fit-guard.py", hook_input) or rider("job-host-guard.py", hook_input))
+              rider("pane-fit-guard.py", hook_input) or rider("job-host-guard.py", hook_input)
+              or rider("fix-round-guard.py", hook_input))
     if reason:  # JSON deny: Claude Code and Codex both read it
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
