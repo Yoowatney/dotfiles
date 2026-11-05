@@ -180,12 +180,14 @@ def bash_problem(cmd: str) -> tuple[str, bool | str] | None:
                 return what, "key"
     if KEY_TF.search(flat) and TF_SHELL_WRITE.search(flat):
         return "terraform 서비스 계정 키 리소스", "key"
-    # The file an ADC assignment names is a SELECT, not a read of the credential store.
+    # The file an ADC assignment names is a SELECT, not a read of the credential store. Each is matched on the command and
+    # on it with quotes and backslashes removed: `'log'in` and `foo\"bar` run as the same words (api#1026 review).
+    unassigned = ADC_ASSIGN.sub("", cmd)
     for pattern, what in PERSIST:
-        if pattern.search(ADC_ASSIGN.sub("", cmd)):
+        if pattern.search(unassigned) or pattern.search(re.sub(r"['\"\\]", "", unassigned)):
             return what, True
     for pattern, what in SELECT:
-        if pattern.search(cmd):
+        if pattern.search(cmd) or pattern.search(re.sub(r"['\"\\]", "", cmd)):
             return what, False
     for m in ADC_ASSIGN.finditer(cmd):  # gomgom's own file, or the agent's default file named outright
         if not re.search(r"(?:gomgom\S*|/adc-munice\.json['\"]?)$", m.group(1)):
@@ -904,6 +906,11 @@ def selftest():
         f"gcloud {admin} secrets describe config --project=miraclenight-dev"))
     checks["persist_joined_quoted_value"] = lambda: all((bash_problem(c) or ("", False))[1] is True for c in (
         "gcloud auth --project='miraclenight-'dev login", "gcloud config --verbosity='de'bug set account a@b.com"))
+    # fourth Codex review: an escaped quote, or a quoted word, still runs as the same command
+    checks["persist_escaped_or_quoted_word"] = lambda: all((bash_problem(c) or ("", False))[1] is True for c in (
+        'gcloud config --trace-token=foo\\"bar set account other@example.com', 'gcloud auth --trace-token=foo\\"bar login',
+        "gcloud auth 'login'", 'gcloud config set "account" a@b.com'))
+    checks["select_quoted_word"] = lambda: bash_problem("gcloud --configuration=muni''ce-admin run services list") is not None
 
     def both_refused(text):
         p = claude_transcript(text)
