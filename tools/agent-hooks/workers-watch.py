@@ -14,6 +14,7 @@ how several leads at once each hear only of their own), else the main pane, else
 - a pane whose opener is on no server (its lead closed while it runs), once: closing a lead no longer stops its panes;
 - the workers server down, once while it stays down, unless nobody is there and no pane was seen (a Mac with no workers).
 A test pane (`임시 …`) is news only in a dialog: its lead hears of it from yoyoo-share-guard until it closes (요유 2026-11-05).
+One gone without a report gets an entry in the pane report day file instead, since share-guard sees only open panes.
 Dispatch tabs run here too (요유 2026-11-05), with no opener, so these reach the main pane, named `자동 칸`. No 🫡 marks them, so their
 record does: an agent that ended is news, and its pane, a bare shell, closes once someone heard. A 🔴 one waits on what it started
 (CI, a long check), so it is news after JOB_HELD instead of 900 s. Nothing can be typed in one, so an alert names what is left: read
@@ -164,6 +165,21 @@ def settle(env, sock, a, rec, pane, reported: bool) -> None:
 def trial(name) -> bool:
     """A test pane: yoyoo-share-guard names it at each of its lead's reports until it closes, so its stop or end is no news."""
     return bool(TRIAL.match(unicodedata.normalize("NFC", name or "")))
+
+
+def keep_trial(env, old, term, now) -> bool:
+    """A test pane gone without a report is no news for the main pane, but its lead may still be waiting on that report: one
+    entry in the pane report day file says where its session is (11/05 check: it used to vanish without a trace)."""
+    folder = env.get("PANE_REPORT_DIR") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".local", "state", "pane-reports")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, time.strftime("%Y-%m-%d", time.localtime(now)) + ".md"), "a", encoding="utf-8") as f:
+            f.write(f"\n## {time.strftime('%H:%M:%S', time.localtime(now))} workers/{old.get('pane') or '?'} {old.get('name') or term}\n\n"
+                    f"workers-watch: 시험 칸이 보고 없이 사라졌습니다. 세션 {old.get('session') or '?'}, 연 칸 {old.get('opener') or '?'}. "
+                    f"보고가 있었다면 그 세션 기록에 남아 있습니다.\n")
+        return True
+    except OSError:
+        return False
 
 
 def kind(status) -> str:
@@ -327,7 +343,9 @@ def tick(env, now: float) -> list:
                 continue
             lost_text = (f"자동 칸 {old.get('name') or term}(workers/{old.get('pane') or '?'})이 보고 없이 사라졌습니다. 보드 항목이 In Progress로 남았을 수 있으니 보고 이어 갈 일은 새 칸에 맡기세요. {UNSENT}"
                          if old.get("job") else f"밑 칸 {old.get('name') or term}(workers/{old.get('pane') or '?'})이 보고 없이 사라졌습니다. {UNSENT}")
-            if not reported_since(old.get("floor", 0), term, old.get("session")) and not trial(old.get("name")) and not tell(lost_text, old.get("opener", ""), old.get("home", False)):
+            if reported_since(old.get("floor", 0), term, old.get("session")):
+                continue
+            if not (keep_trial(env, old, term, now) if trial(old.get("name")) else tell(lost_text, old.get("opener", ""), old.get("home", False))):
                 records[term] = old  # told nobody: try again next minute
         state = records  # panes that are gone drop out
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -813,9 +831,16 @@ esac
 
         # A test pane (`임시 …`) is the lead's own trial, and yoyoo-share-guard names it at each of the lead's reports until it
         # is closed: its stop, its going and its agent's end are no news (11/05: 12 of the main pane's 24 watch alerts). A dialog still is.
-        panes_on_workers(label("w1:pT", "🟢 🫡 임시 시험")); agents(agent("w1:pT", "term_T", "idle", seq=1)); tick(116000)
+        t = agent("w1:pT", "term_T", "idle", seq=1); t["agent_session"] = {"value": "sess-T"}
+        panes_on_workers(label("w1:pT", "🟢 🫡 임시 시험")); agents(t); tick(116000)
         assert tick(116900) == [], "a test pane stopped without a report is no news"
         panes_on_workers(); agents(); assert tick(116960) == [] and "term_T" not in watch(), "nor one gone without a report"
+        kept = f"{d}/.local/state/pane-reports/{time.strftime('%Y-%m-%d', time.localtime(116960))}.md"
+        text = open(kept).read() if os.path.exists(kept) else ""
+        assert "workers/w1:pT" in text and "sess-T" in text and "보고 없이 사라" in text, ("but the report file keeps it: a real report may be missing", text)
+        os.remove(kept)
+        panes_on_workers(label("w1:pT", "🟢 🫡 임시 시험")); agents(t); tick(116970); touch_reported("term_T", 116980)
+        panes_on_workers(); agents(); tick(116990); assert not os.path.exists(kept), "one that reported leaves no line"
         panes_on_workers(label("w1:pT", "🟢 🫡 임시 시험")); agents(agent("w1:pT", "term_T", "working", seq=3)); tick(117000); agents()
         assert tick(117060) == [] and tick(117600) == [], "nor its agent's end"
         panes_on_workers(label("w1:pT", "🟢 🫡 임시 시험")); agents(agent("w1:pT", "term_T", "blocked", seq=5)); tick(118000)
