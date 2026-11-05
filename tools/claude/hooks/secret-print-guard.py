@@ -26,7 +26,11 @@ SECRET_PATH = re.compile(
     r"|(?:^|(?<=[\s'\"=/:(]))\.env(?:\.(?!example|sample|template)[\w.-]+)?(?=$|[\s'\"|;&)<>])",
     re.I,
 )
-SECRET_VAR = re.compile(r"\$\{?[A-Za-z_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE)[A-Za-z_]*\}?", re.I)
+# A search of the folder that holds a secret file prints that file too (`rg -n slack ~/.codex`, `~/.codex/*.toml`).
+SECRET_DIR = re.compile(HOME + r"/\.(?:codex|config)/?(?:\*[^\s'\"/]*)?(?=$|[\s'\"|;&)<>])")
+# ponytail: after `cd ~/.codex` only `config.toml` by name is seen; `rg x .` or a bare `rg x` there is not.
+CD_CODEX = re.compile(r"\bcd\s+" + HOME + r"/\.codex/?(?=$|[\s;&|)])")
+SECRET_VAR =re.compile(r"\$\{?[A-Za-z_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE)[A-Za-z_]*\}?", re.I)
 PRINTS_SECRET = re.compile(
     r"security\s+find-(?:generic|internet)-password\b[^|;&]*\s-[wg]\b"
     r"|\bop\s+read\b"
@@ -79,12 +83,28 @@ SHELL_C = re.compile(r"-[a-zA-Z]*c[a-zA-Z]*")
 READERS = {
     "cat", "bat", "less", "more", "head", "tail", "sed", "awk", "gawk", "jq", "yq", "cut", "tr",
     "sort", "uniq", "nl", "column", "strings", "xxd", "od", "hexdump", "base64", "tee", "cp",
-    "diff", "python", "python3", "node", "ruby", "perl", "grep", "rg", "egrep",
+    "diff", "python", "python3", "node", "ruby", "perl", "deno", "bun", "grep", "rg", "egrep",
 }
 GREPS = {"grep", "rg", "egrep"}
-QUIET_GREP = {"--files-with-matches", "--files-without-match", "--count", "--quiet"}
+QUIET_GREP = {"--files-with-matches", "--files-without-match", "--count", "--quiet", "--files"}
 SPLIT = re.compile(r"\|\||&&|[;|\n]")
-HEREDOC = re.compile(r"<<-?\s*['\"]?([\w.-]+)['\"]?[^\n]*\n.*?\n\s*\1\s*(?=\n|$)", re.S)
+HEREDOC = re.compile(r"<<-?\s*['\"]?([\w.-]+)['\"]?([^\n]*)\n(.*?)\n\s*\1\s*(?=\n|$)", re.S)
+# ponytail: a heredoc handed to bash/sh is still read as text; check its body like a command if one leaks that way.
+INTERPRETER = re.compile(r"(?:^|[\s(/])(?:python[\d.]*|node|ruby|perl|deno|bun)(?=[\s;&|)]|$)")
+
+
+def is_reader(x: str) -> bool:
+    return x in READERS or x.rstrip("0123456789.") in READERS  # python3.12 is python
+
+
+def heredoc(m: re.Match, text: str) -> str:
+    """A heredoc body is text, unless its line hands it to an interpreter: then the secret paths in it get read.
+
+    The rest of the marker's line stays, since `<<'EOF' && cat secret` runs that command too.
+    """
+    line = text[:m.start()].rsplit("\n", 1)[-1] + m[2]
+    paths = SECRET_PATH.findall(m[3]) if INTERPRETER.search(line) else []
+    return " ".join(["<<heredoc", *paths]) + m[2]
 
 
 def strip_captures(cmd: str) -> str:
@@ -188,7 +208,7 @@ def reads_secret(body: str) -> bool:
         w = words(seg)
         n = names(w)
         if PRINTS_SECRET.match(" ".join(w)) or reads_credential(n) or (
-            READERS & set(n) and SECRET_PATH.search(" ".join(w))
+            any(map(is_reader, n)) and SECRET_PATH.search(" ".join(w))
         ):
             return True
     return False
@@ -219,8 +239,10 @@ def rest_problem(cmd: str, shown: set[str], ran: list[str]) -> str | None:
 
 
 def bash_problem(cmd: str) -> str | None:
-    text = HEREDOC.sub("<<heredoc", cmd)  # heredoc bodies are text, not commands
+    text = HEREDOC.sub(lambda m: heredoc(m, cmd), cmd)
     visible = strip_captures(text)
+    if CD_CODEX.search(visible):
+        visible = re.sub(r"(?<![\w/.-])config\.toml\b", "~/.codex/config.toml", visible)
     seen = segments(visible)
     # A capture keeps one value out of the chat, but a transfer config is a whole answer read in order to print it.
     runs = QUOTED.sub(lambda m: "''" if m[0][0] == "'" else m[0], text)  # nothing runs in single quotes
@@ -262,8 +284,8 @@ def bash_problem(cmd: str) -> str | None:
             return "curl -v/--trace는 Authorization 헤더를 그대로 출력함"
         if verb == "git" and len(w) > 1 and w[1] in {"show", "cat-file"} and SECRET_PATH.search(segment):
             return "`git show`가 비밀 파일 내용을 출력함. 있는지만 볼 때는 `git ls-tree`를 쓸 것"
-        readers = [b for b in (x.rsplit("/", 1)[-1] for x in w) if b in READERS]
-        if readers and SECRET_PATH.search(segment):
+        readers = [b for b in (x.rsplit("/", 1)[-1] for x in w) if is_reader(b)]
+        if readers and (SECRET_PATH.search(segment) or SECRET_DIR.search(segment)):
             if set(readers) <= GREPS and (
                 QUIET_GREP & set(w) or any(re.match(r"^-[a-zA-Z]*[lLcq]", a) for a in w[1:])
             ):
@@ -394,6 +416,23 @@ def selftest():
         "S=$(cat ~/.config/x/.env); echo $S",
         "S=$(firebase functions:secrets:access X); echo \"len=${#S} head=${S:0:4}\"",
         "S=$(gcloud secrets versions access latest --secret=x); echo \"${S%????????}\"",
+        # 2026-11-05 (api#1035): a Codex pane printed the Slack token with a Python heredoc that grepped config.toml
+        "python3 - <<'PY'\nfrom pathlib import Path\nfor f in ['/Users/yoyoo/.codex/config.toml']:\n"
+        " for n,l in enumerate(Path(f).read_text().splitlines(),1):\n  if 'slack' in l: print(f'{f}:{n}:{l}')\nPY",
+        "python3 - <<'PY' 2>&1 | head\nprint(open('/Users/yoyoo/.codex/config.toml').read())\nPY",
+        "uv run --with x python3 - <<'PY'\nimport os\nprint(open(os.path.expanduser('~/.codex/config.toml')).read())\nPY",
+        "node - <<'JS'\nconsole.log(require('fs').readFileSync('/Users/yoyoo/.claude.json','utf8'))\nJS",
+        "cat > /tmp/a.py <<'PY' && python3 /tmp/a.py\nprint(open('/Users/yoyoo/.codex/config.toml').read())\nPY",
+        "cat > /tmp/a.txt <<'EOF' && cat ~/.codex/config.toml\nx\nEOF",
+        "python3.12 -c 'print(open(\"/Users/yoyoo/.codex/config.toml\").read())'",
+        # the same kind: a search of the folder that holds the file, or the file by its short name
+        "rg -n slack ~/.codex",
+        "rg -n slack /Users/yoyoo/.codex/",
+        "rg -n -i token ~/.config",
+        "grep -rn SLACK ~/.codex",
+        "rg -n xoxb ~/.codex/*.toml",
+        "cd ~/.codex && rg slack config.toml",
+        "cd /Users/yoyoo/.codex; sed -n '140,150p' config.toml",
     ]
     allow = [
         "T=$(python3 -I -c 'import re,os;print(open(os.path.expanduser(\"~/.codex/config.toml\")).read())')",
@@ -474,6 +513,16 @@ def selftest():
         "S=$(gcloud secrets versions list s); echo $S",
         "S=$(gcloud secrets versions access latest --secret=x); echo $SX ${SX:0:4}",
         "git commit -m 'S=$(gcloud secrets versions access latest --secret=x); echo ${S:0:4}'",
+        "T=$(python3 - <<'PY'\nimport tomllib\nprint(tomllib.load(open('/Users/yoyoo/.codex/config.toml','rb'))['x'])\nPY\n)",
+        "python3 - <<'PY'\nprint('see ~/.codex/hooks.json')\nPY",
+        "cat > notes.md <<'EOF'\npython3 reads ~/.codex/config.toml\nEOF",
+        "rg -l slack ~/.codex",
+        "rg --files ~/.codex",
+        "rg -n hook ~/.codex/hooks.json",
+        "rg -n x ~/.codex/hooks ~/.config/mise",
+        "ls -la ~/.codex ~/.config",
+        "cd ~/.codex && cat hooks.json",
+        "cd ~/.dotfiles && cat tools/mise/config.toml",
     ]
     for c in deny:
         assert bash_problem(c), f"should deny: {c}"
