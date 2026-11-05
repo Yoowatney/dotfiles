@@ -165,6 +165,10 @@ for name in servers:
 EOF
     ) || die "cannot turn off every MCP server in Codex's config, so a Codex check pane could write through one; open it with --kind claude"
     off=(); while IFS= read -r l; do [ -z "$l" ] || off+=("$l"); done <<<"$mcp"
+    # Codex's TUI serves MCP tools of its own outside the sandbox (create_worktree runs git in a trusted repo), unless a configured
+    # server holds their name: codex_worktrees, or codex_tui with a daemon. Then it starts without them. No feature turns them
+    # off, and a server with no command stops Codex from starting (Codex 0.166, 2026-11-05).
+    for n in codex_worktrees codex_tui; do off+=(-c "mcp_servers.$n={command=\"/usr/bin/false\",enabled=false}"); done
     # The folder's path has dots (~/.local), which a dotted -c path would split, so its trust goes in as a table.
     set -- --sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=false \
       -c "projects={\"$cwd\"={trust_level=\"trusted\"}}" "${off[@]}" --disable apps --disable plugins "$@"

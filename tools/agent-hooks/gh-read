@@ -10,6 +10,8 @@
 set -u
 no() { echo "gh-read: $*. It runs only GitHub reads: issue/pr/run/workflow/release/label list or view, repo view, pr diff/checks/status, search, and api GETs (-X GET for fields)." >&2; exit 2; }
 repo_ok() { case "$1" in */*/*) [[ "$1" == github.com/*/* ]] || no "a host other than github.com: $1" ;; esac; }
+# gh reads a field value that starts with @ from that file (or stdin), so the file's content would go out in the query.
+field_ok() { case "${1#*=}" in @*) no "a field value that starts with @ sends a local file: $1" ;; esac; }
 [ $# -ge 2 ] || no "give a gh command"
 
 case "$1 $2" in
@@ -21,9 +23,9 @@ esac
 
 if [ "$1" = api ]; then rest=("${@:2}"); else rest=("${@:3}"); fi
 method= fields= endpoint= expect=
-for a in "${rest[@]}"; do
+for a in ${rest[@]+"${rest[@]}"}; do # bash 3.2 under set -u calls an empty array unbound
   if [ -n "$expect" ]; then # the value of the option before it
-    case "$expect" in repo) repo_ok "$a" ;; method) method=$a ;; esac
+    case "$expect" in repo) repo_ok "$a" ;; method) method=$a ;; field) field_ok "$a" ;; esac
     expect=; continue
   fi
   case "$a" in *://*) [[ "$a" == https://github.com/* ]] || no "a URL outside github.com: $a" ;; esac
@@ -41,8 +43,8 @@ for a in "${rest[@]}"; do
   case "$a" in
     -X | --method) expect=method ;;
     --method=*) method=${a#--method=} ;;
-    -f | -F | --field | --raw-field) fields=1 expect=value ;;
-    --field=* | --raw-field=*) fields=1 ;;
+    -f | -F | --field | --raw-field) fields=1 expect=field ;;
+    --field=* | --raw-field=*) fields=1; field_ok "${a#*=}" ;;
     -q | --jq | -t | --template | --cache) expect=value ;;
     --jq=* | --template=* | --cache=* | --paginate | --slurp | -i | --include | --silent) ;;
     -*) no "gh api $a is not allowed" ;;

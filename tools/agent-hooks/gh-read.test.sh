@@ -32,6 +32,11 @@ reads api repos/o/r/pulls/3
 reads api repos/o/r/issues --paginate --jq '.[].number'
 reads api -X GET search/issues -f q=repo:o/r
 reads api --method=GET search/issues -F per_page=5
+# A read with nothing after its two words: bash 3.2 under set -u called the empty argument list unbound (2026-11-05).
+reads repo view
+reads issue status
+reads label list
+reads pr status
 
 refuses pr merge 3 -R o/r
 refuses pr comment 3 -R o/r -b hi
@@ -53,6 +58,15 @@ refuses api --method PATCH repos/o/r/issues/1
 refuses api -XDELETE repos/o/r/git/refs/heads/x
 refuses api repos/o/r/issues -f title=x # fields alone make gh POST
 refuses api repos/o/r/issues --input body.json
+# A field value that starts with @ makes gh read a local file and put it in the query: it would leave the sandbox (2026-11-05).
+refuses api -X GET repos/o/r -F x=@/etc/hosts
+refuses api -X GET repos/o/r -f x=@/etc/hosts
+refuses api -X GET repos/o/r --field x=@-
+refuses api -X GET repos/o/r --raw-field 'labels[]=@notes.txt'
+refuses api -X GET repos/o/r --field=x=@/etc/hosts
+refuses api -X GET repos/o/r --raw-field=x=@/etc/hosts
+refuses api -X GET repos/o/r -F @/etc/hosts
+reads api -X GET search/issues -f q=author:@me # an @ later in the value is text
 refuses api graphql -f query='{ viewer { login } }' # a query document can hold a mutation
 refuses api /graphql
 refuses api repos/o/r -H 'X-HTTP-Method-Override: DELETE'

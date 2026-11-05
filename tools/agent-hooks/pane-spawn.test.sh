@@ -274,7 +274,13 @@ RULES="$CHECK_DIR/.codex/rules/check.rules"
 REAL_DIR=$(cd "$(dirname "$SUBJECT")" && pwd -P) # pane-spawn names gh-read by its real path: /var is /private/var on macOS
 has "-c projects={\"$CHECK_DIR\"={trust_level=\"trusted\"}}" "the fixed folder is trusted, so Codex loads its rules and asks nothing"
 has "--disable apps --disable plugins" "connectors and plugins are off"
-hasnt "mcp_servers" "a config with no MCP server turns none off"
+# Codex's TUI serves its own MCP tools (create_worktree, in a trusted repo, runs git outside the sandbox) unless a configured
+# server holds their name; then it starts without them. Neither `--disable worktrees` (a removed feature, still on) nor
+# `-c mcp_servers.codex_worktrees.enabled=false` (no command: Codex does not start) does it (2026-11-05, Codex 0.166).
+has '-c mcp_servers.codex_worktrees={command="/usr/bin/false",enabled=false}' "Codex's worktree tools are off"
+has '-c mcp_servers.codex_tui={command="/usr/bin/false",enabled=false}' "and its task tools, served under this name with a daemon"
+hasnt "mcp_servers.slack" "a config with no MCP server turns none of its own off"
+hasnt "worktrees.enabled" "no server that Codex cannot start"
 mkdir -p "$SANDBOX/home/.codex"
 printf '%s\n' '[mcp_servers.slack]' 'command = "npx"' '[mcp_servers."notion-token"]' 'command = "x"' \
   '[mcp_servers.munice]' 'url = "https://x"' '[mcp_servers.brand_new]' 'command = "x"' > "$SANDBOX/home/.codex/config.toml"
