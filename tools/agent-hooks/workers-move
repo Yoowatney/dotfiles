@@ -175,7 +175,7 @@ if op == "open":
     addr = next((l for l in o.splitlines() if l.startswith("workers/")), "")
     if addr:  # exit 1 with an address: it shows no work yet, and the instruction was typed
         out({"ok": True, "address": addr, "kind": "claude", "memo": memo, "start": [day, size], "warn": e.strip()[-300:] if rc else ""})
-    out({"ok": False, "unknown": rc == 124, "why": (e or o).strip()[-300:]})
+    out({"ok": False, "unknown": rc == 124, "why": (e or o).strip()[:700]})  # pane-spawn names what the screen shows first
 if op == "bridge":
     import re
     head = re.compile(rb"\n## \d\d:\d\d:\d\d \S")
