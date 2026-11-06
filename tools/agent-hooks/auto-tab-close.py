@@ -412,8 +412,15 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send):
                 return True
             head = ("바로 전달하는 칸의 보고입니다(확인 칸의 질문·대기 보고입니다)." if interim else
                     f"확인 칸의 마지막 보고입니다(일 칸 보고와 확인 결과를 함께 보냅니다). {share.CHECK_NOTE}:")
+            worker_address = context.get("worker_address")
+            if context.get("worker_terminal"):
+                current = herdr_peers.all_panes(env).get(context["worker_terminal"])
+                if current:
+                    server = worker_address.split("/", 1)[0] if worker_address and "/" in worker_address else herdr_peers.server_key(env)
+                    worker_address = f"{server}/{current[1]['pane_id']}"
             message = (f"{head}\n"
                        f"일: {context['job']}\n일 칸 보고: {context['first']}\n확인 결과: {short_report(reply, None)}\n"
+                       f"일 칸: {worker_address or '주소 없음: 기존 보고 참조'}\n"
                        f"확인 종류: {context['kind']} ({context['kind_reason']})\n"
                        f"전체 보고: {context['report']} ({context['entry']})\n확인 전체 보고: {path} ({entry})")
             sent = send(message)
@@ -446,6 +453,8 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send):
             kind, kind_reason = check_kind(reply)
             job = re.sub(r"^[🟢🔴👑🫡\s]+", "", me.get("label") or "") or "일 칸 결과"
             context = dict(job=job, first=short_report(reply, None).splitlines()[0], report=path, entry=entry,
+                           worker_address=herdr_peers.address(env, me['pane_id']),
+                           worker_terminal=me.get("terminal_id"),
                            cwd=me.get("cwd") or os.path.expanduser("~"), kind=kind, kind_reason=kind_reason)
         # Persist the token before the instruction can reach a very fast check pane.
         write_context(context_path, context)
@@ -578,6 +587,12 @@ def finish(reply: str, env):
         lead, to = main_pane(env)
         sent = bool(lead) and tell(lead, to)
     if (needs_yoyoo or (lead and herdr_peers.delegates_checks(env, to.get("terminal_id")))) and not sent:
+        close = False
+    # A small reuse window for main-owned company work. workers-watch still reaps reported, unheld panes after 15 idle
+    # minutes. Independent check panes, jobs, Home panes and ordinary leads keep their existing lifecycle.
+    if (sent and workers and herdr_peers.delegates_checks(env, to.get("terminal_id"))
+            and opener(name) == to.get("terminal_id") and not share.CHECK_AGENT.match(name or "")
+            and not dispatch_job(env, name) and not herdr_peers.home_pane(name)):
         close = False
     # the main pane's watch: this pane is waiting, not stuck. Only workers panes: a personal server is left alone. A dispatch
     # pane that closes reported on the board, and --sweep closes it with no job env for pane-label to see (Codex review)
@@ -1249,7 +1264,7 @@ esac''')
     herdr_says({"name": "spawned"}, [main])                                     # default server
     herdr_says_on("workers", {"name": "spawn-M-1"}, [me], wagents)
     on_workers = {"HERDR_PANE_ID": "w1:p2", "HERDR_SOCKET_PATH": W}
-    assert run(reported, on_workers) == (0, "", "tell default/w5:p3\n" + closed), "a workers pane reports across servers to the main pane"
+    assert run(reported, on_workers) == (0, "", "tell default/w5:p3\n"), "a workers pane reports and stays available for follow-up"
     told = open(f"{sandbox}/told").read()
     assert told.startswith("바로 전달하는 칸의 보고입니다(") and "simulated check start failure" in told, "a failed automatic check preserves the original report"
     assert share.RELAY_NOTE not in told and share.DELEGATE_NOTE not in told, f"the fallback does not demand a check that failed to open: {told!r}"
@@ -1293,7 +1308,7 @@ esac''')
     assert "자세한 내용은" not in told and "남은 것: 요유 몫: 없음" in told, "and the rest stays in the file, as ever"
     saved()
     herdr_says_on("workers", {"name": "spawn-M-1"}, [me], wagents)
-    assert run(long_report, on_workers) == (0, "", "tell default/w5:p3\n" + closed)
+    assert run(long_report, on_workers) == (0, "", "tell default/w5:p3\n")
     told = open(f"{sandbox}/told").read()
     assert long_line in told, f"automatic check startup failure preserves the complete first-line verdict: {told!r}"
     saved()
@@ -1329,7 +1344,7 @@ esac''')
     stop(json.dumps({"last_assistant_message": full}), {**on_workers, "AUTO_TAB_CLOSE_SETTLE": "0.1"})
     stop(json.dumps({"last_assistant_message": keep[3]}), {"HERDR_PANE_ID": "w1:p2"})   # default w1:p2: no report, withdraws its own only
     herdr_says_on("workers", {"name": "spawn-M-1"}, [me], wagents)
-    assert taken() == "tell default/w5:p3\n" + closed, "the workers pane's report survives the default pane's Stop"
+    assert taken() == "tell default/w5:p3\n", "the workers pane's report survives the default pane's Stop and keeps its reuse window"
     saved()
     # The short form keeps code and quotes in `남은 것:`: they are what 요유 has to type.
     assert short_report("끝났습니다.\n남은 것: 요유 몫: `prod 허용` 입력 · 세션: 닫으면 \"승격\" 못 함") == \

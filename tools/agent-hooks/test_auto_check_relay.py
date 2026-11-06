@@ -89,6 +89,7 @@ class RelayTests(unittest.TestCase):
 
     def test_result_opens_check_then_delivers_combined_report_once(self):
         self.finish()
+        self.assertNotIn("w1:p2", self.closed, "keep the original worker available for follow-up")
         self.assertEqual(len(self.tells), 0, "the work report must not wake the main pane")
         self.assertEqual(len(self.spawns), 1)
         args, env = self.spawns[0]
@@ -108,10 +109,26 @@ class RelayTests(unittest.TestCase):
         for item in ("Job", DONE.splitlines()[0], CHECKED.splitlines()[0], "전체 보고:", "항목"):
             self.assertIn(item, message)
         self.assertNotIn("세부 근거는 보존됩니다", message)
+        self.assertIn("일 칸: workers/w1:p2", message)
+        self.assertIn("w1:p9", self.closed, "independent checks still close after their report")
         self.finish(CHECKED, check=True)
         self.finish()
         self.assertEqual(len(self.tells), 1, "duplicate Stop/sweep must not redeliver")
         self.assertEqual(len(self.spawns), 1)
+
+    def test_follow_up_uses_same_worker_and_gets_a_fresh_independent_check(self):
+        self.finish()
+        self.finish(CHECKED, check=True)
+        self.finish(DONE.replace("12개", "13개"))
+        self.assertNotIn("w1:p2", self.closed)
+        self.assertEqual(len(self.spawns), 2)
+        self.assertTrue(all("--check" in args for args, env in self.spawns))
+
+    def test_combined_report_resolves_a_moved_worker_by_terminal(self):
+        self.finish()
+        self.worker["pane_id"] = "w2:p7"
+        self.finish(CHECKED, check=True)
+        self.assertIn("일 칸: workers/w2:p7", self.tells[-1][1])
 
     def test_yoyoo_decision_is_delivered_immediately(self):
         self.finish("배포 승인이 필요합니다.\n남은 것: 요유 몫: prod 허용 입력 · 유요 몫: 대기 · 세션: 닫으면 승인 대기 멈춤")

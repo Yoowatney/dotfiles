@@ -20,8 +20,8 @@ and the spawn whose output printed that address (else whose work name matches th
 cites a check pane's report (`pane-spawn --check` names its pane `확인 …`); walking back from it, check to the work it checked
 to that work's own spawn, counts the fixes before it.
 
-ponytail: a fix sent to a pane that is already open (pane-tell) is no spawn and is not counted, and a /clear starts a new
-session record, so the count starts over; both would need a record kept outside the session, add it when a loop goes that way.
+Fixes delivered by pane-tell count too, including queued deliveries. A /clear still starts a new session record, so the count
+starts over; preserving it across clears would need a record outside the session.
 Unrelated words with no item in them still answer the latest refusal: the hook cannot read what they mean. A decide for
 another item called first after the refusal takes the job's question, and a ✅ on its `[보류 중 …]` re-ask ("keep paused")
 still matches; only the job's own item in its spawn would tell them apart. Items match by number alone (api#7 and cf#7 are
@@ -34,6 +34,7 @@ gcp-account-guard.py calls check(), for the reason pane-fit-guard.py gives. Fail
 from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
 
 import json
+import glob
 import os
 import re
 import sys
@@ -56,6 +57,8 @@ VALUED = r"--(?:why|cwd|kind)\s+(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|\S+)"
 SPAWN = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?pane-spawn("
                    r"(?:\s+" + VALUED + r"|\s+--[\w-]+(?:\s+[^\s\"'-]\S*)?)*)\s+"
                    r"(\"(?:\\.|[^\"\\])*\"|'[^']*')")
+TELL = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?pane-tell\s+"
+                  r"[\"']?((?:\w+/)?w\w+:p\w+)[\"']?\s+")
 CITE = re.compile(r"(\d{2}:\d{2}:\d{2})\s*(?:entry|항목)")
 CITED_DAY = re.compile(r"pane-reports/(\d{4}-\d{2}-\d{2})\.md")
 ENTRY = re.compile(r"^## (\d{2}:\d{2}:\d{2}) (\S+) ?(.*)$", re.M)  # auto-tab-close.py writes `## HH:MM:SS <address> <label>`
@@ -81,6 +84,12 @@ def unquote(literal: str) -> str:
 
 def flat(content) -> str:
     if isinstance(content, str):
+        try:
+            obj = json.loads(content)
+            if isinstance(obj, dict) and isinstance(obj.get("output"), str):
+                return obj["output"]
+        except ValueError:
+            pass
         return content
     return "\n".join(b.get("text") or "" for b in content if isinstance(b, dict)) if isinstance(content, list) else ""
 
@@ -133,6 +142,18 @@ def spawn(command: str) -> dict | None:
             "days": CITED_DAY.findall(text), "addr": None, "refused": None}
 
 
+def action(command: str) -> dict | None:
+    opened = spawn(command)
+    if opened:
+        return opened
+    m = TELL.search(command)
+    if not m:
+        return None
+    text = command[m.start():]
+    return dict(check=False, name=m[1], cites=CITE.findall(text), days=CITED_DAY.findall(text),
+                target=m[1].split("/")[-1], addr=None, refused=None)
+
+
 def bare(label: str) -> str:
     return label.lstrip("🔴🟢👑🫡 ").strip()
 
@@ -156,9 +177,9 @@ def answers(text: str) -> str:
 
 def check(payload: dict, env) -> str | None:
     command = str((payload.get("tool_input") or {}).get("command") or "")
-    if payload.get("tool_name") != "Bash" or "pane-spawn" not in command or not CITE.search(command):
+    if payload.get("tool_name") != "Bash" or not CITE.search(command):
         return None
-    new = spawn(command)
+    new = action(command)
     if not new or new["check"]:
         return None
     try:
@@ -167,8 +188,8 @@ def check(payload: dict, env) -> str | None:
         return None
     spawns, by_id, asks, words = [], {}, {}, []
     for i, e in enumerate(record):
-        if e[0] == "call" and "pane-spawn" in e[1]:
-            s = spawn(e[1])
+        if e[0] == "call" and ("pane-spawn" in e[1] or "pane-tell" in e[1]):
+            s = action(e[1])
             if s:
                 spawns.append(s)
                 by_id[e[2]] = s
@@ -180,12 +201,30 @@ def check(payload: dict, env) -> str | None:
                 s["refused"] = i
             elif s is not None and opened:
                 s["addr"] = opened.group(1).split("/")[-1]
+            elif s is not None and s.get("target") and not e[3] and re.search(r"(?:^|\n)(?:told |queued for )", e[1]):
+                s["addr"] = s["target"]
             if e[2] in asks:
                 asks[e[2]][1].update(DECIDE.findall(e[1]))
         elif e[0] == "in" and (said := answers(e[1])):
             words.append((i, set(REF.findall(e[1])), said == "react"))
     folder = env.get("PANE_REPORT_DIR") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".local", "state", "pane-reports")
     files = {}
+    state = env.get("XDG_STATE_HOME") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".local/state")
+    automatic_folder = os.path.join(state, "orchestrator/automatic-checks")
+    terminals = {}
+    for path in glob.glob(os.path.join(automatic_folder, "*.json")):
+        try:
+            with open(path) as f:
+                context = json.load(f)
+            address, terminal = context.get("worker_address"), context.get("worker_terminal")
+            if address and terminal:
+                terminals.setdefault(address.split("/")[-1], set()).add(terminal)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+
+    def same_worker(a, b):
+        # Pane moves change addresses; only an unambiguous stable terminal can bridge them.
+        return a == b or bool(a and b and len(terminals.get(a, ())) == 1 and terminals.get(a) == terminals.get(b))
 
     def entry(s: dict, at: str) -> tuple | None:
         now = time.time()
@@ -202,9 +241,15 @@ def check(payload: dict, env) -> str | None:
 
     def walk(start: dict, known: list) -> tuple:
         """start's fixes, newest first, and the spawn its job began with: the job's key."""
-        def opener(e: tuple) -> dict | None:  # the spawn that opened the pane of report entry e: the latest one, ids come back
-            by_addr = [s for s in known if s["addr"] == e[2]]
-            by_name = [s for s in known if s["addr"] is None and (f"확인 {s['name']}" if s["check"] else s["name"]) == bare(e[3])]
+        def before(s):
+            return next((i for i, item in enumerate(known) if item is s), len(known))
+
+        def opener(e: tuple, end: int) -> dict | None:
+            # A reused worker has the same address every round: only actions before its checker can own that report.
+            candidates = [s for s in known[:end] if not s.get("target") or
+                          any(is_check(r) for r in (entry(s, at) for at in s["cites"]) if r)]
+            by_addr = [s for s in candidates if same_worker(s["addr"], e[2])]
+            by_name = [s for s in candidates if s["addr"] is None and (f"확인 {s['name']}" if s["check"] else s["name"]) == bare(e[3])]
             return (by_addr or by_name or [None])[-1]
 
         chain, cur, seen = [], start, set()
@@ -214,9 +259,19 @@ def check(payload: dict, env) -> str | None:
             if cur["check"] or not checks:
                 break
             chain.append(cur)
-            checker = opener(max(checks))
+            checked = max(checks)
+            checker = opener(checked, before(cur))
             works = [e for e in (entry(checker, at) for at in checker["cites"]) if e and not is_check(e)] if checker else []
-            cur = opener(max(works)) if works else None
+            if not checker and (token := re.search(r"\[ac-([0-9a-f]{16})\]", checked[3])):
+                # Stop hooks open automatic checks outside the main transcript. Their persisted handoff is the link.
+                try:
+                    with open(os.path.join(automatic_folder, token[1] + ".json")) as f:
+                        context = json.load(f)
+                    source = dict(days=CITED_DAY.findall(context["report"]))
+                    works = [e for e in (entry(source, at) for at in CITE.findall(context["entry"])) if e and not is_check(e)]
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+            cur = opener(max(works), before(checker) if checker else before(cur)) if works else None
         return chain, cur or chain[-1]
 
     chain, job = walk(new, [s for s in spawns if s["refused"] is None])
@@ -328,12 +383,61 @@ def selftest():
                 {"type": "input_text", "text": "Script completed\nWall time 0.2 seconds\nOutput:\n"}, {"type": "input_text", "text": f"workers/{addr}\n"}]}})
         assert check(p(new, transcript(js, "j.jsonl")), env), "Codex's JS exec tool"
 
+        # Reusing one worker must preserve the same two-fix limit on both transcript formats.
+        reused = []
+        for i, (at, addr, flags, name, cited) in enumerate(night):
+            addr = addr if flags else night[0][1]
+            report(at, f"workers/{addr}", f"🟢 🫡 {'확인 ' if flags else ''}{name}")
+            command = spawn_cmd(flags, name, cited) if flags or i == 0 else f"pane-tell workers/{addr} '{cite(cited)} Fix it.'"
+            reused += ran(command, f"r{i}", f"workers/{addr}\n" if flags or i == 0 else f"queued for workers/{addr} (Job)\n")
+        tell_third = f"pane-tell workers/{night[0][1]} '{cite(third[4])} Fix it.'"
+        assert check(p(tell_third, transcript(reused, "reuse.jsonl")), env), "Claude: third fix on the same worker"
+        codex_reused = []
+        for i in range(0, len(reused), 2):
+            command = reused[i]["message"]["content"][0]["input"]["command"]
+            output = reused[i + 1]["message"]["content"][0]["content"]
+            codex_reused += [{"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "call_id": f"r{i}",
+                              "input": f"text(await tools.exec_command({{cmd:{json.dumps(command)}}}))"}},
+                            {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": f"r{i}",
+                              "output": json.dumps(dict(exit_code=0, output=output))}}]
+        assert check(p(tell_third, transcript(codex_reused, "reuse-codex.jsonl")), env), "Codex: third fix on the same worker"
+        lookup = ran(f"pane-tell workers/{night[0][1]} '{cite(night[4][0])} Additional lookup.'", "lookup",
+                     f"told workers/{night[0][1]} (Job)\n")
+        assert check(p(tell_third, transcript(reused + lookup, "reuse-lookup.jsonl")), env), "a lookup cannot reset the fix lineage"
+        automatic = os.path.join(d, ".local/state/orchestrator/automatic-checks")
+        os.makedirs(automatic)
+        for i in (1, 3, 5):
+            at, addr, flags, name, cited = night[i]
+            token = f"{i:016x}"
+            report(at, f"workers/{addr}", f"🟢 🫡 확인 {name} [ac-{token}]")
+            with open(os.path.join(automatic, token + ".json"), "w") as f:
+                json.dump(dict(report=os.path.join(reports, "2026-11-05.md"), entry=f"{cited} 항목"), f)
+        no_check_calls = [event for i in (0, 2, 4) for event in reused[2*i:2*i+2]]
+        assert check(p(tell_third, transcript(no_check_calls, "reuse-automatic.jsonl")), env), "automatic checks keep the lineage without transcript calls"
+        # A move between a successful fix delivery and its report must not reset the limit.
+        for i in (1, 3, 5):
+            context_path = os.path.join(automatic, f"{i:016x}.json")
+            with open(context_path) as f:
+                context = json.load(f)
+            context.update(worker_terminal="stable-worker", worker_address="workers/" + (night[0][1] if i == 1 else "w2:p7"))
+            with open(context_path, "w") as f:
+                json.dump(context, f)
+        for i in (2, 4):
+            at, addr, flags, name, cited = night[i]
+            report(at, "workers/w2:p7", f"🟢 🫡 {name}")
+        assert check(p(tell_third, transcript(no_check_calls, "reuse-moved.jsonl")), env), "moved worker keeps the fix lineage"
+        assert check(p(f"pane-tell workers/{night[0][1]} '{cite(night[3][0])} Fix it.'",
+                       transcript(reused[:8], "reuse-second.jsonl")), env) is None, "second fix on the same worker passes"
+        for at, addr, flags, name, cited in night:
+            report(at, f"workers/{addr}", f"🟢 🫡 {'확인 ' if flags else ''}{name}")
+
         # Only the third fix stops: the second fix, a check, a first job and other commands pass.
-        assert check(p(spawn_cmd("", "메인 칸 위임 틈 수정", "02:37:40"), transcript(claude_lines(night[:4]))), env) is None, "second fix"
+        assert check(p(spawn_cmd("", "메인 칸 위임 틈 수정", "02:37:40"), transcript(claude_lines(night[:4]), "second.jsonl")), env) is None, "second fix"
         assert check(p(spawn_cmd("--check ", "틈 수정 확인", "03:04:44"), path), env) is None, "a check is never stopped"
         assert check(p(spawn_cmd("", "새 일", None), path), env) is None, "a job citing no report"
         assert check(p(spawn_cmd("", "다른 일", "03:04:44"), path), env) is None, "citing a work pane's report: not a fix"
-        assert check(p("pane-tell workers/w1:p15 '고쳐 주세요 03:34:57 항목'", path), env) is None, "no pane-spawn"
+        assert check(p("pane-tell workers/w1:p15 '고쳐 주세요 03:34:57 항목'", path), env), "a third fix via pane-tell is also refused"
+        assert check(p("pane-tell workers/w1:p15 '추가 조회 03:04:44 항목'", path), env) is None, "a work-report lookup is not a fix"
         assert check({"tool_name": "Edit", "tool_input": {"file_path": "/x"}, "transcript_path": path}, env) is None
         assert check(p(new, os.path.join(d, "missing.jsonl")), env) is None, "fails open"
 
