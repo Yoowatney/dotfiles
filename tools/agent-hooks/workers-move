@@ -157,7 +157,52 @@ if op == "prepare":
     if not os.path.isdir(folder):
         out({"ok": False, "why": "집맥에 %s 폴더가 없습니다" % folder})
     out({"ok": True, "made": made})
+def trusted(key):
+    try:
+        with open(home + "/.claude.json", encoding="utf-8") as f:
+            return bool(((json.load(f).get("projects") or {}).get(key) or {}).get("hasTrustDialogAccepted"))
+    except (OSError, ValueError, AttributeError):
+        return False
+def accept_trust(folder, key):
+    """Claude asks once per repo whether to trust it, and a new pane has nobody to answer (e2e 11/06). This is the answer a
+    person gives by hand: Claude itself in a pty, Enter at the question, ended once its config says trusted."""
+    import fcntl, pty, select, signal, struct, termios
+    pid, fd = pty.fork()
+    if pid == 0:
+        try:
+            os.chdir(folder)
+            os.execvpe("claude", ["claude"], dict(env, TERM="xterm-256color"))
+        finally:
+            os._exit(127)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 160, 0, 0))
+    seen, answered, end = b"", False, time.time() + 90
+    try:
+        while time.time() < end and not trusted(key):
+            if select.select([fd], [], [], 0.5)[0]:
+                try:
+                    seen = (seen + os.read(fd, 65536))[-50000:]
+                except OSError:
+                    break
+            if not answered and b"trust" in seen:
+                time.sleep(1)
+                os.write(fd, b"\r")
+                answered = True
+    finally:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                break
+            time.sleep(1)
+        try:
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+        os.close(fd)
 if op == "open":
+    key = a.get("main_tree") or a["folder"]  # Claude keys a worktree by its main repo
+    if a.get("trust") and not trusted(key):
+        accept_trust(a["folder"], key)  # if it did not take, pane-spawn below says what the screen shows
     memo = os.path.join(home, ".local/state/workers-move/memos", a["agent"] + ".md")
     os.makedirs(os.path.dirname(memo), exist_ok=True)
     with open(memo, "w", encoding="utf-8") as f:
@@ -448,6 +493,15 @@ def instruction(rec, g, made) -> str:
     return text
 
 
+def claude_trusts(env, key) -> bool:
+    """Has Claude on this Mac been told to trust key (a repo's main tree, or a folder outside git)?"""
+    try:
+        with open(os.path.join(env.get("HOME") or os.path.expanduser("~"), ".claude.json"), encoding="utf-8") as f:
+            return bool(((json.load(f).get("projects") or {}).get(key) or {}).get("hasTrustDialogAccepted"))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def move_one(env, moves, rec, memo, agents_now) -> None:
     """Steps 2-4 for one pane whose note arrived. Each outcome is saved before the next step."""
     go, why, folder = parse_memo(memo)
@@ -469,7 +523,8 @@ def move_one(env, moves, rec, memo, agents_now) -> None:
     rec.update(step="opening", top=g.get("top"), branch=g.get("branch"), git=bool(g.get("git")))
     save(env, "moves.json", moves)
     o = remote(env, "open", timeout=900, agent=rec["agent"], memo=note(env, rec, memo, g), opener=herdr_peers.main_terminal(env),
-               folder=rec["folder"], name=f"{plain_label(rec['label'])} (집맥)", prompt=instruction(rec, g, p.get("made")))
+               folder=rec["folder"], name=f"{plain_label(rec['label'])} (집맥)", prompt=instruction(rec, g, p.get("made")),
+               main_tree=g.get("main_tree") or rec["folder"], trust=claude_trusts(env, g.get("main_tree") or rec["folder"]))
     if o is None or o.get("unknown"):  # it may have opened: never a second pane, never the same work here too
         return settle(env, moves, rec, "unknown", "집맥 칸을 여는 도중 ssh가 끊겼습니다. 집맥 workers 서버에 그 칸이 있는지 보세요")
     if not o.get("ok"):
@@ -1028,6 +1083,29 @@ if text.startswith("[퇴근 인계]") and addr in memos:
         assert run(dict(env, WORKERS_MOVE_SLEPT="-0.15", WORKERS_MOVE_WAIT="30")) == 0
         h = load(env, "moves.json", {})["term_H"]
         assert h["step"] == "kept" and "잠들어" in h["reason"] and not os.listdir(f"{orch}/moving"), h
+
+        # 집맥's Claude keys a worktree by its main repo and asks once whether to trust it; nobody answers that in a new pane
+        # (e2e 11/06). open answers it in a pty, only for a repo the 회사맥 trusts.
+        script("rbin/claude", '#!/usr/bin/env python3\nimport json, os, subprocess, sys, time\n'
+               'open(os.environ["FAKE_D"] + "/claude.log", "a").write(os.getcwd() + "\\n")\n'
+               'print("Quick safety check: Is this a project you created or one you trust?", flush=True)\n'
+               'sys.stdin.read(1)\n'
+               'top = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True)\n'
+               'key = os.path.dirname(top.stdout.strip().rstrip("/"))\n'
+               'json.dump({"projects": {key: {"hasTrustDialogAccepted": True}}}, open(os.path.expanduser("~/.claude.json"), "w"))\n'
+               'time.sleep(30)\n')
+        repo = os.path.realpath(f"{d}/repo")
+        ask = dict(timeout=90, agent="spawn-MAIN-t1", memo="m", opener="term_MAIN", folder=wt, main_tree=repo, name="t", prompt="{memo}")
+        assert remote(env, "open", trust=False, **ask)["ok"] and not lines("claude.log"), "a repo the 회사맥 does not trust stays so"
+        assert remote(env, "open", trust=True, **ask)["ok"] and len(lines("claude.log")) == 1, "the 회사맥 trusts it: answered once"
+        with open(f"{rhome}/.claude.json") as f:
+            assert json.load(f)["projects"][repo]["hasTrustDialogAccepted"] is True
+        assert remote(env, "open", trust=True, **ask)["ok"] and len(lines("claude.log")) == 1, "and never asked again"
+        assert not claude_trusts(env, repo)
+        os.makedirs(home, exist_ok=True)
+        with open(f"{home}/.claude.json", "w") as f:
+            json.dump({"projects": {repo: {"hasTrustDialogAccepted": True}}}, f)
+        assert claude_trusts(env, repo) and not claude_trusts(env, wt)
 
         # tell / read reach the 집맥 pane
         assert main(["workers-move", "tell", "집맥:workers/w9:pR1", "계속하세요"], env) == 0
