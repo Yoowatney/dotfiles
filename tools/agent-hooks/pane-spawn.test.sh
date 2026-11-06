@@ -29,6 +29,7 @@ case "\$1 \$2" in
   "pane layout") [ -z "\${FAIL_LAYOUT:-}" ] && cat "$SANDBOX/layout.json" ;;
   "pane split") [ -z "\${FAIL_SPLIT:-}" ] && jq -n '{result: {pane: {pane_id: "w1:new"}}}' ;;
   "pane rename"|"agent prompt"|"pane close") ;;
+  "agent read") printf '%s\n' "\${SCREEN:-}" ;;
   "agent wait")
     n=\$(cat "$SANDBOX/waits" 2>/dev/null || echo 0); echo \$((n + 1)) > "$SANDBOX/waits"
     [ "\$n" -ge "\${FAIL_WAIT:-0}" ] ;;
@@ -129,7 +130,10 @@ hasnt "tab create" "--same-tab opens no tab"
 
 # Agent arguments pass through, and Codex works without a session id until its first prompt.
 SESSIONLESS=1 ps --kind codex "조사" "지시" -- -m gpt-5 >/dev/null
-has "--kind codex --pane w1:new --timeout 120000 -- -m gpt-5" "codex with its arguments"
+# 2026-11-06: once Codex sees a newer release than it runs, its TUI opens on an update prompt that nobody here answers, so
+# every Codex pane failed to start until 0.167.0 was installed (mise installs a release a day after it comes out).
+NOUPDATE="-c check_for_update_on_startup=false"
+has "--kind codex --pane w1:new --timeout 120000 -- $NOUPDATE -m gpt-5" "codex skips its update prompt, then its arguments"
 has "agent prompt w1:new 지시" "codex gets the instruction"
 hasnt "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" "a codex pane keeps its environment"
 
@@ -164,12 +168,15 @@ if FAIL_START=9 ps "실패" "지시" 2>/dev/null; then fail "a failed start must
 has "pane close w1:new" "the empty pane goes"
 hasnt "agent prompt" "nothing to prompt"
 
-# An agent held by a dialog as it starts (Codex asks once whether to trust a folder) keeps the name it was given, so a retry
-# could only fail on that name and hide why. It is given up at once, naming the dialog and the way around it.
-if BLOCKED_START=1 ps --kind codex "막힘" "지시" 2>"$SANDBOX/err"; then fail "a start held by a dialog must exit non-zero"; fi
+# An agent held by a dialog as it starts keeps the name it was given, so a retry could only fail on that name and hide why.
+# It is given up at once, quoting what the dialog says: on 2026-11-06 the message guessed a trust question, and the dialog
+# was Codex's update prompt.
+if BLOCKED_START=1 SCREEN=$'  Update available · 0.166.0 → 0.167.0\n\n› 1. Update now\n  2. Skip' ps --kind codex "막힘" "지시" 2>"$SANDBOX/err"; then fail "a start held by a dialog must exit non-zero"; fi
 [ "$(cat "$SANDBOX/starts")" = 1 ] || fail "no retry after a dialog: $(cat "$SANDBOX/starts") starts"
 has "pane close w1:new" "the held pane goes"
-grep -q "trust" "$SANDBOX/err" || fail "names the trust dialog: $(cat "$SANDBOX/err")"
+before "agent read w1:new" "pane close w1:new"
+grep -qF "Update available · 0.166.0 → 0.167.0 › 1. Update now 2. Skip" "$SANDBOX/err" || fail "quotes the dialog on one line: $(cat "$SANDBOX/err")"
+grep -q "trust" "$SANDBOX/err" || fail "still says how to answer a trust dialog: $(cat "$SANDBOX/err")"
 grep -q -- "--kind claude" "$SANDBOX/err" || fail "names the way around it: $(cat "$SANDBOX/err")"
 
 # Work that never shows fails loudly, with no resend and the pane left open: an instruction Codex dropped looks the same as a
@@ -331,7 +338,7 @@ has "확인 칸입니다" "options in any order"
 has "--cwd $CHECK_DIR " "a --cwd the caller gives is checked from the fixed folder too"
 has "/work/repo" "and named in the instruction"
 ps --check "로그인" "돌려 보세요" -- -m gpt-5 >/dev/null
-grep -qE -- "-- $SANDBOXED .*--disable plugins -m gpt-5\$" "$SANDBOX/log" || fail "the caller's Codex arguments follow the sandbox: $(log)"
+grep -qE -- "-- $SANDBOXED .*--disable plugins $NOUPDATE -m gpt-5\$" "$SANDBOX/log" || fail "the caller's Codex arguments follow the sandbox, and a check pane skips the update prompt: $(log)"
 ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
 has "--kind codex --pane w1:new --timeout 120000 -- $SANDBOXED" "--kind codex is the same"
 SESSIONLESS=1 ps --kind codex --cwd /work/repo "조사" "지시" >/dev/null

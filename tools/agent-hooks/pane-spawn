@@ -96,7 +96,10 @@ case "$kind" in
   # hid mise's config and installs: python3 re-ran its own shim for ever, or failed on mise's trust check (2026-11-05). mise's
   # folders by absolute path keep what it reads the same under any HOME. Codex hands a command only the variables its config lists
   # in shell_environment_policy.include_only, so these four names are listed there too (exact names: a glob would pass tokens).
+  # Once Codex sees a release newer than it runs, its TUI opens on an update prompt nobody here answers, and mise installs a
+  # release only a day after it comes out: every Codex pane failed to start that day (2026-11-06, 0.167.0).
   codex) ready='.result.agent.interactive_ready'
+    set -- -c check_for_update_on_startup=false "$@"
     env_args=(--env "MISE_CONFIG_DIR=${MISE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/mise}"
       --env "MISE_DATA_DIR=${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"
       --env "MISE_STATE_DIR=${MISE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/mise}"
@@ -263,8 +266,12 @@ give_up() { "$H" pane close "$pane" >/dev/null 2>&1; echo "pane-spawn: $1" >&2; 
 agent="spawn-$term-${check:+chk}$home$RANDOM" # herdr allows 32 characters; terminal ids run about 15
 for try in 1 2 3; do # a pane opened a moment ago may not be at its shell prompt yet
   out=$("$H" agent start "$agent" --kind "$kind" --pane "$pane" --timeout 120000 ${1+--} "$@" 2>&1) && break
-  # An agent held by a dialog keeps its name, so a retry would only fail on that name and hide this.
-  case "$out" in *"blocked during startup"*) give_up "$kind waits at a dialog as it starts, most likely whether to trust $cwd (Codex asks once per folder): start $kind there by hand once and answer it, or open a check pane with --kind claude. herdr: $out" ;; esac
+  # An agent held by a dialog keeps its name, so a retry would only fail on that name and hide this. The message quotes the
+  # dialog: a guess at which one it was (a trust question) sent the 2026-11-06 hunt the wrong way, and it was the update prompt.
+  case "$out" in *"blocked during startup"*)
+    screen=$("$H" agent read "$pane" --source visible 2>/dev/null | tr -s ' \n' '  ')
+    give_up "$kind waits at a dialog as it starts, which nobody here answers. It shows: ${screen:0:400}. If it asks whether to trust $cwd, start $kind there by hand once and answer it; else open the pane with --kind claude. herdr: $out" ;;
+  esac
   [ "$try" != 3 ] || give_up "$kind did not start: $out"
   sleep "${PANE_SPAWN_RETRY_WAIT:-3}"
 done
