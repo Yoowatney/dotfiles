@@ -482,7 +482,10 @@ def relay_reason(payload: dict, text: str, env) -> str | None:
         return None
     for start in reversed([i for i, line in enumerate(lines) if "보고입니다(" in line]):  # parse only from the newest one on
         first = next(records(lines[start:start + 1]), None)
-        relayed = RELAYED.search(unicodedata.normalize("NFC", first[1])) if first and first[0] == "in" else None
+        # pane-tell's batch for the main pane holds several reports in one prompt: the one that asks most decides (api#1051).
+        # ponytail: one reason a turn, so a check report batched behind a work report gets no `확인:` demand of its own
+        found = RELAYED.finditer(unicodedata.normalize("NFC", first[1])) if first and first[0] == "in" else ()
+        relayed = min(found, key=lambda m: ("이", "확인", "바로 전달하는").index(m[1]), default=None)
         if relayed:
             break
     else:
@@ -1421,6 +1424,9 @@ def selftest():
         own_terminal("term_M\n")
         for label, records, text, want in (
                 ("a report with no 확인 line and no check pane", [claude_in(told)], bare, DELEGATE_REASON),
+                # pane-tell's batch for the main pane (api#1051): a work report after one passed on as is still needs its check
+                ("a batch: a work report after a passed-on one", [claude_in(told.replace("이 칸의 마지막 보고입니다(", "바로 전달하는 칸의 보고입니다(") + "\n\n" + told)],
+                 bare, DELEGATE_REASON),
                 ("a claimed check with no check pane behind it", [claude_in(told)], by_check, DELEGATE_REASON),
                 ("a check it ran itself", [claude_in(told), test_run], checked, DELEGATE_REASON),
                 ("a pane that is no check pane", [claude_in(told), *spawned('pane-spawn "로그인" "돌려 보세요"')], bare, DELEGATE_REASON),

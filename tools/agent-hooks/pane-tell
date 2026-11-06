@@ -26,6 +26,17 @@
 #   pane-tell --raw <pane id> "<message>"       the same door for a prompt a machine types as it is, into any pane; one that
 #                                               has to wait stays for the session in the pane now, like every queued message
 #   pane-tell --box-ready <pane id> <kind>      exit 0 when the box is empty and in view (ambient/deliver.py asks this)
+# Batching (api#1051): a marked message for the main pane (the terminal in orchestrator/main) while it rests opens a batch, and
+# all that comes for it in the next PANE_TELL_BATCH seconds (120; 0, or a file batch-off in the state folder, turns batching
+# off) goes as one prompt, each message with
+# its own mark, a blank line between: it prints "queued for … held …" and exits 0. The main pane read about 210k tokens a turn,
+# and in the 3 days to 11/07, 32% of the turns a relay started while it rested had another relay within 2 minutes of the
+# first (25% at 90 s, 44% at 180 s). The prompt still opens with a mark, and fix-round-guard, trial-count and
+# yoyoo-share-guard read each message of it (split at "\n\n[pane-tell: '"). A working main pane takes a message at once: Claude
+# folds it into the running turn. So does a message that may not wait or must arrive alone, after what was held: 요유's
+# `prod 허용`/`staging 허용` (gcp-account-guard grants on one whole relay, for the turn it starts), 장애/보안/긴급 in its first
+# 300 characters, and main-refresh's request, which checks that it is the last prompt. A batch is not tied to the session, so a
+# /clear meanwhile hands it to the next one.
 H=${HERDR_BIN_PATH:-herdr}
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}/pane-tell
 PEERS="default workers"
@@ -159,7 +170,39 @@ deliver() { # message file, receiver's terminal (a moved pane gets a new pane id
   echo "$(date '+%F %T') undelivered $(basename "$1") for $2" >> "$STATE/log"
   warn "다른 칸에 보낸 글을 전달하지 못해 파일로 남겼습니다: $STATE/undelivered/$(basename "$1")" "$4" "$5"
 }
+BATCH=${PANE_TELL_BATCH:-120}
+[ ! -e "$STATE/batch-off" ] || BATCH=0 # the switch for every sender at once: launchd jobs set no environment of ours
+# 0 when the message goes now even to a resting main pane
+urgent() {
+  case "$1" in *"prod 허용"* | *"staging 허용"* | "[main-refresh]"*) return 0 ;; esac
+  case "${1:0:300}" in *장애* | *보안* | *긴급*) return 0 ;; esac
+  return 1
+}
+# A batch is the directory <dir>/open, one file per message named by its arrival time, and .t, its opening second. A rename
+# carries it away whole, so a message moved in is either in it or refused (the batch has gone: the caller opens another).
+add() { # dir, message
+  local tmp
+  [ -d "$1/open" ] && tmp=$(mktemp "$1/.new.XXXXXX") || return 1
+  printf '%s' "$2" > "$tmp" && mv "$tmp" "$1/open/$(perl -MTime::HiRes=time -e 'printf "%017.6f", time').$$" 2>/dev/null && return
+  rm -f "$tmp"; return 1
+}
+take() { # dir: takes the open batch and prints the file holding its messages joined in order; nothing when none is open
+  local s="$1/sending.$$.$RANDOM" out f
+  mv "$1/open" "$s" 2>/dev/null || return 0
+  out=$(mktemp "$1/.joined.XXXXXX") || return 0
+  for f in "$s"/[0-9]*; do [ -f "$f" ] || continue; [ ! -s "$out" ] || printf '\n\n' >> "$out"; cat "$f" >> "$out"; done
+  rm -rf "$s"
+  if [ -s "$out" ]; then echo "$out"; else rm -f "$out"; fi
+}
 if [ "${1:-}" = --deliver ]; then deliver "$2" "$3" "${4:-}" "${5:-}" "${6:-}"; exit; fi
+if [ "${1:-}" = --flush ]; then # dir, the main pane's terminal: sends the batch when its hold ends, through the usual queue
+  sleep "$BATCH"
+  # ponytail: a batch opened after an urgent message took this one goes early, with this wake
+  f=$(take "$2"); [ -z "$f" ] && exit 0
+  mkdir -p "$STATE/waiting" "$STATE/undelivered" && w=$(mktemp "$STATE/waiting/$(date +%s).XXXXXX") && mv "$f" "$w" || exit 1
+  deliver "$w" "$3" "" "" ""
+  exit
+fi
 if [ "${1:-}" = --box-ready ]; then box_ready "$2" "$3"; exit; fi
 
 command -v "$H" >/dev/null 2>&1 || die "herdr not found"
@@ -250,5 +293,29 @@ msg="[pane-tell: '${from:-자동 작업}' 세션이 보낸 글입니다. 요유�
 sender=$(awk -F'\t' -v me="$me" '$1 == me {print $7}' <<<"$mine")
 # A pane on another server is named with its server: a caller reusing a bare id would type into a different pane on its own.
 shown=$pane; [ -z "$there" ] || shown=$(srv "$there")/$pane
+if [ "$BATCH" -gt 0 ] 2>/dev/null && [ "$terminal" = "$(cat "${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main" 2>/dev/null)" ]; then
+  umask 077 # messages can name customers
+  dir=$STATE/batch/$terminal
+  mkdir -p "$dir" || die "cannot keep the message"
+  held_now() { # sends the open batch now, unbound to the session like the batch itself
+    local j; j=$(take "$dir"); [ -n "$j" ] || return 0
+    tell "$pane" "$kind" "$(cat "$j")" "$terminal" "" "" ""; local rc=$?; rm -f "$j"; return $rc
+  }
+  # A batch older than its hold has no process left to send it (the Mac restarted): it goes now, with this message.
+  if [ -d "$dir/open" ] && [ $(( $(date +%s) - $(cat "$dir/open/.t" 2>/dev/null || echo 0) )) -gt $(( BATCH + 60 )) ] && add "$dir" "$msg"; then
+    if held_now; then echo "told $shown ($name)"; else echo "queued for $shown ($name): its input box is not empty, so this goes in once it is"; fi
+    exit 0
+  fi
+  if urgent "$2"; then
+    held_now # what was held goes first: a grant counts only for the turn it starts, so it must be the last prompt
+  else
+    if [ ! -d "$dir/open" ] && case "$("$H" pane get "$pane" 2>/dev/null | jq -r '.result.pane.agent_status // ""')" in idle | done) true ;; *) false ;; esac &&
+      mkdir "$dir/open" 2>/dev/null; then
+      date +%s > "$dir/open/.t"
+      nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' bash "$0" --flush "$dir" "$terminal" </dev/null >/dev/null 2>&1 &
+    fi
+    if add "$dir" "$msg"; then echo "queued for $shown ($name): held up to ${BATCH}s to go in one prompt with what else comes for the main pane"; exit 0; fi
+  fi
+fi
 if tell "$pane" "$kind" "$msg" "$terminal" "$sid" "$sender" "${there:+$here}"; then echo "told $shown ($name)"; exit 0; fi
 echo "queued for $shown ($name): its input box is not empty, so this goes in once it is"

@@ -325,4 +325,55 @@ done
 rm -f "$SANDBOX/workers-stuck"; unset PANE_TELL_OTHER_LIMIT
 sessions_up
 
+# Batching (api#1051): what reaches the resting main pane waits PANE_TELL_BATCH seconds and goes as one prompt.
+mkdir -p "$SANDBOX/state/orchestrator"; echo term_pM > "$SANDBOX/state/orchestrator/main"
+main_panes() { # the main pane w1:pM in state $1, an ordinary pane w1:p3 in the same state, and the sender w1:p9
+  jq -n --arg s "$1" '{result: {panes: [
+    {pane_id: "w1:pM", label: "🟢 👑 메인 오케스트레이터", agent_session: {value: "sM"}, cwd: "/w", tab_id: "w1:t1", agent: "claude", terminal_id: "term_pM", agent_status: $s},
+    {pane_id: "w1:p3", label: "🟢 api#7 시험", agent_session: {value: "s3"}, cwd: "/w", tab_id: "w1:t1", agent: "claude", terminal_id: "term_p3", agent_status: $s},
+    {pane_id: "w1:p9", label: "🟢 와우포인트 정리", agent_session: {value: "s9"}, cwd: "/w", tab_id: "w1:t1", agent: "claude", terminal_id: "term_p9"}]}}' > "$SANDBOX/panes"
+  rm -f "$SANDBOX/log"
+}
+batched() { local i; for i in $(seq 1 200); do [ ! -d "$SANDBOX/state/pane-tell/batch/term_pM/open" ] && ! pgrep -f -- "--flush $SANDBOX/" >/dev/null && return; sleep 0.05; done; echo "FAIL a batch never went"; fails=1; }
+prompts() { cat "$SANDBOX/log" 2>/dev/null | grep -c '^w1:pM|'; }
+held() { sed 's/: held.*//' <<<"$1"; }
+HELD="queued for w1:pM (👑 메인 오케스트레이터)"
+export PANE_TELL_BATCH=1
+main_panes idle
+out1=$(pt "메인 오케" "첫 글"); out2=$(pt "메인 오케" "둘째 글")
+check "resting main pane: both held, nothing typed yet" "$(held "$out1")|$(held "$out2")|$(prompts)" "$HELD|$HELD|0"
+batched
+check "after the hold: one prompt, each message with its own mark, in order" \
+  "$(prompts)|$(grep -c "\[pane-tell: '와우포인트 정리'" "$SANDBOX/log")|$(head -1 "$SANDBOX/log" | grep -c "^w1:pM|\[pane-tell: '")|$(tr '\n' ' ' < "$SANDBOX/log" | grep -c '첫 글  \[pane-tell.*둘째 글')" \
+  "1|2|1|1"
+main_panes working; out=$(pt "메인 오케" "일하는 중")
+check "a working main pane takes it now: Claude folds it into the running turn" "${out%% (*}|$(prompts)" "told w1:pM|1"
+main_panes idle; out=$(pt "api#7 " "x")
+check "a resting pane that is not the main pane takes it now" "${out%% (*}|$(sent)" "told w1:p3|w1:p3 "
+main_panes idle; pt "메인 오케" "보통 글" >/dev/null
+out=$(pt "메인 오케" "[Slack #0-yoyooyo 요유] prod 허용 (ts 1.000001, 글 C0CEX59CX60/1.000001)"); batched
+check "요유's grant goes at once and alone, right after what was held" \
+  "${out%% (*}|$(prompts)|$(grep '^w1:pM|' "$SANDBOX/log" | head -1 | grep -c '보통 글')|$(grep '^w1:pM|' "$SANDBOX/log" | tail -1 | grep -c '보통 글')|$(grep -c 'prod 허용' "$SANDBOX/log")" \
+  "told w1:pM|2|1|0|1"
+main_panes idle; out=$(pt "메인 오케" "staging 허용")
+check "staging 허용 is not held either" "${out%% (*}|$(prompts)" "told w1:pM|1"
+main_panes idle; out=$(pt "메인 오케" "cf#7 장애: 5xx가 늘었습니다")
+check "an incident is not held" "${out%% (*}|$(prompts)" "told w1:pM|1"
+main_panes idle; out=$(pt "메인 오케" "[main-refresh] 새벽 정리입니다.")
+check "main-refresh's request is not held: it checks that it is the last prompt" "${out%% (*}|$(prompts)" "told w1:pM|1"
+export PANE_TELL_BATCH=0; main_panes idle; out=$(pt "메인 오케" "x")
+check "PANE_TELL_BATCH=0 turns it off" "${out%% (*}|$(prompts)" "told w1:pM|1"
+export PANE_TELL_BATCH=1; touch "$SANDBOX/state/pane-tell/batch-off"; main_panes idle; out=$(pt "메인 오케" "x")
+check "so does the batch-off file, for every sender" "${out%% (*}|$(prompts)" "told w1:pM|1"
+rm -f "$SANDBOX/state/pane-tell/batch-off"
+# Failure flows: the box is full when the hold ends; the process that would send a batch is gone.
+main_panes idle; pt "메인 오케" "찬 칸" >/dev/null; claude_screen "치던 글" > "$SANDBOX/screen-w1:pM"; sleep 1.5
+check "a full box when the hold ends: it waits" "$(prompts)" 0
+rm -f "$SANDBOX/screen-w1:pM"; batched; settled
+check "and goes once the box is empty" "$(prompts)|$(grep -c '찬 칸' "$SANDBOX/log")" "1|1"
+main_panes idle; b="$SANDBOX/state/pane-tell/batch/term_pM/open"; mkdir -p "$b"; echo 1 > "$b/.t"; printf '%s' "[pane-tell: 'x' …] 묵은 글" > "$b/0000000001.000000.1"
+out=$(pt "메인 오케" "새 글"); batched
+check "a batch nobody sent (the Mac restarted) goes at once, with the next message" "${out%% (*}|$(prompts)|$(tr '\n' ' ' < "$SANDBOX/log" | grep -c '묵은 글  \[pane-tell.*새 글')" "told w1:pM|1|1"
+rm -f "$SANDBOX/state/orchestrator/main"; unset PANE_TELL_BATCH
+
 exit $fails

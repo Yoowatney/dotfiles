@@ -40,6 +40,7 @@ SUBPANE = "이 칸은 리드 밑 칸입니다"
 TEST = re.compile(r"도구를 쓰지 말고|한 단어만 답하|Without using tools|^\s*Call mcp__|훅 테스트|이 시험|시험입니다|"
                   r"^\s*(test|테스트)\b|그대로 (출력|답)하|This is a hook test", re.I)
 SLACK = re.compile(r"^\[pane-tell: '자동 작업' [^\]]*\] \[Slack #\S+ 요유( 반응)?\] ?", re.S)
+BATCH = re.compile(r"\n\n(?=\[pane-tell: ')")  # as fix-round-guard.py
 QUESTION = [re.compile(p) for p in (  # progress_q.py, 2026-11-04
     r"남은\s*(거|것|게|일)|남았(어|니|냐|나)",
     r"내가\s*(할|해야\s*할|해야할)\s*(거|것|게|일)|내\s*몫|내가\s*뭘\s*(해|결정)|요유\s*몫",
@@ -121,7 +122,8 @@ def count(home: str, since: str, until: str, listing: list | None = None) -> dic
     for path, hint, rows in sessions(home, start.timestamp() - 86400):
         if kind(path, hint, rows) != "counted":
             continue
-        for ts, text in rows:
+        # pane-tell sends what it held for the main pane as one prompt, each message with its own mark (api#1051)
+        for ts, text in ((ts, part) for ts, whole in rows for part in BATCH.split(whole)):
             try:
                 at = dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(KST)
             except ValueError:
@@ -169,7 +171,10 @@ def selftest():
                         ("2026-11-05T16:00:00Z", "꺼도 돼?")])  # 11/06 01:00 KST
         claude("other", [("2026-11-05T02:00:00Z", "내가 할 거 있어?"), ("2026-11-05T02:01:00Z", "x" * 400 + " 어디까지"),
                          ("2026-11-05T02:02:00Z", "[ambient-round] work.md 를 읽고 어디까지 했는지 이어서")])
-        claude("slackonly", [("2026-11-05T05:00:00Z", relay + "[Slack #0-yoyooyo 요유] 좋아 (ts 3.4)")])
+        claude("slackonly", [("2026-11-05T05:00:00Z", relay + "[Slack #0-yoyooyo 요유] 좋아 (ts 3.4)"),
+                             # pane-tell's batch for the main pane (api#1051): 요유's words after another message
+                             ("2026-11-05T05:01:00Z", relay + "밑 칸 w1:p3이 보고 없이 15분째 멈춰 있습니다\n\n" + relay +
+                              "[Slack #0-yoyooyo 요유] 남은 거 있어? (ts 3.5)")])
         with open(os.path.join(proj, "main.jsonl"), "a") as f:  # typed while the agent worked: Claude keeps it as an attachment
             for i, (ts, prompt, mode, origin) in enumerate((
                     ("2026-11-05T01:10:00Z", "하고나서 QA까지하자", "prompt", "human"),
@@ -199,9 +204,9 @@ def selftest():
         # main 1 + 2 typed while it worked, other 2 (the long one too), codex 1; not the sub-pane, headless, relays, notices,
         # a side agent's note, another session's message or /goal's
         assert day5["typed"] == 6, day5
-        assert day5["slack"] == 2 and day5["reactions"] == 2, day5
+        assert day5["slack"] == 3 and day5["reactions"] == 2, day5
         assert day5["panes"] == 3, "main, other and the Codex session: not a pane that only got Slack words"
-        assert day5["questions"] == 4, "slack 어디까지, 내가 할 거, 얼마나 남았어, 이거 남았어; the 400-character one is skipped"
+        assert day5["questions"] == 5, "slack 어디까지, 남은 거(batched), 내가 할 거, 얼마나 남았어, 이거 남았어; not the 400-character one"
         assert day6 == {"typed": 1, "slack": 0, "reactions": 0, "panes": 1, "questions": 1}, day6
         assert "2026-11-03" not in got, "outside the window"
     assert options(["--list", "--since", "2026-11-04"]) == {"--list": True, "--since": "2026-11-04"}, "a flag before a pair"

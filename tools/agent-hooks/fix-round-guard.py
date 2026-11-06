@@ -65,6 +65,7 @@ ADDRESS = re.compile(r"(?:^|\n)((?:\w+/)?w\w+:p\w+)[ \t]*(?=\n|$)")  # pane-spaw
 CODEX_CMD = re.compile(r"\bcmd[\"']?\s*:\s*(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')")  # as in yoyoo-share-guard.py
 RELAYED_YOYOO = re.compile(r"^\[pane-tell: '자동 작업' [^\]]*\] \[Slack #\S+ 요유( 반응)?\]")  # main-channel's relay of 요유's words
 RELAYED_LIST = re.compile(r"^\[pane-tell: '자동 작업' [^\]]*\] \[Slack 리스트 요유\] ")  # main-channel's relay of a row 요유 changed
+BATCH = re.compile(r"\n\n(?=\[pane-tell: ')")  # between the messages pane-tell held for the main pane and sends as one prompt
 REACTION = re.compile(r".*에 :([\w+-]+): \(", re.S)  # greedy: the relay's own `에 :emoji: (ts …)` comes after the quoted post
 NOT_TYPED = ("[pane-tell:", "[auto-dispatch]", "<", "[main-refresh]", "[handoff:", "Stop hook feedback", "Caveat:", "[Request interrupted",
              "This session is being continued", "# AGENTS.md", "Here is a note offered by a side agent")
@@ -204,8 +205,10 @@ def check(payload: dict, env) -> str | None:
                 s["addr"] = s["target"]
             if e[2] in asks:
                 asks[e[2]][1].update(DECIDE.findall(e[1]))
-        elif e[0] == "in" and (said := answers(e[1])):
-            words.append((i, set(REF.findall(e[1])), said == "react"))
+        elif e[0] == "in":
+            for part in BATCH.split(e[1]):  # pane-tell's batch for the main pane: each message keeps its own mark
+                if said := answers(part):
+                    words.append((i, set(REF.findall(part)), said == "react"))
     folder = env.get("PANE_REPORT_DIR") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".local", "state", "pane-reports")
     files = {}
     state = env.get("XDG_STATE_HOME") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".local/state")
@@ -472,6 +475,9 @@ def selftest():
         yes = relay + "[Slack #0-yoyooyo 요유 반응] '[결정 api#1002] 고를 것: …'에 :white_check_mark: (ts 1)"
         assert judged(new, *refused), "the same call again"
         for words in ([said(relay + "[Slack #0-yoyooyo 요유] 응 계속 고쳐 (ts 1.2)")], [said("계속해")], [queued("계속해")],
+                      # pane-tell's batch for the main pane: 요유's words after another message, each with its mark (api#1051)
+                      [said(relay + "밑 칸 w1:p15이 보고 없이 15분째 멈춰 있습니다\n\n" + relay + "[Slack #0-yoyooyo 요유] 응 계속 고쳐 (ts 1.2)")],
+                      [*decide, queued(relay + "밑 칸 w1:p15이 질문 창에서 멈춰 있습니다\n\n" + yes)],
                       [queued([{"type": "text", "text": "[Image #1] 계속해"}, {"type": "image"}])],
                       [*decide, said(yes)], [*decide, *other, said(yes)],
                       [*decide, said(relay + "[Slack #0-yoyooyo 요유] api#1002 추천대로 (스레드 1.1: '11/05 결정 기다리는 것')")],
