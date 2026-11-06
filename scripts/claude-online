@@ -39,12 +39,46 @@ if [ -z "$role" ] && [ -n "${HERDR_PANE_ID:-}" ] && [ -f "$main_file" ]; then
   terminal=$(herdr pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.terminal_id // empty')
   [ -z "$terminal" ] || [ "$(cat "$main_file")" != "$terminal" ] || role=main
 fi
+# paneRules (worker only): rule files a pane under a lead loads without their `<!-- pane:skip -->` blocks, which only
+# leads and the main pane need. The full file goes in claudeMdExcludes and the filtered copy comes back through
+# --append-system-prompt-file, so the file stays the one source and sessions opened by hand still load it whole
+# (api#1031). Claude hides HTML comments from rule files it loads, so the markers cost those sessions nothing.
+pane_rules() { # Rewrites $settings; sets $rules_file when anything was filtered.
+  local file under excludes=() text=""
+  while IFS=$'\t' read -r file under; do
+    file=${file/#\~/$HOME} under=${under/#\~/$HOME}
+    [ -f "$file" ] || continue
+    if [ -n "$under" ]; then case "$PWD/" in "$under"/*) ;; *) continue ;; esac; fi
+    excludes+=("$file")
+    # ponytail: one-line comments only; a marker inside a multi-line comment is not seen.
+    text+="Contents of $file, as loaded in a pane under a lead:"$'\n\n'"$(awk '
+      /^<!-- \/pane:skip -->$/ { skip = 0; next }
+      /^<!-- pane:skip -->$/ { skip = 1; next }
+      skip { next }
+      /^<!-- pane: .* -->$/ { sub(/^<!-- pane: /, ""); sub(/ -->$/, ""); print; next }
+      /^<!--.*-->$/ { next }
+      { print }' "$file")"$'\n\n'
+  done < <(jq -r '.paneRules[]? | [.file, .under // ""] | @tsv' <<<"$settings")
+  if [ -n "$text" ]; then
+    local dir="${XDG_STATE_HOME:-$HOME/.local/state}/claude-startup" sum
+    mkdir -p "$dir" || return 1
+    sum=$(printf '%s' "$text" | shasum -a 256 | cut -c1-16)
+    rules_file="$dir/pane-rules-$sum.md" # same text, same file: launches never pile up copies
+    [ -f "$rules_file" ] || { printf '%s' "$text" >"$rules_file.$$" && mv "$rules_file.$$" "$rules_file"; } || return 1
+  fi
+  settings=$(jq -c 'del(.paneRules) | if $ARGS.positional == [] then . else .claudeMdExcludes = $ARGS.positional end' \
+    --args ${excludes[@]+"${excludes[@]}"} <<<"$settings")
+}
 case "$role" in
   worker | main)
     if [ "${CLAUDE_STARTUP_PROFILE:-}" != full ]; then
       profile="$(cd "$(dirname "$0")/.." && pwd)/tools/claude/startup-profile.json"
-      settings=$(jq -c --arg role "$role" '.common + .roles[$role]' "$profile") || exit 1
+      settings=$(jq -c --arg role "$role" '.common * .roles[$role]' "$profile") || exit 1
+      rules_file=""
+      # A pane that cannot get the filtered copy starts with the full rule files rather than not at all.
+      pane_rules || { rules_file=""; settings=$(jq -c 'del(.paneRules)' <<<"$settings") || exit 1; }
       profile_args=(--settings "$settings")
+      [ -z "$rules_file" ] || profile_args+=(--append-system-prompt-file "$rules_file")
     fi ;;
 esac
 exec claude ${profile_args[@]+"${profile_args[@]}"} "$@"

@@ -9,7 +9,42 @@
     }
   },
   "roles": {
-    "worker": {},
+    "worker": {
+      "enabledPlugins": {
+        "core-skills@hyperframes": false,
+        "watch@claude-video": false,
+        "ralph-loop@claude-plugins-official": false,
+        "claude-hud@claude-hud": false,
+        "skill-creator@claude-plugins-official": false
+      },
+      "deniedMcpServers": [{ "serverName": "rea" }, { "serverName": "obsidian" }],
+      "permissions": { "deny": ["AskUserQuestion", "ScheduleWakeup", "SendFeedback"] },
+      "env": { "ENABLE_CLAUDEAI_MCP_SERVERS": "false" },
+      "skillOverrides": {
+        "closing-household-ledger": "off",
+        "hiring-panel": "off",
+        "asciinema-subtitles": "off",
+        "article-summary": "off",
+        "reverse-engineer-anything": "off",
+        "main-orchestrator": "off",
+        "stripe-projects": "off",
+        "chrome-browser": "off",
+        "computer-use": "off",
+        "built-in-browser": "off",
+        "google-workspace": "off",
+        "docs": "off",
+        "deep-research": "off",
+        "morning": "off",
+        "import-memory": "off",
+        "keybindings-help": "off",
+        "fewer-permission-prompts": "off",
+        "schedule": "off"
+      },
+      "paneRules": [
+        { "file": "~/.codex/AGENTS.md" },
+        { "file": "~/work/munice/CLAUDE.local.md", "under": "~/work/munice" }
+      ]
+    },
     "main": { "enableArtifact": false }
   }
 }
