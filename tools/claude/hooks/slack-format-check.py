@@ -24,6 +24,7 @@ import json
 import os
 import re
 import sys
+from collections import Counter
 
 FAKE_BULLET = re.compile(r"^\s*[•◦▪‣●○∙·]\s")
 MD_LIST = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
@@ -237,7 +238,7 @@ RUNS_CODE = re.compile(
 SHELL_READS = re.compile(_RUNNER + r"(?:python3?|node|deno|bun|ruby|perl|bash|sh|zsh|curl)\b", re.M)  # curl -d @-
 HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1[^\n]*\n(.*?)(?:^[ \t]*\2[ \t]*$|\Z)", re.S | re.M)
 # a quoted -c/-e code or curl body (-d, --data…, --json) stays; any other multi-line quote is words, not a command
-QUOTED = re.compile(r"(\s(?:-[ced]|--data(?:-\w+)?|--json)[=\s]+)?(\"(?:[^\"\\]|\\.)*\"|'[^']*')")
+QUOTED = re.compile(r"(\s(?:-[ced][=\s]*|(?:--data(?:-\w+)?|--json)[=\s]+))?(\"(?:[^\"\\]|\\.)*\"|'[^']*')")
 # how Codex writes a scratch script: cat > /tmp/…/post.py <<'EOF'
 WRITES_SCRIPT = re.compile(r"\bcat\b[^\n;&|]*>\s*['\"]?(" + SCRATCH_PATH.pattern + r"[^\s'\";&|]*?\.(?:py|[cm]?js|ts|sh))(?=['\"\s;&|)]|$)")
 # a curl body sent from a file (-d @body.json), and the simple VAR=value and cd that name its place
@@ -278,7 +279,9 @@ def code_only(command: str) -> str:
         kept.append(m[0])
         return "\0%d\0" % (len(kept) - 1)
     # quotes pair from the left as the shell pairs them; only a multi-line one that is no -c/-e code goes
-    out = QUOTED.sub(lambda m: m[0] if m[1] or "\n" not in m[2] else ' ""', HEREDOC.sub(heredoc, command))
+    # a double quote runs its $(…) and backticks: x="$(\ncurl …\n)" stays
+    out = QUOTED.sub(lambda m: m[0] if m[1] or "\n" not in m[2] or (m[2][0] == '"' and re.search(r"\$\(|`", m[2]))
+                     else ' ""', HEREDOC.sub(heredoc, command))
     return re.sub(r"\0(\d+)\0", lambda m: kept[int(m[1])], out)
 
 
@@ -318,8 +321,13 @@ def direct_post_problems(tool: str, inp: dict, cwd: str) -> list[str]:
     elif "*** Begin Patch" in command:
         deleted = {os.path.join(cwd, p.strip()) for p in re.findall(r"^\*\*\* Delete File: (.+)$", command, re.M)}
         for path, removed, added in patch_changes(command, cwd):
-            gone = set(removed.split("\n"))
-            final = "\n".join(line for line in on_disk(path).split("\n") if line not in gone) + "\n" + added
+            gone, kept = Counter(removed.split("\n")), []
+            for line in on_disk(path).split("\n"):  # each removed line once: a twin line the patch keeps stays
+                if gone[line]:
+                    gone[line] -= 1
+                else:
+                    kept.append(line)
+            final = "\n".join(kept) + "\n" + added
             changes += [] if path in deleted else [(path, final, final)]
     else:
         script, code = WRITES_SCRIPT.search(_expand(command)(command)), code_only(command)
@@ -531,6 +539,20 @@ def selftest():
     assert direct_post_problems("Bash", {"command": "cat <<'EOF'\nblocks 설명\nEOF\n" + send}, "")
     assert direct_post_problems("Bash", {"command": "cat <<EOF\n오늘 $(date)\n" + send + "\nEOF"}, "") == []
     assert direct_post_problems("Bash", {"command": curl + "-d @- <<'EOF'\n{\"blocks\": []}\nEOF"}, "") == []
+    # Codex review of origin/main..bf31d86: a $( in a multi-line double quote runs, -d'…' and -c'…' are attached
+    # arguments, a patch that removes one of two twin lines keeps the other
+    assert direct_post_problems("Bash", {"command": 'r="$(\n' + send + '\n)"'}, "")
+    assert direct_post_problems("Bash", {"command": send.split(" -d")[0] + " -d'{\n\"blocks\": []\n}'"}, "") == []
+    assert direct_post_problems("Bash", {"command": "python3 -c'import urllib.request as u\n"
+                                                     "u.urlopen(\"https://slack.com/api/chat.postMessage\")'"}, "")
+    twin = tempfile.mkdtemp(dir="/tmp")
+    try:
+        with open(os.path.join(twin, "post.py"), "w", encoding="utf-8") as f:
+            f.write('a = {\n"blocks": [],\n}\nb = {\n"blocks": [],\n}\nc.chat_postMessage(**b)\n')
+        patch = "*** Begin Patch\n*** Update File: post.py\n@@\n a = {\n-\"blocks\": [],\n+\"text\": \"x\",\n*** End Patch"
+        assert direct_post_problems("Bash", {"command": patch}, twin) == []
+    finally:
+        shutil.rmtree(twin)
     # Codex review of 24216ce: a blocks body in a variable or piped in
     assert direct_post_problems("Bash", {"command": "payload='{\n\"blocks\": []\n}'\n" + curl + '-d "$payload"'}, "") == []
     assert direct_post_problems("Bash", {"command": "cat <<'EOF' | " + curl + "-d @-\n{\"blocks\": []}\nEOF"}, "") == []
