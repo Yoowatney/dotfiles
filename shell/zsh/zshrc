@@ -15,6 +15,9 @@ fi
 # ============================================
 export ZSH="$HOME/.oh-my-zsh"
 ZSH_THEME="powerlevel10k/powerlevel10k"
+# Ask nothing at start: a [Y/n] update question eats the first key a tool types, and herdr starts an agent by
+# typing its command (집맥 2026-11-06: `claude` ran as `laude`). It only reminds; `omz update` updates.
+zstyle ':omz:update' mode reminder
 
 plugins=(
 	zsh-completions
