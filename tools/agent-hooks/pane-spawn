@@ -6,7 +6,7 @@
 # It marks the calling pane 👑 unless it is already 🫡, opens the split or tab, names the pane 🫡, starts the agent, waits for its session and
 # hands over the instruction. The agent's herdr name is what lets the pane close itself when its work ends (pane-label).
 # Agents cannot run `herdr agent start` or `herdr pane split` themselves: the hook no-sed-inplace.py sends them here.
-#   pane-spawn [--new-tab] [--kind claude|codex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
+#   pane-spawn [--new-tab] [--kind claude|codex|auto] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
 #   pane-spawn "api#1 설계" "지시" -- --model opus --effort high
 # Three callers stay where they are and open beside themselves: a pane under a lead (🫡), a job tab (`pane-tell` refuses a job pane,
 # so a hidden child could reach nobody), and a pane on any server but default. So does a lead when workers cannot take the pane
@@ -23,10 +23,12 @@
 # report asks for no other check (auto-tab-close.py). Only a pane herdr_peers.delegates_checks says yes to may open one (the main
 # pane today); any other lead checks results itself, so there it is bad usage and opens nothing. A check pane is Codex in its
 # sandbox, which writes only in a fixed empty folder and temp and has no network: it reads GitHub through gh-read, Slack
-# through the Slack MCP's read tools, and processes with ps. With --kind claude, or once Codex's week is past 70% used, it is
-# Claude Sonnet, which may write anywhere.
-# --kind auto is that same choice for a pane that does the job: Codex until its week is past 70% used, then Claude. A lead opens
-# a pane for code, tests or docs with it (요유 2026-11-05). The main pane posts to Slack; its work panes only report results.
+# through the Slack MCP's read tools, and processes with ps. With --kind claude it is Claude Sonnet, which may write anywhere.
+# --kind auto uses Codex regardless of recorded weekly usage (요유 2026-11-07, api#1051: reset coupons are available).
+# The herdr startup/readiness responses used here provide no verified current quota-block signal.
+# Historical percentages and dialog text cannot prove one.
+# Until such a signal exists, auto never falls back to Claude. Startup and delivery failures retain their normal error paths.
+# A lead opens a pane for code, tests or docs with it (요유 2026-11-05). The main pane posts to Slack; its work panes only report results.
 # The main pane opens a Claude pane that does the job only with --why, the reason Codex cannot do it (api#1036): a Codex work pane
 # writes nothing outside its folder, so gcloud cannot refresh its login there and GCP commands fail (2026-11-05). A missing
 # reason or any reason mentioning Slack (case-insensitive) or 슬랙 is refused and sent to --kind auto. --why gcp and other
@@ -37,20 +39,17 @@
 # Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
 H=${HERDR_BIN_PATH:-herdr}
 USAGE='usage: pane-spawn [--new-tab] [--check] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
-  --kind auto: Codex until its week is past 70% used, then Claude. Use it for code, tests and docs; work panes report results.
+  --kind auto: Codex regardless of weekly usage. This launcher has no verified quota-block signal, so no automatic Claude fallback.
+    Use it for code, tests and docs; work panes report results. Yoyoo can reset exhausted quota with a coupon.
   --why: in the main pane, why a pane that does the job must be Claude: gcp (it runs gcloud or other GCP commands) or another
     reason in one line. A Claude pane without one, or with a reason mentioning Slack (any case) or 슬랙, is refused there.
     Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요
-  --check: a check pane (main pane only): Codex, read-only, by the same 70% rule; --kind claude for a check that must write.'
+  --check: a check pane (main pane only): Codex, read-only, regardless of weekly usage; --kind claude for a check that must write.'
 MIN_ROWS=${PANE_SPAWN_MIN_ROWS:-16} # a 46-row window holds 4 panes of 11-12 rows, which still show about 5 lines of work (2026-11-04); a fifth would leave 5-6
 die() { echo "pane-spawn: $*" >&2; exit 2; }
 # Every reader takes a tab named "자동 …" or "알아서 …" for a job's: pane-tell refuses its panes, and no mark goes on it. A work name that
 # starts that way made an ordinary pane unreachable (요유 2026-11-05), so no tab it names starts that way.
 tab_name() { case "$1" in "자동 "* | "알아서 "*) echo "일 $1" ;; *) echo "$1" ;; esac; }
-
-# Codex's weekly use in percent, from the newest session record that has one: 0 once that week has reset, nothing if none says.
-# codex-week beside this script reads it; the status line shows the same reading.
-codex_week_used() { "$(dirname "$(readlink -f "$0")")/codex-week" | cut -f1; }
 
 same= new_tab= check= kind= why= opener= cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
 while [ $# -gt 0 ]; do
@@ -69,17 +68,11 @@ while [ $# -gt 0 ]; do
 done
 [ $# -ge 2 ] && [ -n "$1" ] && [ -n "$2" ] || die "$USAGE"
 [ -z "$opener" ] || [ -z "$check$same$new_tab" ] || die "--opener opens a moved pane's own tab: no --check, --same-tab or --new-tab"
-asked=${kind:-claude} # what the caller chose; auto past 70% turns Claude below, which is pane-spawn's choice, not the caller's
-# A check pane runs on Codex's spare weekly allowance (2026-11-05) until that week is past 70% used. A check that must write to
+asked=${kind:-claude} # what the caller chose, before auto resolves to Codex
+# A check pane runs Codex regardless of weekly usage. A check that must write to
 # GitHub, Slack or the board, or to the repo it checks, passes --kind claude: the Codex pane below cannot.
 [ -z "$check" ] || [ -n "$kind" ] || kind=auto
-if [ "$kind" = auto ]; then
-  kind=codex used=$(codex_week_used)
-  if awk -v u="${used:-0}" 'BEGIN { exit !(u > 70) }'; then
-    kind=claude
-    echo "pane-spawn: Codex has used ${used}% of its week, so this pane runs Claude" >&2
-  fi
-fi
+[ "$kind" != auto ] || kind=codex
 kind=${kind:-claude}
 name=$1 prompt=$2
 # 요유 talks only to the lead (2026-11-01), so a new pane hears it here and not from each lead's memory.
@@ -195,7 +188,7 @@ workers_help="start it with: launchctl kickstart gui/$(id -u)/com.yoyoo.herdr-wo
 if [ -z "$opener" ] && [ "term_$term" = "$(cat "$mainfile" 2>/dev/null)" ]; then
   [ -z "$same" ] || die "the main pane does no work, so it never adds a pane to its own tab"
   if [ -z "$check" ] && [ "$asked" = claude ]; then
-    [[ "$why" == *[![:space:]]* ]] || die "the main pane opens a Claude pane only with --why, the reason Codex cannot do the job: --why gcp (it runs gcloud or other GCP commands; a Codex work pane cannot write gcloud's login files) or --why \"<one line>\". Any other pane: --kind auto (Codex until its week is past 70% used)."
+    [[ "$why" == *[![:space:]]* ]] || die "the main pane opens a Claude pane only with --why, the reason Codex cannot do the job: --why gcp (it runs gcloud or other GCP commands; a Codex work pane cannot write gcloud's login files) or --why \"<one line>\". Any other pane: --kind auto (Codex regardless of weekly usage)."
     case "$why" in
       *[sS][lL][aA][cC][kK]* | *슬랙*) die "Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요" ;;
     esac

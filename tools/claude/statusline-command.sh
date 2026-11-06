@@ -12,7 +12,7 @@ input=$(cat)
 hud_launchers=("${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/claude-hud/claude-hud/*/scripts/statusline.mjs)
 hud=$(printf '%s' "$input" | node "${hud_launchers[0]}" 2>/dev/null)
 
-# Codex's week beside Claude's, read by codex-week as pane-spawn reads it. Match claude-hud 0.14.1's
+# Codex's week beside Claude's, read by codex-week for display only. Match claude-hud 0.14.1's
 # render/frame (10/6/4 cells), render/colors (rounded fill, quota colors, dim empty cells), and render/time (ceil minutes for resets,
 # floor minutes for record age). Keep this independent of the plugin so a missing HUD still shows Codex.
 codex_text() {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Codex's weekly limit from the newest Codex session record that has one, as "<used percent>\t<reset epoch>\t<record epoch>":
 # used is 0 once that week has reset, the record epoch is empty if the line has no timestamp, and nothing prints if no
-# record of the last 8 days says. pane-spawn (its --kind auto and --check choice) and the status line read it.
+# record of the last 8 days says. The status line reads it; pane-spawn does not use usage to select an agent.
 for f in $(find "${CODEX_HOME:-$HOME/.codex}/sessions" -name '*.jsonl' -mtime -8 -print0 2>/dev/null | xargs -0 ls -t 2>/dev/null | head -5); do
   grep -h '"rate_limits"' "$f" | jq -r --argjson now "$(date +%s)" '. as $line | .payload.rate_limits | objects | (.primary, .secondary)
     | select(.window_minutes? == 10080)

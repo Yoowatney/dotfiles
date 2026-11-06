@@ -12,6 +12,7 @@ fail() {
 
 # A fake herdr that logs each call to $SANDBOX/log. FAIL_START=<n> fails the first n agent starts, SESSIONLESS=1 keeps
 # the session id empty as Codex does until its first prompt, FAIL_WAIT=<n> fails the first n waits for work.
+# NOT_READY=1 never reports readiness; FAIL_PROMPT=1 refuses prompt delivery.
 # Each line starts with the server the call went to, read from HERDR_SOCKET_PATH: [default] or [workers].
 cat > "$SANDBOX/herdr" <<EOF
 #!/usr/bin/env bash
@@ -28,7 +29,8 @@ case "\$1 \$2" in
   "tab create") { [ -z "\${FAIL_WORKERS_TAB:-}" ] || [ "\$s" != workers ]; } && jq -n '{result: {root_pane: {pane_id: "w1:new"}, tab: {tab_id: "w1:t9"}}}' ;;
   "pane layout") [ -z "\${FAIL_LAYOUT:-}" ] && cat "$SANDBOX/layout.json" ;;
   "pane split") [ -z "\${FAIL_SPLIT:-}" ] && jq -n '{result: {pane: {pane_id: "w1:new"}}}' ;;
-  "pane rename"|"agent prompt"|"pane close") ;;
+  "pane rename"|"pane close") ;;
+  "agent prompt") [ -z "\${FAIL_PROMPT:-}" ] ;;
   "agent read") printf '%s\n' "\${SCREEN:-}" ;;
   "agent wait")
     n=\$(cat "$SANDBOX/waits" 2>/dev/null || echo 0); echo \$((n + 1)) > "$SANDBOX/waits"
@@ -39,7 +41,8 @@ case "\$1 \$2" in
     [ -z "\${BLOCKED_START:-}" ] || { echo '{"error":{"code":"agent_not_ready","message":"agent x is blocked during startup and is not ready for prompts"}}'; exit 1; }
     [ "\$n" -ge "\${FAIL_START:-0}" ] ;;
   "agent get")
-    if [ -n "\${SESSIONLESS:-}" ]; then jq -n '{result: {agent: {interactive_ready: true}}}'
+    if [ -n "\${NOT_READY:-}" ]; then jq -n '{result: {agent: {interactive_ready: false}}}'
+    elif [ -n "\${SESSIONLESS:-}" ]; then jq -n '{result: {agent: {interactive_ready: true}}}'
     else jq -n --arg n "\${CALLER_AGENT:-}" '{result: {agent: {name: \$n, interactive_ready: true, agent_session: {value: "sid"}}}}'; fi ;;
   *) exit 2 ;;
 esac
@@ -372,7 +375,7 @@ ps --check --kind claude "로그인" "돌려 보세요" -- --model=opus --effort
 hasnt "claude-sonnet-5-5" "the caller's --model= wins"
 hasnt "--effort high" "so does the caller's --effort="
 
-# Past 70% of Codex's week, read from the newest Codex session record, a check pane runs Claude Sonnet again and says why.
+# api#1051: recorded usage never selects Claude; it cannot prove a current quota block after a coupon reset.
 usage() { # <used percent> <seconds until reset> [secondary]: a Codex session record as Codex writes it
   mkdir -p "$SANDBOX/home/.codex/sessions/2026/11/05"
   local week; week=$(jq -n --argjson u "$1" --argjson r "$(($(date +%s) + $2))" '{used_percent: $u, window_minutes: 10080, resets_at: $r}')
@@ -381,36 +384,68 @@ usage() { # <used percent> <seconds until reset> [secondary]: a Codex session re
   { echo '{"type":"session_meta","payload":{}}'
     jq -nc --argjson p "$p" --argjson s "$s" '{type: "event_msg", payload: {type: "token_count", rate_limits: {limit_id: "codex", primary: $p, secondary: $s}}}'; } > "$SANDBOX/home/.codex/sessions/2026/11/05/rollout-a.jsonl"
 }
-usage 71 3600
-ps --check "로그인" "돌려 보세요" 2>"$SANDBOX/err" >/dev/null
-has "--kind claude --pane w1:new --timeout 120000 -- --model claude-sonnet-5-5 --effort high" "71%: a Claude Sonnet check pane"
-hasnt "--sandbox" "71%: no Codex flags"
-grep -q "71" "$SANDBOX/err" || fail "71%: says why: $(cat "$SANDBOX/err")"
-usage 70 3600
+for percent in 0 69 70 71 99 100; do
+  for window in primary secondary; do
+    usage "$percent" 3600 "$([ "$window" != secondary ] || echo secondary)"
+    ps --check "로그인" "돌려 보세요" 2>"$SANDBOX/err" >/dev/null
+    has "--kind codex" "$percent ($window): a Codex check pane"
+    has "--sandbox workspace-write --ask-for-approval never" "$percent ($window): check restrictions remain"
+    hasnt "--kind claude" "$percent ($window): no automatic Claude fallback"
+    SESSIONLESS=1 ps --kind auto "구현" "지시" 2>"$SANDBOX/err" >/dev/null
+    has "--kind codex" "$percent ($window): an auto work pane runs Codex"
+    hasnt "--sandbox" "a work pane is no check pane"
+    hasnt "확인 칸입니다" "nor told it is one"
+  done
+done
+usage 100 -60
 ps --check "로그인" "돌려 보세요" >/dev/null
-has "--kind codex" "70% is not past 70%"
-usage 90 -60
-ps --check "로그인" "돌려 보세요" >/dev/null
-has "--kind codex" "a week that has reset since the record starts at 0"
-usage 71 3600 secondary
-ps --check "로그인" "돌려 보세요" >/dev/null
-has "--kind claude" "a plan whose week is the second limit is read there"
-usage 71 3600; echo '{"type":"event_msg","payload":{"type":"token_count","rate_limits":null}}' >> "$SANDBOX/home/.codex/sessions/2026/11/05/rollout-a.jsonl"
+has "--kind codex" "a reset week still runs Codex"
+usage 100 3600; echo '{"type":"event_msg","payload":{"type":"token_count","rate_limits":null}}' >> "$SANDBOX/home/.codex/sessions/2026/11/05/rollout-a.jsonl"
 mkdir -p "$SANDBOX/home/.codex/sessions/2026/11/06"; echo '{"type":"session_meta","payload":{}}' > "$SANDBOX/home/.codex/sessions/2026/11/06/rollout-b.jsonl"
 touch -t "$(date -v-1H +%Y%m%d%H%M)" "$SANDBOX/home/.codex/sessions/2026/11/05/rollout-a.jsonl"
 ps --check "로그인" "돌려 보세요" >/dev/null
-has "--kind claude" "a newer session with no limits yet: the last one that has them counts"
-# A lead opens a pane that posts nothing to Slack (code, tests, docs) with --kind auto: Codex by the same 70% rule (요유 2026-11-05).
-usage 71 3600
-ps --kind auto "구현" "지시" 2>"$SANDBOX/err" >/dev/null
-has "--kind claude" "auto past 70%: Claude"
-grep -q "71" "$SANDBOX/err" || fail "auto past 70%: says why: $(cat "$SANDBOX/err")"
-hasnt "--model" "a Claude work pane keeps its model"
-usage 70 3600
+has "--kind codex" "stale recorded exhaustion does not prove a current block"
+echo 'not JSON' > "$SANDBOX/home/.codex/sessions/2026/11/06/rollout-b.jsonl"
 SESSIONLESS=1 ps --kind auto "구현" "지시" >/dev/null
-has "--kind codex" "auto at 70%: Codex"
-hasnt "--sandbox" "a Codex work pane is no check pane"
-hasnt "확인 칸입니다" "nor told it is one"
+has "--kind codex" "unreadable usage does not select Claude"
+rm -rf "$SANDBOX/home/.codex/sessions"
+ps --check "로그인" "돌려 보세요" >/dev/null
+has "--kind codex" "missing usage does not select Claude"
+
+# Startup failures are not proof of exhausted quota. Do not silently start another agent or send the job twice.
+rc=0
+FAIL_START=9 ps --kind auto "실패" "지시" 2>"$SANDBOX/err" >/dev/null || rc=$?
+[ "$rc" = 1 ] || fail "auto startup failure: expected exit 1, got $rc"
+has "--kind codex" "auto startup failure stays Codex"
+hasnt "--kind claude" "no fallback on an unclassified start error"
+has "pane close w1:new" "a failed start removes its empty pane"
+hasnt "agent prompt" "a failed start delivers no job"
+grep -q "codex did not start" "$SANDBOX/err" || fail "reports the startup error"
+rc=0
+BLOCKED_START=1 SCREEN='You have hit your usage limit' ps --check "막힘" "지시" 2>"$SANDBOX/err" >/dev/null || rc=$?
+[ "$rc" = 1 ] || fail "an unstructured dialog must fail, got $rc"
+hasnt "--kind claude" "dialog text alone cannot prove a current quota block"
+grep -qF 'You have hit your usage limit' "$SANDBOX/err" || fail "reports the actual dialog"
+rc=0
+NOT_READY=1 ps --kind auto "준비 실패" "지시" 2>"$SANDBOX/err" >/dev/null || rc=$?
+[ "$rc" = 1 ] || fail "readiness timeout: expected exit 1, got $rc"
+hasnt "--kind claude" "readiness timeout does not select Claude"
+has "pane close w1:new" "a pane that never became ready is removed"
+hasnt "agent prompt" "an unready pane gets no job"
+grep -q 'codex never became ready' "$SANDBOX/err" || fail "reports readiness timeout"
+rc=0
+FAIL_PROMPT=1 ps --kind auto "전달 실패" "지시" 2>"$SANDBOX/err" >/dev/null || rc=$?
+[ "$rc" = 1 ] || fail "prompt failure: expected exit 1, got $rc"
+hasnt "--kind claude" "prompt failure does not select Claude"
+has "pane close w1:new" "a rejected delivery removes its pane"
+hasnt "agent wait" "rejected delivery does not wait for work"
+grep -q 'the instruction was not delivered' "$SANDBOX/err" || fail "reports prompt failure"
+rc=0
+FAIL_WAIT=1 ps --kind auto "무응답" "지시" 2>"$SANDBOX/err" >/dev/null || rc=$?
+[ "$rc" = 1 ] || fail "auto unseen work: expected exit 1, got $rc"
+hasnt "--kind claude" "ambiguous delivery never starts a duplicate Claude job"
+hasnt "pane close" "an accepted job may still be running"
+[ "$(grep -c 'agent prompt w1:new 지시' "$SANDBOX/log")" = 1 ] || fail "auto delivers only once"
 usage 71 3600
 ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
 has "--kind codex" "a kind the caller names wins"
@@ -451,7 +486,7 @@ ps --why "작업 폴더 밖 파일 수정" "설정 수정" "지시" >/dev/null; 
 SESSIONLESS=1 ps --kind codex "구현" "지시" >/dev/null; has "--kind codex" "Codex needs no reason"
 SESSIONLESS=1 ps --kind auto "구현" "지시" >/dev/null; has "--kind codex" "auto needs no reason"
 usage 71 3600
-ps --kind auto "구현" "지시" 2>/dev/null >/dev/null; has "--kind claude" "auto past 70%: Claude by pane-spawn's choice, no reason"
+ps --kind auto "구현" "지시" 2>/dev/null >/dev/null; has "--kind codex" "auto at high usage still needs no reason"
 ps --check --kind claude "로그인" "돌려 보세요" >/dev/null; has "--kind claude" "a check pane needs no reason"
 ps --check --kind claude --why "Slack에 답글" "로그인" "돌려 보세요" >/dev/null; has "--kind claude" "a check pane skips the Slack reason check"
 not_main
