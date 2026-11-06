@@ -13,7 +13,7 @@ hud_launchers=("${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/claude-hud/cl
 hud=$(printf '%s' "$input" | node "${hud_launchers[0]}" 2>/dev/null)
 
 # Codex's week beside Claude's, read by codex-week as pane-spawn reads it. Match claude-hud 0.14.1's
-# render/frame (10/6/4 cells), render/colors (rounded fill), and render/time (ceil minutes for resets,
+# render/frame (10/6/4 cells), render/colors (rounded fill, quota colors, dim empty cells), and render/time (ceil minutes for resets,
 # floor minutes for record age). Keep this independent of the plugin so a missing HUD still shows Codex.
 codex_text() {
 	local used resets at now
@@ -33,12 +33,16 @@ codex_text() {
 			if (resets <= now) used = 0
 			used = used > 100 ? 100 : used
 			filled = int(used / 100 * width + 0.5)
-			printf "Codex "
-			for (i = 0; i < width; i++) printf "%s", (i < filled ? "█" : "░")
+			color = used >= 90 ? "\033[31m" : used >= 75 ? "\033[95m" : "\033[94m"
+			printf "Codex %s", color
+			for (i = 0; i < filled; i++) printf "█"
+			printf "\033[2m"
+			for (i = filled; i < width; i++) printf "░"
+			printf "\033[0m"
 			note = resets <= now ? "reset" : "resets in " duration(int((resets - now + 59) / 60))
 			if (at ~ /^[0-9]+$/ && now - at >= 3600)
 				note = note "; updated " duration(int((now - at) / 60)) " ago"
-			printf " %d%% (%s)\n", int(used + 0.5), note
+			printf " %s%d%%\033[0m (%s)\n", color, int(used + 0.5), note
 		}'
 }
 # The HUD's lines, Codex at the end of its usage line when that fits COLUMNS (a wrapped status line reads as broken), else on

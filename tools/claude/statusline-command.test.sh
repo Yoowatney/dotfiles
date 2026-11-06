@@ -32,6 +32,15 @@ check() {   # <name> <output> <must match> [<must not match>]
 		echo "ok   $1"
 	fi
 }
+check_exact() { # <name> <output> <expected>, including ANSI styling
+	if [ "$2" = "$3" ]; then
+		echo "ok   $1"
+	else
+		echo "FAIL $1"
+		printf '  expected: %s\n  actual:   %s\n' "$3" "$2" | cat -v
+		fails=$((fails + 1))
+	fi
+}
 
 fake_hud "$T/hud" 'console.log("[Opus] Context 12%")'   # a machine without the real HUD plugin must pass too
 out=$(CLAUDE_CONFIG_DIR="$T/hud" run)
@@ -77,8 +86,23 @@ codex_record() { # <used percent> <reset epoch> <seconds since written>: one rec
 		>"$HOME/.codex/sessions/2026/11/06/rollout-a.jsonl"
 }
 plain() { sed $'s/\e\\[[0-9;]*m//g'; }
-fake_hud "$T/usage" 'console.log("[Opus]\nContext 12% │ Usage Weekly ██████░░░░ 63% (resets in 1d 10h)")'
+fake_hud "$T/usage" 'console.log("[Opus]\nContext 12% │ Usage Weekly \x1b[94m██████\x1b[2m░░░░\x1b[0m \x1b[94m63%\x1b[0m (resets in 1d 10h)")'
 reset=$(($(date +%s) + 5 * 86400 + 6 * 3600))
+# Literal expectations from claude-hud 0.14.1 render/colors.ts: quotaBar + formatQuotaPercent.
+# Catch absent/wrong band colors, DIM on the wrong cells, and color leaking into the reset notice.
+for row in '0 94 - ░░░░░░░░░░ 0' '48 94 █████ ░░░░░ 48' '74.9 94 ███████ ░░░ 75' '75 95 ████████ ░░ 75' '89.9 95 █████████ ░ 90' '90 31 █████████ ░ 90' '100 31 ██████████ - 100' '123 31 ██████████ - 100'; do
+	read -r used color filled empty percent <<<"$row"
+	[ "$filled" != - ] || filled=''
+	[ "$empty" != - ] || empty=''
+	codex_record "$used" "$reset" 60
+	out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/empty" run)
+	check_exact "$used%: HUD quota color, dim empty cells, colored percent and resets" "$out" \
+		"Codex $(printf '\033[%sm%s\033[2m%s\033[0m \033[%sm%s%%\033[0m' "$color" "$filled" "$empty" "$color" "$percent") (resets in 5d 6h)"
+done
+codex_record 90 "$(date +%s)" 60
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/empty" run)
+check_exact "reset clears critical coloring as well as usage" "$out" \
+	$'Codex \e[94m\e[2m░░░░░░░░░░\e[0m \e[94m0%\e[0m (reset)'
 codex_record 46.0 "$reset" 60
 out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
 check "Codex uses the HUD's ten-cell rounded bar and reset wording" "$(sed -n 2p <<<"$out")" 'Usage Weekly ██████░░░░ 63% \(resets in 1d 10h\) │ Codex █████░░░░░ 46% \(resets in 5d 6h\)$'
