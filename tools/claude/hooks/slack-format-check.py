@@ -79,14 +79,14 @@ def left_problems(text: str, left: dict | None = None) -> list[str]:
             or any(re.search(r"(?<![\w./@])@" + re.escape(n) + r"(?![A-Za-z0-9_])", text, re.I) for n in names)]
 
 
-LEFT_SENDS = re.compile(r"slack-post\.sh|slack\.com/api|\bgh\s+release\s+(?:create|edit)\b")
 NOTES_FILE = re.compile(r"(?:--notes-file|\s-F)[=\s]+['\"]?([^\s'\";&|)]+)")
 
 
 def left_bash_problems(command: str, cwd: str, left: dict | None = None) -> list[str]:
     """A shell post that skips the Slack client (nightly_api slack-post.sh, curl, the release body CI posts as its
     공지): the command text and a notes file it names. ponytail: a body piped in from a file other than these is unread."""
-    if not LEFT_SENDS.search(command):
+    # the script or gh in a command word's place (_AT, defined below), so a note that only names them is not a post
+    if not re.search(_AT + r"(?:slack-post\.sh|gh\s+release\s+(?:create|edit)\b)|slack\.com/api", command, re.M):
         return []
     files = [on_disk(p if os.path.isabs(p) else os.path.join(cwd, p))
              for p in map(os.path.expanduser, NOTES_FILE.findall(command))]
@@ -467,6 +467,8 @@ def selftest():
         os.remove(notes)
     assert left_bash_problems(post.replace("@Gone", "@Luke"), "", gone) == []
     assert left_bash_problems("grep -rn '@Gone' docs/", "", gone) == []  # a search, not a post
+    note = "cat >> notes.md <<'EOF'\n- GREEN: slack-post.sh @Gone -> deny, gh release edit <@U9>\nEOF"
+    assert left_bash_problems(note, "", gone) == [], "a note that names the script runs nothing"
 
     # cf#752: a session's own call to Slack's post API skips the shared client, so its list lines go out as typed.
     tmp = "/private/tmp/claude-501/x/scratchpad/"
