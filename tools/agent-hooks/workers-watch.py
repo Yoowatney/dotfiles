@@ -327,7 +327,7 @@ def tick(env, now: float) -> list:
         """moved: (pane, name) of a pane workers-move opened here, whose lead is on the 회사맥: the day file takes what nobody
         here heard, and `workers-move bridge` carries it there. It is no alert someone took, so it is not in `told`."""
         pt = env.get("WORKERS_WATCH_PANE_TELL") or os.path.join(HERE, "pane-tell")
-        for term in dict.fromkeys(t for t in (opener, main) if t in where):  # a lead that cannot hear (its agent ended) is no stop
+        for term in dict.fromkeys(t for t in (opener, "" if moved else main) if t in where):  # a lead that cannot hear (its agent ended) is no stop
             text = f"{msg} {herdr_peers.HOME_NOTE}" if home and term != opener else msg
             try:
                 ok = subprocess.run([pt, where[term][0], text], env={**os.environ, **env}, timeout=10, stdin=subprocess.DEVNULL,
@@ -997,6 +997,10 @@ esac
         script(f"{d}/workers-move", f'echo "$*" >> {d}/moved\n')
         subprocess.run([sys.executable, "-I", os.path.realpath(__file__)], env={**env, "PATH": os.environ.get("PATH", ""),
                        "WORKERS_WATCH_MOVE": f"{d}/workers-move", "WORKERS_WATCH_NOW": "132000"}, timeout=30)
+        for _ in range(100):  # detached
+            if os.path.exists(f"{d}/moved"):
+                break
+            time.sleep(0.05)
         assert open(f"{d}/moved").read() == "bridge\n", "the bridge runs once a minute with the watch"
 
         # The main pane re-reads its whole conversation for each message, so past MAIN_REFRESH_AT tokens (the last response's
@@ -1092,10 +1096,13 @@ def main():
         tick(os.environ, float(os.environ.get("WORKERS_WATCH_NOW") or time.time()))
     except Exception:
         pass
-    try:  # what moved panes said on 집맥 reaches the main pane here; with no open move it returns at once
-        subprocess.run([os.environ.get("WORKERS_WATCH_MOVE") or os.path.join(HERE, "workers-move"), "bridge"], timeout=90,
-                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except (OSError, subprocess.TimeoutExpired):
+    # What moved panes said on 집맥 reaches the main pane here; with no open move it returns at once. Detached, never killed at a
+    # timeout: one cut between a send and its save would send it again or open a second check pane (Claude review). bridge.lock
+    # keeps one at a time.
+    try:
+        subprocess.Popen([os.environ.get("WORKERS_WATCH_MOVE") or os.path.join(HERE, "workers-move"), "bridge"], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
         pass
 
 

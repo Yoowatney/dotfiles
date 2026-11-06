@@ -70,7 +70,7 @@ def _load(name, file):
 herdr_peers = _load("herdr_peers", "herdr_peers.py")
 atc = _load("auto_tab_close", "auto-tab-close.py")  # last_reply, route_main_report, short_report
 
-WAIT, POLL, GONE = 900, 5, 60
+WAIT, POLL, GONE, SLEPT = 900, 5, 60, 120
 MARK = "[인계 메모]"
 SYNCED = ("~/.dotfiles", "~/work/munice", "~/work/munice/munice-claude")  # 집맥 pulls these every 3 minutes (sync-home step 4)
 ENTRY = re.compile(r"^## (\d\d:\d\d:\d\d) (\S+)(?: (.*))?$", re.M)  # auto-tab-close.py's `## HH:MM:SS <address> <label>`
@@ -101,7 +101,9 @@ def run(*cmd, timeout=120):
     try:
         r = subprocess.run(list(cmd), capture_output=True, text=True, env=env, timeout=timeout)
         return r.returncode, r.stdout, r.stderr
-    except (OSError, subprocess.TimeoutExpired) as e:
+    except subprocess.TimeoutExpired as e:
+        return 124, "", str(e)
+    except OSError as e:
         return 1, "", str(e)
 def git(top, *args):
     return run("git", "-C", top, *args)
@@ -166,15 +168,14 @@ if op == "open":
     except OSError:
         size = 0
     spawn = os.environ.get("WORKERS_MOVE_REMOTE_SPAWN") or home + "/.local/bin/pane-spawn"
-    tried = []
-    for kind in dict.fromkeys([a["kind"], "claude"]):
-        rc, o, e = run(spawn, "--opener", a["opener"], "--kind", kind, "--cwd", a["folder"], a["name"],
-                       a["prompt"].replace("{memo}", memo), timeout=600)
-        addr = next((l for l in o.splitlines() if l.startswith("workers/")), "")
-        if addr:  # exit 1 with an address: it shows no work yet, and the instruction was typed
-            out({"ok": True, "address": addr, "kind": kind, "memo": memo, "start": [day, size], "warn": e.strip()[-300:] if rc else ""})
-        tried.append("%s: %s" % (kind, (e or o).strip()[-300:]))
-    out({"ok": False, "why": " / ".join(tried)})
+    # Claude, whatever the 회사맥 pane ran: a Codex pane has no network to push, and in a fresh worktree here it would stop at a
+    # trust dialog that eats the instruction (Claude review)
+    rc, o, e = run(spawn, "--opener", a["opener"], "--kind", "claude", "--cwd", a["folder"], a["name"],
+                   a["prompt"].replace("{memo}", memo), timeout=600)
+    addr = next((l for l in o.splitlines() if l.startswith("workers/")), "")
+    if addr:  # exit 1 with an address: it shows no work yet, and the instruction was typed
+        out({"ok": True, "address": addr, "kind": "claude", "memo": memo, "start": [day, size], "warn": e.strip()[-300:] if rc else ""})
+    out({"ok": False, "unknown": rc == 124, "why": (e or o).strip()[-300:]})
 if op == "bridge":
     import re
     head = re.compile(rb"\n## \d\d:\d\d:\d\d \S")
@@ -468,8 +469,8 @@ def move_one(env, moves, rec, memo, agents_now) -> None:
     rec.update(step="opening", top=g.get("top"), branch=g.get("branch"), git=bool(g.get("git")))
     save(env, "moves.json", moves)
     o = remote(env, "open", timeout=900, agent=rec["agent"], memo=note(env, rec, memo, g), opener=herdr_peers.main_terminal(env),
-               kind=rec["kind"], folder=rec["folder"], name=f"{plain_label(rec['label'])} (집맥)", prompt=instruction(rec, g, p.get("made")))
-    if o is None:  # it may have opened: never a second pane, never the same work here too
+               folder=rec["folder"], name=f"{plain_label(rec['label'])} (집맥)", prompt=instruction(rec, g, p.get("made")))
+    if o is None or o.get("unknown"):  # it may have opened: never a second pane, never the same work here too
         return settle(env, moves, rec, "unknown", "집맥 칸을 여는 도중 ssh가 끊겼습니다. 집맥 workers 서버에 그 칸이 있는지 보세요")
     if not o.get("ok"):
         return settle(env, moves, rec, "kept", f"집맥 칸을 열지 못했습니다: {o.get('why')}")
@@ -529,7 +530,8 @@ def run(env) -> int:
     for c in found:
         key, old = c["terminal"], moves.get(c["terminal"]) or {}
         keys.append(key)
-        if old.get("step") == "opened":  # the 집맥 pane is open; only this pane's close was left
+        if old.get("step") in ("opened", "moved") and old.get("agent") == c["agent"]:
+            old["pane"] = c["pane"]  # its 집맥 pane is open: this pane's close was left, or did not take
             close_local(env, moves, old)
         elif old.get("step") == "opening":  # a run died while it opened one
             settle(env, moves, old, "unknown", "지난 실행이 집맥 칸을 여는 도중 멈췄습니다. 집맥 workers 서버에 그 칸이 있는지 보세요")
@@ -550,28 +552,43 @@ def run(env) -> int:
     if not keys:
         say("[퇴근 인계] 넘길 밑 칸이 없습니다.")
         return 0
-    deadline = time.time() + float(env.get("WORKERS_MOVE_WAIT") or WAIT)
-    while waiting := [k for k in keys if moves[k].get("step") == "asked"]:
-        listed = herdr_peers.herdr(env, "agent", "list", socket=herdr_peers.socket_of(env, "workers")).get("agents")
-        by_pane = {a.get("pane_id"): a for a in listed or []}
-        for k in waiting if listed is not None else []:
-            rec = moves[k]
-            a = by_pane.get(rec["pane"])
-            if a is None:
-                settle(env, moves, rec, "kept", "인계 메모를 쓰기 전에 칸이 사라졌습니다")
-                continue
-            t = transcript(env, rec["session"])
-            if a.get("agent_status") not in ("idle", "done") or not t or os.path.getmtime(t) < rec["asked_at"]:
-                continue
-            memo = atc.last_reply(rec["session"], env.get("HOME") or "")
-            if MARK in memo:
-                move_one(env, moves, rec, memo, listed)
-        if time.time() >= deadline:
-            for k in waiting:
-                if moves[k].get("step") == "asked":
-                    settle(env, moves, moves[k], "kept", "기다리는 동안 인계 메모가 오지 않았습니다")
-            break
-        time.sleep(float(env.get("WORKERS_MOVE_POLL") or POLL))
+    poll = float(env.get("WORKERS_MOVE_POLL") or POLL)
+    deadline, last = time.time() + float(env.get("WORKERS_MOVE_WAIT") or WAIT), time.time()
+    try:
+        while waiting := [k for k in keys if moves[k].get("step") == "asked"]:
+            if time.time() - last > poll + float(env.get("WORKERS_MOVE_SLEPT") or SLEPT):  # the lid closed during the wait: at 출근 nothing goes to 집맥 (Claude review)
+                for k in waiting:
+                    settle(env, moves, moves[k], "kept", "기다리는 동안 회사맥이 잠들어 옮기지 않았습니다")
+                break
+            listed = herdr_peers.herdr(env, "agent", "list", socket=herdr_peers.socket_of(env, "workers")).get("agents")
+            by_pane = {a.get("pane_id"): a for a in listed or []}
+            for k in waiting if listed is not None else []:
+                rec = moves[k]
+                try:
+                    a = by_pane.get(rec["pane"])
+                    if a is None:
+                        settle(env, moves, rec, "kept", "인계 메모를 쓰기 전에 칸이 사라졌습니다")
+                        continue
+                    t = transcript(env, rec["session"])
+                    if a.get("agent_status") not in ("idle", "done") or not t or os.path.getmtime(t) < rec["asked_at"]:
+                        continue
+                    memo = atc.last_reply(rec["session"], env.get("HOME") or "")
+                    if MARK in memo:
+                        move_one(env, moves, rec, memo, listed)
+                except Exception as error:  # noqa: BLE001 - one pane's trouble stops no other
+                    if rec.get("step") in ("asked", "opening"):
+                        settle(env, moves, rec, "unknown" if rec["step"] == "opening" else "kept", f"오류: {error!r}"[:300])
+            if time.time() >= deadline:
+                for k in waiting:
+                    if moves[k].get("step") == "asked":
+                        settle(env, moves, moves[k], "kept", "기다리는 동안 인계 메모가 오지 않았습니다")
+                break
+            last = time.time()
+            time.sleep(poll)
+    finally:
+        for k in keys:
+            if moves[k].get("step") == "asked":
+                mark(env, "moving", k, on=False)
     text = summary(moves, keys)
     with open(path(env, "last-summary.txt"), "w", encoding="utf-8") as f:
         f.write(text + "\n")
@@ -967,10 +984,18 @@ if text.startswith("[퇴근 인계]") and addr in memos:
         moves["term_B"].update(remote="workers/w9:pR2")
         moves["term_C"]["step"] = "opening"
         save(env, "moves.json", moves)
+        with open(f"{d}/local.json") as f:  # A's close did not take: it is listed again, under another pane id
+            local = json.load(f)
+        local["workers"]["agents"].append(agent("w1:pA2", "spawn-MAIN-11", "sA", cwd=wt))
+        local["workers"]["agents"][-1]["terminal_id"] = "term_A"
+        local["workers"]["panes"].append({"pane_id": "w1:pA2", "terminal_id": "term_A", "label": "🟢 🫡 일 A"})
+        with open(f"{d}/local.json", "w") as f:
+            json.dump(local, f)
         assert run(dict(env, WORKERS_MOVE_WAIT="0.5")) == 0
         moves = load(env, "moves.json", {})
         assert moves["term_B"]["step"] == "moved" and moves["term_C"]["step"] == "unknown" and len(lines("rspawn.log")) == 1
         assert "workers pane close w1:pB" in lines("local.json.log")
+        assert "workers pane close w1:pA2" in lines("local.json.log") and not told("workers/w1:pA2"), "closed again, never asked"
         asks_c = told("workers/w1:pC").count(ASK)
         assert run(dict(env, WORKERS_MOVE_WAIT="0.5")) == 0  # and again: an unknown one is never asked again
         assert load(env, "moves.json", {})["term_C"]["step"] == "unknown" and told("workers/w1:pC").count(ASK) == asks_c
@@ -990,10 +1015,19 @@ if text.startswith("[퇴근 인계]") and addr in memos:
         os.unlink(f"{d}/spawn-fail")
         g = load(env, "moves.json", {})["term_G"]
         assert g["step"] == "kept" and "열지 못했습니다" in g["reason"] and "no trust" in g["reason"], g
-        assert [json.loads(x)[3] for x in lines("rspawn.log")[1:]] == ["codex", "claude"]  # Codex, then Claude
+        assert [json.loads(x)[3] for x in lines("rspawn.log")[1:]] == ["claude"]  # a Codex pane goes on as Claude
         assert "w1:pG" in json.dumps(json.load(open(f"{d}/local.json")))
         assert resume(env) == 0 and told("workers/w1:pG")[-1] == RESUME
         assert load(env, "moves.json", {})["term_G"]["step"] == "resumed" and not told("workers/w1:pD")
+
+        # the lid closed during the wait: on waking nothing is moved, and no mark stays
+        local["workers"]["agents"] = [agent("w1:pH", "spawn-MAIN-19", "sH", "working")]
+        local["workers"]["panes"] = [{"pane_id": "w1:pH", "terminal_id": "term_H", "label": "🫡 일 H"}]
+        with open(f"{d}/local.json", "w") as f:
+            json.dump(local, f)
+        assert run(dict(env, WORKERS_MOVE_SLEPT="-0.15", WORKERS_MOVE_WAIT="30")) == 0
+        h = load(env, "moves.json", {})["term_H"]
+        assert h["step"] == "kept" and "잠들어" in h["reason"] and not os.listdir(f"{orch}/moving"), h
 
         # tell / read reach the 집맥 pane
         assert main(["workers-move", "tell", "집맥:workers/w9:pR1", "계속하세요"], env) == 0

@@ -26,7 +26,7 @@ lead's panes share that server's one workspace: when the opener is gone or canno
 the main pane, saying it stands in (and, for a Home pane, to keep it off company Slack and the board; 요유 2026-11-05), never to
 another lead.
 At 퇴근 workers-move (api#1049) asks the main pane's panes for a handoff note: while `{state}/orchestrator/moving/<terminal>` is
-there, a reply is saved and goes nowhere, and the pane stays for workers-move to close. The pane it then opens on 집맥 (agent name
+there, a handoff note (`[인계 메모]`) is saved and goes nowhere, and the pane stays for workers-move to close. The pane it then opens on 집맥 (agent name
 with `r`) has its lead on the 회사맥, so there the day file is the delivery: the report is marked sent, for `workers-move bridge`.
 A dispatch tab runs on the workers server too, where nobody types (요유 2026-11-05). A report with something in `요유 몫` goes to the
 main pane in the short form under share.JOB_NOTE, which asks for no check pane, and then the tab closes unless its report says
@@ -513,14 +513,17 @@ def finish(reply: str, env):
              and not held(me.get("label") or "", me.get("terminal_id"), agents + hidden))
     now = datetime.datetime.now()
     path = save(reply, me, pane, env, now)
-    if moving(me, env):  # workers-move reads this reply as the pane's handoff note and closes the pane itself (api#1049)
+    # workers-move reads a handoff note itself and closes the pane (api#1049). A report the pane finished before it read the ask
+    # goes as any other (Claude review): Claude queues a typed message until its turn ends.
+    if moving(me, env) and "[인계 메모]" in reply:
         return
     quiet: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     sideways = close or "👑" not in (me.get("label") or "")
     workers = herdr_peers.server_key(env) == "workers"
     if needs_yoyoo:
         found = main_pane(env)
-    elif env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT") or dispatch_job(env, name):
+    elif env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT") or dispatch_job(env, name) or herdr_peers.remote_pane(name):
+        # a moved pane on 집맥: its lead is the 회사맥 main pane, which the bridge reaches through the day file; no stand-in here
         found = ("", {})
     else:  # with no name on workers, sideways would be the main pane, with no word of a Home pane
         found = None if workers and agents is None and not name else lead_pane(me, panes, name, sideways, env)
@@ -1494,11 +1497,14 @@ esac''')
     moving = f"{sandbox}/.local/state/orchestrator/moving/term_2"
     os.makedirs(os.path.dirname(moving), exist_ok=True)
     open(moving, "w").close()
-    assert run(reported, on_workers) == (0, "", ""), "a pane being moved tells nobody and stays"
-    assert full in saved() and not os.path.exists(report_mark), "its reply is saved, and no mark: workers-move makes it at the close"
+    note = json.dumps({"last_assistant_message": "[인계 메모] 옮기지 않음: 이미 끝남\n폴더: /x\n\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨"})
+    assert run(note, on_workers) == (0, "", ""), "a pane's handoff note tells nobody and the pane stays"
+    assert "[인계 메모]" in saved() and not os.path.exists(report_mark), "it is saved, and no mark: workers-move makes it at the close"
+    assert run(reported, on_workers)[2] == closed, "a report it finished before it read the ask goes as usual (Claude review)"
+    saved()
     old = time.time() - 3 * 3600
     os.utime(moving, (old, old))
-    assert run(reported, on_workers)[2] == closed, "a mark left from a move hours ago is no move"
+    assert run(note, on_workers)[2] == closed, "a mark left from a move hours ago is no move"
     saved(); os.unlink(moving)
     open(state_file, "w").write("term_M")
     # A list it cannot read is no closed lead. Sent sideways, a Home pane's report would reach the main pane with no word of it, and the
