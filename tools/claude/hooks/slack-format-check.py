@@ -208,12 +208,20 @@ SCRATCH_PATH = re.compile(r"(?:/private)?/(?:tmp|var/folders)/")
 NOT_CODE = re.compile(r"\.(?:md|markdown|txt|json|jsonl|log|csv|html)$|/(?:tests?|__tests__)/|(?:^|/)test_|\.(?:test|spec)\.|fake")
 # what sends: an HTTP call, a Slack SDK client, or the shared client's raw call (Slack()._do)
 SENDS = re.compile(r"slack\.com/api|urlopen|requests\.post|WebClient|slack_sdk|getSlackClient|\._do\(|\bfetch\(")
-_AT = r"(?:^|[;&|(`]|\$\()\s*(?:\w+=\S*\s+)*"  # a command word's own place, past VAR=value
+# a command word's own place: past do/then/env/timeout N and VAR=value, its path allowed (/usr/bin/python3)
+_AT = r"(?:^|[;&|(`]|\$\()\s*(?:(?:do|then|else|exec|nohup|env|time|timeout\s+\S+)\s+)*(?:\w+=\S*\s+)*(?:\S*/)?"
 RUNS_CODE = re.compile(
     _AT + r"(?:curl|wget)\b"
     r"|" + _AT + r"(?:uv\s+run\s+(?:\S+\s+)*?)?(?:python3?|node|deno|bun|ruby|perl)\b[^\n;&|]*?(?:\s-[ce]\b|\s-(?=\s|$)|<<)", re.M)
+SHELL_READS = re.compile(_AT + r"(?:python3?|node|deno|bun|ruby|perl|bash|sh|zsh)\b", re.M)
+HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1[^\n]*\n(.*?)(?:^[ \t]*\2[ \t]*$|\Z)", re.S | re.M)
+MULTILINE_ARG = re.compile(r"(\s-[ce]\s+)?(\"(?:[^\"\\]|\\.)*\n(?:[^\"\\]|\\.)*\"|'[^']*\n[^']*')")
 # how Codex writes a scratch script: cat > /tmp/…/post.py <<'EOF'
-WRITES_SCRIPT = re.compile(r"\bcat\b[^\n;&|]*>\s*['\"]?" + SCRATCH_PATH.pattern + r"\S*\.(?:py|[cm]?js|ts|sh)\b")
+WRITES_SCRIPT = re.compile(r"\bcat\b[^\n;&|]*>\s*['\"]?(" + SCRATCH_PATH.pattern + r"[^\s'\";&|]*?\.(?:py|[cm]?js|ts|sh))(?=['\"\s;&|)]|$)")
+# a curl body sent from a file (-d @body.json), and the simple VAR=value and cd that name its place
+DATA_FILE = re.compile(r"(?:-d|--data(?:-binary|-raw)?|-F|--form)[=\s]+['\"]?(?:\w+=)?@([^\s'\";&|)]+)")
+ASSIGN = re.compile(r"(?:^|[\s;&|(])(\w+)=(\"[^\"\n]*\"|'[^'\n]*'|[^\s;&|]+)")
+CD = re.compile(r"(?:^|[;&|]\s*)cd\s+(['\"]?)([^\s;&|'\"]+)\1", re.M)
 AGENT_BOARD = "/Users/yoyoo/work/munice/.agents/skills/agent-board"
 DIRECT_FIX = (
     "세션이 블록 없이 Slack API를 직접 불러 글을 쓰려 했다. 그러면 `1.`, `- ` 줄이 목록이 아니라 글자로 나간다(cf#752). "
@@ -227,23 +235,74 @@ DIRECT_FIX = (
 )
 
 
+def _expand(command: str):
+    """The command's own VAR=value words, then a function that puts them into a string ($VAR, ${VAR})."""
+    env = {m[1]: m[2].strip("'\"") for m in ASSIGN.finditer(command)}
+    return lambda s: re.sub(r"\$\{?(\w+)\}?", lambda m: env.get(m[1], os.environ.get(m[1], m[0])), s)
+
+
+def code_only(command: str) -> str:
+    """The command without the words no program runs: a heredoc body that goes to cat, git or gh (a PR body, a commit
+    message, a file) and a multi-line quoted argument other than -c/-e code. A line in them is no command (review of deb8395)."""
+    kept = []
+
+    def heredoc(m):  # a body a program reads is set aside, so the quote pass below cannot pair its quotes
+        opener = command[command.rfind("\n", 0, m.start()) + 1:m.start()]
+        if not SHELL_READS.search(opener):
+            return m[0][:m.start(3) - m.start()]
+        kept.append(m[0])
+        return "\0%d\0" % (len(kept) - 1)
+    out = MULTILINE_ARG.sub(lambda m: m[0] if m[1] else ' ""', HEREDOC.sub(heredoc, command))
+    return re.sub(r"\0(\d+)\0", lambda m: kept[int(m[1])], out)
+
+
+def data_files(command: str, cwd: str) -> str:
+    """What a curl command sends from files (-d @f). ponytail: a path built any other way than VAR=value or cd is unread."""
+    expand = _expand(command)
+    bases = [expand(m[2]) for m in CD.finditer(command)] + [cwd]
+    out = []
+    for m in DATA_FILE.finditer(command):
+        path = os.path.expanduser(expand(m[1]))
+        out += [on_disk(path)] if os.path.isabs(path) else [on_disk(os.path.join(b, path)) for b in bases if b]
+    return "\n".join(out)
+
+
+def final_text(path: str, edits: list) -> str:
+    """A file as an Edit/MultiEdit leaves it."""
+    text = on_disk(path)
+    for e in edits:
+        old, new = e.get("old_string") or "", e.get("new_string") or ""
+        text = text.replace(old, new) if e.get("replace_all") else text.replace(old, new, 1)
+    return text
+
+
 def direct_post_problems(tool: str, inp: dict, cwd: str) -> list[str]:
-    """Where a scratch code file or a command that runs code posts text to Slack's API itself, with no blocks."""
+    """Where a scratch code file or a command that runs code posts text to Slack's API itself, with no blocks.
+    Each change is (path, the text as it will stand): a rewrite is judged by what it leaves, not by what it removed."""
     command = inp.get("command") or ""
-    if tool in ("Write", "Edit", "MultiEdit"):
+    if tool == "Write":
+        changes = [(inp.get("file_path") or "", inp.get("content") or "")]
+    elif tool in ("Edit", "MultiEdit"):
         path = inp.get("file_path") or ""
-        changes = [(path, inp.get("content") or "")] if tool == "Write" else \
-            [(path, e.get("new_string") or "") for e in inp.get("edits") or [inp]]
+        changes = [(path, final_text(path, inp.get("edits") or [inp]))]
     elif "*** Begin Patch" in command:
-        changes = [(path, new) for path, _, new in patch_changes(command, cwd)]
+        changes = []
+        for path, removed, added in patch_changes(command, cwd):
+            gone = set(removed.split("\n"))
+            changes.append((path, "\n".join(line for line in on_disk(path).split("\n") if line not in gone) + "\n" + added))
     else:
-        sends = RUNS_CODE.search(command) and SENDS.search(command)
-        changes = [("", command)] if sends or WRITES_SCRIPT.search(command) else []
+        script, code = WRITES_SCRIPT.search(_expand(command)(command)), code_only(command)
+        if script:
+            changes = [] if NOT_CODE.search(script[1]) else [(script[1], command)]
+        elif RUNS_CODE.search(code) and SENDS.search(code):
+            changes = [("", code + "\n" + data_files(command, cwd))]
+        else:
+            changes = []
     return [f"{os.path.basename(path) or 'Bash 명령'}: 블록 없이 Slack API를 직접 불러 글을 씀"
-            for path, text in changes
+            for path, final in changes
             if (not path or (SCRATCH_PATH.match(path) and not NOT_CODE.search(path)))
-            and any(POST_API.search(line) for line in text.split("\n") if OPT_OUT not in line)
-            and not BLOCKS.search(text + (on_disk(path) if path else ""))]
+            and any(POST_API.search(line) for line in final.split("\n") if OPT_OUT not in line)
+            and not BLOCKS.search(final)]
 
 
 def fresh_reason(payload: dict) -> str | None:
@@ -360,6 +419,48 @@ def selftest():
         ("Bash", {"command": "f=$(rg -l 'chat.postMessage' 10 11); python3 - \"$f\" <<'EOF'\nimport json\nEOF"}),
     ]:
         assert direct_post_problems(tool, inp, "") == [], (tool, inp)
+
+    # Codex review of deb8395: a test written with cat passes as one written with Write; a rewrite is judged by what it
+    # leaves, not by the blocks it removed; a curl body read from a file counts.
+    assert direct_post_problems("Bash", {"command": "cat > /tmp/x/tests/test_slack.py <<'EOF'\n"
+                                                     "return method == 'chat.postMessage'\nEOF"}, "") == []
+    old, body = "/tmp/slack-format-check-selftest-old.py", "/tmp/slack-format-check-selftest-body.json"
+    with open(old, "w", encoding="utf-8") as f:
+        f.write('c.chat_postMessage(channel=c, blocks=b)\n')
+    with open(body, "w", encoding="utf-8") as f:
+        f.write('{"channel": "C1", "blocks": [{"type": "rich_text"}]}')
+    try:
+        text_only = "c.chat_postMessage(channel=c, text='- a')"
+        assert direct_post_problems("Write", {"file_path": old, "content": text_only}, "")
+        assert direct_post_problems("Edit", {"file_path": old, "old_string": "blocks=b", "new_string": "text=t"}, "")
+        assert direct_post_problems("Edit", {"file_path": old, "old_string": "\n", "new_string": "\n" + text_only + "\n"}, "") == []
+        curl = "curl -s https://slack.com/api/chat.postMessage -H \"$H\" "
+        assert direct_post_problems("Bash", {"command": curl + "--data-binary @" + body}, "") == []
+        assert direct_post_problems("Bash", {"command": "S=/tmp; " + curl + "-d @$S/" + os.path.basename(body)}, "") == []
+        assert direct_post_problems("Bash", {"command": "cd /tmp && " + curl + "-d @" + os.path.basename(body)}, "") == []
+        assert direct_post_problems("Bash", {"command": curl + "-d @/tmp/slack-format-check-selftest-missing.json"}, "")
+    finally:
+        os.remove(old)
+        os.remove(body)
+
+    # review of deb8395: a line inside a PR body, a commit message or a file written with cat is no command, while a
+    # shell or an interpreter that reads a heredoc runs it; loops, env and absolute paths still name the command
+    send = "curl -s https://slack.com/api/chat.postMessage -d text=x"
+    for cmd in [
+        "gh pr create --body \"$(cat <<'EOF'\n## 검증\n" + send + "\nEOF\n)\"",
+        "git commit -F - <<'EOF'\nfix: x\n\n" + send.replace("postMessage", "update") + "\nEOF",
+        "cat > /Users/x/repo/scripts/x.sh <<'EOF'\n" + send + "\nEOF",
+        "cat > /tmp/x/a.py.md <<'EOF'\n" + send + "\nEOF",
+        "gh pr comment 1 --body '확인:\n" + send + "'",
+    ]:
+        assert direct_post_problems("Bash", {"command": cmd}, "") == [], cmd
+    for cmd in [
+        "bash <<'EOF'\n" + send + "\nEOF",
+        "for c in C1 C2; do " + send + "; done",
+        "timeout 30 " + send,
+        "/usr/bin/python3 -c \"import urllib.request as u\nu.urlopen('https://slack.com/api/chat.postMessage')\"",
+    ]:
+        assert direct_post_problems("Bash", {"command": cmd}, ""), cmd
     print("selftest ok")
 
 
@@ -374,7 +475,10 @@ if __name__ == "__main__":
         found, fix = problems(inp.get("text") or ""), FIX + "\n" + MENTION_FIX
     else:
         cwd = payload.get("cwd") or os.getcwd()
-        found, fix = direct_post_problems(tool, inp, cwd), DIRECT_FIX
+        try:  # its own crash must not take the older checks below with it
+            found, fix = direct_post_problems(tool, inp, cwd), DIRECT_FIX
+        except Exception:
+            found, fix = [], DIRECT_FIX
         if not found:
             found, fix = code_problems(tool, inp, cwd), CODE_FIX
         if not found and "slackcopy" in (inp.get("command") or ""):  # a markdown file headed for the clipboard
