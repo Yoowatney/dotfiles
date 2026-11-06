@@ -199,7 +199,7 @@ def accept_trust(folder, key):
             mark = len(seen[0])
             os.write(fd, b"\x1b[B")
             pump(2)
-            if re.search(rb"\xe2\x9d\xaf(?:\x1b\[[0-9;]*[A-Za-z])*\s*Yes, I trust", seen[0][mark:]):
+            if re.search(rb"\xe2\x9d\xaf(?:\x1b\[[0-9;]*[A-Za-z])*Yes, I trust", seen[0][mark:]):
                 os.write(fd, b"\r")
                 while not trusted(key) and time.time() - t0 < 75 and pump(0.5):
                     pass
@@ -222,7 +222,10 @@ def accept_trust(folder, key):
 if op == "open":
     key = a.get("main_tree") or a["folder"]  # Claude keys a worktree by its main repo
     if a.get("trust") and not trusted(key):
-        accept_trust(a["folder"], key)  # if it did not take, pane-spawn below says what the screen shows
+        try:
+            accept_trust(a["folder"], key)
+        except Exception:  # best effort: if it did not take, pane-spawn below says what the screen shows
+            pass
     memo = os.path.join(home, ".local/state/workers-move/memos", a["agent"] + ".md")
     os.makedirs(os.path.dirname(memo), exist_ok=True)
     with open(memo, "w", encoding="utf-8") as f:
@@ -1106,32 +1109,49 @@ if text.startswith("[퇴근 인계]") and addr in memos:
 
         # 집맥's Claude keys a worktree by its main repo and asks once whether to trust it; nobody answers that in a new pane
         # (e2e 11/06). open answers it in a pty, only for a repo the 회사맥 trusts.
-        script("rbin/claude", '#!/usr/bin/env python3\nimport json, os, subprocess, sys, time, tty\n'
-               'open(os.environ["FAKE_D"] + "/claude.log", "a").write(os.getcwd() + "\\n")\n'
-               'tty.setraw(0)\n'
-               'w = lambda t: (os.write(1, t), time.sleep(0.1))\n'
-               'w(b"Quick safety check: Is this a project you created or one you trust?\\r\\n\\xe2\\x9d\\xaf\\x1b[4GNo, exit\\r\\n'
-               '\\x1b[4GYes, I trust this folder\\r\\n")\n'
-               'yes = False\n'
-               'while True:\n'
-               '    k = os.read(0, 16)\n'
-               '    if k == b"\\x1b[B":\n'
-               '        yes = True\n'
-               '        w(b"\\x1b[4A \\x1b[4GNo, exit\\r\\x1b[1B\\xe2\\x9d\\xaf\\x1b[4GYes, I trust this folder\\r\\n")\n'
-               '    elif k == b"\\r":\n'
-               '        if not yes:\n'
-               '            sys.exit(1)\n'
-               '        top = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True)\n'
-               '        key = os.path.dirname(top.stdout.strip().rstrip("/"))\n'
-               '        json.dump({"projects": {key: {"hasTrustDialogAccepted": True}}}, open(os.path.expanduser("~/.claude.json"), "w"))\n'
-               '        time.sleep(30)\n')
+        script("rbin/claude", r'''#!/usr/bin/env python3
+import json, os, subprocess, sys, time, tty
+d = os.environ["FAKE_D"]
+open(d + "/claude.log", "a").write(os.getcwd() + "\n")
+tty.setraw(0)
+w = lambda t: (os.write(1, t), time.sleep(0.1))
+w(b"Quick safety check: Is this a project you created or one you trust?\r\n\xe2\x9d\xaf\x1b[4GNo, exit\r\n\x1b[4GYes, I trust this folder\r\n")
+if os.path.exists(d + "/trust-exit"):
+    sys.exit(0)
+yes = False
+while True:
+    k = os.read(0, 16)
+    open(d + "/claude-keys.log", "a").write({b"\x1b[B": "down", b"\r": "enter"}.get(k, repr(k)) + "\n")
+    if k == b"\x1b[B" and os.path.exists(d + "/trust-stuck"):
+        w(b"\x1b[4A\xe2\x9d\xaf\x1b[4GNo, exit\r\x1b[1B \x1b[4GYes, I trust this folder\r\n")
+    elif k == b"\x1b[B":
+        yes = True
+        w(b"\x1b[4A \x1b[4GNo, exit\r\x1b[1B\xe2\x9d\xaf\x1b[4GYes, I trust this folder\r\n")
+    elif k == b"\r":
+        if not yes:
+            sys.exit(1)
+        top = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True)
+        key = os.path.dirname(top.stdout.strip().rstrip("/"))
+        json.dump({"projects": {key: {"hasTrustDialogAccepted": True}}}, open(os.path.expanduser("~/.claude.json"), "w"))
+        time.sleep(30)
+''')
         repo = os.path.realpath(f"{d}/repo")
         ask = dict(timeout=90, agent="spawn-MAIN-t1", memo="m", opener="term_MAIN", folder=wt, main_tree=repo, name="t", prompt="{memo}")
         assert remote(env, "open", trust=False, **ask)["ok"] and not lines("claude.log"), "a repo the 회사맥 does not trust stays so"
-        assert remote(env, "open", trust=True, **ask)["ok"] and len(lines("claude.log")) == 1, "the 회사맥 trusts it: answered once"
+        open(f"{d}/trust-stuck", "w").close()  # Down did not move the mark: no Enter, which would say no
+        assert remote(env, "open", trust=True, **ask)["ok"] and lines("claude-keys.log") == ["down"], lines("claude-keys.log")
+        os.unlink(f"{d}/trust-stuck")
+        open(f"{d}/trust-exit", "w").close()  # Claude quits at the question: the move still gets its answer, at once
+        began = time.time()
+        o = remote(env, "open", trust=True, **ask)
+        assert o and o["ok"] and time.time() - began < 20 and len(lines("claude.log")) == 2, (o, time.time() - began)
+        os.unlink(f"{d}/trust-exit")
+        assert not os.path.exists(f"{rhome}/.claude.json")
+        assert remote(env, "open", trust=True, **ask)["ok"] and len(lines("claude.log")) == 3, "the 회사맥 trusts it: answered once"
+        assert lines("claude-keys.log") == ["down", "down", "enter"], lines("claude-keys.log")
         with open(f"{rhome}/.claude.json") as f:
             assert json.load(f)["projects"][repo]["hasTrustDialogAccepted"] is True
-        assert remote(env, "open", trust=True, **ask)["ok"] and len(lines("claude.log")) == 1, "and never asked again"
+        assert remote(env, "open", trust=True, **ask)["ok"] and len(lines("claude.log")) == 3, "and never asked again"
         assert not claude_trusts(env, repo)
         os.makedirs(home, exist_ok=True)
         with open(f"{home}/.claude.json", "w") as f:
