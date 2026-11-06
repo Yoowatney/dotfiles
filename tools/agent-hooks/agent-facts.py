@@ -49,21 +49,21 @@ def gcp():
         rows, why = None, "출력이 JSON이 아님"
     if rows is None:
         return "- 조회 실패(%s): `gcloud config configurations list`로 직접 보세요." % why
-    # `configurations list` leaves out auth/: the one setting that says who a command really runs as (the agent SA, api#1005)
-    try:
-        auth = json.loads(run("gcloud", "config", "list", "--format=json")[0] or "{}").get("auth") or {}
-    except ValueError:
-        auth = {}
     def munice(account):  # gomgom and other accounts of 요유's stay out of a munice session's file
         return account.endswith(("@munice.com", ".iam.gserviceaccount.com"))
-    def one(c, runs_as=""):
+    def one(c):
         core = (c.get("properties") or {}).get("core") or {}
         if not munice(core.get("account") or ""):
             return None
+        # `configurations list` leaves out auth/, the one setting that says who a command really runs as (the agent SA, tf#1005)
+        try:
+            props = json.loads(run("gcloud", "config", "configurations", "describe", c.get("name") or "", "--format=json")[0] or "{}")
+            runs_as = ((props.get("properties") or {}).get("auth") or {}).get("impersonate_service_account") or ""
+        except ValueError:
+            runs_as = ""
         return "`%s`(로그인 %s, %s프로젝트 %s)" % (c.get("name"), core["account"], "명령은 %s으로 실행, " % runs_as if runs_as else "",
                                             core.get("project") or "없음")
-    active = [one(c, auth.get("impersonate_service_account") or "") or "`%s`(munice 밖 계정이라 적지 않음)" % c.get("name")
-              for c in rows if c.get("is_active")]
+    active = [one(c) or "`%s`(munice 밖 계정이라 적지 않음)" % c.get("name") for c in rows if c.get("is_active")]
     rest = [x for x in (one(c) for c in rows if not c.get("is_active")) if x]
     lines = ["- 활성 구성: %s" % (active[0] if active else "없음")]
     if rest:
@@ -123,13 +123,14 @@ def selftest():
         configs = [{"name": "munice", "is_active": True, "properties": {"core": {"account": "y@munice.com", "project": "p"}}},
                    {"name": "munice-admin", "is_active": False, "properties": {"core": {"account": "y@munice.com"}}},
                    {"name": "home", "is_active": False, "properties": {"core": {"account": "someone@gmail.com", "project": "p"}}}]
-        active = {"core": {"account": "y@munice.com", "project": "p"}, "auth": {"impersonate_service_account": "agent@p.iam.gserviceaccount.com"}}
+        described = {"name": "munice", "properties": {"core": {"account": "y@munice.com"}, "auth": {"impersonate_service_account": "agent@p.iam.gserviceaccount.com"}}}
         cf = [{"tagName": "slack-admin-bot-v1.31.0", "isPrerelease": False, "publishedAt": "2026-11-06T06:33:22Z"},
               {"tagName": "stripe-webhook-v1.2.1", "isPrerelease": True, "publishedAt": "2026-11-06T14:02:04Z"},
               {"tagName": "slack-admin-bot-v1.30.0", "isPrerelease": False, "publishedAt": "2026-11-06T06:01:09Z"}]
         api = [{"tagName": "v1.26.0-rc.3", "isPrerelease": True, "publishedAt": "2026-11-06T01:00:00Z"},
                {"tagName": "v1.25.1", "isPrerelease": False, "publishedAt": "2026-11-05T01:00:00Z"}]
-        for name, body in (("gcloud", 'case "$2" in configurations) echo \'%s\' ;; *) echo \'%s\' ;; esac' % (json.dumps(configs), json.dumps(active))),
+        for name, body in (("gcloud", 'case "$3 $4" in "list "*) echo \'%s\' ;; "describe munice") echo \'%s\' ;; *) echo "{}" ;; esac'
+                            % (json.dumps(configs), json.dumps(described))),
                            ("gh", 'case "$4" in munice-dev/cloud-functions) echo \'%s\' ;; munice-dev/nightly_api) echo \'%s\' ;; '
                                   'munice-dev/nightly_ios) exit 1 ;; *) echo "[]" ;; esac' % (json.dumps(cf), json.dumps(api))),
                            ("herdr", "echo 'herdr 0.9.1'")):
@@ -144,6 +145,15 @@ def selftest():
         assert "- 활성 구성: `munice`(로그인 y@munice.com, 명령은 agent@p.iam.gserviceaccount.com으로 실행, 프로젝트 p)" in text, text
         assert "- 다른 구성: `munice-admin`(로그인 y@munice.com, 프로젝트 없음)" in text, "the other configurations too"
         assert "gmail" not in text and "`home`" not in text, "an account outside munice stays out"
+        # 집맥: the active configuration is not munice's, and munice's still says whom it runs as
+        configs[0]["is_active"], configs[2]["is_active"] = False, True
+        with open(os.path.join(bin_, "gcloud"), "w") as f:
+            f.write('#!/bin/sh\ncase "$3 $4" in "list "*) echo \'%s\' ;; "describe munice") echo \'%s\' ;; *) echo "{}" ;; esac\n'
+                    % (json.dumps(configs), json.dumps(described)))
+        write(out, now=1793851200)
+        text = open(out).read()
+        assert "- 활성 구성: `home`(munice 밖 계정이라 적지 않음)" in text and "gmail" not in text, text
+        assert "`munice`(로그인 y@munice.com, 명령은 agent@p.iam.gserviceaccount.com으로 실행, 프로젝트 p)" in text, text
         assert "- nightly_api: release v1.25.1 (2026-11-05) · prerelease v1.26.0-rc.3 (2026-11-06)" in text, text
         assert "`slack-admin-bot` release v1.31.0 (2026-11-06); `stripe-webhook` prerelease v1.2.1 (2026-11-06)" in text, "newest per service"
         assert "- nightly_ios: 조회 실패(exit 1)" in text and "- monaural_beat_recommend: 릴리스 없음" in text, "a failed lookup is said, the rest still written"
