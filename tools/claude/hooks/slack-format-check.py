@@ -234,9 +234,10 @@ _RUNNER = _AT + r"(?:uv\s+run\s+(?:\S+\s+)*?)?"
 RUNS_CODE = re.compile(
     _AT + r"(?:curl|wget)\b"
     r"|" + _RUNNER + r"(?:python3?|node|deno|bun|ruby|perl)\b[^\n;&|]*?(?:\s-[ce]\b|\s-(?=\s|$)|<<)", re.M)
-SHELL_READS = re.compile(_RUNNER + r"(?:python3?|node|deno|bun|ruby|perl|bash|sh|zsh)\b", re.M)
+SHELL_READS = re.compile(_RUNNER + r"(?:python3?|node|deno|bun|ruby|perl|bash|sh|zsh|curl)\b", re.M)  # curl -d @-
 HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1[^\n]*\n(.*?)(?:^[ \t]*\2[ \t]*$|\Z)", re.S | re.M)
-QUOTED = re.compile(r"(\s-[ce]\s+)?(\"(?:[^\"\\]|\\.)*\"|'[^']*')")
+# a quoted -c/-e code or curl body (-d, --data…, --json) stays; any other multi-line quote is words, not a command
+QUOTED = re.compile(r"(\s(?:-[ced]|--data(?:-\w+)?|--json)[=\s]+)?(\"(?:[^\"\\]|\\.)*\"|'[^']*')")
 # how Codex writes a scratch script: cat > /tmp/…/post.py <<'EOF'
 WRITES_SCRIPT = re.compile(r"\bcat\b[^\n;&|]*>\s*['\"]?(" + SCRATCH_PATH.pattern + r"[^\s'\";&|]*?\.(?:py|[cm]?js|ts|sh))(?=['\"\s;&|)]|$)")
 # a curl body sent from a file (-d @body.json), and the simple VAR=value and cd that name its place
@@ -269,9 +270,10 @@ def code_only(command: str) -> str:
 
     def heredoc(m):  # a body a program reads is set aside, so the quote pass below cannot pair its quotes
         opener = command[command.rfind("\n", 0, m.start()) + 1:m.start()]
-        # an unquoted delimiter lets the shell run the body's $(…) before cat sees it
-        if not SHELL_READS.search(opener) and (m[1] or not re.search(r"\$\(|`", m[3])):
-            return m[0][:m.start(3) - m.start()]
+        if not SHELL_READS.search(opener):
+            # an unquoted delimiter lets the shell run the body's $(…) before cat sees it: those lines stay
+            runs = "" if m[1] else "".join(line + "\n" for line in m[3].split("\n") if re.search(r"\$\(|`", line))
+            return m[0][:m.start(3) - m.start()] + runs
         kept.append(m[0])
         return "\0%d\0" % (len(kept) - 1)
     # quotes pair from the left as the shell pairs them; only a multi-line one that is no -c/-e code goes
@@ -283,8 +285,9 @@ def data_files(command: str, cwd: str) -> str:
     """What a curl command sends from files (-d @f). ponytail: a path built any other way than VAR=value or cd is unread."""
     expand, out = _expand(command), []
     for m in DATA_FILE.finditer(command):
-        cds = [c for c in CD.finditer(command) if c.start() < m.start()]  # where curl runs: the last cd before it
-        base = os.path.join(cwd, os.path.expanduser(expand(cds[-1][2]))) if cds else cwd
+        base = cwd  # where curl runs: every cd before it, in turn
+        for c in CD.finditer(command[:m.start()]):
+            base = os.path.normpath(os.path.join(base, os.path.expanduser(expand(c[2]))))
         out.append(on_disk(os.path.join(base, os.path.expanduser(expand(m[1])))))
     return "\n".join(out)
 
@@ -322,7 +325,7 @@ def direct_post_problems(tool: str, inp: dict, cwd: str) -> list[str]:
         if script and not NOT_CODE.search(script[1]):
             changes = [(script[1], command, command)]
         elif RUNS_CODE.search(code) and SENDS.search(code):  # a test written with cat leaves the rest checked
-            changes = [("", code, command + "\n" + data_files(command, cwd))]
+            changes = [("", code, code + "\n" + data_files(command, cwd))]
     return [f"{os.path.basename(path) or 'Bash 명령'}: 블록 없이 Slack API를 직접 불러 글을 씀"
             for path, call, sent in changes
             if (not path or (SCRATCH_PATH.match(path) and not NOT_CODE.search(path)))
@@ -519,6 +522,20 @@ def selftest():
     finally:
         shutil.rmtree(here)
         shutil.rmtree(there)
+
+    # Codex review of f6c7d1e: blocks count only in what is sent, an unquoted heredoc keeps only its $(…) lines,
+    # cd after cd adds up
+    assert direct_post_problems("Bash", {"command": "cat <<'EOF'\nblocks 설명\nEOF\n" + send}, "")
+    assert direct_post_problems("Bash", {"command": "cat <<EOF\n오늘 $(date)\n" + send + "\nEOF"}, "") == []
+    assert direct_post_problems("Bash", {"command": curl + "-d @- <<'EOF'\n{\"blocks\": []}\nEOF"}, "") == []
+    here = tempfile.mkdtemp(dir="/tmp")
+    try:
+        os.mkdir(os.path.join(here, "sub"))
+        with open(os.path.join(here, "body.json"), "w", encoding="utf-8") as f:
+            f.write('{"blocks": []}')
+        assert direct_post_problems("Bash", {"command": "cd sub && cd .. && " + curl + "-d @body.json"}, here) == []
+    finally:
+        shutil.rmtree(here)
     print("selftest ok")
 
 
