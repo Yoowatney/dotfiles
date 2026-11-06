@@ -6,7 +6,7 @@ default `munice` gcloud config and ADC files. Yoyoo's own account lives in the `
 config and `adc-munice-admin.json`. Two kinds of commands are refused:
   - SELECT: one command picks another identity. Allowed when the session chose admin (`cla`
     sets MUNICE_GCP_ADMIN=1) or Yoyoo's latest typed prompt contains `prod 허용` (that turn only),
-    except in the main pane: any session can type into its input box (요유 2026-11-06, api#1026).
+    except in the main pane or a subordinate pane: another session can type into its input box (api#1026).
   - PERSIST: a change that outlives the command (a login, `config set`, the active config, the
     credential files). Always refused, so an unlocked turn cannot leave admin behind.
 terraform#1005.
@@ -96,8 +96,12 @@ SLACK_NEVER = re.compile(
     r"|(?<![.@\w-])iam(?![.\w-])|iam-?policy|\bhmac\b|sign-?(?:jwt|blob)|generate(?:access|id)token", re.I)
 BACKGROUND = re.compile(r"(?<![>&|])&(?![&>])")  # `cmd &`; not &&, 2>&1, &> or |&, nor one inside a literal string
 SLACK_NOTE = "메인 칸은 Slack ✅로도 이 명령 하나를 한 번 실행할 수 있습니다(메인 칸 스킬 'Steps only 요유 can unlock')."
-TYPED_NOTE = ("메인 칸은 입력창에 들어온 `prod 허용`·`staging 허용`을 허용으로 치지 않습니다: 다른 세션이 쳐 넣은 글과 요유가 친 글을 "
-              "구분할 수 없습니다(요유 11/06, api#1026). 요유가 Slack에 쓴 허용 글이나 실행 요청의 ✅로 풀 것.")
+TYPED_NOTE = ("메인 칸은 입력창에 들어온 `prod 허용`·`staging 허용`을 허용으로 치지 않습니다. "
+              "다른 세션이 입력한 글과 사용자가 직접 입력한 글을 구분할 수 없습니다(api#1026). "
+              "사용자가 Slack에 쓴 허용 글이나 실행 요청의 ✅로 풀 것.")
+SUB_TYPED_NOTE = ("리드 밑 칸은 입력창에 들어온 `prod 허용`·`staging 허용`을 허용으로 치지 않습니다. "
+                  "다른 세션이 입력한 글과 사용자가 직접 입력한 글을 구분할 수 없습니다(api#1026). "
+                  "보고로 리드에게 넘길 것: 메인 칸이 Slack 허용이나 ✅를 확인하고 직접 실행합니다.")
 
 # ponytail: text patterns over the whole command, heredoc bodies included (a script there runs).
 # They stop accidents (a wrong config, a script that grabs the admin ADC), not a session set on
@@ -502,6 +506,23 @@ def main_pane(env: dict) -> bool:
         return False
 
 
+def subordinate_pane(env: dict) -> bool:
+    """Reuse workers' server identity, pane-spawn's opener and the subordinate mark. Resolve moved pane ids first."""
+    try:
+        peers = load(os.path.join(HOOKS, "herdr_peers.py"))
+        if peers.server_key(env) == "workers" or env.get("HERDR_SESSION") == "workers":
+            return True
+        if not env.get("HERDR_PANE_ID"):
+            return False
+        pane = peers.herdr(env, "pane", "get", env["HERDR_PANE_ID"]).get("pane") or {}
+        if "🫡" in (pane.get("label") or ""):
+            return True
+        agent = peers.herdr(env, "agent", "get", pane.get("pane_id") or "-").get("agent") or {}
+        return agent.get("pane_id") == pane.get("pane_id") and bool(peers.opener(agent.get("name")))
+    except Exception:
+        return False
+
+
 def slack_liftable(payload: dict, env: dict) -> bool:
     """A refusal a Slack ✅ may lift: one Bash command that picks another identity, outside job tabs, nothing broad."""
     inp = payload.get("tool_input") or {}
@@ -606,9 +627,10 @@ def hook(hook_input: dict, env: dict, riders, approvals, is_main, budget: float 
     if not strict:
         return riders(hook_input)
     typed = tool_problem(hook_input, env)
-    # The main pane takes no typed grant: any session can type into its input box (요유 2026-11-06, api#1026).
-    # ponytail: main_pane() says False when herdr fails and trusts a main file any pane can write, so a session set on it can
-    # still get a typed grant there; other panes take one too until 요유 decides on them.
+    # Subordinate panes never take typed grants or Slack approvals; the main pane still owns the Slack routes (api#1026).
+    # ponytail: herdr lookups can fail and labels can change; these checks stop mistakes, not a determined bypass.
+    if typed is None and subordinate_pane(env):
+        return f"gcp-account-guard: {strict}\n{SUB_TYPED_NOTE}"
     main = typed is None and is_main(env)
     if typed is None and not main:
         return riders(hook_input)
@@ -1109,6 +1131,7 @@ def selftest():
         "@@\n-" + key_tf.rstrip("\n").replace("\n", "\n-") + "\n*** End Patch"}, "transcript_path": unlocked,
         "cwd": "/tmp"}, {}) is None
     slack_selftest(claude_transcript, tmp)
+    typed_pane_selftest(claude_transcript, codex_transcript, tmp)
     print("selftest ok")
 
 
@@ -1282,6 +1305,59 @@ def slack_selftest(claude_transcript, tmp):
     start = time.monotonic()
     found, why = slack_approval(cmd, 0.5, path=path)
     assert found is None and "초 안에" in why and time.monotonic() - start < 2, (why, time.monotonic() - start)
+
+
+def typed_pane_selftest(claude_transcript, codex_transcript, tmp):
+    """Typed grants depend on who opened the pane, for both transcript formats."""
+    fake = os.path.join(tmp, "typed-herdr")
+    with open(fake, "w") as f:
+        f.write('#!/bin/sh\ncase "$1 $2" in\n'
+                '  "pane get") [ "$3" = w1:p1 ] || exit 1\n'
+                '    printf \'{"result":{"pane":{"pane_id":"wC:p9","terminal_id":"term_T","label":%s}}}\\n\' "$LABEL" ;;\n'
+                '  "agent get") [ "$3" = wC:p9 ] || exit 1\n'
+                '    printf \'{"result":{"agent":{"pane_id":"wC:p9","name":%s}}}\\n\' "$NAME" ;;\n'
+                '  *) exit 1 ;;\nesac\n')
+    os.chmod(fake, 0o755)
+    state = os.path.join(tmp, "typed-state")
+    os.makedirs(os.path.join(state, "orchestrator"), exist_ok=True)
+    open(os.path.join(state, "orchestrator", "main"), "w").write("term_MAIN\n")
+    main_state = os.path.join(tmp, "typed-main-state")
+    os.makedirs(os.path.join(main_state, "orchestrator"), exist_ok=True)
+    open(os.path.join(main_state, "orchestrator", "main"), "w").write("term_T\n")
+    base = {"HERDR_BIN_PATH": fake, "HERDR_PANE_ID": "w1:p1", "HERDR_SESSION": "default",
+            "HERDR_SOCKET_PATH": os.path.join(tmp, "herdr.sock"), "XDG_STATE_HOME": state,
+            "NAME": "null", "LABEL": json.dumps("🟢 ordinary")}
+    cases = [
+        ("hand-opened", {}, False),
+        ("hand-opened lead", {"LABEL": json.dumps("🟢 👑 lead")}, False),
+        ("main", {"XDG_STATE_HOME": main_state}, True),
+        ("workers socket", {"HERDR_SOCKET_PATH": os.path.join(tmp, "sessions/workers/herdr.sock")}, True),
+        ("workers env", {"HERDR_SESSION": "workers"}, True),
+        ("spawned", {"NAME": json.dumps("spawn-A-1")}, True),
+        ("promoted spawned", {"NAME": json.dumps("spawn-A-1"), "LABEL": json.dumps("🟢 👑 lead")}, True),
+        ("marked subordinate", {"LABEL": json.dumps("🟢 🫡 task")}, True),
+    ]
+    commands = [("prod 허용", "gcloud --configuration=munice-admin run services list --project=miraclenight-f06c6"),
+                ("staging 허용", "gcloud --configuration=munice-admin run services list --project=miraclenight-dev")]
+    failures = []
+    for make in (claude_transcript, codex_transcript):
+        for name, extra, refused in cases:
+            for word, command in commands:
+                env = {**base, **extra}
+                payload = {"tool_name": "Bash", "tool_input": {"command": command}, "transcript_path": make(word)}
+                calls = []
+
+                def approvals(cmd, left):
+                    calls.append(cmd)
+                    return None, "no approval"
+
+                reason = hook(payload, env, lambda _: None, approvals, main_pane)
+                if (bool(reason) != refused or (refused and "입력창" not in reason)
+                        or calls != ([command] if name == "main" else [])):
+                    failures.append(f"{make.__name__}/{name}/{word}: {reason!r}, Slack={calls!r}")
+                assert hook(payload, {**env, "MUNICE_GCP_ADMIN": "1"}, lambda _: None, approvals, main_pane) is None, \
+                    f"cla still lifts in {name}"
+    assert not failures, "typed pane grants:\n" + "\n".join(failures)
 
 
 def slack_grant_selftest(run, asked, claims, claude_transcript, tmp):
