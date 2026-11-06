@@ -641,6 +641,8 @@ def after_turn(token: str, env):
         if not ready_for_input(env):
             quiet_from = time.monotonic()
         elif time.monotonic() - quiet_from >= settle:
+            if held_reply(token, env) is None:  # a Stop replaced or withdrew it while herdr answered: that Stop decides
+                return
             try:
                 finish(reply, env)
             finally:
@@ -743,8 +745,11 @@ def selftest():
     def script(name, body):
         path = os.path.join(sandbox, name)
         with open(path, "w") as f:
-            f.write(f"#!/bin/sh\n{body}\n")
+            f.write(f"#!/bin/sh\n[ -z \"${{SELFTEST_WARM:-}}\" ] || exit 0\n{body}\n")
         os.chmod(path, 0o755)
+        # macOS checks a new executable on its first run, one at a time across the machine: with 16 selftests at once that
+        # wait passed the 2-3 s limits on herdr and pane-label calls. Pay it here, with no limit.
+        subprocess.run([path], env={"SELFTEST_WARM": "1"}, check=True)
         return path
 
     def herdr_says_on(srv, agent=None, panes=(), agents=()):
@@ -765,7 +770,9 @@ def selftest():
 case "$1 $2" in
   "session list") cat {sandbox}/sessions.json ;;
   "agent get") [ -f {sandbox}/agent-gone ] || [ "$3" = "$(cat {sandbox}/old-id 2>/dev/null)" ] && exit 1; cat $d/agent.json ;;
-  "pane get") [ -f {sandbox}/herdr-bad ] && {{ echo "not json"; exit 0; }}; jq --arg id "$3" --arg new "$(cat {sandbox}/new-id 2>/dev/null)" \
+  "pane get") [ -f {sandbox}/herdr-bad ] && {{ echo "not json"; exit 0; }}
+    mv {sandbox}/during-get {sandbox}/during-get.run 2>/dev/null && sh {sandbox}/during-get.run  # once, while this call runs
+    jq --arg id "$3" --arg new "$(cat {sandbox}/new-id 2>/dev/null)" \
     '{{result: {{pane: ([.result.panes[] | select(.pane_id == $id or .pane_id == $new)][0])}}}}' $d/panes.json ;;
   "agent list") [ -f $d/agents-bad ] && {{ echo "not json"; exit 0; }}; cat $d/agents.json ;;
   "pane list") [ -f $d/panes-bad ] && exit 1; cat $d/panes.json ;;
@@ -796,23 +803,38 @@ esac''')
 
     reports = f"{sandbox}/reports"
 
+    steps = set()  # tokens of the detached steps started since the last taken()
+
+    def pending():
+        return glob.glob(f"{reports}/**/.pending*", recursive=True)  # a named server's are in its folder
+
     def stop(payload, env, args=()):
-        return subprocess.run([sys.executable, "-I", os.path.realpath(__file__), *args], input=payload, capture_output=True,
-                              text=True, env={"PATH": os.environ.get("PATH", ""), "HOME": sandbox, "HERDR_BIN_PATH": fake_herdr,
-                                              "PANE_REPORT_DIR": reports, "AUTO_TAB_CLOSE_PANE_LABEL": fake,
-                                              "AUTO_TAB_CLOSE_PANE_TELL": fake_tell, "AUTO_TAB_CLOSE_SETTLE": "0",
-                                              "AUTO_TAB_CLOSE_PANE_SPAWN": fake_spawn,
-                                              "AUTO_TAB_CLOSE_POLL": "0.02", **env},
-                              timeout=10)
+        r = subprocess.run([sys.executable, "-I", os.path.realpath(__file__), *args], input=payload, capture_output=True,
+                           text=True, env={"PATH": os.environ.get("PATH", ""), "HOME": sandbox, "HERDR_BIN_PATH": fake_herdr,
+                                           "PANE_REPORT_DIR": reports, "AUTO_TAB_CLOSE_PANE_LABEL": fake,
+                                           "AUTO_TAB_CLOSE_PANE_TELL": fake_tell, "AUTO_TAB_CLOSE_SETTLE": "0",
+                                           "AUTO_TAB_CLOSE_PANE_SPAWN": fake_spawn,
+                                           "AUTO_TAB_CLOSE_POLL": "0.02", **env},
+                           timeout=10)
+        for f in pending():  # its step drops the file only as its last act, so a step without one has ended
+            try:
+                with open(f, encoding="utf-8") as h:
+                    steps.add(json.load(h)["token"])
+            except (OSError, ValueError, KeyError):
+                pass
+        return r
 
     def taken():
-        """What ran, once the detached step has finished."""
-        for _ in range(250):
-            if not glob.glob(f"{reports}/**/.pending*", recursive=True):  # a named server's are in its folder
+        """What ran, once every detached step has ended: one replaced by a later Stop can still be running (11/05)."""
+        deadline = time.monotonic() + 10
+        while True:
+            ps = subprocess.run(["ps", "-Aww", "-o", "command"], capture_output=True, text=True).stdout
+            if not pending() and not any(f"--after-turn {t}" in ps for t in steps):
                 break
+            if time.monotonic() > deadline:
+                raise AssertionError("the step after the turn never finished")
             time.sleep(0.02)
-        else:
-            raise AssertionError("the step after the turn never finished")
+        steps.clear()
         calls = open(f"{sandbox}/calls").read() if os.path.exists(f"{sandbox}/calls") else ""
         if os.path.exists(f"{sandbox}/calls"):
             os.unlink(f"{sandbox}/calls")
@@ -941,7 +963,6 @@ esac''')
     stop(json.dumps({"last_assistant_message": full}), slow)
     stop(json.dumps({"last_assistant_message": keep[0]}), slow)
     herdr_says({"name": "spawned"}, [crown, me])
-    time.sleep(0.4)
     assert taken() == "tell w1:p1\n", "the rewrite left work for 요유: nothing closes, and only the rewrite goes up"
     text = saved()
     assert keep[0] in text and full not in text, f"the last version alone: {text!r}"
@@ -949,14 +970,22 @@ esac''')
     stop(json.dumps({"last_assistant_message": full}), slow)
     stop(json.dumps({"last_assistant_message": keep[3]}), slow)
     herdr_says({"name": "spawned"}, [crown, me])
-    time.sleep(0.4)
     assert taken() == "" and saved() == "", "the rewrite is no report: it withdraws the first"
+    # api#1033: the same, with the next Stop landing while the step waits on herdr's answer, every run. Before the fix the step
+    # sent the reply it had read before asking herdr, and this assert failed 2-3 times in 16 parallel runs.
+    herdr_says({"name": "spawned"}, [crown, busy])
+    stop(json.dumps({"last_assistant_message": full}), pane2)
+    with open(f"{sandbox}/idle.json", "w") as f:
+        json.dump({"result": {"panes": [crown, me]}}, f)
+    with open(f"{sandbox}/during-get.new", "w") as f:  # the withdrawing Stop, then the pane goes idle
+        f.write(f"rm -f {pending_file({'PANE_REPORT_DIR': reports, 'HERDR_PANE_ID': 'w1:p2'})}\ncp {sandbox}/idle.json {sandbox}/panes.json\n")
+    os.replace(f"{sandbox}/during-get.new", f"{sandbox}/during-get")
+    assert taken() == "" and saved() == "", "a reply withdrawn while herdr answered never goes out"
     # 요유 2026-11-01: share-guard sent an implementer's report back, it answered one line without `남은 것`, and its lead never heard.
     herdr_says({"name": "spawned"}, [crown, busy])
     stop(json.dumps({"last_assistant_message": keep[0]}), slow)
     stop(json.dumps({"stop_hook_active": True, "last_assistant_message": "위 보고가 최종입니다."}), slow)
     herdr_says({"name": "spawned"}, [crown, me])
-    time.sleep(0.4)
     assert taken() == "tell w1:p1\n", "a sent-back reply without a report leaves the report held before it"
     assert keep[0] in saved()
     # The session said it was done, and the hook only asked for one more step: the report stands and the pane closes, by choice.
@@ -965,7 +994,6 @@ esac''')
     stop(json.dumps({"last_assistant_message": full}), slow)
     stop(json.dumps({"stop_hook_active": True, "last_assistant_message": "보드 항목을 만들었습니다."}), slow)
     herdr_says({"name": "spawned"}, [crown, me])
-    time.sleep(0.4)
     assert taken() == "tell w1:p1\n" + closed, "the closing report held before a sent-back line still closes"
     assert full in saved()
     herdr_says({"name": "spawned"}, [crown, me])
@@ -999,9 +1027,13 @@ esac''')
     assert full in saved(), "the report is kept, as it was at Stop before the wait existed"
     herdr_says({"name": "spawned"}, [crown, me])
     stop(json.dumps({"last_assistant_message": "무엇을: 앞 보고\n남은 것: 요유 몫: 없음 · 세션: 닫음"}), {**pane2, "TELL_SLEEP": "0.4"})
-    time.sleep(0.2)  # the first report is on its way when the next Stop comes
+    for _ in range(500):  # the first report is on its way when the next Stop comes
+        if os.path.exists(f"{sandbox}/calls"):
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError("the first report never went out")
     stop(json.dumps({"last_assistant_message": full}), {**slow, "TELL_SLEEP": "0"})
-    time.sleep(0.5)
     taken()
     assert full in saved(), "the first step's cleanup leaves the next Stop's reply alone"
     herdr_says({"name": "spawned"}, [crown, me])
