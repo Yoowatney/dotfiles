@@ -125,6 +125,12 @@ def home_pane(name) -> bool:
     return bool(re.match(r"^spawn-[0-9A-Za-z]+-h", name or ""))
 
 
+def remote_pane(name) -> bool:
+    """Opened on 집맥 by workers-move (pane-spawn --opener adds `r`): its lead is the 회사맥 main pane, which no server here
+    holds, so its report and alerts go to the day file that `workers-move bridge` carries to that main pane (api#1049)."""
+    return bool(re.match(r"^spawn-[0-9A-Za-z]+-r", name or ""))
+
+
 def selftest():
     import shutil
     import stat
@@ -173,6 +179,8 @@ esac
         assert not dispatch_pane("spawn-65f2-123") and not dispatch_pane("auto") and not dispatch_pane("") and not dispatch_pane(None)
         assert opener("spawn-65f2-h123") == "term_65f2", "a Home lead's pane still names its opener"
         assert home_pane("spawn-65f2-h123") and not home_pane("spawn-65f2-123") and not home_pane("spawn-65f2-chk1") and not home_pane(None)
+        assert remote_pane("spawn-65f2-r123") and opener("spawn-65f2-r123") == "term_65f2", "a pane workers-move opened on 집맥"
+        assert not any(remote_pane(n) for n in ("spawn-65f2-123", "spawn-65f2-h1", "spawn-65f2-chk1", "auto-api-1", "", None))
         everywhere = all_panes(env_d)
         assert everywhere["term_D2"][0] == "w1:p2" and everywhere["term_W2"][0] == "workers/w1:p2", "the address from this server"
         assert "term_O9" not in everywhere, "a session outside PEERS is never searched"

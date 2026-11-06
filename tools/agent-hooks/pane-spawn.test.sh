@@ -586,4 +586,26 @@ hasnt "tab rename" "and nothing renames them"
 hasnt "agent list" "the main pane's panes share no tab, so it looks for none"
 not_main
 
+# api#1049: workers-move opens the work of a 회사맥 pane on 집맥 over ssh, with no calling pane. --opener names the main pane
+# whose pane it was; the agent name gets `r`, which auto-tab-close and workers-watch read on 집맥.
+remote() { rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits"; env -u HERDR_SOCKET_PATH -u XDG_STATE_HOME -u HERDR_PANE_ID HOME="$SANDBOX/home" PATH="$SANDBOX:$PATH" HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_RETRY_WAIT=0 bash "$SUBJECT" "$@"; }
+workers_up
+out=$(remote --opener term_abc123 --cwd /work "api#1 이어 감" "메모를 읽고 이어 가세요") || fail "--opener needs no calling pane"
+[ "$out" = "workers/w1:new" ] || fail "--opener prints a workers address: $out"
+has "[workers] tab create --workspace w1 --cwd /work --label api#1 이어 감 --no-focus" "each moved pane gets its own workers tab, named for the work"
+has "[workers] agent start spawn-abc123-r" "the agent name records the main pane and marks a moved pane"
+has "보고 첫 줄에 이 칸에서 한 일을 한 문장으로" "a moved pane reports in the main pane's short form"
+hasnt "pane get" "there is no calling pane to look up"
+hasnt "pane-label --lead" "nobody becomes a lead"
+hasnt "[default] tab create" "nothing opens on the default server"
+workers_up false
+if remote --opener term_abc123 --cwd /work "api#1 이어 감" "지시" 2>"$SANDBOX/err"; then fail "--opener fails with workers down"; fi
+hasnt "tab create" "no pane anywhere with workers down"
+hasnt "pane split" "no pane anywhere with workers down"
+workers_up
+is_main; remote --opener term_65f21913323dc21 "이어 감" "지시" >/dev/null || fail "--opener on a Mac whose main pane has that terminal"
+has "agent start spawn-65f21913323dc21-r" "--opener is never the main pane itself, whose --why rule would refuse it"; not_main
+if remote --opener term_abc123 --check "x" "y" 2>/dev/null; then fail "--opener with --check is bad usage"; fi
+if remote --opener "" "x" "y" 2>/dev/null; then fail "an empty --opener is bad usage"; fi
+
 echo "ok: pane-spawn"
