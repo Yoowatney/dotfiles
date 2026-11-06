@@ -34,7 +34,7 @@ INLINE_CODE = re.compile(r"`[^`\n]*`")
 FIX = (
     "Slack MCP는 text만 보내서 진짜 목록을 만들 수 없다. "
     "요유 이름으로 보낼 글이면 마크다운 파일에 써서 `slackcopy`로 클립보드에 넣고, "
-    "봇으로 올려야 하면 chat.postMessage/chat.update에 rich_text_list 블록을 담아 보낸다 "
+    "봇으로 올려야 하면 agent-board `main/main-channel.py reply`(또는 `post`)로 보낸다: 목록 줄을 진짜 목록으로 바꾼다 "
     "(memory: reference_slack_mcp_no_real_bullets)."
 )
 
@@ -197,6 +197,55 @@ def code_problems(tool: str, inp: dict, cwd: str) -> list[str]:
     ]
 
 
+# A session that posts text to Slack's API itself skips the shared client, the one that sends list lines as a real list:
+# 7 posts went out with typed lists that way in 11/03-11/06 (scratch wrappers, curl, inline scripts; cf#752). Only a post
+# without blocks is refused: one that builds its own blocks draws its own lists. Repo code is reviewed in its own PR, so only
+# scratch code files and commands that run code are checked. Replayed over the 7 days to 11/06: see the dotfiles commit.
+# ponytail: a script written outside the temp dirs, or through $TMPDIR, passes; add its place when one shows up.
+POST_API = re.compile(r"chat[._](?:postMessage|update|postEphemeral|scheduleMessage)\b|\binitial_comment\b")
+BLOCKS = re.compile(r"\bblocks\b")
+SCRATCH_PATH = re.compile(r"(?:/private)?/(?:tmp|var/folders)/")
+NOT_CODE = re.compile(r"\.(?:md|markdown|txt|json|jsonl|log|csv|html)$|/(?:tests?|__tests__)/|(?:^|/)test_|\.(?:test|spec)\.|fake")
+# what sends: an HTTP call, a Slack SDK client, or the shared client's raw call (Slack()._do)
+SENDS = re.compile(r"slack\.com/api|urlopen|requests\.post|WebClient|slack_sdk|getSlackClient|\._do\(|\bfetch\(")
+_AT = r"(?:^|[;&|(`]|\$\()\s*(?:\w+=\S*\s+)*"  # a command word's own place, past VAR=value
+RUNS_CODE = re.compile(
+    _AT + r"(?:curl|wget)\b"
+    r"|" + _AT + r"(?:uv\s+run\s+(?:\S+\s+)*?)?(?:python3?|node|deno|bun|ruby|perl)\b[^\n;&|]*?(?:\s-[ce]\b|\s-(?=\s|$)|<<)", re.M)
+# how Codex writes a scratch script: cat > /tmp/…/post.py <<'EOF'
+WRITES_SCRIPT = re.compile(r"\bcat\b[^\n;&|]*>\s*['\"]?" + SCRATCH_PATH.pattern + r"\S*\.(?:py|[cm]?js|ts|sh)\b")
+AGENT_BOARD = "/Users/yoyoo/work/munice/.agents/skills/agent-board"
+DIRECT_FIX = (
+    "세션이 블록 없이 Slack API를 직접 불러 글을 쓰려 했다. 그러면 `1.`, `- ` 줄이 목록이 아니라 글자로 나간다(cf#752). "
+    f"공용 클라이언트를 쓸 것: 팀 채널·스레드·DM은 `python3 {AGENT_BOARD}/main/main-channel.py reply --channel <C|D|G…> "
+    "--thread <ts> <file>`(새 글은 `--thread` 대신 `--new`, 밤 글은 08:00까지 기다리고 `--urgent`는 바로 보냄), "
+    "#0-yoyooyo는 같은 파일의 `post`/`edit`. Python 코드는 "
+    f"`sys.path.insert(0, \"{AGENT_BOARD}/ambient\")` 뒤 `slack.Slack().post(channel, thread_ts, text)`/`.update(channel, ts, text)`"
+    "(`_do`로 직접 부르지 말 것). 파일은 initial_comment 없이 올리고 글은 reply로 단다. "
+    "블록을 직접 만들어 보내는 글(버튼 등, 목록은 `slack.rich_text(text)`)은 막지 않는다. "
+    "그래도 text로 직접 보내야 하면 그 줄에 `slack-format: ok`를 적는다."
+)
+
+
+def direct_post_problems(tool: str, inp: dict, cwd: str) -> list[str]:
+    """Where a scratch code file or a command that runs code posts text to Slack's API itself, with no blocks."""
+    command = inp.get("command") or ""
+    if tool in ("Write", "Edit", "MultiEdit"):
+        path = inp.get("file_path") or ""
+        changes = [(path, inp.get("content") or "")] if tool == "Write" else \
+            [(path, e.get("new_string") or "") for e in inp.get("edits") or [inp]]
+    elif "*** Begin Patch" in command:
+        changes = [(path, new) for path, _, new in patch_changes(command, cwd)]
+    else:
+        sends = RUNS_CODE.search(command) and SENDS.search(command)
+        changes = [("", command)] if sends or WRITES_SCRIPT.search(command) else []
+    return [f"{os.path.basename(path) or 'Bash 명령'}: 블록 없이 Slack API를 직접 불러 글을 씀"
+            for path, text in changes
+            if (not path or (SCRATCH_PATH.match(path) and not NOT_CODE.search(path)))
+            and any(POST_API.search(line) for line in text.split("\n") if OPT_OUT not in line)
+            and not BLOCKS.search(text + (on_disk(path) if path else ""))]
+
+
 def fresh_reason(payload: dict) -> str | None:
     """A check that rides on this hook, for its registration in both tools: see slack-fresh-guard.py. Its own crash passes."""
     sys.dont_write_bytecode = True
@@ -274,6 +323,43 @@ def selftest():
     finally:
         os.remove(md)
     assert problems("*[ a ]* @홍길동", members)  # Slack MCP text too
+
+    # cf#752: a session's own call to Slack's post API skips the shared client, so its list lines go out as typed.
+    tmp = "/private/tmp/claude-501/x/scratchpad/"
+    post = 's._do("chat.postMessage", {"channel": c, "text": t}, post=True)'
+    for tool, inp in [
+        ("Write", {"file_path": tmp + "bb.py", "content": "from slack import Slack\n" + post}),
+        ("Edit", {"file_path": "/tmp/codex/2026-11-06-x/sl.py", "old_string": "", "new_string": post}),
+        ("Write", {"file_path": tmp + "up.py", "content": "c.files_upload_v2(channel=c, file=f, initial_comment=t)"}),
+        ("Bash", {"command": "curl -sS https://slack.com/api/chat.postMessage -H \"$H\" -d @body.json"}),
+        ("Bash", {"command": "cd /x && python3 - <<'EOF'\nWebClient(t).chat_postMessage(channel='C1', text='- a')\nEOF"}),
+        ("Bash", {"command": "uv run --with slack_sdk python3 -c 'W(t).chat_update(channel=c, ts=s, text=x)'"}),
+        ("Bash", {"command": "TOKEN=$T node -e \"new WebClient(t).chat.update({channel, ts, text})\""}),
+        ("Bash", {"command": "cat > /tmp/codex/x/post.py <<'EOF'\nr = s.chat_postMessage(channel=c, text=t)\nEOF"}),
+        ("apply_patch", {"command": "*** Begin Patch\n*** Add File: /tmp/codex/x/p.py\n+" + post + "\n*** End Patch"}),
+    ]:
+        assert direct_post_problems(tool, inp, ""), (tool, inp)
+    for tool, inp in [
+        ("Write", {"file_path": nowhere + "functions/bot/src/slack.ts", "content": "client.chat.postMessage({channel, text})"}),
+        ("Write", {"file_path": tmp + "qa.py", "content": "from slack import Slack\nSlack().post('D1', None, '- a')"}),
+        ("Write", {"file_path": tmp + "qa.py", "content": post + "  # slack-format: ok"}),
+        ("Bash", {"command": 'grep -rn "chat.postMessage" functions/ | head'}),
+        ("Bash", {"command": "gh pr create --body \"$(cat <<'EOF'\nchat.postMessage에 블록을 보낸다\nEOF\n)\""}),
+        ("Bash", {"command": 'git commit -m "fix: chat.update keeps the blocks"'}),
+        ("Bash", {"command": "curl -sS 'https://slack.com/api/conversations.history?channel=C1' -H \"$H\""}),
+        ("Bash", {"command": "python3 " + tmp + "qa.py"}),
+        ("Bash", {"command": "python3 -c \"from slack import Slack; Slack().post('D1', None, '- a')\""}),
+        ("Bash", {"command": "printf '%s' \"$t\" | GCP_PROJECT_ID=p scripts/deploy/slack-post.sh D1"}),
+        # builds its own blocks, so it draws its own lists
+        ("Write", {"file_path": tmp + "post_louie.py", "content": post + "\n" + 'body["blocks"] = [rich]'}),
+        ("Bash", {"command": "curl -s https://slack.com/api/chat.postMessage -d \"$(jq -n '{channel: $c, blocks: $b}')\""}),
+        # notes, a commit message, a test fake and a read of past sessions name the API without calling it
+        ("Write", {"file_path": tmp + "verification.md", "content": post}),
+        ("Bash", {"command": "cat > " + tmp + "commit1.txt <<'EOF'\nchat.postMessage's text has no list syntax\nEOF"}),
+        ("Write", {"file_path": tmp + "wt/.agents/main/tests/listfake.py", "content": 'if method == "chat.postMessage":'}),
+        ("Bash", {"command": "f=$(rg -l 'chat.postMessage' 10 11); python3 - \"$f\" <<'EOF'\nimport json\nEOF"}),
+    ]:
+        assert direct_post_problems(tool, inp, "") == [], (tool, inp)
     print("selftest ok")
 
 
@@ -287,7 +373,10 @@ if __name__ == "__main__":
     if "slack" in tool.lower() and "text" in inp:  # the Slack MCP post tools
         found, fix = problems(inp.get("text") or ""), FIX + "\n" + MENTION_FIX
     else:
-        found, fix = code_problems(tool, inp, payload.get("cwd") or os.getcwd()), CODE_FIX
+        cwd = payload.get("cwd") or os.getcwd()
+        found, fix = direct_post_problems(tool, inp, cwd), DIRECT_FIX
+        if not found:
+            found, fix = code_problems(tool, inp, cwd), CODE_FIX
         if not found and "slackcopy" in (inp.get("command") or ""):  # a markdown file headed for the clipboard
             found, fix = slackcopy_problems(inp["command"], load_members()), MENTION_FIX
     reason = "Slack 형식 검사에 걸렸습니다.\n- " + "\n- ".join(found) + "\n" + fix if found else fresh_reason(payload)
