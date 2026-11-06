@@ -70,8 +70,10 @@ def left_problems(text: str, left: dict | None = None) -> list[str]:
         try:
             with open(LEFT, encoding="utf-8") as f:
                 left = {u: n for u, n in json.load(f).items() if not u.startswith("_")}
-        except (OSError, ValueError):
+        except FileNotFoundError:
             left = {}
+        except (OSError, ValueError, AttributeError):  # a list that cannot be read clears nobody
+            return [f"{LEFT}을 읽을 수 없어 떠난 사람 태그를 확인하지 못함: 파일을 고친 뒤 다시 보낸다"]
     return [f"@{names[0]}: 회사를 떠난 사람이라 태그하지 않는다" for uid, names in left.items()
             if re.search(r"<@%s\b" % uid, text)
             or any(re.search(r"(?<![\w./@])@" + re.escape(n) + r"(?![A-Za-z0-9_])", text, re.I) for n in names)]
@@ -428,6 +430,15 @@ def selftest():
         assert left_problems(text, gone) == ["@Gone: 회사를 떠난 사람이라 태그하지 않는다"], text
     for text in ("gone@munice.com", "Gone 얘기", "@Gonezo", "https://a.b/@곤", "<@U99>"):
         assert left_problems(text, gone) == [], text
+    broken, saved = "/tmp/slack-format-check-selftest-left.json", globals()["LEFT"]
+    with open(broken, "w", encoding="utf-8") as f:
+        f.write("{not json")
+    globals()["LEFT"] = broken
+    try:  # a list that cannot be read clears nobody
+        assert ["읽을 수 없" in p for p in left_problems("평범한 글")] == [True], left_problems("평범한 글")
+    finally:
+        globals()["LEFT"] = saved
+        os.remove(broken)
 
     # cf#752: a session's own call to Slack's post API skips the shared client, so its list lines go out as typed.
     tmp = "/private/tmp/claude-501/x/scratchpad/"
