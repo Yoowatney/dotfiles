@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Hourly ~/.local/state/agent-facts.md for the sessions on this Mac (api#1051). 회사맥 and 집맥 both run it: each Mac's
+     sessions read their own copy, and 회사서버맥 runs no sessions. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.yoyoo.agent-facts</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/yoyoo/.dotfiles/tools/agent-hooks/agent-facts.py</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>/Users/yoyoo/.local/state/agent-facts.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/yoyoo</string>
+        <key>PATH</key>
+        <string>/Users/yoyoo/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
