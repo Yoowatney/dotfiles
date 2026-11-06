@@ -313,6 +313,9 @@ def check(payload: dict, env) -> str | None:
 def selftest():
     import tempfile
 
+    # The night's reports are in 2026-11-05.md, and a citation with no day is looked up today and yesterday: the clock stays
+    # on that day, or the selftest fails from 11/07 on (it did, and refused every dotfiles push).
+    time.time = lambda: 1793851200.0  # 2026-11-05 13:00 KST
     with tempfile.TemporaryDirectory() as d:
         reports = os.path.join(d, "pane-reports")
         os.makedirs(reports)
