@@ -1,0 +1,1047 @@
+#!/usr/bin/env python3
+"""퇴근 hand-over, phase 1 of api#1049 (요유 2026-11-06): the main pane stays on the 회사맥, and its panes on the workers server
+carry on on 집맥 while the 회사맥 sleeps.
+
+    workers-move go             start the move in the background and return; its summary reaches the main pane by pane-tell
+    workers-move list           the panes go would ask, changing nothing
+    workers-move bridge         workers-watch runs it every minute on the 회사맥: what moved panes said on 집맥 reaches the main pane
+    workers-move tell <pane> <text>   type into a moved pane on 집맥 (pane-tell there, over ssh)
+    workers-move read <pane>    that pane's screen
+    workers-move resume         tell each pane go left on the 회사맥 to carry on (after 출근)
+    workers-move --selftest
+
+A move, per pane of the main pane on workers (agent name spawn-<main terminal>-, never a check pane or another lead's):
+1. `{state}/orchestrator/moving/<terminal>` is made, so auto-tab-close sends that pane's next reply nowhere, and the pane is
+   asked to stop after its current tool call, commit WIP on its branch, stop watching Slack threads, and reply with a handoff
+   note that starts `[인계 메모] 옮김` or `[인계 메모] 옮기지 않음: <why>` and names its `폴더:`. A pane at a question dialog
+   is not asked: typed text would answer the dialog.
+2. Once the note is its last reply, the folder is checked: a git folder must be clean, on a branch, and either a linked
+   worktree on a feature branch (pushed here: a Codex pane has no network) or the default branch with nothing unpushed. No
+   commit is ever made here: a shared checkout may hold another session's files.
+3. 집맥 (ssh to ~/.config/herdr/remote-host): the same path is made ready (a worktree from that Mac's clone of the repo, or the
+   existing checkout fast-forwarded), the note and the pane's first instruction are written to
+   ~/.local/state/workers-move/memos/<agent>.md there, and `pane-spawn --opener <main terminal>` opens a pane on 집맥's workers
+   server that reads it (Codex, else Claude when Codex stops at a trust dialog).
+4. Only then is the 회사맥 pane marked reported and closed: a 집맥 pane that did not open leaves the 회사맥 pane as it was.
+A pane that will not move stays, is marked reported (its note was its report), and `resume` tells it to go on. Each step is
+saved in moves.json, so a run cut by sleep goes on where it was. A run that died while opening a 집맥 pane, or an ssh call that
+broke during the open, leaves step `unknown`: never a second 집맥 pane, and never a resume of the same work here. One run at a
+time (run.lock).
+
+The bridge reads, over one ssh call, 집맥's workers pane list and the new part of its pane report day files. Entries of moved
+panes (auto-tab-close's reports, workers-watch's `[workers-watch]` alerts) are copied into this Mac's day file under the address
+`집맥:workers/<pane>`, so every reader of `전체 보고: <file> (<time> 항목)` finds them, and queued; each goes to the main pane in
+order, a report through auto-tab-close's route_main_report, so a finished one gets its check pane as any other. Before that the
+회사맥 folder is fast-forwarded to the branch, since the check runs here; if it cannot be, the report goes straight through with
+the reason. What did not go stays queued for the next minute. A move ends once its 집맥 pane has been gone for a minute and
+nothing of it waits.
+
+Test env: WORKERS_MOVE_SSH (a command in place of ssh and its options), WORKERS_MOVE_REMOTE (ssh target), WORKERS_MOVE_TELL
+(a pane-tell), WORKERS_MOVE_WAIT (seconds to wait for notes, 900), WORKERS_MOVE_POLL (5), WORKERS_MOVE_FG=1 (go runs in front).
+On the remote side: WORKERS_MOVE_REMOTE_SPAWN (a pane-spawn), WORKERS_MOVE_REMOTE_PATH.
+"""
+from __future__ import annotations
+
+import sys
+
+sys.dont_write_bytecode = True
+
+import datetime
+import fcntl
+import glob
+import importlib.util
+import json
+import os
+import re
+import shlex
+import subprocess
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+
+
+def _load(name, file):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, file))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+herdr_peers = _load("herdr_peers", "herdr_peers.py")
+atc = _load("auto_tab_close", "auto-tab-close.py")  # last_reply, route_main_report, short_report
+
+WAIT, POLL, GONE = 900, 5, 60
+MARK = "[인계 메모]"
+SYNCED = ("~/.dotfiles", "~/work/munice", "~/work/munice/munice-claude")  # 집맥 pulls these every 3 minutes (sync-home step 4)
+ENTRY = re.compile(r"^## (\d\d:\d\d:\d\d) (\S+)(?: (.*))?$", re.M)  # auto-tab-close.py's `## HH:MM:SS <address> <label>`
+SESSION_LINE = re.compile(r"^세션 (\S*), 폴더 .*\n+")
+ASK = ("[퇴근 인계] 요유가 퇴근해서 회사맥이 곧 잠듭니다. 지금 하던 도구 호출이 끝나면 새 단계를 시작하지 말고 다음만 하세요. "
+       "1) 바뀐 파일이 있으면 이 일의 브랜치에 WIP 커밋을 만드세요. 기본 브랜치(main 등)에는 커밋하지 말고, 이 일과 상관없는 파일은 넣지 마세요. "
+       "push는 이 칸을 넘기는 스크립트가 합니다. "
+       "2) Slack 스레드 감시는 멈추세요. 퇴근하는 동안 Slack 스레드는 집맥 ambient가 맡습니다. 옮길 칸이면 Monitor와 백그라운드 작업도 멈추세요. "
+       "3) 답 맨 앞 줄을 `[인계 메모] 옮김` 또는 `[인계 메모] 옮기지 않음: <이유>`로 쓰고, 다음 줄에 `폴더: <이 일을 하던 폴더의 절대경로>`를 쓰세요. "
+       "이어서 집맥의 새 칸이 이 일을 이어 가는 데 필요한 것을 모두 적으세요: 목표, 한 일, 남은 단계, 브랜치, 확인한 것과 못 한 것, 주의할 것. "
+       "옮기지 않을 칸은 이렇습니다: 기다리기만 하는 칸(CI, 배포, 답을 기다림: 무엇을 기다리는지 적으세요), 브라우저(ego) QA가 남은 칸, "
+       "요유 계정이 필요한 GCP 단계가 남은 칸, 이미 끝난 칸. CI나 배포를 기다리는 칸은 Monitor를 그대로 두세요: 회사맥이 깨면 이어 갑니다. "
+       "4) 마지막 줄은 `남은 것: 요유 몫: 없음 · 유요 몫: 인계 메모대로 · 세션: 닫으면 넘기는 일이 멈춤`으로 쓰세요. "
+       "이 답은 리드에게 가지 않고 넘기는 스크립트가 읽습니다.")
+RESUME = "[퇴근 인계 끝] 회사맥이 다시 켜졌습니다. 인계 메모를 쓰느라 멈춘 일을 이어 가세요. 이어 갈 일이 없으면 짧게 보고하세요."
+
+# Runs on 집맥 as `/usr/bin/python3 -I - <json>` (macOS's 3.9). One op per call; prints one JSON line.
+REMOTE = r'''
+import json, os, subprocess, sys, time
+a = json.loads(sys.argv[1])
+H = os.environ.get("HERDR_BIN_PATH") or "/opt/homebrew/bin/herdr"
+home = os.path.expanduser("~")
+env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_") or k == "HERDR_BIN_PATH"}
+env["PATH"] = os.environ.get("WORKERS_MOVE_REMOTE_PATH") or ":".join(
+    [home + "/.local/bin", home + "/.dotfiles/tools/agent-hooks", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"])
+reports = home + "/.local/state/pane-reports"
+def run(*cmd, timeout=120):
+    try:
+        r = subprocess.run(list(cmd), capture_output=True, text=True, env=env, timeout=timeout)
+        return r.returncode, r.stdout, r.stderr
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, "", str(e)
+def git(top, *args):
+    return run("git", "-C", top, *args)
+def out(d):
+    print(json.dumps(d))
+    sys.exit(0)
+def workers():
+    rc, o, _ = run(H, "session", "list", "--json", timeout=10)
+    try:
+        return rc == 0 and any(s.get("name") == "workers" and s.get("running") for s in json.loads(o).get("sessions") or [])
+    except ValueError:
+        return False
+op = a["op"]
+if op == "check":
+    if not workers():
+        run("launchctl", "kickstart", "gui/%d/com.yoyoo.herdr-workers" % os.getuid(), timeout=10)
+        for _ in range(10):
+            time.sleep(1)
+            if workers():
+                break
+    out({"workers": workers()})
+if op == "prepare":
+    top, folder, branch, made = a.get("top"), a["folder"], a.get("branch"), False
+    if branch:
+        if os.path.isdir(top):
+            cur = git(top, "symbolic-ref", "--short", "-q", "HEAD")[1].strip()
+            if cur != branch:
+                out({"ok": False, "why": "집맥의 %s는 %s입니다" % (top, cur + " 브랜치" if cur else "분리된 HEAD")})
+            rc, st, _ = git(top, "status", "--porcelain")
+            if rc or st.strip():
+                out({"ok": False, "why": "집맥의 %s에 커밋하지 않은 변경이 있습니다" % top})
+        else:
+            main = a.get("main_tree") or ""
+            if not os.path.isdir(os.path.join(main, ".git")):
+                out({"ok": False, "why": "집맥에 %s 리포가 없습니다" % main})
+            rc, _, e = git(main, "fetch", "-q", "origin", branch)
+            if rc:
+                out({"ok": False, "why": "집맥에서 %s를 받지 못했습니다: %s" % (branch, e.strip()[-300:])})
+            if git(main, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] == 0:
+                rc, _, e = git(main, "worktree", "add", "-q", top, branch)
+            else:
+                rc, _, e = git(main, "worktree", "add", "-q", "--track", "-b", branch, top, "origin/" + branch)
+            if rc:
+                out({"ok": False, "why": "집맥에 워크트리를 만들지 못했습니다: %s" % e.strip()[-300:]})
+            made = True
+        rc, _, e = git(top, "fetch", "-q", "origin", branch)
+        if not rc:
+            rc, _, e = git(top, "merge", "--ff-only", "-q", "origin/" + branch)
+        if rc:
+            out({"ok": False, "why": "집맥의 %s를 %s에 맞추지 못했습니다: %s" % (top, branch, e.strip()[-300:])})
+    if not os.path.isdir(folder):
+        out({"ok": False, "why": "집맥에 %s 폴더가 없습니다" % folder})
+    out({"ok": True, "made": made})
+if op == "open":
+    memo = os.path.join(home, ".local/state/workers-move/memos", a["agent"] + ".md")
+    os.makedirs(os.path.dirname(memo), exist_ok=True)
+    with open(memo, "w", encoding="utf-8") as f:
+        f.write(a["memo"])
+    day = time.strftime("%Y-%m-%d")  # the bridge reads the moved pane's entries from here on
+    try:
+        size = os.path.getsize(os.path.join(reports, day + ".md"))
+    except OSError:
+        size = 0
+    spawn = os.environ.get("WORKERS_MOVE_REMOTE_SPAWN") or home + "/.local/bin/pane-spawn"
+    tried = []
+    for kind in dict.fromkeys([a["kind"], "claude"]):
+        rc, o, e = run(spawn, "--opener", a["opener"], "--kind", kind, "--cwd", a["folder"], a["name"],
+                       a["prompt"].replace("{memo}", memo), timeout=600)
+        addr = next((l for l in o.splitlines() if l.startswith("workers/")), "")
+        if addr:  # exit 1 with an address: it shows no work yet, and the instruction was typed
+            out({"ok": True, "address": addr, "kind": kind, "memo": memo, "start": [day, size], "warn": e.strip()[-300:] if rc else ""})
+        tried.append("%s: %s" % (kind, (e or o).strip()[-300:]))
+    out({"ok": False, "why": " / ".join(tried)})
+if op == "bridge":
+    import re
+    head = re.compile(rb"\n## \d\d:\d\d:\d\d \S")
+    rc, o, _ = run(H, "--session", "workers", "pane", "list", timeout=10)
+    try:
+        panes = [p.get("pane_id") for p in json.loads(o)["result"]["panes"]] if rc == 0 else None
+    except (ValueError, KeyError, TypeError):
+        panes = None
+    chunks = {}
+    for name, off in a["files"].items():
+        path = os.path.join(reports, name)
+        try:
+            with open(path, "rb") as f:
+                f.seek(off)
+                data = f.read()
+            settled = time.time() - os.path.getmtime(path) > 5
+        except OSError:
+            continue
+        if not settled:  # its last entry may still be being written: only those a later header closes
+            heads = [m.start() for m in head.finditer(data)]
+            data = data[:heads[-1]] if heads and heads[-1] > 0 else b""
+        chunks[name] = {"bytes": len(data), "text": data.decode("utf-8", "replace")}
+    out({"panes": panes, "chunks": chunks})
+if op == "tell":
+    rc, o, e = run("pane-tell", "workers/" + a["pane"], a["text"], timeout=30)
+    out({"ok": rc == 0, "why": (e or o).strip()[-300:]})
+if op == "read":
+    rc, o, e = run(H, "--session", "workers", "agent", "read", a["pane"], timeout=15)
+    out({"ok": rc == 0, "screen": o if rc == 0 else e})
+out({"ok": False, "why": "unknown op"})
+'''
+
+
+def state_root(env) -> str:
+    return os.path.join(env.get("XDG_STATE_HOME") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".local", "state"), "workers-move")
+
+
+def path(env, name) -> str:
+    return os.path.join(state_root(env), name)
+
+
+def report_dir(env) -> str:
+    return env.get("PANE_REPORT_DIR") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".local", "state", "pane-reports")
+
+
+def log(env, text):
+    os.makedirs(state_root(env), exist_ok=True)
+    with open(path(env, "run.log"), "a", encoding="utf-8") as f:
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text}\n")
+
+
+def load(env, name, default):
+    try:
+        with open(path(env, name), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, type(default)) else default
+    except (OSError, ValueError):
+        return default
+
+
+def save(env, name, data):
+    os.makedirs(state_root(env), exist_ok=True)
+    tmp = path(env, name) + f".{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path(env, name))
+
+
+def locked(env, name):
+    """The open lock file, or None when another run holds it."""
+    os.makedirs(state_root(env), exist_ok=True)
+    f = open(path(env, name), "a")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return f
+    except OSError:
+        f.close()
+        return None
+
+
+def remote_host(env) -> str:
+    if env.get("WORKERS_MOVE_REMOTE"):
+        return env["WORKERS_MOVE_REMOTE"]
+    try:
+        with open(os.path.join(env.get("HOME") or os.path.expanduser("~"), ".config", "herdr", "remote-host")) as f:
+            return f.readline().strip()
+    except OSError:
+        return ""
+
+
+def remote(env, op, timeout=120, **args) -> dict | None:
+    """One op of REMOTE on 집맥; None when ssh failed or its answer is unreadable (the op may have run)."""
+    host = remote_host(env)
+    if not host:
+        return None
+    ssh = shlex.split(env["WORKERS_MOVE_SSH"]) if env.get("WORKERS_MOVE_SSH") else [
+        "ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3"]
+    # ASCII only: a non-interactive ssh shell may have no UTF-8 locale for argv
+    cmd = ssh + [host, "/usr/bin/python3 -I - " + shlex.quote(json.dumps(dict(args, op=op)))]
+    try:
+        r = subprocess.run(cmd, input=REMOTE, capture_output=True, text=True, timeout=timeout)
+        return json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+        return None
+
+
+def clean_env(env) -> dict:
+    """launchd's view: a run started from the main pane must not count as that pane (pane-tell refuses telling itself)."""
+    return {k: v for k, v in env.items() if not k.startswith("HERDR_") or k == "HERDR_BIN_PATH"}
+
+
+def tell(env, address, text) -> bool:
+    try:
+        return subprocess.run([env.get("WORKERS_MOVE_TELL") or os.path.join(HERE, "pane-tell"), address, text], env=clean_env(env),
+                              timeout=30, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def main_pane(env):
+    """(address, pane) of the main pane, or ("", {})."""
+    return (herdr_peers.all_panes(clean_env(env)) or {}).get(herdr_peers.main_terminal(env)) or ("", {})
+
+
+def plain_label(label) -> str:
+    return re.sub(r"^[🟢🔴👑🫡\s]+", "", label or "").strip()
+
+
+def candidates(env) -> list | None:
+    """The main pane's panes on workers, check panes left out; None when workers or the main pane cannot be read."""
+    main = herdr_peers.main_terminal(env)
+    sock = herdr_peers.socket_of(env, "workers")
+    if not main or not sock:
+        return None
+    agents = herdr_peers.herdr(env, "agent", "list", socket=sock).get("agents")
+    panes = herdr_peers.herdr(env, "pane", "list", socket=sock).get("panes")
+    if agents is None or panes is None:
+        return None
+    by_pane = {p.get("pane_id"): p for p in panes}
+    prefix = f"spawn-{main[len('term_'):]}-"
+    found = []
+    for a in agents:
+        name = a.get("name") or ""
+        if not name.startswith(prefix) or name[len(prefix):].startswith("chk"):
+            continue
+        p = by_pane.get(a.get("pane_id"), {})
+        term = a.get("terminal_id") or p.get("terminal_id")
+        if not term:
+            continue
+        found.append({"terminal": term, "pane": a.get("pane_id"), "agent": name, "kind": a.get("agent") or "claude",
+                      "session": (a.get("agent_session") or {}).get("value") or "", "label": p.get("label") or name,
+                      "cwd": a.get("foreground_cwd") or a.get("cwd") or p.get("cwd") or "", "status": a.get("agent_status")})
+    return found
+
+
+def transcript(env, session) -> str:
+    home = env.get("HOME") or os.path.expanduser("~")
+    found = (glob.glob(f"{home}/.claude/projects/*/{glob.escape(session)}.jsonl")
+             + glob.glob(f"{home}/.codex/sessions/*/*/*/rollout-*-{glob.escape(session)}.jsonl")) if session else []
+    return found[0] if found else ""
+
+
+def first_prompt(file) -> str:
+    """The pane's instruction: the first prompt in its Claude transcript or Codex log."""
+    try:
+        with open(file, encoding="utf-8") as f:
+            for line in f:
+                e = json.loads(line)
+                if e.get("type") == "user" and not e.get("isMeta") and isinstance((e.get("message") or {}).get("content"), str):
+                    return e["message"]["content"].strip()
+                p = e.get("payload") or {}
+                if p.get("type") == "message" and p.get("role") == "user":
+                    text = "".join(c.get("text", "") for c in p.get("content") or [] if isinstance(c, dict))
+                    if text and not text.startswith(("# AGENTS.md", "<")):
+                        return text.strip()
+    except (OSError, ValueError):
+        pass
+    return ""
+
+
+def parse_memo(text) -> tuple:
+    """(move, why, folder) from a handoff note; move is None when the reply holds no note."""
+    plain = (text or "").replace("**", "").replace("`", "")
+    m = re.search(re.escape(MARK) + r"[ \t]*(옮기지[ \t]*않음|옮김)[ \t]*[:：]?[ \t]*([^\n]*)", plain)
+    if not m:
+        return None, "", ""
+    folder = re.search(r"^\s*[-*]?\s*폴더\s*[:：]\s*(/\S+)", plain, re.M)
+    return m[1] == "옮김", m[2].strip(), folder[1].rstrip(".,)") if folder else ""
+
+
+def git(top, *args, timeout=60) -> tuple:
+    try:
+        r = subprocess.run(["git", "-C", top, *args], capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout.strip(), r.stderr.strip()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, "", str(e)
+
+
+def git_state(folder) -> dict:
+    """Can the work in folder go to 집맥 as it is? ok, why, and for a git folder top, main_tree, branch, push, synced."""
+    if not os.path.isdir(folder):
+        return {"ok": False, "why": f"{folder} 폴더가 없습니다"}
+    rc, top, _ = git(folder, "rev-parse", "--show-toplevel")
+    if rc:
+        return {"ok": True, "git": False}
+    if git(top, "status", "--porcelain")[1]:
+        return {"ok": False, "why": f"{top}에 커밋하지 않은 변경이 있습니다"}
+    branch = git(top, "symbolic-ref", "--short", "-q", "HEAD")[1]
+    if not branch:
+        return {"ok": False, "why": f"{top}이 분리된 HEAD입니다"}
+    main_tree = os.path.dirname(git(top, "rev-parse", "--path-format=absolute", "--git-common-dir")[1].rstrip("/"))
+    default = git(top, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD")[1].split("/", 1)[-1] or "main"
+    upstream = git(top, "rev-parse", "--abbrev-ref", "-q", "@{u}")[0] == 0
+    ahead = int(git(top, "rev-list", "--count", "@{u}..HEAD")[1] or 0) if upstream else None
+    state = {"ok": True, "git": True, "top": top, "main_tree": main_tree, "branch": branch, "push": False,
+             "synced": any(os.path.realpath(top) == os.path.realpath(os.path.expanduser(s)) for s in SYNCED)}
+    if branch == default:
+        if not upstream or ahead:
+            return {"ok": False, "why": f"{top}의 기본 브랜치 {branch}에 push하지 않은 커밋이 있습니다"}
+        return state
+    if os.path.realpath(top) == os.path.realpath(main_tree):
+        return {"ok": False, "why": f"{top} 원본 체크아웃에서 {branch} 브랜치 작업 중입니다(집맥은 원본의 브랜치를 바꾸지 않습니다)"}
+    return dict(state, push=not upstream or bool(ahead))
+
+
+def mark(env, kind, key, on=True):
+    """`moving` (auto-tab-close sends the pane's reply nowhere) or `reported` (workers-watch hears nothing more of it)."""
+    if not key:
+        return
+    p = os.path.join(herdr_peers.state_dir(env), kind, key)
+    if not on:
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+        return
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "a"):
+        os.utime(p)
+
+
+def settle(env, moves, rec, step, why=""):
+    """A pane that stays here: its note was its report, and its reply goes to its lead again."""
+    rec.update(step=step, reason=why)
+    if step != "skipped":
+        mark(env, "reported", rec["terminal"]), mark(env, "reported", rec["session"])
+    mark(env, "moving", rec["terminal"], on=False)
+    save(env, "moves.json", moves)
+
+
+def note(env, rec, memo, g) -> str:
+    where = f"폴더: {rec['folder']}" + (f", 브랜치: {g['branch']} (push됨)" if g.get("git") else "")
+    return (f"# 퇴근 인계: {plain_label(rec['label'])}\n\n회사맥 칸: workers/{rec['pane']} ({rec['agent']}), 세션 {rec['session']}, "
+            f"넘긴 때 {datetime.datetime.now():%m-%d %H:%M}\n{where}\n\n## 원래 지시\n\n"
+            f"{first_prompt(transcript(env, rec['session'])) or '(기록에서 찾지 못했습니다)'}\n\n## 인계 메모\n\n{memo.strip()}\n")
+
+
+def instruction(rec, g, made) -> str:
+    text = (f"[퇴근 인계] 회사맥 칸 '{plain_label(rec['label'])}'이 요유 퇴근 때 넘긴 일을 집맥에서 이어 갑니다. 먼저 {{memo}}를 Read로 끝까지 "
+            f"읽으세요. 원래 지시와 인계 메모가 들어 있습니다. 폴더는 {rec['folder']}"
+            + (f"이고 브랜치 {g['branch']}가 push되어 있습니다. " if g.get("git") else "입니다. ")
+            + "집맥에는 브라우저(ego)가 없고 요유 계정이 필요한 GCP 단계도 할 수 없으니, 그런 단계가 나오면 멈추고 보고하세요. "
+            "~/.claude, ~/.codex, ~/.dotfiles, munice-claude 원본 같은 전역 설정과 메모리는 고치지 마세요: 집맥은 회사맥에서 복사받습니다. "
+            "Slack 스레드는 감시하지 마세요: 퇴근하는 동안 Slack 스레드는 집맥 ambient가 맡습니다.")
+    if g.get("synced"):
+        text += " 이 폴더는 집맥이 3분마다 pull하는 원본 체크아웃이니 커밋하거나 파일을 고치지 마세요. 고칠 일이면 워크트리를 따로 만드세요."
+    if made:
+        text += " 이 폴더는 집맥에 새로 만든 워크트리라 node_modules, .env 같은 git 밖 파일이 없을 수 있습니다."
+    return text
+
+
+def move_one(env, moves, rec, memo, agents_now) -> None:
+    """Steps 2-4 for one pane whose note arrived. Each outcome is saved before the next step."""
+    go, why, folder = parse_memo(memo)
+    if not go:
+        return settle(env, moves, rec, "kept", why or "칸이 옮기지 않기로 했습니다")
+    if any(herdr_peers.opener(a.get("name")) == rec["terminal"] for a in agents_now):
+        return settle(env, moves, rec, "kept", "이 칸이 연 칸이 아직 열려 있습니다")
+    rec["folder"] = folder or rec["cwd"]
+    g = git_state(rec["folder"])
+    if not g["ok"]:
+        return settle(env, moves, rec, "kept", g["why"])
+    if g.get("push"):
+        rc, _, err = git(g["top"], "push", "-q", "-u", "origin", "HEAD", timeout=180)
+        if rc:
+            return settle(env, moves, rec, "kept", f"push하지 못했습니다: {err[-300:]}")
+    p = remote(env, "prepare", folder=rec["folder"], top=g.get("top"), main_tree=g.get("main_tree"), branch=g.get("branch"))
+    if not p or not p.get("ok"):
+        return settle(env, moves, rec, "kept", (p or {}).get("why") or "집맥에 닿지 못했습니다")
+    rec.update(step="opening", top=g.get("top"), branch=g.get("branch"), git=bool(g.get("git")))
+    save(env, "moves.json", moves)
+    o = remote(env, "open", timeout=900, agent=rec["agent"], memo=note(env, rec, memo, g), opener=herdr_peers.main_terminal(env),
+               kind=rec["kind"], folder=rec["folder"], name=f"{plain_label(rec['label'])} (집맥)", prompt=instruction(rec, g, p.get("made")))
+    if o is None:  # it may have opened: never a second pane, never the same work here too
+        return settle(env, moves, rec, "unknown", "집맥 칸을 여는 도중 ssh가 끊겼습니다. 집맥 workers 서버에 그 칸이 있는지 보세요")
+    if not o.get("ok"):
+        return settle(env, moves, rec, "kept", f"집맥 칸을 열지 못했습니다: {o.get('why')}")
+    rec.update(step="opened", remote=o["address"], remote_kind=o.get("kind"), memo=o.get("memo"), warn=o.get("warn") or "",
+               start=o.get("start"), opened_at=time.time())
+    save(env, "moves.json", moves)
+    close_local(env, moves, rec)
+
+
+def close_local(env, moves, rec):
+    mark(env, "reported", rec["terminal"]), mark(env, "reported", rec["session"])
+    herdr_peers.herdr(env, "pane", "close", rec["pane"], socket=herdr_peers.socket_of(env, "workers"))  # fails open: no answer to check
+    rec["step"] = "moved"
+    mark(env, "moving", rec["terminal"], on=False)
+    save(env, "moves.json", moves)
+
+
+def summary(moves, keys) -> str:
+    moved = [moves[k] for k in keys if moves[k].get("step") in ("opened", "moved")]
+    kept = [moves[k] for k in keys if moves[k].get("step") not in ("opened", "moved")]
+    lines = [f"[퇴근 인계] 끝났습니다. 집맥으로 넘긴 칸 {len(moved)}개, 회사맥에 둔 칸 {len(kept)}개."]
+    lines += [f"- 넘김: {plain_label(m['label'])}(workers/{m['pane']}) → 집맥 {m['remote']} ({m.get('remote_kind')})"
+              + (f" 주의: {m['warn']}" if m.get("warn") else "") for m in moved]
+    lines += [f"- 둠: {plain_label(m['label'])}(workers/{m['pane']}): {m.get('reason') or m.get('step')}" for m in kept]
+    if moved:
+        lines.append("집맥 칸의 보고와 알림은 회사맥이 깨어 있을 때 1분 안에 이 칸에 옵니다. 집맥 칸에 답하기: "
+                     "`workers-move tell <집맥 칸 id> \"<글>\"`, 화면 보기: `workers-move read <집맥 칸 id>`.")
+    if kept:
+        lines.append("회사맥에 둔 칸은 인계 메모를 쓰고 멈춰 있습니다. 출근 뒤 `workers-move resume`으로 이어 가게 하세요.")
+    return "\n".join(lines)
+
+
+def run(env) -> int:
+    lock = locked(env, "run.lock")
+    if not lock:
+        print("workers-move: 이미 도는 중입니다")
+        return 0
+    addr = main_pane(env)[0]
+
+    def say(text):
+        log(env, text.replace("\n", " / "))
+        print(text)
+        if addr:
+            tell(env, addr, text)
+
+    check = remote(env, "check", timeout=60)
+    if not check or not check.get("workers"):
+        say("[퇴근 인계] 집맥에 닿지 못했거나 집맥 workers 서버를 켜지 못해 아무 칸도 넘기지 않았습니다. 회사맥 칸은 그대로입니다.")
+        return 1
+    found = candidates(env)
+    if found is None:
+        say("[퇴근 인계] 메인 칸이나 workers 서버의 칸 목록을 읽지 못해 아무 칸도 넘기지 않았습니다.")
+        return 1
+    moves = load(env, "moves.json", {})
+    keys = []
+    now = time.time()
+    for c in found:
+        key, old = c["terminal"], moves.get(c["terminal"]) or {}
+        keys.append(key)
+        if old.get("step") == "opened":  # the 집맥 pane is open; only this pane's close was left
+            close_local(env, moves, old)
+        elif old.get("step") == "opening":  # a run died while it opened one
+            settle(env, moves, old, "unknown", "지난 실행이 집맥 칸을 여는 도중 멈췄습니다. 집맥 workers 서버에 그 칸이 있는지 보세요")
+        elif old.get("step") == "asked" and now - old.get("asked_at", 0) < WAIT:
+            pass  # a run cut short asked it already
+        else:
+            rec = moves[key] = {k: v for k, v in c.items() if k != "status"}
+            rec.update(step="asked", asked_at=now)
+            if c["status"] == "blocked":
+                settle(env, moves, rec, "skipped", "질문 창에서 멈춰 있어 인계 요청을 넣지 않았습니다")
+                continue
+            mark(env, "moving", key)
+            if not tell(env, f"workers/{c['pane']}", ASK):
+                settle(env, moves, rec, "skipped", "인계 요청을 칸에 넣지 못했습니다")
+    save(env, "moves.json", moves)
+    if not keys:
+        say("[퇴근 인계] 넘길 밑 칸이 없습니다.")
+        return 0
+    deadline = time.time() + float(env.get("WORKERS_MOVE_WAIT") or WAIT)
+    while waiting := [k for k in keys if moves[k].get("step") == "asked"]:
+        listed = herdr_peers.herdr(env, "agent", "list", socket=herdr_peers.socket_of(env, "workers")).get("agents")
+        by_pane = {a.get("pane_id"): a for a in listed or []}
+        for k in waiting if listed is not None else []:
+            rec = moves[k]
+            a = by_pane.get(rec["pane"])
+            if a is None:
+                settle(env, moves, rec, "kept", "인계 메모를 쓰기 전에 칸이 사라졌습니다")
+                continue
+            t = transcript(env, rec["session"])
+            if a.get("agent_status") not in ("idle", "done") or not t or os.path.getmtime(t) < rec["asked_at"]:
+                continue
+            memo = atc.last_reply(rec["session"], env.get("HOME") or "")
+            if MARK in memo:
+                move_one(env, moves, rec, memo, listed)
+        if time.time() >= deadline:
+            for k in waiting:
+                if moves[k].get("step") == "asked":
+                    settle(env, moves, moves[k], "kept", "기다리는 동안 인계 메모가 오지 않았습니다")
+            break
+        time.sleep(float(env.get("WORKERS_MOVE_POLL") or POLL))
+    text = summary(moves, keys)
+    with open(path(env, "last-summary.txt"), "w", encoding="utf-8") as f:
+        f.write(text + "\n")
+    say(text)
+    return 0
+
+
+def split_entries(text):
+    heads = list(ENTRY.finditer(text))
+    for i, m in enumerate(heads):
+        yield m[1], m[2], m[3] or "", text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip("\n")
+
+
+def fast_forward(rec) -> str:
+    """Bring the 회사맥 folder to what the 집맥 pane pushed, since the check runs here; "" when done, else why not."""
+    if not rec.get("git"):
+        return ""
+    top, branch = rec["top"], rec["branch"]
+    if not os.path.isdir(top):
+        return f"회사맥에 {top} 폴더가 없습니다"
+    cur = git(top, "symbolic-ref", "--short", "-q", "HEAD")[1]
+    if cur != branch:
+        return f"회사맥의 {top}이 {cur + ' 브랜치' if cur else '분리된 HEAD'}에 있습니다"
+    if git(top, "status", "--porcelain")[1]:
+        return f"회사맥의 {top}에 커밋하지 않은 변경이 있습니다"
+    rc, _, err = git(top, "fetch", "-q", "origin", branch, timeout=120)
+    if not rc:
+        rc, _, err = git(top, "merge", "--ff-only", "-q", f"origin/{branch}")
+    return f"회사맥의 {top}를 집맥이 push한 {branch}에 맞추지 못했습니다: {err[-200:]}" if rc else ""
+
+
+def deliver(env, rec, item, main, ffs) -> bool:
+    addr, to = main
+    pane = rec["remote"].split("/", 1)[-1]
+    cenv = clean_env(env)
+    file = os.path.join(report_dir(env), item["day"] + ".md")
+    at = f"{item['time']} 항목"
+    where = f"칸: 집맥:{rec['remote']} {plain_label(rec['label'])} (집맥)"
+    hint = f"집맥 칸입니다. 답은 `workers-move tell {pane} \"<글>\"`, 화면은 `workers-move read {pane}`로 봅니다."
+
+    def send(message):
+        return tell(env, addr, f"{message}\n{hint}")
+
+    if item["text"].startswith("[workers-watch]"):
+        return send(f"집맥 칸 알림입니다. {item['text'][len('[workers-watch]'):].strip()}\n{where}\n전체: {file} ({at})")
+    m = SESSION_LINE.match(item["text"])
+    reply = item["text"][m.end():] if m else item["text"]
+    if rec["key"] not in ffs:
+        ffs[rec["key"]] = fast_forward(rec)
+    if ffs[rec["key"]]:
+        return send(f"바로 전달하는 칸의 보고입니다(확인 칸을 열지 않습니다: {ffs[rec['key']]}).\n"
+                    f"{atc.short_report(reply, None)}\n{where}\n전체 보고: {file} ({at})")
+    me = {"pane_id": f"집맥:{rec['remote']}", "terminal_id": f"집맥:{rec['remote']}", "label": f"{rec['label']} (집맥)",
+          "agent_session": {"value": m[1] if m else ""}, "cwd": rec["folder"]}
+    now = datetime.datetime.strptime(f"{item['day']} {item['time']}", "%Y-%m-%d %H:%M:%S")
+    try:
+        routed = atc.route_main_report(reply, me, rec["agent"], addr, to, file, now, cenv, send)
+    except (OSError, ValueError, KeyError) as error:
+        return send(f"바로 전달하는 칸의 보고입니다(확인 자동 연결 실패). {error}\n{atc.short_report(reply, None)}\n{where}\n전체 보고: {file} ({at})")
+    if routed is None:
+        return send(f"이 칸의 보고입니다(집맥). {atc.share.RELAY_NOTE}:\n{atc.short_report(reply)}\n{where}\n전체 보고: {file} ({at})")
+    return routed
+
+
+def bridge(env) -> int:
+    lock = locked(env, "bridge.lock")
+    if not lock:
+        return 0
+    moves = load(env, "moves.json", {})
+    b = load(env, "bridge.json", {})
+    offsets, queue, done, gone = (b.setdefault(k, d) for k, d in (("offsets", {}), ("queue", []), ("done", []), ("gone", {})))
+    active = {k: dict(r, key=k) for k, r in moves.items() if r.get("step") in ("opened", "moved") and r.get("remote") and k not in done}
+    if not active and not queue:
+        return 0
+    if active:
+        today = datetime.date.today()
+        for r in active.values():
+            day0, size0 = r.get("start") or [today.isoformat(), 0]
+            offsets.setdefault(f"{day0}.md", size0)
+            d = datetime.date.fromisoformat(day0)
+            while (d := d + datetime.timedelta(days=1)) <= today:
+                offsets.setdefault(f"{d.isoformat()}.md", 0)
+        wanted = {f"{(today - datetime.timedelta(days=n)).isoformat()}.md" for n in range(8)}
+        os.makedirs(report_dir(env), exist_ok=True)
+        got = remote(env, "bridge", timeout=60, files={f: o for f, o in offsets.items() if f in wanted})
+        if got:
+            by_addr = {r["remote"]: k for k, r in active.items()}
+            for name, chunk in sorted((got.get("chunks") or {}).items()):
+                day = name[:-3]
+                with open(os.path.join(report_dir(env), name), "a", encoding="utf-8") as copy:
+                    for at, addr, label, body in split_entries(chunk["text"]):
+                        if addr in by_addr:
+                            copy.write(f"\n## {at} 집맥:{addr} {label}\n\n{body}\n")
+                            queue.append({"key": by_addr[addr], "day": day, "time": at, "text": body})
+                offsets[name] = offsets.get(name, 0) + chunk["bytes"]
+            panes = got.get("panes")
+            for k, r in active.items():
+                if panes is None or r["remote"].split("/", 1)[-1] in panes:
+                    gone.pop(k, None)
+                else:
+                    gone.setdefault(k, time.time())
+        save(env, "bridge.json", b)
+    main = main_pane(env)
+    ffs: dict = {}
+    while queue and main[0]:
+        item = queue[0]
+        rec = active.get(item["key"]) or dict(moves.get(item["key"]) or {}, key=item["key"])
+        if rec.get("remote") and not deliver(env, rec, item, main, ffs):
+            break  # in order: the next minute tries this one first
+        queue.pop(0)
+        save(env, "bridge.json", b)
+    for k in active:  # gone for a minute: its last entry, written just before it closed, has been read
+        if k in gone and time.time() - gone[k] >= GONE and not any(i["key"] == k for i in queue):
+            done.append(k)
+            gone.pop(k)
+    save(env, "bridge.json", b)
+    return 0
+
+
+def resume(env) -> int:
+    lock = locked(env, "run.lock")
+    if not lock:
+        print("workers-move: go가 도는 중입니다")
+        return 1
+    moves = load(env, "moves.json", {})
+    here = {c["terminal"] for c in candidates(env) or []}
+    told = []
+    for k, rec in moves.items():
+        if rec.get("step") == "kept" and k in here and tell(env, f"workers/{rec['pane']}", RESUME):
+            rec["step"] = "resumed"
+            told.append(plain_label(rec["label"]))
+    save(env, "moves.json", moves)
+    print(f"workers-move: 이어 가라고 한 칸 {len(told)}개" + (": " + ", ".join(told) if told else ""))
+    return 0
+
+
+def remote_pane_id(text) -> str:
+    return re.sub(r"^(?:집맥:)?(?:workers/)?", "", text or "")
+
+
+def main(argv, env) -> int:
+    cmd = argv[1] if len(argv) > 1 else ""
+    if cmd == "--selftest":
+        return selftest()
+    if cmd == "go":
+        if env.get("WORKERS_MOVE_FG"):
+            return run(env)
+        os.makedirs(state_root(env), exist_ok=True)
+        with open(path(env, "run.log"), "a") as out:
+            me = os.path.realpath(__file__)
+            try:  # caffeinate -i: idle sleep waits for the notes; a closed lid still sleeps
+                subprocess.Popen(["/usr/bin/caffeinate", "-i", me, "run"], env=clean_env(env), stdin=subprocess.DEVNULL, stdout=out,
+                                 stderr=out, start_new_session=True)
+            except OSError:
+                subprocess.Popen([me, "run"], env=clean_env(env), stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True)
+        print(f"workers-move: 시작했습니다. 칸마다 인계 메모를 기다리고(최대 {int(float(env.get('WORKERS_MOVE_WAIT') or WAIT)) // 60}분), "
+              f"요약은 이 칸에 pane-tell로 옵니다. 기록: {path(env, 'run.log')}")
+        return 0
+    if cmd == "run":
+        return run(env)
+    if cmd == "list":
+        found = candidates(env)
+        if found is None:
+            print("workers-move: 메인 칸이나 workers 서버의 칸 목록을 읽지 못했습니다")
+            return 1
+        for c in found:
+            print(f"workers/{c['pane']}\t{c['status']}\t{c['kind']}\t{plain_label(c['label'])}\t{c['cwd']}")
+        return 0
+    if cmd == "bridge":
+        return bridge(env)
+    if cmd == "resume":
+        return resume(env)
+    if cmd == "tell" and len(argv) == 4:
+        r = remote(env, "tell", timeout=60, pane=remote_pane_id(argv[2]), text=argv[3])
+        print("workers-move: 넣었습니다" if r and r.get("ok") else f"workers-move: 넣지 못했습니다: {(r or {}).get('why') or 'ssh 실패'}")
+        return 0 if r and r.get("ok") else 1
+    if cmd == "read" and len(argv) == 3:
+        r = remote(env, "read", timeout=30, pane=remote_pane_id(argv[2]))
+        print((r or {}).get("screen") or "workers-move: 읽지 못했습니다")
+        return 0 if r and r.get("ok") else 1
+    print(__doc__.split("\n\n")[1])
+    return 2
+
+
+def selftest() -> int:
+    import shutil
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    try:
+        home, rhome = f"{d}/home", f"{d}/rhome"
+        state = f"{home}/.local/state"
+        env = {"HOME": home, "XDG_STATE_HOME": state, "PANE_REPORT_DIR": f"{state}/pane-reports", "HERDR_BIN_PATH": f"{d}/herdr",
+               "FAKE_HERDR": f"{d}/local.json", "FAKE_REMOTE_HERDR": f"{d}/remote.json", "FAKE_REMOTE_HOME": rhome, "FAKE_D": d,
+               "WORKERS_MOVE_SSH": f"{d}/ssh", "WORKERS_MOVE_REMOTE": "jip", "WORKERS_MOVE_TELL": f"{d}/tell",
+               "WORKERS_MOVE_REMOTE_SPAWN": f"{d}/rspawn", "WORKERS_MOVE_REMOTE_PATH": f"{d}/rbin:/usr/bin:/bin",
+               "AUTO_TAB_CLOSE_PANE_SPAWN": f"{d}/cspawn", "WORKERS_MOVE_WAIT": "3", "WORKERS_MOVE_POLL": "0.2",
+               "PATH": "/usr/bin:/bin:/opt/homebrew/bin", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com", "GIT_CONFIG_NOSYSTEM": "1"}
+        for k in [k for k in os.environ if k.startswith(("HERDR_", "GIT_", "MUNICE_"))]:
+            del os.environ[k]
+        os.environ.update(env)
+        os.makedirs(f"{d}/rbin")
+        os.makedirs(f"{state}/orchestrator")
+        os.makedirs(f"{rhome}/.local/state/pane-reports")
+        with open(f"{state}/orchestrator/main", "w") as f:
+            f.write("term_MAIN")
+
+        def script(name, body):
+            with open(f"{d}/{name}", "w") as f:
+                f.write(body)
+            os.chmod(f"{d}/{name}", 0o755)
+
+        script("herdr", r'''#!/usr/bin/env python3
+import json, os, sys
+st = os.environ["FAKE_HERDR"]
+data = json.load(open(st))
+args = sys.argv[1:]
+if args[:1] == ["--session"]:
+    srv, args = args[1], args[2:]
+else:
+    sock = os.environ.get("HERDR_SOCKET_PATH") or ""
+    srv = sock.split("/")[-2] if sock else "default"
+open(st + ".log", "a").write(srv + " " + " ".join(args) + "\n")
+if args[:2] == ["session", "list"]:
+    print(json.dumps({"sessions": [{"name": n, "running": True, "socket_path": "/x/sessions/%s/herdr.sock" % n} for n in data]}))
+    sys.exit(0)
+s = data.get(srv)
+if s is None:
+    sys.exit(1)
+r = {}
+if args[:2] == ["pane", "list"]:
+    r = {"panes": s["panes"]}
+elif args[:2] == ["agent", "list"]:
+    r = {"agents": s["agents"]}
+elif args[:2] == ["pane", "close"]:
+    s["panes"] = [p for p in s["panes"] if p["pane_id"] != args[2]]
+    s["agents"] = [a for a in s["agents"] if a["pane_id"] != args[2]]
+    json.dump(data, open(st, "w"))
+elif args[:2] == ["pane", "get"]:
+    r = {"pane": next((p for p in s["panes"] if p["pane_id"] == args[2]), {})}
+elif args[:2] == ["agent", "read"]:
+    print("screen of " + args[2])
+    sys.exit(0)
+print(json.dumps({"result": r}))
+''')
+        # pane-tell: logs; the ASK makes a pane with a canned note reply in its transcript
+        script("tell", r'''#!/usr/bin/env python3
+import json, os, sys
+d = os.environ["FAKE_D"]
+addr, text = sys.argv[1], sys.argv[2]
+open(d + "/tell.log", "a").write(json.dumps([addr, text], ensure_ascii=False) + "\n")
+if os.path.exists(d + "/tell-fail"):
+    sys.exit(1)
+memos = json.load(open(d + "/memos.json")) if os.path.exists(d + "/memos.json") else {}
+if text.startswith("[퇴근 인계]") and addr in memos:
+    sid, memo = memos[addr]
+    with open(os.environ["HOME"] + "/.claude/projects/x/" + sid + ".jsonl", "a") as f:
+        f.write(json.dumps({"type": "user", "message": {"content": text}}) + "\n")
+        f.write(json.dumps({"type": "assistant", "message": {"id": "m" + sid, "content": [{"type": "text", "text": memo}]}}) + "\n")
+''')
+        script("ssh", '#!/bin/sh\nfor a; do cmd=$a; done\necho call >> "$FAKE_D/ssh.log"\n'
+                      'HOME="$FAKE_REMOTE_HOME" FAKE_HERDR="$FAKE_REMOTE_HERDR" exec /bin/sh -c "$cmd"\n')
+        script("rspawn", '#!/usr/bin/env python3\nimport json, os, sys\nd = os.environ["FAKE_D"]\n'
+                         'open(d + "/rspawn.log", "a").write(json.dumps(sys.argv[1:], ensure_ascii=False) + "\\n")\n'
+                         'if os.path.exists(d + "/spawn-fail"):\n    print("no trust", file=sys.stderr); sys.exit(1)\n'
+                         'print("workers/w9:pR1")\n')
+        script("rbin/pane-tell", '#!/bin/sh\necho "$1 $2" >> "$FAKE_D/rtell.log"\n')
+        script("cspawn", '#!/usr/bin/env python3\nimport json, os, sys\nd = os.environ["FAKE_D"]\n'
+                         'open(d + "/cspawn.log", "a").write(json.dumps([os.environ.get("HERDR_PANE_ID")] + sys.argv[1:], ensure_ascii=False) + "\\n")\n'
+                         'print("workers/w1:pC1")\n')
+
+        def lines(name):
+            try:
+                with open(f"{d}/{name}", encoding="utf-8") as f:
+                    return f.read().splitlines()
+            except OSError:
+                return []
+
+        def told(addr=None):
+            return [t for a, t in map(json.loads, lines("tell.log")) if addr is None or a == addr]
+
+        def sh(*cmd, cwd=None):
+            subprocess.run(cmd, cwd=cwd, check=True, capture_output=True)
+
+        # repos: origin, its main clone, a worktree on feat/x with a WIP commit not pushed, and a second clone for 집맥's pushes
+        sh("git", "init", "-q", "--bare", "-b", "main", f"{d}/origin.git")
+        sh("git", "clone", "-q", f"{d}/origin.git", f"{d}/repo")
+        sh("git", "commit", "-q", "--allow-empty", "-m", "init", cwd=f"{d}/repo")
+        sh("git", "push", "-q", "origin", "main", cwd=f"{d}/repo")
+        sh("git", "remote", "set-head", "origin", "main", cwd=f"{d}/repo")
+        wt = f"{d}/wt"
+        sh("git", "worktree", "add", "-q", "-b", "feat/x", wt, cwd=f"{d}/repo")
+        sh("git", "commit", "-q", "--allow-empty", "-m", "wip", cwd=wt)
+        os.makedirs(f"{d}/plain")
+
+        # git_state
+        assert git_state(f"{d}/plain") == {"ok": True, "git": False}
+        g = git_state(wt)
+        assert g["ok"] and g["push"] and g["branch"] == "feat/x" and os.path.realpath(g["main_tree"]) == os.path.realpath(f"{d}/repo"), g
+        sh("git", "checkout", "-q", "-b", "side", cwd=f"{d}/repo")
+        assert "원본 체크아웃" in git_state(f"{d}/repo")["why"]
+        sh("git", "checkout", "-q", "main", cwd=f"{d}/repo")
+        sh("git", "commit", "-q", "--allow-empty", "-m", "local", cwd=f"{d}/repo")
+        assert "push하지 않은" in git_state(f"{d}/repo")["why"]
+        sh("git", "reset", "-q", "--hard", "origin/main", cwd=f"{d}/repo")
+        assert git_state(f"{d}/repo")["ok"] and not git_state(f"{d}/repo")["push"]
+        open(f"{d}/repo/dirt", "w").close()
+        assert "커밋하지 않은" in git_state(f"{d}/repo")["why"]
+        os.unlink(f"{d}/repo/dirt")
+        sh("git", "checkout", "-q", "--detach", cwd=f"{d}/repo")
+        assert "분리된 HEAD" in git_state(f"{d}/repo")["why"]
+        sh("git", "checkout", "-q", "main", cwd=f"{d}/repo")
+
+        # parse_memo
+        assert parse_memo(f"[인계 메모] 옮김\n폴더: {wt}\n목표: x") == (True, "", wt)
+        assert parse_memo("**[인계 메모] 옮기지 않음: CI 기다림**\n- 폴더: `/a/b`.") == (False, "CI 기다림", "/a/b")
+        assert parse_memo("그냥 보고") == (None, "", "")
+
+        # 회사맥: the main pane on default; on workers the main pane's panes A-D, another lead's E and a check pane F
+        def agent(pid, name, sid, status="idle", kind="claude", cwd=d):
+            return {"pane_id": pid, "terminal_id": f"term_{pid[-1]}", "name": name, "agent": kind, "agent_status": status,
+                    "agent_session": {"value": sid}, "cwd": cwd, "foreground_cwd": cwd}
+        agents = [agent("w1:pA", "spawn-MAIN-11", "sA", cwd=wt), agent("w1:pB", "spawn-MAIN-12", "sB"),
+                  agent("w1:pC", "spawn-MAIN-13", "sC", "working", "codex"), agent("w1:pD", "spawn-MAIN-14", "sD", "blocked"),
+                  agent("w1:pE", "spawn-OTHER-15", "sE"), agent("w1:pF", "spawn-MAIN-chk16", "sF")]
+        local = {"default": {"panes": [{"pane_id": "w1:pM", "terminal_id": "term_MAIN", "label": "👑 메인"}], "agents": []},
+                 "workers": {"panes": [{"pane_id": a["pane_id"], "terminal_id": a["terminal_id"], "label": f"🟢 🫡 일 {a['pane_id'][-1]}"}
+                                       for a in agents], "agents": agents}}
+        with open(f"{d}/local.json", "w") as f:
+            json.dump(local, f)
+        with open(f"{d}/remote.json", "w") as f:
+            json.dump({"default": {"panes": [], "agents": []}, "workers": {"panes": [{"pane_id": "w9:pR1"}], "agents": []}}, f)
+        os.makedirs(f"{home}/.claude/projects/x")
+        for sid in ("sA", "sB", "sC"):
+            with open(f"{home}/.claude/projects/x/{sid}.jsonl", "w") as f:
+                f.write(json.dumps({"type": "user", "message": {"content": f"원래 지시 {sid}"}}) + "\n")
+            os.utime(f"{home}/.claude/projects/x/{sid}.jsonl", (time.time() - 600,) * 2)
+        with open(f"{d}/memos.json", "w") as f:
+            json.dump({"workers/w1:pA": ["sA", f"[인계 메모] 옮김\n폴더: {wt}\n목표: A를 끝낸다\n\n남은 것: 요유 몫: 없음"],
+                       "workers/w1:pB": ["sB", "**[인계 메모] 옮기지 않음: CI 기다림**\n폴더: /x"]}, f)
+
+        found = candidates(env)
+        assert [c["pane"] for c in found] == ["w1:pA", "w1:pB", "w1:pC", "w1:pD"], found
+        assert main_pane(env)[0] == "w1:pM"
+
+        # ssh down: nothing is asked, the main pane hears why
+        assert run(dict(env, WORKERS_MOVE_SSH="false")) == 1
+        assert not any(t.startswith("[퇴근 인계] 요유가") for t in told()) and "닿지 못했" in told("w1:pM")[-1]
+
+        assert run(env) == 0
+        moves = load(env, "moves.json", {})
+        asked = [a for a, t in map(json.loads, lines("tell.log")) if t == ASK]
+        assert asked == ["workers/w1:pA", "workers/w1:pB", "workers/w1:pC"], asked  # not D (dialog), E (other lead), F (check)
+        a = moves["term_A"]
+        assert a["step"] == "moved" and a["remote"] == "workers/w9:pR1" and a["start"] == [time.strftime("%Y-%m-%d"), 0], a
+        assert git(wt, "rev-parse", "HEAD")[1] == git(f"{d}/repo", "rev-parse", "origin/feat/x")[1] != "", "WIP pushed"
+        spawned = [json.loads(x) for x in lines("rspawn.log")]
+        assert len(spawned) == 1 and spawned[0][:6] == ["--opener", "term_MAIN", "--kind", "claude", "--cwd", wt], spawned
+        assert spawned[0][6] == "일 A (집맥)" and f"{rhome}/.local/state/workers-move/memos/spawn-MAIN-11.md" in spawned[0][7]
+        with open(f"{rhome}/.local/state/workers-move/memos/spawn-MAIN-11.md", encoding="utf-8") as f:
+            memo = f.read()
+        assert "원래 지시 sA" in memo and "목표: A를 끝낸다" in memo and "feat/x (push됨)" in memo
+        assert "workers pane close w1:pA" in lines("local.json.log") and "w1:pA" not in json.dumps(json.load(open(f"{d}/local.json")))
+        assert moves["term_B"]["step"] == "kept" and moves["term_B"]["reason"] == "CI 기다림"
+        assert moves["term_C"]["step"] == "kept" and "오지 않았습니다" in moves["term_C"]["reason"]
+        assert moves["term_D"]["step"] == "skipped" and "질문 창" in moves["term_D"]["reason"]
+        orch = f"{state}/orchestrator"
+        assert all(os.path.exists(f"{orch}/reported/{k}") for k in ("term_A", "sA", "term_B", "sB", "term_C"))
+        assert not os.path.exists(f"{orch}/reported/term_D") and not os.listdir(f"{orch}/moving")
+        assert "넘긴 칸 1개, 회사맥에 둔 칸 3개" in told("w1:pM")[-1] and "집맥 workers/w9:pR1" in told("w1:pM")[-1]
+
+        # a run cut short: an open 집맥 pane is not opened again; one cut while opening is never resumed here
+        moves["term_B"]["step"] = "opened"
+        moves["term_B"].update(remote="workers/w9:pR2")
+        moves["term_C"]["step"] = "opening"
+        save(env, "moves.json", moves)
+        assert run(dict(env, WORKERS_MOVE_WAIT="0.5")) == 0
+        moves = load(env, "moves.json", {})
+        assert moves["term_B"]["step"] == "moved" and moves["term_C"]["step"] == "unknown" and len(lines("rspawn.log")) == 1
+        assert "workers pane close w1:pB" in lines("local.json.log")
+
+        # the 집맥 open fails: the 회사맥 pane stays as it was, and it can resume
+        with open(f"{d}/local.json") as f:
+            local = json.load(f)
+        local["workers"]["agents"] = [agent("w1:pG", "spawn-MAIN-17", "sG", kind="codex", cwd=f"{d}/plain")]
+        local["workers"]["panes"] = [{"pane_id": "w1:pG", "terminal_id": "term_G", "label": "🫡 일 G"}]
+        with open(f"{d}/local.json", "w") as f:
+            json.dump(local, f)
+        with open(f"{d}/memos.json", "w") as f:
+            json.dump({"workers/w1:pG": ["sG", f"[인계 메모] 옮김\n폴더: {d}/plain"]}, f)
+        open(f"{home}/.claude/projects/x/sG.jsonl", "w").close()
+        open(f"{d}/spawn-fail", "w").close()
+        assert run(env) == 0
+        os.unlink(f"{d}/spawn-fail")
+        g = load(env, "moves.json", {})["term_G"]
+        assert g["step"] == "kept" and "열지 못했습니다" in g["reason"] and "no trust" in g["reason"], g
+        assert [json.loads(x)[3] for x in lines("rspawn.log")[1:]] == ["codex", "claude"]  # Codex, then Claude
+        assert "w1:pG" in json.dumps(json.load(open(f"{d}/local.json")))
+        assert resume(env) == 0 and told("workers/w1:pG")[-1] == RESUME
+        assert load(env, "moves.json", {})["term_G"]["step"] == "resumed" and not told("workers/w1:pD")
+
+        # tell / read reach the 집맥 pane
+        assert main(["workers-move", "tell", "집맥:workers/w9:pR1", "계속하세요"], env) == 0
+        assert lines("rtell.log")[-1] == "workers/w9:pR1 계속하세요"
+        assert main(["workers-move", "read", "w9:pR1"], env) == 0
+
+        # the bridge: 집맥 entries of moved panes reach the main pane, others stay there
+        rday = f"{rhome}/.local/state/pane-reports/{time.strftime('%Y-%m-%d')}.md"
+        lday = f"{state}/pane-reports/{time.strftime('%Y-%m-%d')}.md"
+
+        def remote_entry(at, addr, body, fresh=False):
+            with open(rday, "a", encoding="utf-8") as f:
+                f.write(f"\n## {at} {addr} 🟢 🫡 일 A (집맥)\n\n{body}\n")
+            os.utime(rday, None if fresh else (time.time() - 60,) * 2)
+
+        sh("git", "clone", "-q", "-b", "feat/x", f"{d}/origin.git", f"{d}/jip")  # 집맥 pushes a commit
+        sh("git", "commit", "-q", "--allow-empty", "-m", "from 집맥", cwd=f"{d}/jip")
+        sh("git", "push", "-q", "origin", "feat/x", cwd=f"{d}/jip")
+        remote_entry("21:00:00", "workers/w9:pR1", "[workers-watch] 밑 칸 일 A가 질문 창에서 멈췄습니다")
+        remote_entry("21:00:05", "w2:p1", "세션 x, 폴더 /y\n\nambient 보고")
+        remote_entry("21:01:00", "workers/w9:pR1", f"세션 sR, 폴더 {wt}\n\n일을 마쳤습니다. 테스트 통과.\n\n남은 것: 요유 몫: 없음 · 세션: 닫아도 됨")
+        n = len(told("w1:pM"))
+        assert bridge(env) == 0
+        assert "질문 창에서 멈췄습니다" in told("w1:pM")[n] and "workers-move tell w9:pR1" in told("w1:pM")[n]
+        checks = [json.loads(x) for x in lines("cspawn.log")]
+        assert len(checks) == 1 and checks[0][0] == "w1:pM" and checks[0][1:6] == ["--check", "--kind", checks[0][3], "--cwd", wt], checks
+        assert git(wt, "rev-parse", "HEAD")[1] == git(f"{d}/jip", "rev-parse", "HEAD")[1], "회사맥 folder fast-forwarded"
+        with open(lday, encoding="utf-8") as f:
+            copied = f.read()
+        assert "## 21:00:00 집맥:workers/w9:pR1" in copied and "## 21:01:00 집맥:workers/w9:pR1" in copied and "ambient" not in copied
+        b = load(env, "bridge.json", {})
+        assert b["queue"] == [] and b["offsets"][os.path.basename(rday)] == os.path.getsize(rday)
+        n = len(told())
+        assert bridge(env) == 0 and len(told()) == n and len(lines("cspawn.log")) == 1, "nothing twice"
+
+        # an entry still being written waits for the next minute
+        remote_entry("21:02:00", "workers/w9:pR1", "[workers-watch] 밑 칸 일 A가 보고 없이 15분째", fresh=True)
+        assert bridge(env) == 0 and len(told()) == n
+        os.utime(rday, (time.time() - 60,) * 2)
+        assert bridge(env) == 0 and "보고 없이 15분째" in told("w1:pM")[-1]
+
+        # the main pane cannot be told: the entry stays queued, in order
+        remote_entry("21:03:00", "workers/w9:pR1", "[workers-watch] 알림 하나")
+        remote_entry("21:03:30", "workers/w9:pR1", "[workers-watch] 알림 둘")
+        open(f"{d}/tell-fail", "w").close()
+        assert bridge(env) == 0 and len(load(env, "bridge.json", {})["queue"]) == 2
+        os.unlink(f"{d}/tell-fail")
+        assert bridge(env) == 0 and load(env, "bridge.json", {})["queue"] == []
+        assert "알림 하나" in told("w1:pM")[-2] and "알림 둘" in told("w1:pM")[-1]
+
+        # the 회사맥 folder cannot follow: the report goes straight to the main pane, with no check pane
+        open(f"{wt}/dirt", "w").close()
+        remote_entry("21:04:00", "workers/w9:pR1", f"세션 sR, 폴더 {wt}\n\n두 번째 일을 마쳤습니다.\n\n남은 것: 요유 몫: 없음")
+        assert bridge(env) == 0 and len(lines("cspawn.log")) == 1
+        assert "확인 칸을 열지 않습니다" in told("w1:pM")[-1] and "커밋하지 않은 변경" in told("w1:pM")[-1]
+        os.unlink(f"{wt}/dirt")
+
+        # the 집맥 pane closed: done a minute later, and the bridge no longer calls 집맥
+        with open(f"{d}/remote.json", "w") as f:
+            json.dump({"workers": {"panes": [], "agents": []}}, f)
+        assert bridge(env) == 0 and "term_A" in load(env, "bridge.json", {})["gone"]
+        b = load(env, "bridge.json", {})
+        b["gone"] = {k: v - GONE for k, v in b["gone"].items()}
+        save(env, "bridge.json", b)
+        assert bridge(env) == 0 and set(load(env, "bridge.json", {})["done"]) == {"term_A", "term_B"}
+        calls = len(lines("ssh.log"))
+        assert bridge(env) == 0 and len(lines("ssh.log")) == calls
+        print("selftest ok")
+        return 0
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv, dict(os.environ)))
