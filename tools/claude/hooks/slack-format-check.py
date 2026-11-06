@@ -79,6 +79,20 @@ def left_problems(text: str, left: dict | None = None) -> list[str]:
             or any(re.search(r"(?<![\w./@])@" + re.escape(n) + r"(?![A-Za-z0-9_])", text, re.I) for n in names)]
 
 
+LEFT_SENDS = re.compile(r"slack-post\.sh|slack\.com/api|\bgh\s+release\s+(?:create|edit)\b")
+NOTES_FILE = re.compile(r"(?:--notes-file|\s-F)[=\s]+['\"]?([^\s'\";&|)]+)")
+
+
+def left_bash_problems(command: str, cwd: str, left: dict | None = None) -> list[str]:
+    """A shell post that skips the Slack client (nightly_api slack-post.sh, curl, the release body CI posts as its
+    공지): the command text and a notes file it names. ponytail: a body piped in from a file other than these is unread."""
+    if not LEFT_SENDS.search(command):
+        return []
+    files = [on_disk(p if os.path.isabs(p) else os.path.join(cwd, p))
+             for p in map(os.path.expanduser, NOTES_FILE.findall(command))]
+    return left_problems("\n".join([command, *files]), left)
+
+
 def mention_problems(text: str, members: dict[str, str]) -> list[str]:
     """Korean @mentions, with the English Slack name to use instead (Korean particles may follow: @홍길동님)."""
     found, fenced = [], False
@@ -439,6 +453,20 @@ def selftest():
     finally:
         globals()["LEFT"] = saved
         os.remove(broken)
+    # posts that skip the Slack client: nightly_api's slack-post.sh and the release body its CI posts (review, 11/06)
+    post = "printf '%s\\n' '@Gone 확인' | GCP_PROJECT_ID=p scripts/deploy/slack-post.sh C0536DQTREV"
+    assert left_bash_problems(post, "", gone), post
+    assert left_bash_problems("gh release edit v1 --notes '## 공지\n<@U9> 확인'", "", gone)
+    notes = "/tmp/slack-format-check-selftest-notes.md"
+    with open(notes, "w", encoding="utf-8") as f:
+        f.write("## 공지\n@곤님 봐 주세요\n")
+    try:
+        assert left_bash_problems("gh release create v1 --notes-file " + notes, "", gone)
+        assert left_bash_problems("gh release create v1 -F " + os.path.basename(notes), "/tmp", gone)
+    finally:
+        os.remove(notes)
+    assert left_bash_problems(post.replace("@Gone", "@Luke"), "", gone) == []
+    assert left_bash_problems("grep -rn '@Gone' docs/", "", gone) == []  # a search, not a post
 
     # cf#752: a session's own call to Slack's post API skips the shared client, so its list lines go out as typed.
     tmp = "/private/tmp/claude-501/x/scratchpad/"
@@ -592,8 +620,10 @@ if __name__ == "__main__":
             found, fix = problems(inp.get("text") or ""), FIX + "\n" + MENTION_FIX
     else:
         cwd = payload.get("cwd") or os.getcwd()
+        found, fix = left_bash_problems(inp.get("command") or "", cwd), LEFT_FIX
         try:  # its own crash must not take the older checks below with it
-            found, fix = direct_post_problems(tool, inp, cwd), DIRECT_FIX
+            if not found:
+                found, fix = direct_post_problems(tool, inp, cwd), DIRECT_FIX
         except Exception:
             found, fix = [], DIRECT_FIX
         if not found:
