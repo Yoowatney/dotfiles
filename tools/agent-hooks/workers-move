@@ -183,7 +183,7 @@ if op == "bridge":
         panes = [p.get("pane_id") for p in json.loads(o)["result"]["panes"]] if rc == 0 else None
     except (ValueError, KeyError, TypeError):
         panes = None
-    chunks = {}
+    chunks, held = {}, False
     for name, off in a["files"].items():
         path = os.path.join(reports, name)
         try:
@@ -195,9 +195,10 @@ if op == "bridge":
             continue
         if not settled:  # its last entry may still be being written: only those a later header closes
             heads = [m.start() for m in head.finditer(data)]
-            data = data[:heads[-1]] if heads and heads[-1] > 0 else b""
+            cut = data[:heads[-1]] if heads and heads[-1] > 0 else b""
+            held, data = held or len(cut) < len(data), cut
         chunks[name] = {"bytes": len(data), "text": data.decode("utf-8", "replace")}
-    out({"panes": panes, "chunks": chunks})
+    out({"panes": panes, "chunks": chunks, "held": held})
 if op == "tell":
     rc, o, e = run("pane-tell", "workers/" + a["pane"], a["text"], timeout=30)
     out({"ok": rc == 0, "why": (e or o).strip()[-300:]})
@@ -532,6 +533,8 @@ def run(env) -> int:
             close_local(env, moves, old)
         elif old.get("step") == "opening":  # a run died while it opened one
             settle(env, moves, old, "unknown", "지난 실행이 집맥 칸을 여는 도중 멈췄습니다. 집맥 workers 서버에 그 칸이 있는지 보세요")
+        elif old.get("step") == "unknown":
+            pass  # never asked again: its work may be running on 집맥 (Codex review)
         elif old.get("step") == "asked" and now - old.get("asked_at", 0) < WAIT:
             pass  # a run cut short asked it already
         else:
@@ -633,6 +636,18 @@ def deliver(env, rec, item, main, ffs) -> bool:
     return routed
 
 
+def running(env) -> bool:
+    """A go or resume run holds run.lock."""
+    lock = locked(env, "run.lock")
+    if lock:
+        lock.close()
+    return not lock
+
+
+def placed(moves) -> set:
+    return {k for k, r in moves.items() if r.get("step") in ("opening", "opened", "moved")}
+
+
 def bridge(env) -> int:
     lock = locked(env, "bridge.lock")
     if not lock:
@@ -653,7 +668,12 @@ def bridge(env) -> int:
                 offsets.setdefault(f"{d.isoformat()}.md", 0)
         wanted = {f"{(today - datetime.timedelta(days=n)).isoformat()}.md" for n in range(8)}
         os.makedirs(report_dir(env), exist_ok=True)
-        got = remote(env, "bridge", timeout=60, files={f: o for f, o in offsets.items() if f in wanted})
+        got = None
+        # A pane being opened on 집맥 has no address saved yet: what it writes now would be read past and lost (Codex review)
+        if not (running(env) and any(r.get("step") == "opening" for r in moves.values())):
+            got = remote(env, "bridge", timeout=60, files={f: o for f, o in offsets.items() if f in wanted})
+            if got and placed(load(env, "moves.json", {})) != placed(moves):
+                got = None  # a move went on during the read: read again next minute
         if got:
             by_addr = {r["remote"]: k for k, r in active.items()}
             for name, chunk in sorted((got.get("chunks") or {}).items()):
@@ -680,7 +700,8 @@ def bridge(env) -> int:
             break  # in order: the next minute tries this one first
         queue.pop(0)
         save(env, "bridge.json", b)
-    for k in active:  # gone for a minute: its last entry, written just before it closed, has been read
+    # gone for a minute, and this minute read every entry to the end: its last one, written as it closed, is in the queue
+    for k in active if got and not got.get("held") else []:
         if k in gone and time.time() - gone[k] >= GONE and not any(i["key"] == k for i in queue):
             done.append(k)
             gone.pop(k)
@@ -950,6 +971,9 @@ if text.startswith("[퇴근 인계]") and addr in memos:
         moves = load(env, "moves.json", {})
         assert moves["term_B"]["step"] == "moved" and moves["term_C"]["step"] == "unknown" and len(lines("rspawn.log")) == 1
         assert "workers pane close w1:pB" in lines("local.json.log")
+        asks_c = told("workers/w1:pC").count(ASK)
+        assert run(dict(env, WORKERS_MOVE_WAIT="0.5")) == 0  # and again: an unknown one is never asked again
+        assert load(env, "moves.json", {})["term_C"]["step"] == "unknown" and told("workers/w1:pC").count(ASK) == asks_c
 
         # the 집맥 open fails: the 회사맥 pane stays as it was, and it can resume
         with open(f"{d}/local.json") as f:
@@ -1005,6 +1029,23 @@ if text.startswith("[퇴근 인계]") and addr in memos:
         n = len(told())
         assert bridge(env) == 0 and len(told()) == n and len(lines("cspawn.log")) == 1, "nothing twice"
 
+        # a pane being opened on 집맥 has no address yet: the bridge reads nothing past what it may write meanwhile
+        moves = load(env, "moves.json", {})
+        moves["term_X"] = {"terminal": "term_X", "pane": "w1:pX", "label": "🫡 일 X", "agent": "spawn-MAIN-18", "session": "sX",
+                           "folder": f"{d}/plain", "step": "opening"}
+        save(env, "moves.json", moves)
+        hold = locked(env, "run.lock")
+        remote_entry("21:01:30", "workers/w9:pR3", "[workers-watch] 새 칸 알림")
+        calls = len(lines("ssh.log"))
+        assert bridge(env) == 0 and len(lines("ssh.log")) == calls and len(told()) == n
+        hold.close()
+        moves["term_X"].update(step="opened", remote="workers/w9:pR3", start=[time.strftime("%Y-%m-%d"), 0])
+        save(env, "moves.json", moves)
+        with open(f"{d}/remote.json", "w") as f:
+            json.dump({"workers": {"panes": [{"pane_id": "w9:pR1"}, {"pane_id": "w9:pR3"}], "agents": []}}, f)
+        assert bridge(env) == 0 and "새 칸 알림" in told("w1:pM")[-1] and "workers-move tell w9:pR3" in told("w1:pM")[-1]
+        n = len(told())
+
         # an entry still being written waits for the next minute
         remote_entry("21:02:00", "workers/w9:pR1", "[workers-watch] 밑 칸 일 A가 보고 없이 15분째", fresh=True)
         assert bridge(env) == 0 and len(told()) == n
@@ -1031,10 +1072,15 @@ if text.startswith("[퇴근 인계]") and addr in memos:
         with open(f"{d}/remote.json", "w") as f:
             json.dump({"workers": {"panes": [], "agents": []}}, f)
         assert bridge(env) == 0 and "term_A" in load(env, "bridge.json", {})["gone"]
+        remote_entry("21:05:00", "workers/w9:pR1", "[workers-watch] 마지막 알림", fresh=True)  # written as it closed
         b = load(env, "bridge.json", {})
         b["gone"] = {k: v - GONE for k, v in b["gone"].items()}
         save(env, "bridge.json", b)
-        assert bridge(env) == 0 and set(load(env, "bridge.json", {})["done"]) == {"term_A", "term_B"}
+        assert bridge(env) == 0 and load(env, "bridge.json", {})["done"] == [], "an entry held back keeps it open"
+        assert bridge(dict(env, WORKERS_MOVE_SSH="false")) == 0 and load(env, "bridge.json", {})["done"] == [], "no read"
+        os.utime(rday, (time.time() - 60,) * 2)
+        assert bridge(env) == 0 and "마지막 알림" in told("w1:pM")[-1]
+        assert set(load(env, "bridge.json", {})["done"]) == {"term_A", "term_B", "term_X"}
         calls = len(lines("ssh.log"))
         assert bridge(env) == 0 and len(lines("ssh.log")) == calls
         print("selftest ok")
