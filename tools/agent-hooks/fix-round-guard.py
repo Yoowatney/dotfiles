@@ -4,8 +4,7 @@
 On the night of 2026-11-05 the main pane ran check, fix, check, fix, check, fix from 01:09 to 04:15 while 요유 slept: four check
 panes and three fix panes, and the third fix undid what the first two fixed. Its rules said "the fix's report gets a new check
 pane" with no limit (daily wow 2026-11-05, card 01). Now two fixes of one job are the limit: the third is refused, and the pane
-asks 요유 (the main pane through `decide`, whose 22:00~08:00 queue makes it a morning question; a pane under a lead through its
-`남은 것:` report). Repeating the call does not pass. 요유's own words after the refusal do: typed in the pane (also while the
+asks 요유 (the main pane through `decide`; a pane under a lead through its `남은 것:` report). Repeating the call does not pass. 요유's own words after the refusal do: typed in the pane (also while the
 agent works), or relayed from #0-yoyooyo by main-channel, where of reactions only ✅ answers (❌ is "no", 💤 "ask tomorrow").
 An answer opens one fix of one job. Plain words open the job whose refusal came last before them. A ✅, and words that name
 a board item, open a job only through its question: the first `decide` called after its refusal, unless another job's
@@ -45,8 +44,8 @@ MARK = "fix-round:"
 LIMIT = 2  # fixes of one job before 요유 is asked (요유's wow card: "두 번까지, 세 번째는 열지 않고 멈춥니다")
 REASON = (MARK + " 같은 일의 고치기와 확인이 이미 두 번 돌았습니다({chain}). 세 번째 고치기 칸은 열지 않습니다. 지금까지 고친 것과 남은 결함을 "
           "`고를 것`·`추천`·`바뀌는 것` 세 줄로 묶어 요유에게 물으세요. 메인 칸은 다른 결정보다 먼저 그 일의 보드 항목으로 "
-          "`python3 /Users/yoyoo/work/munice/munice-claude/.agents/skills/agent-board/main/main-channel.py decide --board <url>`을 부릅니다"
-          "(22~08시에는 아침 8시에 나갑니다). 이 거절 뒤 처음 부른 decide가 이 일의 질문입니다. 보드 항목이 없는 일이면 먼저 `echo \"<본문>\" | bash /Users/yoyoo/work/munice/.agents/skills/agent-board/board.sh "
+          "`python3 /Users/yoyoo/work/munice/munice-claude/.agents/skills/agent-board/main/main-channel.py decide --board <url>`을 부릅니다. "
+          "이 거절 뒤 처음 부른 decide가 이 일의 질문입니다. 보드 항목이 없는 일이면 먼저 `echo \"<본문>\" | bash /Users/yoyoo/work/munice/.agents/skills/agent-board/board.sh "
           "create nightly_api \"<제목>\" yoyoo`(인프라 일은 terraform)로 항목을 만들고, 맨 처음 출력되는 URL을 `decide --board`에 넘깁니다. 제목과 본문에는 "
           "로컬 경로(보고 파일 경로 포함)를 쓰지 않습니다. 리드 밑 칸은 `남은 것:` 보고로 리드에게 올립니다. 이 거절 뒤에 요유가 칸에 직접 치거나 "
           "#0-yoyooyo에서 답하면(반응은 이 일의 질문 글에 단 ✅만 답으로 칩니다. ❌와 💤는 답이 아닙니다), 또는 결정 리스트의 이 일 행에서 상태를 "

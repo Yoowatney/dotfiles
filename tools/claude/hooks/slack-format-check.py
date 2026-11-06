@@ -265,7 +265,7 @@ AGENT_BOARD = "/Users/yoyoo/work/munice/.agents/skills/agent-board"
 DIRECT_FIX = (
     "세션이 블록 없이 Slack API를 직접 불러 글을 쓰려 했다. 그러면 `1.`, `- ` 줄이 목록이 아니라 글자로 나간다(cf#752). "
     f"공용 클라이언트를 쓸 것: 팀 채널·스레드·DM은 `python3 {AGENT_BOARD}/main/main-channel.py reply --channel <C|D|G…> "
-    "--thread <ts> <file>`(새 글은 `--thread` 대신 `--new`, 밤 글은 08:00까지 기다리고 `--urgent`는 바로 보냄), "
+    "--thread <ts> <file>`(새 글은 `--thread` 대신 `--new`), "
     "#0-yoyooyo는 같은 파일의 `post`/`edit`. Python 코드는 "
     f"`sys.path.insert(0, \"{AGENT_BOARD}/ambient\")` 뒤 `slack.Slack().post(channel, thread_ts, text)`/`.update(channel, ts, text)`"
     "(`_do`로 직접 부르지 말 것). 파일은 initial_comment 없이 올리고 글은 reply로 단다. "

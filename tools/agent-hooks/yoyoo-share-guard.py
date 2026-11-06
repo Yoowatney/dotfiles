@@ -715,7 +715,7 @@ def posted_reply(command: str, name: str, output: str, targets: set, channels: s
 def thread_call_reason(payload: dict, env) -> str | None:
     """Inspect the latest input and its completed tool calls, locally. Other panes and unreadable records fail open.
 
-    Do not use replied/<thread>: the posting helper writes it even when quiet hours only schedule the reply.
+    Do not use replied/<thread>: only a completed call of this turn counts, not a reply written down earlier.
     A new user input supersedes the previous turn, including a chitchat call intentionally skipped after one reminder.
     """
     path = payload.get("transcript_path")
