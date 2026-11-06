@@ -46,13 +46,8 @@ die() { echo "pane-spawn: $*" >&2; exit 2; }
 tab_name() { case "$1" in "자동 "* | "알아서 "*) echo "일 $1" ;; *) echo "$1" ;; esac; }
 
 # Codex's weekly use in percent, from the newest session record that has one: 0 once that week has reset, nothing if none says.
-codex_week_used() {
-  local f
-  for f in $(find "$HOME/.codex/sessions" -name '*.jsonl' -mtime -8 -print0 2>/dev/null | xargs -0 ls -t 2>/dev/null | head -5); do
-    grep -h '"rate_limits"' "$f" | jq -r --argjson now "$(date +%s)" '.payload.rate_limits | objects | (.primary, .secondary)
-      | select(.window_minutes? == 10080) | if .resets_at < $now then 0 else .used_percent end' 2>/dev/null | tail -1 | grep . && return
-  done
-}
+# codex-week beside this script reads it; the status line shows the same reading.
+codex_week_used() { "$(dirname "$(readlink -f "$0")")/codex-week" | cut -f1; }
 
 same= new_tab= check= kind= why= cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
 while [ $# -gt 0 ]; do

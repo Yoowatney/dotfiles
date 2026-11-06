@@ -9,6 +9,7 @@ trap 'rm -rf "$T"' EXIT
 INPUT='{"model":{"display_name":"Opus"},"workspace":{"current_dir":"'"$T"'"},"context_window":{"used_percentage":12,"context_window_size":200000}}'
 fails=0
 export CLOUDSDK_CORE_PROJECT=test-dev   # a dev project, whatever this machine's gcloud points at
+export HOME="$T/home"                   # no real Codex records: the Codex part reads ~/.codex/sessions
 
 run() { printf '%s' "$INPUT" | bash "$SCRIPT" 2>&1; }
 fake_hud() {   # <config dir> <launcher source>
@@ -42,11 +43,11 @@ check "no PROD warning on a PROD project" "$out" 'Context' 'PROD'
 check "HUD is still the first line on a PROD project" "$(head -1 <<<"$out")" '\[Opus\]'
 
 out=$(CLAUDE_CONFIG_DIR="$T/empty" run)
-check "missing HUD prints no old lines" "$out" '^$' 'Opus|👤'
+check "missing HUD prints no old lines, only the Codex line" "$out" '^Codex ' 'Opus|👤'
 
 fake_hud "$T/broken" 'process.exit(1)'
 out=$(CLAUDE_CONFIG_DIR="$T/broken" run)
-check "HUD that prints nothing leaves no old lines" "$out" '^$' 'Opus|👤'
+check "HUD that prints nothing leaves no old lines, only the Codex line" "$out" '^Codex ' 'Opus|👤'
 
 # bun loads .env from the session folder unless told not to, and these repos keep secrets there
 fake_hud "$T/leak" 'console.log("leak=" + process.env.STATUSLINE_TEST_SECRET)'
@@ -60,6 +61,48 @@ echo 'preload = ["./preload.js"]' >"$T/repo/bunfig.toml"
 echo 'console.log("preloaded")' >"$T/repo/preload.js"
 out=$(cd "$T/repo" && CLAUDE_CONFIG_DIR="$T/leak" run)
 check "HUD ignores bunfig.toml in the session folder" "$out" 'leak=undefined' 'preloaded'
+
+# Codex's week beside Claude's (2026-11-06), from the newest Codex session record, as pane-spawn reads it.
+codex_record() { # <used percent> <reset epoch> <seconds since written>: one record as Codex writes it
+	mkdir -p "$HOME/.codex/sessions/2026/11/06"
+	jq -nc --argjson u "$1" --argjson r "$2" --arg at "$(date -u -r $(($(date +%s) - $3)) +%Y-%m-%dT%H:%M:%S.000Z)" \
+		'{timestamp: $at, type: "event_msg", payload: {type: "token_count", rate_limits: {limit_id: "codex", primary: {used_percent: $u, window_minutes: 10080, resets_at: $r}, secondary: null}}}' \
+		>"$HOME/.codex/sessions/2026/11/06/rollout-a.jsonl"
+}
+plain() { sed $'s/\e\\[[0-9;]*m//g'; }
+fake_hud "$T/usage" 'console.log("[Opus]\nContext 12% │ Usage Weekly 63% (resets in 1d 10h)")'
+reset=$(($(date +%s) + 2 * 86400)) when=$(date -r "$reset" '+%m/%d %H:%M')
+codex_record 42.0 "$reset" 60
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "Codex sits at the end of the HUD's usage line" "$(sed -n 2p <<<"$out")" "Usage Weekly 63% \(resets in 1d 10h\) │ Codex 42% · 리셋 $when$"
+check "and adds no line of its own" "$(wc -l <<<"$out" | tr -d ' ')" '^2$'
+# The usage line is 49 cells and " │ Codex 42% · 리셋 MM/DD HH:MM" 31, with each Hangul two cells wide.
+out=$(COLUMNS=80 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "80 columns: it still fits on the usage line" "$(sed -n 2p <<<"$out")" "│ Codex 42%"
+out=$(COLUMNS=79 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "79 columns: the usage line stays as the HUD drew it" "$(sed -n 2p <<<"$out")" '\(resets in 1d 10h\)$'
+check "and Codex gets the line under the HUD" "$(sed -n 3p <<<"$out")" "^Codex 42% · 리셋 $when$"
+past=$(($(date +%s) - 60))
+codex_record 90 "$past" 60
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "a week that has reset since the record: 0%, and when it reset" "$out" "│ Codex 0% · $(date -r "$past" '+%m/%d %H:%M') 리셋됨$"
+codex_record 42 "$reset" $((3 * 3600 + 60))
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "a record over an hour old says how old" "$out" "Codex 42% · 리셋 $when · 기록 3시간 전$"
+codex_record 42 "$reset" $((2 * 86400 + 60))
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "a record over a day old says it in days" "$out" "Codex 42% · 리셋 $when · 기록 2일 전$"
+echo '{"type":"event_msg","payload":{"rate_limits": broken' >"$HOME/.codex/sessions/2026/11/06/rollout-a.jsonl"
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "a broken record: no reading, and the HUD still shows" "$out" '│ Codex 기록 없음$'
+check "the HUD's first line is untouched" "$(head -1 <<<"$out")" '^\[Opus\]$'
+rm -rf "$HOME/.codex"
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "no Codex records at all: says so" "$out" '│ Codex 기록 없음$'
+codex_record 42 "$reset" 60
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/hud" run | plain)
+check "a HUD with no usage line: Codex gets the line under it" "$(sed -n 2p <<<"$out")" "^Codex 42% · 리셋 $when$"
+rm -rf "$HOME/.codex"
 
 # 요유 reads only the lead's pane, and a lead's panes run on the hidden workers server: their steps show here all the same.
 mkdir "$T/fake"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Claude Code Statusline: Claude HUD (jarrodwatts/claude-hud), then the lines the task-progress and token-weather mods
+# Claude Code Statusline: Claude HUD (jarrodwatts/claude-hud) with Codex's week on its usage line, then the lines the task-progress and token-weather mods
 # leave for this session. (The Firebase/gcloud PROD warning that ran `firebase use` and `gcloud` on every refresh was
 # removed on 2026-11-03: it made each refresh take over a second.)
 
@@ -10,7 +10,38 @@ input=$(cat)
 # /claude-hud:setup makes. Any installed copy works: the launcher picks the newest version. Node, not bun: bun reads
 # .env and bunfig.toml from the session folder, and a bunfig.toml preload would run that repo's code on every refresh.
 hud_launchers=("${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/claude-hud/claude-hud/*/scripts/statusline.mjs)
-printf '%s' "$input" | node "${hud_launchers[0]}" 2>/dev/null
+hud=$(printf '%s' "$input" | node "${hud_launchers[0]}" 2>/dev/null)
+
+# Codex's week beside Claude's (2026-11-06), read by codex-week as pane-spawn reads it: "Codex 42% · 리셋 11/09 09:00",
+# with the record's age once it is over an hour old (Codex on another machine moves the week without a record here).
+codex_text() {
+	local used resets at now
+	IFS=$'\t' read -r used resets at < <("$(dirname "$(readlink -f "$0")")/../agent-hooks/codex-week" 2>/dev/null)
+	[[ "$used" =~ ^[0-9.]+$ && "$resets" =~ ^[0-9]+$ ]] || { echo "Codex 기록 없음"; return; }
+	now=$(date +%s)
+	if [ "$resets" -lt "$now" ]; then
+		printf 'Codex 0%% · %s 리셋됨' "$(date -r "$resets" '+%m/%d %H:%M')"
+	else
+		printf 'Codex %.0f%% · 리셋 %s' "$used" "$(date -r "$resets" '+%m/%d %H:%M')"
+	fi
+	if [[ "$at" =~ ^[0-9]+$ ]]; then
+		local age=$(((now - at) / 3600))
+		[ "$age" -ge 24 ] && printf ' · 기록 %d일 전' $((age / 24)) || { [ "$age" -ge 1 ] && printf ' · 기록 %d시간 전' "$age"; }
+	fi
+	echo
+}
+# The HUD's lines, Codex at the end of its usage line when that fits COLUMNS (a wrapped status line reads as broken), else on
+# the line under the HUD. Cells: ANSI codes take none, Hangul and other wide characters two.
+printf '%s' "$hud" | perl -CSDA -e '
+	my ($codex, $cols) = @ARGV; my $done;
+	sub plain { (my $t = shift) =~ s/\e\[[0-9;]*m//g; $t }
+	sub cells { my $n = 0;
+		$n += /[\x{1100}-\x{115F}\x{2E80}-\x{A4CF}\x{AC00}-\x{D7A3}\x{F900}-\x{FAFF}\x{FE30}-\x{FE4F}\x{FF00}-\x{FF60}\x{FFE0}-\x{FFE6}]/ ? 2 : 1 for split //, plain(shift); $n }
+	my $tail = "\e[38;2;153;153;153m \x{2502} \e[0m$codex"; # " │ " in the grey of the HUD'"'"'s own separators
+	while (<STDIN>) { chomp;
+		if (!$done && plain($_) =~ /Usage|Weekly/ && (!$cols || cells($_) + cells($tail) <= $cols)) { $_ .= $tail; $done = 1 }
+		print "$_\n" }
+	print "$codex\n" unless $done' "$(codex_text)" "${COLUMNS:-0}"
 
 session_id="$(echo "$input" | jq -r '.session_id // empty')"
 
