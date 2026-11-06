@@ -12,23 +12,34 @@ input=$(cat)
 hud_launchers=("${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/claude-hud/claude-hud/*/scripts/statusline.mjs)
 hud=$(printf '%s' "$input" | node "${hud_launchers[0]}" 2>/dev/null)
 
-# Codex's week beside Claude's (2026-11-06), read by codex-week as pane-spawn reads it: "Codex 42% · 리셋 11/09 09:00",
-# with the record's age once it is over an hour old (Codex on another machine moves the week without a record here).
+# Codex's week beside Claude's, read by codex-week as pane-spawn reads it. Match claude-hud 0.14.1's
+# render/frame (10/6/4 cells), render/colors (rounded fill), and render/time (ceil minutes for resets,
+# floor minutes for record age). Keep this independent of the plugin so a missing HUD still shows Codex.
 codex_text() {
 	local used resets at now
 	IFS=$'\t' read -r used resets at < <("$(dirname "$(readlink -f "$0")")/../agent-hooks/codex-week" 2>/dev/null)
-	[[ "$used" =~ ^[0-9.]+$ && "$resets" =~ ^[0-9]+$ ]] || { echo "Codex 기록 없음"; return; }
+	[[ "$used" =~ ^[0-9]+([.][0-9]+)?$ && "$resets" =~ ^[0-9]+$ ]] || { echo "Codex (no usage data)"; return; }
 	now=$(date +%s)
-	if [ "$resets" -lt "$now" ]; then
-		printf 'Codex 0%% · %s 리셋됨' "$(date -r "$resets" '+%m/%d %H:%M')"
-	else
-		printf 'Codex %.0f%% · 리셋 %s' "$used" "$(date -r "$resets" '+%m/%d %H:%M')"
-	fi
-	if [[ "$at" =~ ^[0-9]+$ ]]; then
-		local age=$(((now - at) / 3600))
-		[ "$age" -ge 24 ] && printf ' · 기록 %d일 전' $((age / 24)) || { [ "$age" -ge 1 ] && printf ' · 기록 %d시간 전' "$age"; }
-	fi
-	echo
+	awk -v used="$used" -v resets="$resets" -v at="$at" -v now="$now" -v cols="${COLUMNS:-0}" '
+		function duration(mins, hours, days) {
+			if (mins < 60) return mins "m"
+			hours = int(mins / 60)
+			if (hours < 24) return hours "h" (mins % 60 ? " " mins % 60 "m" : "")
+			days = int(hours / 24)
+			return days "d" (hours % 24 ? " " hours % 24 "h" : "")
+		}
+		BEGIN {
+			width = !cols || cols >= 100 ? 10 : cols >= 60 ? 6 : 4
+			if (resets <= now) used = 0
+			used = used > 100 ? 100 : used
+			filled = int(used / 100 * width + 0.5)
+			printf "Codex "
+			for (i = 0; i < width; i++) printf "%s", (i < filled ? "█" : "░")
+			note = resets <= now ? "reset" : "resets in " duration(int((resets - now + 59) / 60))
+			if (at ~ /^[0-9]+$/ && now - at >= 3600)
+				note = note "; updated " duration(int((now - at) / 60)) " ago"
+			printf " %d%% (%s)\n", int(used + 0.5), note
+		}'
 }
 # The HUD's lines, Codex at the end of its usage line when that fits COLUMNS (a wrapped status line reads as broken), else on
 # the line under the HUD. Cells: ANSI codes take none, Hangul and other wide characters two.

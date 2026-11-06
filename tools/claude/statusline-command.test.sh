@@ -10,6 +10,13 @@ INPUT='{"model":{"display_name":"Opus"},"workspace":{"current_dir":"'"$T"'"},"co
 fails=0
 export CLOUDSDK_CORE_PROJECT=test-dev   # a dev project, whatever this machine's gcloud points at
 export HOME="$T/home"                   # no real Codex records: the Codex part reads ~/.codex/sessions
+export CODEX_HOME="$HOME/.codex"         # ignore an inherited Codex profile too
+# Freeze the clock at the process boundary, including codex-week, so minute/reset boundaries are exact.
+mkdir -p "$T/bin"
+export STATUSLINE_TEST_NOW=1804488000
+printf '#!/bin/bash\nif [ "$*" = +%%s ]; then echo "$STATUSLINE_TEST_NOW"; else exec /bin/date "$@"; fi\n' >"$T/bin/date"
+chmod +x "$T/bin/date"
+export PATH="$T/bin:$PATH"
 
 run() { printf '%s' "$INPUT" | bash "$SCRIPT" 2>&1; }
 fake_hud() {   # <config dir> <launcher source>
@@ -33,7 +40,7 @@ check "HUD is the first line on a dev project" "$(head -1 <<<"$out")" '\[Opus\]'
 check "old env line is gone" "$out" 'Context' '👤|로그인필요|미설정'
 
 # The PROD warning was removed (it ran firebase and gcloud on every refresh, over a second each time).
-mkdir "$T/bin" "$T/fb"
+mkdir "$T/fb"
 printf '#!/bin/bash\necho test-f06c6\n' >"$T/bin/firebase"
 printf '#!/bin/bash\necho test-f06c6\n' >"$T/bin/gcloud"
 chmod +x "$T/bin/firebase" "$T/bin/gcloud"
@@ -70,38 +77,76 @@ codex_record() { # <used percent> <reset epoch> <seconds since written>: one rec
 		>"$HOME/.codex/sessions/2026/11/06/rollout-a.jsonl"
 }
 plain() { sed $'s/\e\\[[0-9;]*m//g'; }
-fake_hud "$T/usage" 'console.log("[Opus]\nContext 12% │ Usage Weekly 63% (resets in 1d 10h)")'
-reset=$(($(date +%s) + 2 * 86400)) when=$(date -r "$reset" '+%m/%d %H:%M')
-codex_record 42.0 "$reset" 60
+fake_hud "$T/usage" 'console.log("[Opus]\nContext 12% │ Usage Weekly ██████░░░░ 63% (resets in 1d 10h)")'
+reset=$(($(date +%s) + 5 * 86400 + 6 * 3600))
+codex_record 46.0 "$reset" 60
 out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
-check "Codex sits at the end of the HUD's usage line" "$(sed -n 2p <<<"$out")" "Usage Weekly 63% \(resets in 1d 10h\) │ Codex 42% · 리셋 $when$"
+check "Codex uses the HUD's ten-cell rounded bar and reset wording" "$(sed -n 2p <<<"$out")" 'Usage Weekly ██████░░░░ 63% \(resets in 1d 10h\) │ Codex █████░░░░░ 46% \(resets in 5d 6h\)$'
 check "and adds no line of its own" "$(wc -l <<<"$out" | tr -d ' ')" '^2$'
-# The usage line is 49 cells and " │ Codex 42% · 리셋 MM/DD HH:MM" 31, with each Hangul two cells wide.
-out=$(COLUMNS=80 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
-check "80 columns: it still fits on the usage line" "$(sed -n 2p <<<"$out")" "│ Codex 42%"
-out=$(COLUMNS=79 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
-check "79 columns: the usage line stays as the HUD drew it" "$(sed -n 2p <<<"$out")" '\(resets in 1d 10h\)$'
-check "and Codex gets the line under the HUD" "$(sed -n 3p <<<"$out")" "^Codex 42% · 리셋 $when$"
+# 60 cells of HUD + 41 cells of separator/Codex. ANSI styling takes no cells.
+out=$(COLUMNS=101 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "101 columns: exact fit stays on the usage line" "$(sed -n 2p <<<"$out")" '│ Codex █████░░░░░ 46%'
+out=$(COLUMNS=100 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "100 columns: the usage line stays as the HUD drew it" "$(sed -n 2p <<<"$out")" '\(resets in 1d 10h\)$'
+check "and Codex gets the line under the HUD" "$(sed -n 3p <<<"$out")" '^Codex █████░░░░░ 46% \(resets in 5d 6h\)$'
+for row in '100 █████░░░░░' '99 ███░░░' '60 ███░░░' '59 ██░░' '1 ██░░' '0 █████░░░░░'; do
+	read -r cols bar <<<"$row"
+	out=$(COLUMNS="$cols" CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+	check "$cols columns: bar width matches HUD" "$out" "Codex $bar 46%"
+done
+out=$(env -u COLUMNS CLAUDE_CONFIG_DIR="$T/usage" bash -c 'printf "%s" "$1" | bash "$2"' _ "$INPUT" "$SCRIPT" | plain)
+check "unknown columns: ten cells like HUD" "$out" 'Codex █████░░░░░ 46%'
+codex_record 45 "$reset" 60
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "half a bar cell rounds up like Math.round" "$out" 'Codex █████░░░░░ 45%'
+codex_record 46.5 "$reset" 60
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "fractional percent rounds up instead of printf ties-to-even" "$out" 'Codex █████░░░░░ 47%'
+for row in '454500 5d 6h' '172800 2d' '86400 1d' '86399 1d' '86340 23h 59m' '5401 1h 31m' '5400 1h 30m' '3600 1h' '60 1m' '1 1m'; do
+	read -r seconds duration <<<"$row"
+	codex_record 46 "$(($(date +%s) + seconds))" 60
+	out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+	check "$seconds seconds: HUD rounds minutes up and omits zero units" "$out" "Codex █████░░░░░ 46% \\(resets in $duration\\)$"
+done
 past=$(($(date +%s) - 60))
 codex_record 90 "$past" 60
 out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
-check "a week that has reset since the record: 0%, and when it reset" "$out" "│ Codex 0% · $(date -r "$past" '+%m/%d %H:%M') 리셋됨$"
-codex_record 42 "$reset" $((3 * 3600 + 60))
+check "a reset week: empty bar and English parenthetical notice" "$out" '│ Codex ░░░░░░░░░░ 0% \(reset\)$'
+codex_record 90 "$(date +%s)" 60
 out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
-check "a record over an hour old says how old" "$out" "Codex 42% · 리셋 $when · 기록 3시간 전$"
-codex_record 42 "$reset" $((2 * 86400 + 60))
+check "reset at this exact second also clears the bar" "$out" 'Codex ░░░░░░░░░░ 0% \(reset\)$'
+codex_record 46 "$reset" $((3 * 3600 + 60))
 out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
-check "a record over a day old says it in days" "$out" "Codex 42% · 리셋 $when · 기록 2일 전$"
+check "an old record keeps its age in the same parenthetical style" "$out" 'Codex █████░░░░░ 46% \(resets in 5d 6h; updated 3h 1m ago\)$'
+codex_record 46 "$reset" $((2 * 86400 + 60))
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "a record over a day old uses HUD day units" "$out" 'Codex █████░░░░░ 46% \(resets in 5d 6h; updated 2d ago\)$'
+codex_record 46 "$reset" 3599
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "a record under an hour old needs no age" "$out" 'Codex █████░░░░░ 46% \(resets in 5d 6h\)$'
+codex_record 46 "$reset" 3600
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "an hour-old record starts showing its age" "$out" '\(resets in 5d 6h; updated 1h ago\)$'
+codex_record 90 "$past" 7200
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
+check "a stale reset week keeps both notices" "$out" 'Codex ░░░░░░░░░░ 0% \(reset; updated 2h ago\)$'
 echo '{"type":"event_msg","payload":{"rate_limits": broken' >"$HOME/.codex/sessions/2026/11/06/rollout-a.jsonl"
 out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
-check "a broken record: no reading, and the HUD still shows" "$out" '│ Codex 기록 없음$'
+check "a broken record: English parenthetical notice and HUD still shows" "$out" '│ Codex \(no usage data\)$'
 check "the HUD's first line is untouched" "$(head -1 <<<"$out")" '^\[Opus\]$'
 rm -rf "$HOME/.codex"
 out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
-check "no Codex records at all: says so" "$out" '│ Codex 기록 없음$'
-codex_record 42 "$reset" 60
+check "no Codex records at all: says so" "$out" '│ Codex \(no usage data\)$'
+codex_record 46 "$reset" 60
 out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/hud" run | plain)
-check "a HUD with no usage line: Codex gets the line under it" "$(sed -n 2p <<<"$out")" "^Codex 42% · 리셋 $when$"
+check "a HUD with no usage line: Codex gets the line under it" "$(sed -n 2p <<<"$out")" '^Codex █████░░░░░ 46% \(resets in 5d 6h\)$'
+# A 6-cell bar at this width; Hangul takes two cells and ANSI takes none: 23 + 37 = 60.
+fake_hud "$T/hangul" 'console.log("\x1b[2m한글 Usage 한글한글한글\x1b[0m")'
+out=$(COLUMNS=60 CLAUDE_CONFIG_DIR="$T/hangul" run | plain)
+check "wide Hangul and ANSI fit when there is enough room" "$(head -1 <<<"$out")" '│ Codex ███░░░ 46%'
+fake_hud "$T/hangul" 'console.log("\x1b[2m한글 Usage 한글한글한글한글\x1b[0m")'
+out=$(COLUMNS=60 CLAUDE_CONFIG_DIR="$T/hangul" run | plain)
+check "wide Hangul forces a separate line when cell width exceeds columns" "$(sed -n 2p <<<"$out")" '^Codex ███░░░ 46%'
 rm -rf "$HOME/.codex"
 
 # 요유 reads only the lead's pane, and a lead's panes run on the hidden workers server: their steps show here all the same.
