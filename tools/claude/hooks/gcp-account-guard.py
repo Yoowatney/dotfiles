@@ -5,13 +5,14 @@ AI sessions run as an agent service account (production read, staging write) thr
 default `munice` gcloud config and ADC files. Yoyoo's own account lives in the `munice-admin`
 config and `adc-munice-admin.json`. Two kinds of commands are refused:
   - SELECT: one command picks another identity. Allowed when the session chose admin (`cla`
-    sets MUNICE_GCP_ADMIN=1) or Yoyoo's latest typed prompt contains `prod 허용` (that turn only).
+    sets MUNICE_GCP_ADMIN=1) or Yoyoo's latest typed prompt contains `prod 허용` (that turn only),
+    except in the main pane: any session can type into its input box (요유 2026-11-06, api#1026).
   - PERSIST: a change that outlives the command (a login, `config set`, the active config, the
     credential files). Always refused, so an unlocked turn cannot leave admin behind.
 terraform#1005.
 In the main pane a refused SELECT also runs once when 요유 put ✅ on a Slack reply that holds exactly this command:
 slack_approval.py (munice-claude) reads Slack itself, never the text relayed into the pane.
-In the main pane `prod 허용`/`staging 허용` written by 요유 in any Slack channel also counts as typed, for the turn its relay
+In the main pane `prod 허용`/`staging 허용` written by 요유 in any Slack channel unlocks instead, for the turn its relay
 starts (api#1026): the relay names the message as `글 <channel>/<ts>`, and slack_approval.py reads author, time and words back
 from Slack, and only when the whole relayed text is that message's relay. `api#973 prod 허용` (an item right before the word, or
 opening the words) lifts only commands that name the item; an item named any other way, or an unclear grant, lifts nothing.
@@ -95,6 +96,8 @@ SLACK_NEVER = re.compile(
     r"|(?<![.@\w-])iam(?![.\w-])|iam-?policy|\bhmac\b|sign-?(?:jwt|blob)|generate(?:access|id)token", re.I)
 BACKGROUND = re.compile(r"(?<![>&|])&(?![&>])")  # `cmd &`; not &&, 2>&1, &> or |&, nor one inside a literal string
 SLACK_NOTE = "메인 칸은 Slack ✅로도 이 명령 하나를 한 번 실행할 수 있습니다(메인 칸 스킬 'Steps only 요유 can unlock')."
+TYPED_NOTE = ("메인 칸은 입력창에 들어온 `prod 허용`·`staging 허용`을 허용으로 치지 않습니다: 다른 세션이 쳐 넣은 글과 요유가 친 글을 "
+              "구분할 수 없습니다(요유 11/06, api#1026). 요유가 Slack에 쓴 허용 글이나 실행 요청의 ✅로 풀 것.")
 
 # ponytail: text patterns over the whole command, heredoc bodies included (a script there runs).
 # They stop accidents (a wrong config, a script that grabs the admin ADC), not a session set on
@@ -599,14 +602,21 @@ def hook(hook_input: dict, env: dict, riders, approvals, is_main, budget: float 
     """The whole PreToolUse verdict, within `budget` seconds of `started`. On the Slack paths the other checks run first:
     pane-fit-guard asks the main pane once a message, and its repeat must still find the approval unused."""
     started = time.monotonic() if started is None else started
-    reason = tool_problem(hook_input, env)
-    if not reason:
+    strict = tool_problem(hook_input, env, prompt="")  # what no word typed in this pane lifts
+    if not strict:
         return riders(hook_input)
-    reason = f"gcp-account-guard: {reason}"
+    typed = tool_problem(hook_input, env)
+    # The main pane takes no typed grant: any session can type into its input box (요유 2026-11-06, api#1026).
+    # ponytail: main_pane() says False when herdr fails and trusts a main file any pane can write, so a session set on it can
+    # still get a typed grant there; other panes take one too until 요유 decides on them.
+    main = typed is None and is_main(env)
+    if typed is None and not main:
+        return riders(hook_input)
+    reason = f"gcp-account-guard: {strict}\n{TYPED_NOTE}" if main else f"gcp-account-guard: {typed}"
     # 요유 no longer watches the terminal, so a Slack grant lifts only what a ✅ may: nothing that outlives the turn (review)
     liftable = slack_liftable(hook_input, env)
     turn = relayed_turn(hook_input, env) if liftable else None
-    if not liftable or not is_main(env):
+    if not liftable or not (main or is_main(env)):
         return reason
     other = riders(hook_input)
     if other:
@@ -1200,8 +1210,19 @@ def slack_selftest(claude_transcript, tmp):
         consumed.clear()
     # a command the guard allows anyway never reaches Slack
     assert run("gcloud run services list --project miraclenight-f06c6") is None and not calls
-    # a typed unlock comes first: no Slack read
-    assert run(cmd, prompt="prod 허용") is None and not calls and not asked
+    # the main pane takes no typed grant: any session can type into its input box (요유 2026-11-06, api#1026)
+    stg_cmd = "gcloud --configuration=munice-admin secrets versions add K --project=miraclenight-dev --data-file=/tmp/k"
+    for c, word in ((cmd, "prod 허용"), (cmd, "api#973 prod 허용"), (stg_cmd, "staging 허용")):
+        reason = run(c if "#" not in word else f"{c} # api#973", prompt=word, found=False)
+        assert reason and "입력창" in reason and calls, f"typed {word!r} in the main pane: {reason}"
+    assert "입력창" in (run(cmd, prompt="prod 허용", tool="Monitor") or ""), "nor where no Slack read follows"
+    # there its Slack ✅ and cla still lift, and any other pane still takes the typed word
+    assert run(cmd, prompt="prod 허용") is None and calls == [cmd]
+    consumed.clear()
+    assert run(cmd, prompt="prod 허용", env={"MUNICE_GCP_ADMIN": "1"}) is None and not calls
+    assert run(cmd, prompt="prod 허용", main=False) is None and not calls
+    assert run(stg_cmd, prompt="staging 허용", main=False) is None and not calls
+    assert run(cmd, prompt="고쳐줘", main=False) and not calls, "another pane without the word"
     slack_grant_selftest(run, asked, claims, claude_transcript, tmp)
     # the used marks are out of reach of the file tools too
     for tool, key in (("Write", "file_path"), ("Edit", "file_path"), ("Read", "file_path")):
