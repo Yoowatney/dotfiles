@@ -187,8 +187,8 @@ PAGE = re.compile(r"/explain/\S+\.html")
 # reply in the thread), and done --thread, the one check, runs only when a thread is closed. So each turn of the main pane ends
 # with the threads still owed a reply, read from the relay's own state (owed_reason).
 OWED_REASON = ("yoyoo-share-guard: 릴레이가 이 칸에 넘긴 요유의 Slack 글 가운데, 뒤에 우리 답글이 없는 스레드가 있습니다: {}. "
-               "턴을 끝내기 전에 스레드마다 `main-channel.py post --thread <스레드 ts>`로 답하세요. 일이 이어지면 어디까지 했고 끝나면 "
-               "그 스레드에 알린다고 쓰고, 끝난 일이면 답한 뒤 `main-channel.py done --thread <스레드 ts>`로 닫으세요. "
+               "턴을 끝내기 전에 스레드마다 `main-channel.py post --thread <스레드 ts>`로 답하세요. 일이 이어지면 어디까지 했는지, 끝날 예상 시각"
+               "(`끝날 예상: 14:30쯤`), 끝나면 그 스레드에 알린다는 것을 쓰고, 끝난 일이면 답한 뒤 `main-channel.py done --thread <스레드 ts>`로 닫으세요. "
                "이미 다른 길로 답했으면 릴레이가 1분 안에 그 답을 읽고 목록에서 지우니, 응답 없이 턴을 끝내세요.")
 THREAD_CALL = re.compile(r"\[Slack 스레드 요유 부름\][^\n]*?\(스레드 ([CG][A-Z0-9]+)/(\d+\.\d+), 글 [CG][A-Z0-9]+/\d+\.\d+\)")
 SLACK_TS = re.compile(r"\d+\.\d+")
@@ -1552,6 +1552,7 @@ def selftest():
         owes(**{thread: ["1793871000.000100", "머지 ㄱㄱ"]})
         r = stops() or ""
         assert f"{thread}('머지 ㄱㄱ')" in r and "post --thread" in r and "done --thread" in r, f"owed words come back: {r}"
+        assert "끝날 예상 시각" in r, f"work still running gets its end time (wow 11/06): {r}"
         assert stops(stop_hook_active=True) is None, "once a turn"
         replied("1793870900.000000")
         assert thread in (stops() or ""), "a reply from before the words answers nothing"
