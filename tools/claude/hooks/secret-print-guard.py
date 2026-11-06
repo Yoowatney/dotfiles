@@ -157,12 +157,35 @@ def strip_captures(cmd: str) -> str:
     return re.sub(r"`[^`]*`", "", "".join(out))
 
 
+def strip_comments(cmd: str) -> str:
+    """Drop `# ...` up to the line's end where the shell does: only a `#` that opens a word, outside quotes.
+    shlex also starts a comment at a `#` inside a word (`${#S}`, `a#b`), which hid the rest of the line (2026-11-06)."""
+    out, quote, i = [], None, 0
+    while i < len(cmd):
+        c = cmd[i]
+        if c == "\\" and quote != "'" and i + 1 < len(cmd):
+            out += cmd[i:i + 2]
+            i += 2
+            continue
+        if quote:
+            quote = None if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        elif c == "#" and (not out or out[-1] in " \t\r\n;&|()<>"):
+            end = cmd.find("\n", i)
+            i = len(cmd) if end < 0 else end
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def segments(cmd: str) -> list[list[str]]:
     """Simple commands as word lists, split on ; & | and newlines that sit outside quotes."""
-    # A continued line is one command, and shlex's comment skip eats the newline that ends a comment.
-    cmd = cmd.replace("\\\n", " ").replace("\n", "\n\n")
+    cmd = strip_comments(cmd.replace("\\\n", " "))  # a continued line is one command
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=";&|\n")
+        lex.commenters = ""  # strip_comments did the shell's part
         lex.whitespace = " \t\r"
         lex.whitespace_split = True
         toks = list(lex)
@@ -531,8 +554,16 @@ def selftest():
         "git cat-file blob HEAD:env.mjs",
         "git log -U3 -- env.mjs",
         "git log --patch-with-stat -- env.mjs",
+        # 2026-11-06: shlex read a `#` inside a word as a comment and skipped the rest of the line; the shell does not
+        ": ${#Z}; gcloud secrets versions access latest --secret=x",
+        "echo a#b; cat ~/.codex/config.toml",
+        "curl -s https://x/#frag && gcloud auth print-access-token",
+        "S=$(: ${#Z}; gcloud secrets versions access latest --secret=x); echo \"$S\"",
     ]
     allow = [
+        "ls  # cat ~/.codex/config.toml",
+        "gcloud secrets list --project=p # api#973",
+        "echo 'a #b'; ls",
         "T=$(python3 -I -c 'import re,os;print(open(os.path.expanduser(\"~/.codex/config.toml\")).read())')",
         "export SLACK_BOT_TOKEN=$(jq -r .x ~/.claude.json) && python3 post.py",
         "set -a; source ~/.config/gemini/.env; set +a; curl -s -H \"x-goog-api-key: $GEMINI_API_KEY\" https://x",
