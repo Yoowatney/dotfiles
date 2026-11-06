@@ -37,7 +37,7 @@ By design, two stops inside one tick interval look like one: a report for the fi
 An alert nobody took marks nothing, so the next minute sends it again. Fails open: any error exits 0 quietly.
 
 It also restarts the main pane through `main-refresh --now` once its conversation (the last response's usage in its transcript)
-passes MAIN_REFRESH_AT tokens, after an hour since a restart anyone made, and only
+passes MAIN_REFRESH_AT tokens, after an hour since a restart anyone made (past MAIN_REFRESH_FULL at once), and only
 when it answered something after its first 15 minutes (its handoff load alone passes the line); see refresh_main(). State: `{state_dir}/main-size.json`, each call also a line in main-refresh's `{state_dir}/refresh.log`.
 An active refresh owns its queued request and retries; a run that stopped without a restart is tried again next minute.
 
@@ -77,6 +77,10 @@ ORPHAN_TTL = 3600
 STOPPED = 900
 MAIN_REFRESH_AT = 150_000  # tokens in the main pane's conversation (the lead, 2026-11-05); a fresh one reached 141k in 40 s on 11/05
 MAIN_REFRESH_GAP = 3600
+# Past this the hour is not waited for: the pane grows up to ~5k tokens a minute, so an hour of it is 275-360k (11/06), near
+# the 367k where Claude compacts by itself (17:54 that day, at 46 min). 250k leaves room for main-refresh's wait for an idle
+# pane; the last 10 sessions passed it in 18-61 min.
+MAIN_REFRESH_FULL = 250_000
 MAIN_REFRESH_RETRY = 60
 MAIN_REFRESH_SETTLE = 900  # a session's first 15 minutes are its handoff load, not conversation
 USAGE = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
@@ -197,7 +201,10 @@ def last_usage(path) -> tuple:
             continue
         try:
             d = json.loads(raw)
-            n, at = sum(int(d["message"]["usage"].get(k) or 0) for k in USAGE), stamp(d)
+            u = d["message"]["usage"]
+            # A response that called the advisor lists its model calls in `iterations` and sums them above: the last call is the size.
+            calls = [i for i in u.get("iterations") or [] if i.get("type") == "message"]
+            n, at = sum(int((calls[-1] if calls else u).get(k) or 0) for k in USAGE), stamp(d)
         except (ValueError, KeyError, TypeError, AttributeError):
             continue
         if d.get("type") == "assistant" and not d.get("isSidechain") and n:
@@ -231,7 +238,7 @@ def refresh_main(env, now, where, main) -> None:
         asked = {}
     asked = asked if isinstance(asked, dict) else {}
     start = born(found[0])
-    if now - start < MAIN_REFRESH_GAP or now - float(asked.get(main) or 0) < MAIN_REFRESH_RETRY:
+    if now - float(asked.get(main) or 0) < MAIN_REFRESH_RETRY:
         return
     lock = os.path.join(herdr_peers.state_dir(env), "refresh.lock")
     # main-refresh recovers locks older than two hours itself. Never spawn competing waits for a live run.
@@ -240,7 +247,7 @@ def refresh_main(env, now, where, main) -> None:
     size, at = last_usage(found[0])
     # A fresh session is past the line once its handoff is loaded (11/05: 141k in 40 s), so a pane that has answered nothing
     # since would be restarted every hour all night for nothing: it re-reads only when a message comes.
-    if size <= MAIN_REFRESH_AT or at < start + MAIN_REFRESH_SETTLE:
+    if size <= MAIN_REFRESH_AT or at < start + MAIN_REFRESH_SETTLE or (now - start < MAIN_REFRESH_GAP and size <= MAIN_REFRESH_FULL):
         return
     # From the workers server or launchd alike: the server variables would point main-refresh away from the main pane.
     child = {k: v for k, v in {**os.environ, **env}.items() if k not in ("HERDR_SOCKET_PATH", "HERDR_SESSION", "HERDR_PANE_ID")}
@@ -990,6 +997,24 @@ esac
         assert refreshed(0.5) == [], "a subagent's or a synthetic line is not the conversation's size"
         conversation("s5", 150000 - 7200, 170000, last=150000 - 7200 + 600); tick(150000)
         assert refreshed(0.5) == [], "a pane quiet since its handoff load is no restart: a fresh one is past the line already"
+        # A response that called the advisor sums its model calls at the top level (11/06: 135k read as 272k): the last call counts.
+        write(f"{d}/.claude/projects/-w/s7.jsonl", "".join(json.dumps(r) + "\n" for r in [
+            {"type": "user", "timestamp": iso(155000 - 7200), "message": {"content": "hi"}},
+            {"type": "assistant", "timestamp": iso(155000 - 600), "message": {"id": "a1", "usage": {
+                "input_tokens": 6, "cache_creation_input_tokens": 1000, "cache_read_input_tokens": 271347, "output_tokens": 37, "iterations": [
+                    {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 135493, "output_tokens": 30},
+                    {"type": "advisor_message", "input_tokens": 0},
+                    {"type": "message", "input_tokens": 4, "cache_creation_input_tokens": 1000, "cache_read_input_tokens": 135854, "output_tokens": 7}]}}}]))
+        result("default-panes", "panes", [{"pane_id": "w5:p3", "terminal_id": "term_M", "label": "👑 메인", "agent": "claude",
+                                           "agent_session": {"value": "s7"}}])
+        tick(155000); assert refreshed(0.5) == [], "an advisor call does not double the conversation's size"
+        # This pane grows up to ~5k tokens a minute from a ~125k handoff load, so an hour of it is 275-360k, near the 367k where
+        # Claude compacts by itself (11/06 17:54; the pane restarted itself at 16:12 and 17:05, so no session reached its hour). Past
+        # MAIN_REFRESH_FULL the hour is not waited for; the first 15 minutes still are.
+        conversation("s8", 155060 - 600, 300000, last=155060 - 30); tick(155060)
+        assert refreshed(0.5) == [], "a big session in its first 15 minutes is its handoff load: still no restart"
+        conversation("s9", 155120 - 1200, 260000, last=155120 - 60); tick(155120)
+        assert refreshed() == ["--now none none"], "past the full line a 20-minute-old session is restarted, not left for its hour"
         result("default-panes", "panes", [{"pane_id": "w5:p3", "terminal_id": "term_M", "label": "👑 메인", "agent": "claude"}])
         tick(160000); assert refreshed(0.5) == [], "no session id: nothing to measure"
         conversation("s4", 100000, 200000); env["WORKERS_WATCH_MAIN_REFRESH"] = f"{d}/nowhere"; tick(170000)
