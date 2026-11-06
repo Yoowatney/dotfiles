@@ -56,6 +56,26 @@ def load_members(path: str = MEMBERS) -> dict[str, str]:
         return {}
 
 
+LEFT = os.path.expanduser("~/.config/slackcopy/left.json")  # {user id: [label, alias, ...]} of teammates who left
+LEFT_FIX = (
+    "회사를 떠난 사람은 Slack에서 태그하지 않는다(요유 2026-11-06). 그 사람을 빼고 다시 쓴다. "
+    "목록은 로컬 파일 ~/.config/slackcopy/left.json이고, 인사 정보라 리포·PR·이슈·Slack에는 적지 않는다."
+)
+
+
+def left_problems(text: str, left: dict | None = None) -> list[str]:
+    """Teammates who left that the text tags: <@id> or @name. Same rule as agent-board ambient/slack.py left_mentions."""
+    if left is None:
+        try:
+            with open(LEFT, encoding="utf-8") as f:
+                left = {u: n for u, n in json.load(f).items() if not u.startswith("_")}
+        except (OSError, ValueError):
+            left = {}
+    return [f"@{names[0]}: 회사를 떠난 사람이라 태그하지 않는다" for uid, names in left.items()
+            if re.search(r"<@%s\b" % uid, text)
+            or any(re.search(r"(?<![\w./@])@" + re.escape(n) + r"(?![A-Za-z0-9_])", text, re.I) for n in names)]
+
+
 def mention_problems(text: str, members: dict[str, str]) -> list[str]:
     """Korean @mentions, with the English Slack name to use instead (Korean particles may follow: @홍길동님)."""
     found, fenced = [], False
@@ -210,12 +230,13 @@ NOT_CODE = re.compile(r"\.(?:md|markdown|txt|json|jsonl|log|csv|html)$|/(?:tests
 SENDS = re.compile(r"slack\.com/api|urlopen|requests\.post|WebClient|slack_sdk|getSlackClient|\._do\(|\bfetch\(")
 # a command word's own place: past do/then/env/timeout N and VAR=value, its path allowed (/usr/bin/python3)
 _AT = r"(?:^|[;&|(`]|\$\()\s*(?:(?:do|then|else|exec|nohup|env|time|timeout\s+\S+)\s+)*(?:\w+=\S*\s+)*(?:\S*/)?"
+_RUNNER = _AT + r"(?:uv\s+run\s+(?:\S+\s+)*?)?"
 RUNS_CODE = re.compile(
     _AT + r"(?:curl|wget)\b"
-    r"|" + _AT + r"(?:uv\s+run\s+(?:\S+\s+)*?)?(?:python3?|node|deno|bun|ruby|perl)\b[^\n;&|]*?(?:\s-[ce]\b|\s-(?=\s|$)|<<)", re.M)
-SHELL_READS = re.compile(_AT + r"(?:python3?|node|deno|bun|ruby|perl|bash|sh|zsh)\b", re.M)
+    r"|" + _RUNNER + r"(?:python3?|node|deno|bun|ruby|perl)\b[^\n;&|]*?(?:\s-[ce]\b|\s-(?=\s|$)|<<)", re.M)
+SHELL_READS = re.compile(_RUNNER + r"(?:python3?|node|deno|bun|ruby|perl|bash|sh|zsh)\b", re.M)
 HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1[^\n]*\n(.*?)(?:^[ \t]*\2[ \t]*$|\Z)", re.S | re.M)
-MULTILINE_ARG = re.compile(r"(\s-[ce]\s+)?(\"(?:[^\"\\]|\\.)*\n(?:[^\"\\]|\\.)*\"|'[^']*\n[^']*')")
+QUOTED = re.compile(r"(\s-[ce]\s+)?(\"(?:[^\"\\]|\\.)*\"|'[^']*')")
 # how Codex writes a scratch script: cat > /tmp/…/post.py <<'EOF'
 WRITES_SCRIPT = re.compile(r"\bcat\b[^\n;&|]*>\s*['\"]?(" + SCRATCH_PATH.pattern + r"[^\s'\";&|]*?\.(?:py|[cm]?js|ts|sh))(?=['\"\s;&|)]|$)")
 # a curl body sent from a file (-d @body.json), and the simple VAR=value and cd that name its place
@@ -248,22 +269,23 @@ def code_only(command: str) -> str:
 
     def heredoc(m):  # a body a program reads is set aside, so the quote pass below cannot pair its quotes
         opener = command[command.rfind("\n", 0, m.start()) + 1:m.start()]
-        if not SHELL_READS.search(opener):
+        # an unquoted delimiter lets the shell run the body's $(…) before cat sees it
+        if not SHELL_READS.search(opener) and (m[1] or not re.search(r"\$\(|`", m[3])):
             return m[0][:m.start(3) - m.start()]
         kept.append(m[0])
         return "\0%d\0" % (len(kept) - 1)
-    out = MULTILINE_ARG.sub(lambda m: m[0] if m[1] else ' ""', HEREDOC.sub(heredoc, command))
+    # quotes pair from the left as the shell pairs them; only a multi-line one that is no -c/-e code goes
+    out = QUOTED.sub(lambda m: m[0] if m[1] or "\n" not in m[2] else ' ""', HEREDOC.sub(heredoc, command))
     return re.sub(r"\0(\d+)\0", lambda m: kept[int(m[1])], out)
 
 
 def data_files(command: str, cwd: str) -> str:
     """What a curl command sends from files (-d @f). ponytail: a path built any other way than VAR=value or cd is unread."""
-    expand = _expand(command)
-    bases = [expand(m[2]) for m in CD.finditer(command)] + [cwd]
-    out = []
+    expand, out = _expand(command), []
     for m in DATA_FILE.finditer(command):
-        path = os.path.expanduser(expand(m[1]))
-        out += [on_disk(path)] if os.path.isabs(path) else [on_disk(os.path.join(b, path)) for b in bases if b]
+        cds = [c for c in CD.finditer(command) if c.start() < m.start()]  # where curl runs: the last cd before it
+        base = os.path.join(cwd, os.path.expanduser(expand(cds[-1][2]))) if cds else cwd
+        out.append(on_disk(os.path.join(base, os.path.expanduser(expand(m[1])))))
     return "\n".join(out)
 
 
@@ -278,31 +300,34 @@ def final_text(path: str, edits: list) -> str:
 
 def direct_post_problems(tool: str, inp: dict, cwd: str) -> list[str]:
     """Where a scratch code file or a command that runs code posts text to Slack's API itself, with no blocks.
-    Each change is (path, the text as it will stand): a rewrite is judged by what it leaves, not by what it removed."""
+    Each change is (path, where the call is, what it sends): a rewrite is judged by what it leaves, not by what it removed,
+    and a command's call by the words that run, its blocks by everything it sends."""
     command = inp.get("command") or ""
+    changes = []
     if tool == "Write":
-        changes = [(inp.get("file_path") or "", inp.get("content") or "")]
+        content = inp.get("content") or ""
+        changes = [(inp.get("file_path") or "", content, content)]
     elif tool in ("Edit", "MultiEdit"):
         path = inp.get("file_path") or ""
-        changes = [(path, final_text(path, inp.get("edits") or [inp]))]
+        final = final_text(path, inp.get("edits") or [inp])
+        changes = [(path, final, final)]
     elif "*** Begin Patch" in command:
-        changes = []
+        deleted = {os.path.join(cwd, p.strip()) for p in re.findall(r"^\*\*\* Delete File: (.+)$", command, re.M)}
         for path, removed, added in patch_changes(command, cwd):
             gone = set(removed.split("\n"))
-            changes.append((path, "\n".join(line for line in on_disk(path).split("\n") if line not in gone) + "\n" + added))
+            final = "\n".join(line for line in on_disk(path).split("\n") if line not in gone) + "\n" + added
+            changes += [] if path in deleted else [(path, final, final)]
     else:
         script, code = WRITES_SCRIPT.search(_expand(command)(command)), code_only(command)
-        if script:
-            changes = [] if NOT_CODE.search(script[1]) else [(script[1], command)]
-        elif RUNS_CODE.search(code) and SENDS.search(code):
-            changes = [("", code + "\n" + data_files(command, cwd))]
-        else:
-            changes = []
+        if script and not NOT_CODE.search(script[1]):
+            changes = [(script[1], command, command)]
+        elif RUNS_CODE.search(code) and SENDS.search(code):  # a test written with cat leaves the rest checked
+            changes = [("", code, command + "\n" + data_files(command, cwd))]
     return [f"{os.path.basename(path) or 'Bash 명령'}: 블록 없이 Slack API를 직접 불러 글을 씀"
-            for path, final in changes
+            for path, call, sent in changes
             if (not path or (SCRATCH_PATH.match(path) and not NOT_CODE.search(path)))
-            and any(POST_API.search(line) for line in final.split("\n") if OPT_OUT not in line)
-            and not BLOCKS.search(final)]
+            and any(POST_API.search(line) for line in call.split("\n") if OPT_OUT not in line)
+            and not BLOCKS.search(sent)]
 
 
 def fresh_reason(payload: dict) -> str | None:
@@ -383,6 +408,13 @@ def selftest():
         os.remove(md)
     assert problems("*[ a ]* @홍길동", members)  # Slack MCP text too
 
+    # a teammate who left is never tagged (요유 2026-11-06); the list is local, so no name lives in this file
+    gone = {"U9": ["Gone", "곤"]}
+    for text in ("hi @Gone", "@gone님", "@곤 확인", "<@U9> 봐 주세요", "<@U9|gone>"):
+        assert left_problems(text, gone) == ["@Gone: 회사를 떠난 사람이라 태그하지 않는다"], text
+    for text in ("gone@munice.com", "Gone 얘기", "@Gonezo", "https://a.b/@곤", "<@U99>"):
+        assert left_problems(text, gone) == [], text
+
     # cf#752: a session's own call to Slack's post API skips the shared client, so its list lines go out as typed.
     tmp = "/private/tmp/claude-501/x/scratchpad/"
     post = 's._do("chat.postMessage", {"channel": c, "text": t}, post=True)'
@@ -461,6 +493,32 @@ def selftest():
         "/usr/bin/python3 -c \"import urllib.request as u\nu.urlopen('https://slack.com/api/chat.postMessage')\"",
     ]:
         assert direct_post_problems("Bash", {"command": cmd}, ""), cmd
+
+    # Codex review of 920bbfa: quotes pair as the shell pairs them, a uv-run or unquoted heredoc still runs, a test
+    # written with cat leaves the rest checked, a deleted script and a multi-line blocks body pass, curl reads from its cd
+    for cmd in [
+        'echo "ready"\n' + send + ' -d "a=b"',
+        "uv run --with slack_sdk python3 - <<'PY'\nWebClient(t).chat_postMessage(channel='C1', text='- a')\nPY",
+        "cat <<EOF\n$(" + send + ")\nEOF",
+        "cat > /tmp/x/test_fixture.py <<'EOF'\nx = 1\nEOF\n" + send,
+    ]:
+        assert direct_post_problems("Bash", {"command": cmd}, ""), cmd
+    assert direct_post_problems("Bash", {"command": send + " -d '{\n\"blocks\": [{\"type\": \"rich_text\"}]\n}'"}, "") == []
+    assert direct_post_problems("Bash", {"command": "*** Begin Patch\n*** Delete File: post.py\n*** End Patch"},
+                                "/tmp/x") == []
+    import shutil
+    import tempfile
+    here, there = tempfile.mkdtemp(dir="/tmp"), tempfile.mkdtemp(dir="/tmp")
+    try:
+        with open(os.path.join(here, "body.json"), "w", encoding="utf-8") as f:
+            f.write('{"blocks": []}')
+        with open(os.path.join(there, "body.json"), "w", encoding="utf-8") as f:
+            f.write('{"text": "- a"}')
+        assert direct_post_problems("Bash", {"command": "cd " + there + " && " + curl + "-d @body.json"}, here)
+        assert direct_post_problems("Bash", {"command": curl + "-d @body.json"}, here) == []
+    finally:
+        shutil.rmtree(here)
+        shutil.rmtree(there)
     print("selftest ok")
 
 
@@ -472,7 +530,9 @@ if __name__ == "__main__":
     tool = payload.get("tool_name") or ""
     inp = payload.get("tool_input") or {}
     if "slack" in tool.lower() and "text" in inp:  # the Slack MCP post tools
-        found, fix = problems(inp.get("text") or ""), FIX + "\n" + MENTION_FIX
+        found, fix = left_problems(inp.get("text") or ""), LEFT_FIX
+        if not found:
+            found, fix = problems(inp.get("text") or ""), FIX + "\n" + MENTION_FIX
     else:
         cwd = payload.get("cwd") or os.getcwd()
         try:  # its own crash must not take the older checks below with it
