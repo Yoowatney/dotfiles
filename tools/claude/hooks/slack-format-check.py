@@ -271,7 +271,8 @@ def code_only(command: str) -> str:
     def heredoc(m):  # a body a program reads is set aside, so the quote pass below cannot pair its quotes
         opener = command[command.rfind("\n", 0, m.start()) + 1:m.start()]
         if not SHELL_READS.search(opener):
-            # an unquoted delimiter lets the shell run the body's $(…) before cat sees it: those lines stay
+            # an unquoted delimiter lets the shell run the body's $(…) before cat sees it: those lines stay.
+            # ponytail: a $( whose command is on the next line is missed; keep the whole substitution if one shows up
             runs = "" if m[1] else "".join(line + "\n" for line in m[3].split("\n") if re.search(r"\$\(|`", line))
             return m[0][:m.start(3) - m.start()] + runs
         kept.append(m[0])
@@ -325,7 +326,9 @@ def direct_post_problems(tool: str, inp: dict, cwd: str) -> list[str]:
         if script and not NOT_CODE.search(script[1]):
             changes = [(script[1], command, command)]
         elif RUNS_CODE.search(code) and SENDS.search(code):  # a test written with cat leaves the rest checked
-            changes = [("", code, code + "\n" + data_files(command, cwd))]
+            # a body sent from a variable or stdin (-d "$payload", -d @-) is in words code_only dropped: count them all
+            fed = re.search(r"(?:-d|--data[\w-]*|--json)[=\s]+[\"']?(?:\$|@-)", code)
+            changes = [("", code, (command if fed else code) + "\n" + data_files(command, cwd))]
     return [f"{os.path.basename(path) or 'Bash 명령'}: 블록 없이 Slack API를 직접 불러 글을 씀"
             for path, call, sent in changes
             if (not path or (SCRATCH_PATH.match(path) and not NOT_CODE.search(path)))
@@ -528,6 +531,10 @@ def selftest():
     assert direct_post_problems("Bash", {"command": "cat <<'EOF'\nblocks 설명\nEOF\n" + send}, "")
     assert direct_post_problems("Bash", {"command": "cat <<EOF\n오늘 $(date)\n" + send + "\nEOF"}, "") == []
     assert direct_post_problems("Bash", {"command": curl + "-d @- <<'EOF'\n{\"blocks\": []}\nEOF"}, "") == []
+    # Codex review of 24216ce: a blocks body in a variable or piped in
+    assert direct_post_problems("Bash", {"command": "payload='{\n\"blocks\": []\n}'\n" + curl + '-d "$payload"'}, "") == []
+    assert direct_post_problems("Bash", {"command": "cat <<'EOF' | " + curl + "-d @-\n{\"blocks\": []}\nEOF"}, "") == []
+    assert direct_post_problems("Bash", {"command": "payload='{\n\"text\": \"- a\"\n}'\n" + curl + '-d "$payload"'}, "")
     here = tempfile.mkdtemp(dir="/tmp")
     try:
         os.mkdir(os.path.join(here, "sub"))
