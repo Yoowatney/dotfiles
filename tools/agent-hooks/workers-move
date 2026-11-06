@@ -165,8 +165,9 @@ def trusted(key):
         return False
 def accept_trust(folder, key):
     """Claude asks once per repo whether to trust it, and a new pane has nobody to answer (e2e 11/06). This is the answer a
-    person gives by hand: Claude itself in a pty, Enter at the question, ended once its config says trusted."""
-    import fcntl, pty, select, signal, struct, termios
+    person gives by hand, to Claude itself in a pty. The question starts on "No, exit": Down moves the mark, and Enter goes
+    only once the screen shows it on "Yes, I trust this folder"."""
+    import fcntl, pty, re, select, signal, struct, termios
     pid, fd = pty.fork()
     if pid == 0:
         try:
@@ -175,30 +176,49 @@ def accept_trust(folder, key):
         finally:
             os._exit(127)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 160, 0, 0))
-    seen, answered, end = b"", False, time.time() + 90
-    try:
-        while time.time() < end and not trusted(key):
-            if select.select([fd], [], [], 0.5)[0]:
+    seen, last, t0 = [b""], [time.time()], time.time()
+    def pump(secs):
+        end = time.time() + secs
+        while time.time() < end:
+            if select.select([fd], [], [], 0.2)[0]:
                 try:
-                    seen = (seen + os.read(fd, 65536))[-50000:]
+                    chunk = os.read(fd, 65536)
                 except OSError:
-                    break
-            if not answered and b"trust" in seen:
-                time.sleep(1)
+                    return False
+                if not chunk:
+                    return False
+                seen[0] = (seen[0] + chunk)[-200000:]
+                last[0] = time.time()
+        return True
+    try:
+        while b"trust" not in seen[0] and time.time() - t0 < 30 and pump(0.5):
+            pass
+        while b"trust" in seen[0] and time.time() - last[0] < 2 and time.time() - t0 < 45 and pump(0.3):
+            pass  # keys typed before the screen settles are lost
+        if b"trust" in seen[0]:
+            mark = len(seen[0])
+            os.write(fd, b"\x1b[B")
+            pump(2)
+            if re.search(rb"\xe2\x9d\xaf(?:\x1b\[[0-9;]*[A-Za-z])*\s*Yes, I trust", seen[0][mark:]):
                 os.write(fd, b"\r")
-                answered = True
+                while not trusted(key) and time.time() - t0 < 75 and pump(0.5):
+                    pass
     finally:
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.kill(pid, sig)
-            except OSError:
-                break
-            time.sleep(1)
         try:
-            os.waitpid(pid, 0)
+            os.killpg(pid, signal.SIGTERM)
         except OSError:
             pass
-        os.close(fd)
+        os.close(fd)  # first: a child that ends with output unread waits for it to drain (seen 11/06)
+        for _ in range(10):
+            if os.waitpid(pid, os.WNOHANG)[0]:
+                break
+            time.sleep(0.5)
+        else:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            os.waitpid(pid, 0)
 if op == "open":
     key = a.get("main_tree") or a["folder"]  # Claude keys a worktree by its main repo
     if a.get("trust") and not trusted(key):
@@ -1086,14 +1106,25 @@ if text.startswith("[퇴근 인계]") and addr in memos:
 
         # 집맥's Claude keys a worktree by its main repo and asks once whether to trust it; nobody answers that in a new pane
         # (e2e 11/06). open answers it in a pty, only for a repo the 회사맥 trusts.
-        script("rbin/claude", '#!/usr/bin/env python3\nimport json, os, subprocess, sys, time\n'
+        script("rbin/claude", '#!/usr/bin/env python3\nimport json, os, subprocess, sys, time, tty\n'
                'open(os.environ["FAKE_D"] + "/claude.log", "a").write(os.getcwd() + "\\n")\n'
-               'print("Quick safety check: Is this a project you created or one you trust?", flush=True)\n'
-               'sys.stdin.read(1)\n'
-               'top = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True)\n'
-               'key = os.path.dirname(top.stdout.strip().rstrip("/"))\n'
-               'json.dump({"projects": {key: {"hasTrustDialogAccepted": True}}}, open(os.path.expanduser("~/.claude.json"), "w"))\n'
-               'time.sleep(30)\n')
+               'tty.setraw(0)\n'
+               'w = lambda t: (os.write(1, t), time.sleep(0.1))\n'
+               'w(b"Quick safety check: Is this a project you created or one you trust?\\r\\n\\xe2\\x9d\\xaf\\x1b[4GNo, exit\\r\\n'
+               '\\x1b[4GYes, I trust this folder\\r\\n")\n'
+               'yes = False\n'
+               'while True:\n'
+               '    k = os.read(0, 16)\n'
+               '    if k == b"\\x1b[B":\n'
+               '        yes = True\n'
+               '        w(b"\\x1b[4A \\x1b[4GNo, exit\\r\\x1b[1B\\xe2\\x9d\\xaf\\x1b[4GYes, I trust this folder\\r\\n")\n'
+               '    elif k == b"\\r":\n'
+               '        if not yes:\n'
+               '            sys.exit(1)\n'
+               '        top = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True)\n'
+               '        key = os.path.dirname(top.stdout.strip().rstrip("/"))\n'
+               '        json.dump({"projects": {key: {"hasTrustDialogAccepted": True}}}, open(os.path.expanduser("~/.claude.json"), "w"))\n'
+               '        time.sleep(30)\n')
         repo = os.path.realpath(f"{d}/repo")
         ask = dict(timeout=90, agent="spawn-MAIN-t1", memo="m", opener="term_MAIN", folder=wt, main_tree=repo, name="t", prompt="{memo}")
         assert remote(env, "open", trust=False, **ask)["ok"] and not lines("claude.log"), "a repo the 회사맥 does not trust stays so"
