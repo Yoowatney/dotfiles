@@ -25,6 +25,9 @@ hears a short form (first line, `남은 것:`, the pane's address and the saved 
 lead's panes share that server's one workspace: when the opener is gone or cannot hear, the report goes to a 👑 in the same tab or
 the main pane, saying it stands in (and, for a Home pane, to keep it off company Slack and the board; 요유 2026-11-05), never to
 another lead.
+At 퇴근 workers-move (api#1049) asks the main pane's panes for a handoff note: while `{state}/orchestrator/moving/<terminal>` is
+there, a reply is saved and goes nowhere, and the pane stays for workers-move to close. The pane it then opens on 집맥 (agent name
+with `r`) has its lead on the 회사맥, so there the day file is the delivery: the report is marked sent, for `workers-move bridge`.
 A dispatch tab runs on the workers server too, where nobody types (요유 2026-11-05). A report with something in `요유 몫` goes to the
 main pane in the short form under share.JOB_NOTE, which asks for no check pane, and then the tab closes unless its report says
 `세션: 닫으면 …`: the board holds the question, and a new pane carries on. One it could not tell stays, unmarked, for
@@ -482,6 +485,17 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send):
         return sent
 
 
+MOVE_HOLD = 2 * 3600  # a move's wait for its notes is 15 minutes; a mark this old was left by one that died
+
+
+def moving(me: dict, env) -> bool:
+    """workers-move asked this pane for its handoff note (`{state}/orchestrator/moving/<terminal>`)."""
+    try:
+        return time.time() - os.path.getmtime(os.path.join(herdr_peers.state_dir(env), "moving", me.get("terminal_id") or "-")) < MOVE_HOLD
+    except OSError:
+        return False
+
+
 def finish(reply: str, env):
     """Keep the report, tell the pane above, then close unless the report or the pane says to stay. Only a failed save stops
     the close (it raises)."""
@@ -499,6 +513,8 @@ def finish(reply: str, env):
              and not held(me.get("label") or "", me.get("terminal_id"), agents + hidden))
     now = datetime.datetime.now()
     path = save(reply, me, pane, env, now)
+    if moving(me, env):  # workers-move reads this reply as the pane's handoff note and closes the pane itself (api#1049)
+        return
     quiet: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     sideways = close or "👑" not in (me.get("label") or "")
     workers = herdr_peers.server_key(env) == "workers"
@@ -563,7 +579,9 @@ def finish(reply: str, env):
     # the main pane's watch: this pane is waiting, not stuck. Only workers panes: a personal server is left alone. A dispatch
     # pane that closes reported on the board, and --sweep closes it with no job env for pane-label to see (Codex review)
     # By its session too: a herdr restart brings a pane back on its session under a new terminal (workers/w1:p6G, 2026-11-05).
-    if me.get("terminal_id") and ((sent and (workers or to.get("terminal_id") == main)) or (close and dispatch_job(env, name))):
+    # A pane workers-move opened on 집맥 has its lead on the 회사맥: the day file is its delivery, which `workers-move bridge` carries.
+    if me.get("terminal_id") and ((sent and (workers or to.get("terminal_id") == main)) or (close and dispatch_job(env, name))
+                                  or herdr_peers.remote_pane(name)):
         for key in filter(None, (me["terminal_id"], (me.get("agent_session") or {}).get("value"))):
             try:
                 mark = os.path.join(herdr_peers.state_dir(env), "reported", key)
@@ -1460,6 +1478,28 @@ esac''')
     assert run(reported, on_workers) == (0, "", closed), "no receiver: the report stays in the file, and no other lead reads it as a task"
     assert full in saved()
     assert not os.path.exists(f"{sandbox}/.local/state/orchestrator/reported/term_2"), "nobody heard it: the watch still says so"
+    # api#1049: on 집맥 a pane workers-move opened (`r`) has its lead on the 회사맥. The day file is its delivery: `workers-move
+    # bridge` carries it there. So the mark is made, and the pane closes or stays as its report says.
+    opened_by("spawn-A-r1")
+    assert run(reported, on_workers) == (0, "", closed), "a moved pane on 집맥 tells nobody and closes as its report says"
+    assert full in saved() and os.path.exists(report_mark := f"{sandbox}/.local/state/orchestrator/reported/term_2"), \
+        "and the watch learns it reported: the bridge has it"
+    os.unlink(report_mark)
+    assert run(json.dumps({"last_assistant_message": keep[0]}), on_workers) == (0, "", ""), "a question for 요유 keeps a moved pane open"
+    assert keep[0] in saved() and os.path.exists(report_mark), "its report is in the file for the bridge, and marked"
+    os.unlink(report_mark)
+    # On the 회사맥, while workers-move waits for a pane's handoff note, that reply reaches nobody and the pane stays: workers-move
+    # reads the note and closes the pane itself. No check pane opens for it.
+    opened_by("spawn-A-1")
+    moving = f"{sandbox}/.local/state/orchestrator/moving/term_2"
+    os.makedirs(os.path.dirname(moving), exist_ok=True)
+    open(moving, "w").close()
+    assert run(reported, on_workers) == (0, "", ""), "a pane being moved tells nobody and stays"
+    assert full in saved() and not os.path.exists(report_mark), "its reply is saved, and no mark: workers-move makes it at the close"
+    old = time.time() - 3 * 3600
+    os.utime(moving, (old, old))
+    assert run(reported, on_workers)[2] == closed, "a mark left from a move hours ago is no move"
+    saved(); os.unlink(moving)
     open(state_file, "w").write("term_M")
     # A list it cannot read is no closed lead. Sent sideways, a Home pane's report would reach the main pane with no word of it, and the
     # mark would silence the watch while its lead waits. So: the file, no mark, and the pane stays for the watch to reach its lead.
