@@ -25,6 +25,9 @@ A pane stopped STOPPED s whose own last reply says it may close goes too, whoeve
 restart brought it back with no turn left to end (workers/w1:p6G, 2026-11-05). Only once its report got out, and never the main
 pane's terminal (see settle()). auto-tab-close marks a report by terminal and by session: a restart keeps only the session.
 An alert about a Home lead's pane that goes to anyone but its lead carries HOME_NOTE.
+On 집맥 a pane workers-move opened at 퇴근 (agent name with `r`, api#1049) has its lead, the 회사맥 main pane, on no server here: it is
+no orphan, and an alert nobody here takes goes to the pane report day file as `[workers-watch] …`, not to a screen nobody watches.
+After each tick `workers-move bridge` runs, which carries those entries and the moved panes' reports to the 회사맥 main pane.
 A pane that stopped without a report on a sleep or network error (Claude's `API Error: Your computer went to sleep...`, ENOTFOUND)
 is not news but told WAKE itself at once, before the 15-minute alert (와우 카드 04, 요유 2026-11-05: on 11/05 one sat 77 minutes
 until the main pane said so). See wake(); `{state_dir}/wake.log` keeps one line per wake.
@@ -263,19 +266,24 @@ def refresh_main(env, now, where, main) -> None:
         f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))} 메인 칸 대화 {size} 토큰: workers-watch가 main-refresh --now 부름\n")
 
 
-def keep_trial(env, old, term, now) -> bool:
-    """A test pane gone without a report is no news for the main pane, but its lead may still be waiting on that report: one
-    entry in the pane report day file says where its session is (11/05 check: it used to vanish without a trace)."""
+def day_entry(env, now, pane, name, text) -> bool:
+    """One entry in the pane report day file, headed as auto-tab-close.py heads a report."""
     folder = env.get("PANE_REPORT_DIR") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".local", "state", "pane-reports")
     try:
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, time.strftime("%Y-%m-%d", time.localtime(now)) + ".md"), "a", encoding="utf-8") as f:
-            f.write(f"\n## {time.strftime('%H:%M:%S', time.localtime(now))} workers/{old.get('pane') or '?'} {old.get('name') or term}\n\n"
-                    f"workers-watch: 시험 칸이 보고 없이 사라졌습니다. 세션 {old.get('session') or '?'}, 연 칸 {old.get('opener') or '?'}. "
-                    f"보고가 있었다면 그 세션 기록에 남아 있습니다.\n")
+            f.write(f"\n## {time.strftime('%H:%M:%S', time.localtime(now))} workers/{pane or '?'} {name}\n\n{text}\n")
         return True
     except OSError:
         return False
+
+
+def keep_trial(env, old, term, now) -> bool:
+    """A test pane gone without a report is no news for the main pane, but its lead may still be waiting on that report: one
+    entry in the pane report day file says where its session is (11/05 check: it used to vanish without a trace)."""
+    return day_entry(env, now, old.get("pane"), old.get("name") or term,
+                     f"workers-watch: 시험 칸이 보고 없이 사라졌습니다. 세션 {old.get('session') or '?'}, 연 칸 {old.get('opener') or '?'}. "
+                     f"보고가 있었다면 그 세션 기록에 남아 있습니다.")
 
 
 def kind(status) -> str:
@@ -315,7 +323,9 @@ def tick(env, now: float) -> list:
     state = {k: v for k, v in state.items() if k == "_down" or isinstance(v, dict)}
     told: list = []
 
-    def tell(msg, opener="", home=False) -> bool:
+    def tell(msg, opener="", home=False, moved=None) -> bool:
+        """moved: (pane, name) of a pane workers-move opened here, whose lead is on the 회사맥: the day file takes what nobody
+        here heard, and `workers-move bridge` carries it there. It is no alert someone took, so it is not in `told`."""
         pt = env.get("WORKERS_WATCH_PANE_TELL") or os.path.join(HERE, "pane-tell")
         for term in dict.fromkeys(t for t in (opener, main) if t in where):  # a lead that cannot hear (its agent ended) is no stop
             text = f"{msg} {herdr_peers.HOME_NOTE}" if home and term != opener else msg
@@ -327,6 +337,8 @@ def tick(env, now: float) -> list:
             if ok:
                 told.append(text)
                 return True
+        if moved:
+            return day_entry(env, now, moved[0], moved[1], f"[workers-watch] {msg}")
         if notify(env, msg):  # 요유's own screen needs no warning about 요유's own matters
             told.append(msg)
             return True
@@ -364,6 +376,7 @@ def tick(env, now: float) -> list:
             old = state.get(term) or {}
             opener = herdr_peers.opener(a.get("name"))
             home = herdr_peers.home_pane(a.get("name"))
+            remote = herdr_peers.remote_pane(a.get("name"))
             job = herdr_peers.dispatch_pane(a.get("name"))
             same_lead = old.get("opener") == opener
             rec = old if old.get("seq") == seq and kind(old.get("status")) == kind(status) else {
@@ -372,12 +385,14 @@ def tick(env, now: float) -> list:
                 "lost_at": old.get("lost_at") if same_lead else None, "wakes": old.get("wakes", 0), "woke": old.get("woke", 0)}
             name = p.get("label") or a.get("name") or pane
             session = (a.get("agent_session") or {}).get("value") or ""
-            rec.update(seen=now, name=name, pane=pane, opener=opener, home=home, job=job, session=session)  # to say which pane it was once it is gone
+            rec.update(seen=now, name=name, pane=pane, opener=opener, home=home, job=job, session=session, remote=remote)  # to say which pane it was once it is gone
             records[term] = rec
             held = term == main or "🔴" in name or "👑" in name or any(herdr_peers.opener(c.get("name")) == term for c in agents)
             who = "자동 칸" if job else "밑 칸"
+            moved = (pane, name) if remote else None
             # A lead whose agent ended leaves its pane at a shell, where nobody hears. Restarted between two ticks it is told once for nothing.
-            lost = bool(opener) and not where.get(opener, ("", {}))[1].get("agent")
+            # A moved pane's lead is on the 회사맥: never here, and no orphan.
+            lost = bool(opener) and not remote and not where.get(opener, ("", {}))[1].get("agent")
             if not lost:
                 rec.update(orphaned=False, lost_at=None)
             elif not rec.get("lost_at"):
@@ -388,7 +403,7 @@ def tick(env, now: float) -> list:
                     rec["orphaned"] = True
             if kind(status) == "blocked" and now - rec["since"] >= 60 and "blocked" not in rec["alerted"]:
                 if tell(f"{who} {name}(workers/{pane})이 질문 창에서 멈춰 있습니다. 화면: `herdr --session workers agent read {pane}`, "
-                        f"키 입력: `herdr --session workers agent send-keys {pane} Enter`", opener, home):
+                        f"키 입력: `herdr --session workers agent send-keys {pane} Enter`", opener, home, moved):
                     rec["alerted"].append("blocked")
             if kind(status) == "ready":
                 reported = reported_since(rec["floor"], term, session)
@@ -410,7 +425,7 @@ def tick(env, now: float) -> list:
                     text = (f"자동 칸 {name}(workers/{pane})이 보고 없이 {long} 멈춰 있습니다. 화면: `herdr --session workers agent read {pane}`, "
                             f"닫기: `herdr --session workers pane close {pane}`. 입력을 받지 않는 칸이니 보드 항목을 보고 이어 갈 일은 새 칸에 맡기세요. {UNSENT}"
                             if job else f"밑 칸 {name}(workers/{pane})이 보고 없이 15분째 멈춰 있습니다. {UNSENT}")
-                    if tell(text, opener, home):
+                    if tell(text, opener, home, moved):
                         rec["alerted"].append("idle")
                 if lost and reported and now - max(rec["since"], rec["lost_at"]) >= ORPHAN_TTL and not held:
                     closed = herdr_peers.herdr(env, "pane", "close", pane, socket=sock)  # {} when it failed: tried again next minute
@@ -423,15 +438,16 @@ def tick(env, now: float) -> list:
             job = bool(old.get("job"))
             if ("🫡" not in (p.get("label") or "") and not job) or p.get("pane_id") in with_agent:
                 continue
-            opener, home = old.get("opener", ""), old.get("home", False)
+            opener, home, remote = old.get("opener", ""), old.get("home", False), old.get("remote", False)
             if "status" in old:  # the watch held an agent record here: the agent really ended
                 old = {"first": now, "had_agent": True}
             rec = records[term] = {"first": old.get("first", now), "had_agent": old.get("had_agent", False),
-                                   "alerted": old.get("alerted", []), "opener": opener, "home": home, "job": job}
+                                   "alerted": old.get("alerted", []), "opener": opener, "home": home, "job": job, "remote": remote}
             # ponytail: pane-spawn names a pane 🫡 before `agent start` (3 tries x 120 s, then it closes the pane), so a 🫡
             # pane never seen with an agent may still be starting: it is news only after a 420 s grace
             if (rec["had_agent"] or now - rec["first"] >= 420) and "ended" not in rec["alerted"] \
-                    and (trial(p.get("label")) or tell(f"{'자동 칸' if job else '밑 칸'} {p.get('label')}의 에이전트가 끝났습니다" + (". 보드 항목을 보고 이어 갈 일은 새 칸에 맡기세요. 빈 칸은 닫습니다." if job else ""), opener, home)):
+                    and (trial(p.get("label")) or tell(f"{'자동 칸' if job else '밑 칸'} {p.get('label')}의 에이전트가 끝났습니다" + (". 보드 항목을 보고 이어 갈 일은 새 칸에 맡기세요. 빈 칸은 닫습니다." if job else ""), opener, home,
+                                                       (p.get("pane_id"), p.get("label")) if remote else None)):
                 rec["alerted"].append("ended")
             if job and "ended" in rec["alerted"]:  # a shell and no agent, once someone heard: tried every tick while it is listed
                 herdr_peers.herdr(env, "pane", "close", p.get("pane_id"), socket=sock)
@@ -445,7 +461,8 @@ def tick(env, now: float) -> list:
                          if old.get("job") else f"밑 칸 {old.get('name') or term}(workers/{old.get('pane') or '?'})이 보고 없이 사라졌습니다. {UNSENT}")
             if reported_since(old.get("floor", 0), term, old.get("session")):
                 continue
-            if not (keep_trial(env, old, term, now) if trial(old.get("name")) else tell(lost_text, old.get("opener", ""), old.get("home", False))):
+            moved = (old.get("pane"), old.get("name") or term) if old.get("remote") else None
+            if not (keep_trial(env, old, term, now) if trial(old.get("name")) else tell(lost_text, old.get("opener", ""), old.get("home", False), moved)):
                 records[term] = old  # told nobody: try again next minute
         state = records  # panes that are gone drop out
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -949,6 +966,39 @@ esac
         assert len(tick(119900)) == 1, "`임시저장` is a work name, not a test pane"
         os.remove(f"{d}/state/orchestrator/watch.json"); panes_on_workers(); agents(); tick(120000)
 
+        # api#1049: on 집맥 a pane workers-move opened (`r`) has its lead, the 회사맥 main pane, on no server here: it is no orphan,
+        # and an alert nobody here takes goes to the day file, which `workers-move bridge` carries to that main pane.
+        remove_main_file(); result("default-panes", "panes", [])
+        day = lambda at: f"{d}/.local/state/pane-reports/{time.strftime('%Y-%m-%d', time.localtime(at))}.md"
+        filed = lambda at: open(day(at)).read() if os.path.exists(day(at)) else ""
+        panes_on_workers(label("w1:pV", "🟢 🫡 이어 감")); agents(agent("w1:pV", "term_V", "blocked", seq=1, name="spawn-M-r1"))
+        assert tick(121000) == [] and tick(121060) == [] and notified() == [], "no lead closed, and no screen of 요유's on 집맥"
+        text = filed(121060)
+        assert "## " in text and "workers/w1:pV 🟢 🫡 이어 감" in text and "[workers-watch]" in text and "질문 창" in text, text
+        assert "리드가 닫혔" not in text, "its lead is on the 회사맥, not closed"
+        assert tick(121120) == [] and filed(121120).count("질문 창") == 1, "once, as any alert"
+        agents(agent("w1:pV", "term_V", "idle", seq=3, name="spawn-M-r1")); tick(122000)
+        assert tick(122900) == [] and "보고 없이 15분째" in filed(122900), "stopped without a report"
+        agents(agent("w1:pV", "term_V", "idle", seq=5, name="spawn-M-r1")); tick(123000); touch_reported("term_V", 123001)
+        assert tick(123000 + ORPHAN_TTL + 60) == [] and not os.path.exists(f"{d}/closed"), "reported: not closed an hour later as an orphan"
+        agents(agent("w1:pV", "term_V", "working", seq=7, name="spawn-M-r1")); tick(130000); panes_on_workers(); agents()
+        assert tick(130060) == [] and "보고 없이 사라졌습니다" in filed(130060), "gone without a report"
+        for at in (121060, 122900, 130060):
+            if os.path.exists(day(at)):
+                os.remove(day(at))
+        panes_on_workers(label("w1:pW", "🟢 🫡 보통 칸")); agents(agent("w1:pW", "term_W", "blocked", seq=1, name="spawn-Q-1")); tick(131000)
+        assert tick(131060) == [] and len(notified()) == 1 and filed(131060) == "", "any other pane with nobody to tell: 요유's screen, as before"
+        os.remove(f"{d}/state/orchestrator/watch.json"); panes_on_workers(); agents(); tick(131120)
+        for at in (131060, 131120):
+            if os.path.exists(day(at)):
+                os.remove(day(at))
+        write(main_file, "term_M\n"); result("default-panes", "panes", [{"pane_id": "w5:p3", "terminal_id": "term_M", "label": "👑 메인", "agent": "claude"}])
+        # Each run, after the tick, carries what moved panes on 집맥 said (workers-move bridge), whatever the tick did.
+        script(f"{d}/workers-move", f'echo "$*" >> {d}/moved\n')
+        subprocess.run([sys.executable, "-I", os.path.realpath(__file__)], env={**env, "PATH": os.environ.get("PATH", ""),
+                       "WORKERS_WATCH_MOVE": f"{d}/workers-move", "WORKERS_WATCH_NOW": "132000"}, timeout=30)
+        assert open(f"{d}/moved").read() == "bridge\n", "the bridge runs once a minute with the watch"
+
         # The main pane re-reads its whole conversation for each message, so past MAIN_REFRESH_AT tokens (the last response's
         # usage) it is restarted through main-refresh --now, with the workers server's variables dropped. Failed attempts
         # retry next minute, while a completed restart still gives the new session an hour.
@@ -1041,6 +1091,11 @@ def main():
     try:
         tick(os.environ, float(os.environ.get("WORKERS_WATCH_NOW") or time.time()))
     except Exception:
+        pass
+    try:  # what moved panes said on 집맥 reaches the main pane here; with no open move it returns at once
+        subprocess.run([os.environ.get("WORKERS_WATCH_MOVE") or os.path.join(HERE, "workers-move"), "bridge"], timeout=90,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
         pass
 
 
