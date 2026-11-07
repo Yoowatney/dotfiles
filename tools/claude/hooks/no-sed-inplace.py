@@ -13,6 +13,9 @@ it reads as a session 요유 opened and never closes. A test that needs one uses
 here because Codex runs a new hook only after 요유 trusts it, and this command is already trusted. Jobs that run outside an
 agent's Bash tool (the dispatch job) never reach this hook.
 
+Workers opened by pane-spawn must inspect Claude requests with the local probe, rather than send a billable request from
+Bash. This uses the same entry point in both harnesses; pane-spawn itself and jobs outside agent tools keep working.
+
 Recursive `rm` and the git commands on Claude's deny list that lose work or skip hooks (force push, `reset --hard`,
 `clean -f`, `add -f`, `filter-branch`/`filter-repo`, `--no-verify`) live here for the same reason. Claude's deny list matches
 spellings from the front and Codex does not read it: a session whose `rm -rf` was refused went on with `rm -r -f`, and in the
@@ -73,6 +76,7 @@ RUNNERS = {"env", "nohup", "nice", "timeout", "gtimeout", "xargs", "caffeinate"}
 NOT_COMMAND = re.compile(r"-|[A-Za-z_]\w*=|\{\}$|[\d.]+[smhd]?$")  # a runner's own words: options, A=1, {}, a count, a duration
 SHELLS = {"bash", "sh", "zsh"}
 WATCHED = {"rm", "git", "eval"} | SHELLS
+CLAUDE = {"claude", "cl", "cla"}
 
 
 def name(tok: str) -> str:
@@ -187,6 +191,88 @@ def code_only(cmd: str) -> str:
     """Heredocs and quoted strings are text, also across lines (a commit message); only a capture in double quotes runs."""
     return QUOTED.sub(lambda m: " ; ".join(CAPTURE.findall(m.group())) if m.group()[0] == '"' else "''",
                       _guard.HEREDOC.sub("<<heredoc", cmd))
+
+
+def claude_model_command(cmd: str, depth: int = 0) -> bool:
+    """Common direct calls, wrappers and captures; script internals/dynamic executable names are outside this check."""
+    if depth > 8:
+        return False
+    expanded = []
+    for here in _guard.HEREDOC.finditer(cmd):
+        header = cmd[:here.start()].rsplit("\n", 1)[-1]
+        if any(name(w[0]) in SHELLS for w in simple_commands(header)):
+            if claude_model_command(here[3], depth + 1):
+                return True
+        if not re.match(r"<<-?\s*['\"\\]", here[0]):
+            # Quotes inside an expanding heredoc are text; they do not suppress shell substitutions.
+            expanded.extend(a or b for a, b in _guard.CAPTURE.findall(here[3]))
+    text = _guard.strip_comments(_guard.HEREDOC.sub("<<heredoc", cmd))
+    # Single-quoted examples do not execute substitutions; double-quoted captures do.
+    runs = QUOTED.sub(lambda m: "''" if m[0][0] == "'" else m[0], text)
+    process = re.findall(r"(?<!\\)[<>]\(((?:[^()]|\([^()]*\))*)\)", code_only(text))
+    sources = [text] + expanded + process + [a or b for a, b in _guard.CAPTURE.findall(runs)]
+    for source in sources:
+        for w in _guard.segments(source):
+            while w:
+                clean = _guard.words(w)
+                if clean != w:
+                    w = clean
+                elif name(w[0]) in SHELL_WORDS:
+                    w = w[1:]
+                elif name(w[0]) in RUNNERS:
+                    runner, w = name(w[0]), w[1:]
+                    valued = {"env": {"-u", "--unset", "-C", "--chdir"},
+                              "timeout": {"-s", "--signal", "-k", "--kill-after"},
+                              "gtimeout": {"-s", "--signal", "-k", "--kill-after"},
+                              "nice": {"-n", "--adjustment"},
+                              "xargs": {"-I", "-L", "-n", "-P"}}.get(runner, set())
+                    while w and NOT_COMMAND.match(w[0]):
+                        w = w[2:] if w[0] in valued else w[1:]
+                else:
+                    break
+            if w and w[0].startswith("-"):
+                w = next((w[k:] for k, tok in enumerate(w) if name(tok) in CLAUDE | SHELLS), w)
+            if w and name(w[0]) == "eval" and claude_model_command(" ".join(w[1:]), depth + 1):
+                return True
+            if w and name(w[0]) in SHELLS:
+                for k, tok in enumerate(w[1:-1], 1):
+                    if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", tok):
+                        if claude_model_command(w[k + 1], depth + 1):
+                            return True
+                        break
+            if not w or name(w[0]) not in CLAUDE:
+                continue
+            args = w[1:]
+            if len(args) == 1 and args[0] in {"--version", "-v", "--help", "-h"}:
+                continue
+            if args and args[0] in {"mcp", "auth", "login", "logout", "doctor", "update", "install", "config", "plugin"}:
+                continue
+            return True
+    return False
+
+
+def worker_claude_problem(cmd: str, env=None) -> str | None:
+    """Only named pane-spawn workers on the workers server, resolving a moved pane before asking for its agent."""
+    env = os.environ if env is None else env
+    if not env.get("HERDR_PANE_ID") or not claude_model_command(cmd):
+        return None
+    spec = importlib.util.spec_from_file_location("herdr_peers", os.path.join(
+        os.path.dirname(os.path.realpath(__file__)), "..", "..", "agent-hooks", "herdr_peers.py"))
+    assert spec and spec.loader
+    peers = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(peers)
+    if peers.server_key(env) != "workers":
+        return None
+    pane = peers.herdr(env, "pane", "get", env["HERDR_PANE_ID"]).get("pane") or {}
+    if not pane.get("pane_id") or not pane.get("terminal_id") or peers.delegates_checks(env, pane["terminal_id"]):
+        return None
+    agent = peers.herdr(env, "agent", "get", pane["pane_id"]).get("agent") or {}
+    if not peers.opener(agent.get("name")):
+        return None
+    probe = os.path.expanduser("~/work/munice/munice-claude/scripts/claude-probe/probe.py")
+    return ("worker-claude-model: 부하 칸의 Bash에서 직접 Claude 모델 요청을 보내지 말 것. "
+            "확인·실험은 실제 API 요청을 보내지 않는 로컬 도구로 할 것: "
+            f"`python3 {probe} --cwd <확인할 폴더>`. 정상 칸 시작은 `pane-spawn`을 쓸 것")
 
 
 def bash_problem(cmd: str) -> str | None:
@@ -628,7 +714,8 @@ if __name__ == "__main__":
         sys.exit()
     payload = json.load(sys.stdin)
     cmd = (payload.get("tool_input") or {}).get("command") or ""
-    reason = bash_problem(cmd) or quote_problem(cmd, payload.get("cwd")) if payload.get("tool_name") == "Bash" else None
+    reason = (bash_problem(cmd) or worker_claude_problem(cmd) or quote_problem(cmd, payload.get("cwd"))
+              if payload.get("tool_name") == "Bash" else None)
     if reason:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
