@@ -155,7 +155,11 @@ SESSIONLESS=1 ps --kind codex "조사" "지시" -- -m gpt-5 >/dev/null
 # 2026-11-06: once Codex sees a newer release than it runs, its TUI opens on an update prompt that nobody here answers, so
 # every Codex pane failed to start until 0.167.0 was installed (mise installs a release a day after it comes out).
 NOUPDATE="-c check_for_update_on_startup=false"
-has "--kind codex --pane w1:new --timeout 120000 -- $NOUPDATE -m gpt-5" "codex skips its update prompt, then its arguments"
+# 요유 2026-11-07: a Codex work pane runs gcloud, bq, network and process commands as a Claude pane does. Its workspace-write
+# sandbox let it write only its folder, so gcloud failed as it rewrote its login files and ps saw no other process. Like a
+# Claude pane it runs with no sandbox, guarded by the same PreToolUse hooks, and nobody answers an approval prompt.
+UNBOXED="--sandbox danger-full-access --ask-for-approval never"
+has "--kind codex --pane w1:new --timeout 120000 -- $UNBOXED $NOUPDATE -m gpt-5" "a codex work pane runs unsandboxed, skips its update prompt, then its arguments"
 has "agent prompt w1:new 지시" "codex gets the instruction"
 hasnt "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" "a codex pane keeps its environment"
 
@@ -242,36 +246,36 @@ model_case() { # <model or empty> <effort or empty> <pane-spawn arguments...>
   model_cases=$((model_cases + 1))
 }
 is_main
-model_case claude-sonnet-5-5 high --why gcp "Model defaults" "Run the task"
+model_case claude-sonnet-5-5 high --why skill "Model defaults" "Run the task"
 grep -q 'Sonnet.*--opus' "$SANDBOX/model-err" || fail "the trial reports Sonnet and its opt-out on stderr"
 [ "$(wc -l < "$SANDBOX/model-err" | tr -d ' ')" = 1 ] || fail "the model notice is one line"
-model_case claude-sonnet-5-5 high --kind claude --why gcp "Model defaults" "Run the task"
-model_case '' '' --opus --why gcp "Model defaults" "Run the task"
+model_case claude-sonnet-5-5 high --kind claude --why skill "Model defaults" "Run the task"
+model_case '' '' --opus --why skill "Model defaults" "Run the task"
 grep -q -- '--opus' "$SANDBOX/model-err" || fail "the opt-out reports the global default on stderr"
-model_case '' '' --kind claude --why gcp --opus "Model defaults" "Run the task"
-model_case opus xhigh --why gcp "Model defaults" "Run the task" -- --model opus --effort xhigh
+model_case '' '' --kind claude --why skill --opus "Model defaults" "Run the task"
+model_case opus xhigh --why skill "Model defaults" "Run the task" -- --model opus --effort xhigh
 # The same caller-supplied overrides supported by Claude checks remain supported for work panes.
-ps --why gcp "Model defaults" "Run the task" -- --model=opus --effort=xhigh >/dev/null 2>"$SANDBOX/model-err"
+ps --why skill "Model defaults" "Run the task" -- --model=opus --effort=xhigh >/dev/null 2>"$SANDBOX/model-err"
 has "--model=opus --effort=xhigh" "explicit equals-form overrides pass through"
 hasnt "claude-sonnet-5-5" "no second model after an explicit override"
 hasnt "--effort high" "no second effort after an explicit override"
 # api#1065: the main pane's Claude work and check panes start without the Artifact tool, and --artifact brings it back.
-ps --why gcp "Artifact off" "Run the task" >/dev/null 2>&1
+ps --why skill "Artifact off" "Run the task" >/dev/null 2>&1
 hasnt "CLAUDE_STARTUP_ARTIFACT" "a main-pane work pane starts without the Artifact tool"
 ps --check --kind claude "Artifact off" "Run the check" >/dev/null 2>&1
 hasnt "CLAUDE_STARTUP_ARTIFACT" "a Claude check pane starts without the Artifact tool"
 ps --check --kind claude --artifact "Artifact on" "Run the check" >/dev/null 2>&1
 has "--env CLAUDE_STARTUP_ARTIFACT=1" "a Claude check pane can opt back in"
-ps --why gcp --artifact "Artifact on" "Publish the page" >/dev/null 2>&1
+ps --why skill --artifact "Artifact on" "Publish the page" >/dev/null 2>&1
 has "--env CLAUDE_STARTUP_ARTIFACT=1" "a main-pane work pane can opt back in"
 # api#1066: the main pane's Claude work and check panes start without the unrelated skills, and --skills brings them back.
-ps --why gcp "Skills off" "Run the task" >/dev/null 2>&1
+ps --why skill "Skills off" "Run the task" >/dev/null 2>&1
 hasnt "CLAUDE_STARTUP_SKILLS" "a main-pane work pane starts without the unrelated skills"
 ps --check --kind claude "Skills off" "Run the check" >/dev/null 2>&1
 hasnt "CLAUDE_STARTUP_SKILLS" "a Claude check pane starts without the unrelated skills"
 ps --check --kind claude --skills "Skills on" "Run the check" >/dev/null 2>&1
 has "--env CLAUDE_STARTUP_SKILLS=1" "a Claude check pane can opt back in"
-ps --why gcp --skills "Skills on" "Build the page" >/dev/null 2>&1
+ps --why skill --skills "Skills on" "Build the page" >/dev/null 2>&1
 has "--env CLAUDE_STARTUP_SKILLS=1" "a main-pane work pane can opt back in"
 model_cases=$((model_cases + 1))
 model_case claude-sonnet-5-5 high --check --kind claude "Model defaults" "Run the task"
@@ -280,14 +284,14 @@ model_case '' '' --check "Model defaults" "Run the task"
 model_case '' '' --kind codex "Model defaults" "Run the task"
 model_case '' '' --kind codex --opus "Model defaults" "Run the task"
 model_case '' '' --kind auto "Model defaults" "Run the task"
-MUNICE_AUTO_DISPATCH=1 model_case '' '' --why gcp "Model defaults" "Run the task"
-MUNICE_AMBIENT=1 model_case '' '' --why gcp "Model defaults" "Run the task"
+MUNICE_AUTO_DISPATCH=1 model_case '' '' --why skill "Model defaults" "Run the task"
+MUNICE_AMBIENT=1 model_case '' '' --why skill "Model defaults" "Run the task"
 not_main
 CALLER_LABEL="🟢 👑 Lead" model_case '' '' "Model defaults" "Run the task"
 CALLER_LABEL="🟢 🫡 Worker" model_case '' '' "Model defaults" "Run the task"
 echo "ok: pane-spawn model defaults ($model_cases cases)"
 
-is_main; out=$(ps --why gcp "api#1 설계" "할 일")
+is_main; out=$(ps --why skill "api#1 설계" "할 일")
 has "[workers] tab create --workspace w1 " "a pane the main pane opens goes to workers"
 hasnt "[default] tab create" "nothing opens beside the main pane"
 hasnt "pane split" "the main pane keeps its tab to itself"
@@ -299,19 +303,19 @@ has "[workers] agent prompt w1:new" "the instruction reaches the workers pane"
 has "보고 첫 줄에" "a pane under the main pane learns its first line is its summary"
 [ "$out" = "workers/w1:new" ] || fail "prints an address with the server: $out"
 
-rm "$SANDBOX/workers-workspaces.json"; ps --why gcp "api#2" "할 일" >/dev/null
+rm "$SANDBOX/workers-workspaces.json"; ps --why skill "api#2" "할 일" >/dev/null
 has "[workers] workspace create --label workers --no-focus" "an empty workers server gets its workspace"
 before "workspace create" "tab create --workspace w2"
 
 # 요유 2026-11-05: a tab named `자동 칸을 workers로 이전` read as a dispatch tab, so pane-tell refused its pane. A work name never
 # starts a job tab's name; the pane keeps the work name as given.
 for word in 자동 알아서; do
-  ps --why gcp "$word 칸을 workers로 이전" "할 일" >/dev/null
+  ps --why skill "$word 칸을 workers로 이전" "할 일" >/dev/null
   has "[workers] tab create --workspace w2 --cwd $PWD --label 일 $word 칸을 workers로 이전 --no-focus" "the main pane's tab: no job tab's first word ($word)"
   hasnt "--label $word " "no tab starts with $word"
   has "pane rename w1:new 🟢 🫡 $word 칸을 workers로 이전" "the pane keeps the work name"
 done
-ps --why gcp "자동화 정리" "할 일" >/dev/null
+ps --why skill "자동화 정리" "할 일" >/dev/null
 has "--label 자동화 정리 --no-focus" "자동화 is no job tab's first word"
 not_main; echo '{"result":{"workspaces":[{"workspace_id":"w1","label":"workers"}]}}' > "$SANDBOX/workers-workspaces.json"
 CALLER_LABEL="🟢 자동 칸 정리" ps "구현" "할 일" >/dev/null
@@ -320,17 +324,17 @@ hasnt "--label 자동 " "and none when the tab opens"
 FAIL_SPLIT=1 ps --new-tab "자동 칸 고치기" "할 일" >/dev/null
 hasnt "--label 자동 " "a --new-tab name goes the same way"
 rm -f "$SANDBOX/workers-workspaces.json"; is_main
-ps --why gcp "api#2-2" "할 일" >/dev/null
+ps --why skill "api#2-2" "할 일" >/dev/null
 
-workers_up false; if ps --why gcp "api#3" "할 일" 2>"$SANDBOX/err"; then fail "workers down must fail"; fi
+workers_up false; if ps --why skill "api#3" "할 일" 2>"$SANDBOX/err"; then fail "workers down must fail"; fi
 grep -q "com.yoyoo.herdr-workers" "$SANDBOX/err" || fail "says how to start it: $(cat "$SANDBOX/err")"
 hasnt "tab create" "no pane opens anywhere when workers is down"
 workers_up
 
-if ps --same-tab --why gcp "리뷰" "봐 줘" 2>/dev/null; then fail "the main pane never splits its own tab"; fi
+if ps --same-tab --why skill "리뷰" "봐 줘" 2>/dev/null; then fail "the main pane never splits its own tab"; fi
 hasnt "pane split" "no split beside the main pane"
 
-if FAIL_START=9 ps --why gcp "실패" "지시" 2>/dev/null; then fail "a failed start must exit non-zero"; fi
+if FAIL_START=9 ps --why skill "실패" "지시" 2>/dev/null; then fail "a failed start must exit non-zero"; fi
 has "[workers] pane close w1:new" "a failed start removes the workers pane"
 
 hasnt "확인 칸입니다" "a pane that does the job is no check pane"
@@ -348,11 +352,13 @@ has "보고 첫 줄에" "its first line is what the main pane reads"
 [ "$out" = "workers/w1:new" ] || fail "a check pane's address names its server: $out"
 # 2026-11-05: a check pane runs on Codex's spare weekly allowance, in Codex's sandbox, so a write to the repo fails instead of
 # relying on the instruction. Nobody answers its approval prompts, so a blocked command fails at once.
-# The sandbox has no network: with it a command could post to Slack or merge a PR as easily as read. Reads leave through tools
-# that run outside the sandbox and refuse writes (요유 2026-11-05).
-SANDBOXED="--sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=false"
-has "--kind codex --pane w1:new --timeout 120000 -- $SANDBOXED" "a check pane is a sandboxed Codex without the network"
-hasnt "network_access=true" "the network stays shut"
+# 요유 2026-11-07: a check pane reads GCP, GitHub, the board and the network itself, so the network is on, and gcloud's own
+# folder is the one more place it writes: gcloud rewrites its login files on every call. The checked folder stays read-only.
+SANDBOXED="--sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=true"
+has "--kind codex --pane w1:new --timeout 120000 -- $SANDBOXED" "a check pane is a sandboxed Codex with the network"
+has "-c sandbox_workspace_write.writable_roots=[\"$SANDBOX/home/.config/gcloud\"]" "gcloud's folder is the one writable root it adds"
+hasnt "network_access=false" "the network is not shut"
+hasnt "danger-full-access" "a check pane keeps its sandbox"
 has "Codex 샌드박스" "it hears what the sandbox blocks"
 hasnt "--model" "a codex check pane keeps its model"
 hasnt "--effort" "and its effort"
@@ -368,7 +374,6 @@ has "$PWD/AGENTS.md" "Codex reads no rules of a folder it did not start in, so i
 # MCP servers and plugins run outside the sandbox, so each one that can write is off: every server the user's Codex config
 # names, a new one included, except two that keep only their read tools. Codex's own connectors (apps) and plugins are off.
 RULES="$CHECK_DIR/.codex/rules/check.rules"
-REAL_DIR=$(cd "$(dirname "$SUBJECT")" && pwd -P) # pane-spawn names gh-read by its real path: /var is /private/var on macOS
 has "-c projects={\"$CHECK_DIR\"={trust_level=\"trusted\"}}" "the fixed folder is trusted, so Codex loads its rules and asks nothing"
 has "--disable apps --disable plugins" "connectors and plugins are off"
 # Codex's TUI serves its own MCP tools (create_worktree, in a trusted repo, runs git outside the sandbox) unless a configured
@@ -397,7 +402,7 @@ has '-c mcp_servers.munice.default_tools_approval_mode="approve"' "and munice's"
 hasnt 'notion-token.default_tools_approval_mode' "a server that is off gets no approval"
 hasnt 'mcp_servers."' "no quoted server name"
 has "slack_get_thread_replies" "the instruction names the Slack read tools"
-has "$REAL_DIR/gh-read" "and the GitHub read tool by absolute path"
+hasnt "gh-read" "with the network on, gh reads GitHub itself"
 for bad in 'not toml [' '[mcp_servers."a.b"]'; do
   echo "$bad" > "$SANDBOX/home/.codex/config.toml"
   if ps --check "로그인" "돌려 보세요" 2>"$SANDBOX/err" >/dev/null; then fail "a server it cannot turn off must stop a Codex check pane ($bad)"; fi
@@ -405,19 +410,22 @@ for bad in 'not toml [' '[mcp_servers."a.b"]'; do
   hasnt "agent start" "no check pane opens with a server it could not turn off ($bad)"
 done
 rm -rf "$SANDBOX/home/.codex"
-# Rules let three commands run outside the sandbox: gh-read, ps and pgrep, each only from its real path. Codex resolves an
-# absolute path by its last part, so without host_executable a gh-read or ps the agent wrote in temp would run outside too.
-# ego-browser, which the user's own rules let out, drives a browser that may be signed in to Slack, so here it is forbidden.
+# Inside the sandbox ps sees no other process and launchctl lists nothing (2026-11-07), so rules let ps, pgrep and launchctl's
+# two read verbs run outside it, each only from its real path: Codex resolves an absolute path by its last part, so without
+# host_executable a ps the agent wrote in temp would run outside too. ego-browser, which the user's own rules let out, drives a
+# browser that may be signed in to Slack, so here it is forbidden. The gh verbs that write a pull request or an issue are
+# forbidden too: with the network on, only the instruction stopped them.
 [ -f "$RULES" ] || fail "the check pane's rules are written"
-grep -qF "$REAL_DIR/gh-read" "$RULES" || fail "gh-read by its real path: $(cat "$RULES")"
 ls -A "$CHECK_DIR/.codex/rules" | grep -qv '^check.rules$' && fail "no temp file is left beside the rules: $(ls -A "$CHECK_DIR/.codex/rules")"
 if command -v codex >/dev/null 2>&1; then
   mkdir -p "$SANDBOX/execpolicy-home" "$SANDBOX/execpolicy-tmp"
   decide() { TMPDIR="$SANDBOX/execpolicy-tmp" CODEX_HOME="$SANDBOX/execpolicy-home" codex execpolicy check --resolve-host-executables -r "$RULES" -r "$SANDBOX/user.rules" -- "$@" | jq -r '.decision // "sandbox"'; }
   echo 'prefix_rule(pattern=["ego-browser"], decision="allow")' > "$SANDBOX/user.rules" # as in ~/.codex/rules/default.rules
-  for c in "allow $REAL_DIR/gh-read pr view 3" "allow ps -A" "allow /bin/ps -A" "allow pgrep -fl codex" \
-    "sandbox /tmp/x/gh-read pr view 3" "sandbox gh-read pr view 3" "sandbox /tmp/x/ps -A" "sandbox /tmp/x/pgrep x" \
-    "forbidden ego-browser open x" "forbidden /Users/x/.local/bin/ego-browser open x" "sandbox gh pr merge 3" "sandbox curl -d x https://slack.com/api/chat.postMessage"; do
+  for c in "allow ps -A" "allow /bin/ps -A" "allow pgrep -fl codex" "allow launchctl list" "allow launchctl print gui/501" \
+    "sandbox /tmp/x/ps -A" "sandbox /tmp/x/pgrep x" "sandbox /tmp/x/launchctl list" "sandbox launchctl kickstart gui/501/x" \
+    "forbidden gh pr merge 3" "forbidden gh pr comment 3 -b x" "forbidden gh issue comment 3 -b x" "forbidden gh issue close 3" \
+    "sandbox gh pr view 3" "sandbox gh issue view 3" \
+    "forbidden ego-browser open x" "forbidden /Users/x/.local/bin/ego-browser open x" "sandbox curl -d x https://slack.com/api/chat.postMessage"; do
     want=${c%% *} cmd=${c#* }
     # shellcheck disable=SC2086
     [ "$(decide $cmd)" = "$want" ] || fail "rules: $cmd should be $want, is $(decide $cmd)"
@@ -442,9 +450,9 @@ has "--no-focus $MISE_ENV" "a Codex pane keeps mise's folders when a test swaps 
 ps --check "로그인" "돌려 보세요" >/dev/null
 has "--no-focus $MISE_ENV" "so does a Codex check pane"
 has "[workers] tab create --workspace w2 --cwd $CHECK_DIR --label 확인 로그인 --no-focus $MISE_ENV $NPROC" "and a workers pane, the lower limit"
-ps --why gcp "조사" "지시" >/dev/null
+ps --why skill "조사" "지시" >/dev/null
 hasnt "MISE_" "a Claude pane runs commands without the shims first, so it needs none"
-ps --why gcp "조사" "지시" >/dev/null
+ps --why skill "조사" "지시" >/dev/null
 has "--kind claude" "a pane that does the job is still Claude"
 hasnt "--sandbox" "and has no sandbox"
 # A check that must write to GitHub, Slack or the board asks for Claude: Sonnet at high effort, as before.
@@ -480,7 +488,8 @@ for percent in 0 69 70 71 99 100; do
     hasnt "--kind claude" "$percent ($window): no automatic Claude fallback"
     SESSIONLESS=1 ps --kind auto "구현" "지시" 2>"$SANDBOX/err" >/dev/null
     has "--kind codex" "$percent ($window): an auto work pane runs Codex"
-    hasnt "--sandbox" "a work pane is no check pane"
+    hasnt "--sandbox workspace-write" "a work pane is no check pane"
+    has "--sandbox danger-full-access" "$percent ($window): an auto work pane runs unsandboxed"
     hasnt "확인 칸입니다" "nor told it is one"
   done
 done
@@ -536,11 +545,11 @@ hasnt "pane close" "an accepted job may still be running"
 usage 71 3600
 ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
 has "--kind codex" "a kind the caller names wins"
-ps --why gcp "조사" "지시" >/dev/null
+ps --why skill "조사" "지시" >/dev/null
 has "--kind claude" "an ordinary pane never reads the usage"
-# api#1036: the main pane opens a Claude work pane only for a reason Codex cannot cover. A Codex work pane cannot write
-# gcloud's login files. Slack posts belong to the main pane, so a Slack reason is refused too. Check panes and other callers
-# stay as they were.
+# api#1036: the main pane opens a Claude work pane only for a reason Codex cannot cover. Slack posts belong to the main pane,
+# so a Slack reason is refused. Since 요유 2026-11-07 a Codex work pane runs GCP commands too, so a GCP reason is refused as
+# well. Check panes and other callers stay as they were.
 refused() { # <case> [pane-spawn options]
   local why=$1; shift
   if ps "$@" "구현" "지시" 2>"$SANDBOX/err" >/dev/null; then fail "$why: the main pane's Claude pane needs a reason"; fi
@@ -554,7 +563,19 @@ refused "no kind, no reason"
 refused "claude, no reason" --kind claude
 refused "an empty reason" --kind claude --why ""
 refused "a blank reason" --why "  "
-ps --kind claude --why gcp "GCP 확인" "지시" >/dev/null; has "--kind claude" "the main pane still accepts --why gcp"
+ps --kind claude --why skill "UI 작업" "지시" >/dev/null; has "--kind claude" "the main pane accepts a reason Codex cannot cover"
+for reason in gcp GCP "gcloud로 배포 상태 확인" "bq 조회" "BigQuery 집계"; do
+  for kind_args in default claude; do
+    opts=(); [ "$kind_args" != claude ] || opts=(--kind claude)
+    rc=0
+    ps "${opts[@]}" --why "$reason" "GCP 확인" "지시" >"$SANDBOX/out" 2>"$SANDBOX/err" || rc=$?
+    [ "$rc" = 2 ] || fail "the main pane rejects --why [$reason] ($kind_args): expected exit 2, got $rc"
+    grep -qF -- "GCP 명령도 Codex 칸이 합니다" "$SANDBOX/err" || fail "GCP refusal says Codex runs it: $(cat "$SANDBOX/err")"
+    grep -qF -- "--kind auto" "$SANDBOX/err" || fail "GCP refusal points to --kind auto: $(cat "$SANDBOX/err")"
+    hasnt "agent start" "a GCP reason starts no agent"
+  done
+done
+ps --check --kind claude --why gcp "로그인" "돌려 보세요" >/dev/null; has "--kind claude" "a check pane skips the GCP reason check"
 # Slack posts belong to the main pane; mentioning Slack cannot justify a Claude work pane there.
 for reason in slack "Slack에 답글" "슬랙에 답글" "SLACK에 답글"; do
   for kind_args in default claude; do
@@ -568,7 +589,7 @@ for reason in slack "Slack에 답글" "슬랙에 답글" "SLACK에 답글"; do
     hasnt "agent start" "a Slack reason starts no agent"
   done
 done
-ps --why "gcloud로 배포 상태 확인" "배포 확인" "지시" >/dev/null; has "--kind claude" "a reason opens Claude: the default kind"
+ps --why "Claude 전용 스킬 필요" "배포 확인" "지시" >/dev/null; has "--kind claude" "a reason opens Claude: the default kind"
 ps --why "작업 폴더 밖 파일 수정" "설정 수정" "지시" >/dev/null; has "--kind claude" "another reason still opens Claude"
 SESSIONLESS=1 ps --kind codex "구현" "지시" >/dev/null; has "--kind codex" "Codex needs no reason"
 SESSIONLESS=1 ps --kind auto "구현" "지시" >/dev/null; has "--kind codex" "auto needs no reason"
@@ -651,7 +672,7 @@ hasnt "agent start spawn-65f21913323dc21-h" "a pane of any other lead carries no
 echo '{"result":{"workspaces":[{"workspace_id":"w7","label":"Home"}]}}' > "$SANDBOX/default-workspaces.json"
 CALLER_LABEL="🟢 👑 집 일" ps "조사" "지시" >/dev/null
 has "[workers] agent start spawn-65f21913323dc21-h" "a Home lead's pane is marked"
-is_main; ps --why gcp "메인 일" "지시" >/dev/null; hasnt "agent start spawn-65f21913323dc21-h" "the main pane is no Home lead, wherever it sits"; not_main
+is_main; ps --why skill "메인 일" "지시" >/dev/null; hasnt "agent start spawn-65f21913323dc21-h" "the main pane is no Home lead, wherever it sits"; not_main
 rm "$SANDBOX/default-workspaces.json"
 CALLER_LABEL="🟢 🫡 구현" CALLER_AGENT="spawn-OTHER-h77" ps "조사" "지시" >/dev/null
 has "[default] agent start spawn-65f21913323dc21-h" "a pane under a Home lead passes the mark on"
@@ -697,12 +718,12 @@ out=$(CALLER_LABEL=$LEAD STUCK_WORKERS=1 PANE_SPAWN_WORKERS_LIMIT=1 ps "리뷰" 
 hasnt "[workers] workspace create" "nothing is created after a list that timed out"
 # The main pane never falls back: it does no work, and neither does its tab.
 is_main
-if STUCK_WORKERS=1 PANE_SPAWN_WORKERS_LIMIT=1 ps --why gcp "메인 일" "지시" 2>"$SANDBOX/err"; then fail "the main pane fails on a stuck workers"; fi
-if FAIL_WORKERS_TAB=1 ps --why gcp "메인 일" "지시" 2>"$SANDBOX/err"; then fail "the main pane fails when workers opens nothing"; fi
+if STUCK_WORKERS=1 PANE_SPAWN_WORKERS_LIMIT=1 ps --why skill "메인 일" "지시" 2>"$SANDBOX/err"; then fail "the main pane fails on a stuck workers"; fi
+if FAIL_WORKERS_TAB=1 ps --why skill "메인 일" "지시" 2>"$SANDBOX/err"; then fail "the main pane fails when workers opens nothing"; fi
 hasnt "[default] pane split" "nothing beside the main pane"
 hasnt "[default] tab create" "nothing beside the main pane"
 grep -q "com.yoyoo.herdr-workers" "$SANDBOX/err" || fail "says how to start it: $(cat "$SANDBOX/err")"
-ps --why gcp "메인 일" "지시" >/dev/null
+ps --why skill "메인 일" "지시" >/dev/null
 has "--label 메인 일 --no-focus" "the main pane's tabs keep the work's name"
 hasnt "tab rename" "and nothing renames them"
 hasnt "agent list" "the main pane's panes share no tab, so it looks for none"

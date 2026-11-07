@@ -193,19 +193,14 @@ class RelayTests(unittest.TestCase):
                 args = self.spawns[-1][0]
                 self.assertEqual(args[args.index("--kind") + 1], "auto")
 
-    def test_curl_executed_report_selects_claude(self):
-        self.finish(DONE + "\ncurl을 실행해 페이지를 받았습니다.")
-        self.assertEqual(len(self.spawns), 1)
-        args = self.spawns[0][0]
-        self.assertEqual(args[args.index("--kind") + 1], "claude")
-
-    def test_network_or_process_evidence_selects_claude(self):
-        for word in ("gcloud", "bq", "pgrep", "curl", "소켓"):
+    def test_network_or_process_evidence_selects_auto(self):
+        # 요유 2026-11-07: a Codex check pane has the network, gcloud and process reads, so no word sends it to Claude.
+        for word in ("gcloud", "bq", "pgrep", "curl", "launchctl", "소켓", "네트워크"):
             with self.subTest(word=word):
-                self.finish(DONE.replace("pytest", word))
+                self.finish(DONE.replace("pytest", word) + f"\n{word}을 실행해 확인했습니다.")
                 self.assertTrue(self.spawns, "a result must open a check")
                 args = self.spawns[-1][0]
-                self.assertEqual(args[args.index("--kind") + 1], "claude")
+                self.assertEqual(args[args.index("--kind") + 1], "auto")
 
     def test_other_lead_and_home_are_unchanged(self):
         for terminal, name in (("term_L", "spawn-L-1"), ("term_M", "spawn-M-h1")):

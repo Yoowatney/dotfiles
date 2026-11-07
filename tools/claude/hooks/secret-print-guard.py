@@ -21,6 +21,8 @@ from urllib.parse import unquote
 HOME = r"(?:~|\$HOME|\$\{HOME\}|/Users/[^/\s'\"]+)"
 SECRET_PATH = re.compile(
     HOME + r"/(?:\.codex/config\.toml|\.claude\.json"
+    # Claude's deny list (settings.json) keeps these from Claude; Codex reads through the shell only, so this guard covers both.
+    r"|\.(?:ssh|aws|gnupg)/[^\s'\"]+(?<!\.pub)(?=$|[\s'\"|;&)<>])|\.config/gh/hosts\.yml"
     r"|\.config/[^\s'\"]*?(?:\.env|token|secret|key|cred)[^\s'\"/]*)"
     # any repo env file (.env, .env.staging, ...) except examples; values can span lines (PEM keys)
     r"|(?:^|(?<=[\s'\"=/:(]))(?:\.env(?:\.(?!example|sample|template)[\w.-]+)?"
@@ -33,7 +35,7 @@ SECRET_PATH = re.compile(
     re.I,
 )
 # A search of the folder that holds a secret file prints that file too (`rg -n slack ~/.codex`, `~/.codex/*.toml`).
-SECRET_DIR = re.compile(HOME + r"/\.(?:codex|config)/?(?:\*[^\s'\"/]*)?(?=$|[\s'\"|;&)<>])")
+SECRET_DIR = re.compile(HOME + r"/\.(?:codex|config|ssh|aws|gnupg)/?(?:\*[^\s'\"/]*)?(?=$|[\s'\"|;&)<>])")
 # ponytail: after `cd ~/.codex` only `config.toml` by name is seen; `rg x .` or a bare `rg x` there is not.
 CD_CODEX = re.compile(r"\bcd\s+" + HOME + r"/\.codex/?(?=$|[\s;&|)])")
 SECRET_VAR =re.compile(r"\$\{?[A-Za-z_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE)[A-Za-z_]*\}?", re.I)
@@ -46,6 +48,7 @@ PRINTS_SECRET = re.compile(
 # Left out on purpose: `run`/`functions describe` (350 uses in three weeks, and env is meant to hold secret refs),
 # `apps:sdkconfig` (a public id), `get-credentials` (writes a file), and create/reset commands (not reads).
 CREDENTIAL_READS = [c.split() for c in (
+    "gh auth token",  # the GitHub login itself
     "gcloud auth describe",  # credential JSON, refresh token included
     "gcloud config config-helper",  # carries an access token
     "gcloud secrets versions access",
@@ -559,8 +562,22 @@ def selftest():
         "echo a#b; cat ~/.codex/config.toml",
         "curl -s https://x/#frag && gcloud auth print-access-token",
         "S=$(: ${#Z}; gcloud secrets versions access latest --secret=x); echo \"$S\"",
+        # 2026-11-07: Claude's deny list keeps these from its Read tool and its shell; Codex reads only through the shell.
+        "gh auth token",
+        "gh auth token --hostname github.com | pbcopy",
+        "cat ~/.ssh/id_ed25519",
+        "head -2 /Users/yoyoo/.ssh/id_rsa",
+        "cat ~/.aws/credentials",
+        "cat ~/.gnupg/private-keys-v1.d/x.key",
+        "cat ~/.config/gh/hosts.yml",
+        "grep -rn oauth ~/.ssh",
     ]
     allow = [
+        "ls ~/.ssh",
+        "cat ~/.ssh/id_ed25519.pub",
+        "ssh -o BatchMode=yes host true",
+        "gh auth status",
+        "T=$(gh auth token); curl -s -H \"Authorization: Bearer $T\" https://x",
         "ls  # cat ~/.codex/config.toml",
         "gcloud secrets list --project=p # api#973",
         "echo 'a #b'; ls",

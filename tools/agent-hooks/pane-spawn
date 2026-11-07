@@ -22,17 +22,18 @@
 # or data, and changes nothing (요유 2026-11-05, api#1002). The agent name carries `chk`, which a rename does not change, so its
 # report asks for no other check (auto-tab-close.py). Only a pane herdr_peers.delegates_checks says yes to may open one (the main
 # pane today); any other lead checks results itself, so there it is bad usage and opens nothing. A check pane is Codex in its
-# sandbox, which writes only in a fixed empty folder and temp and has no network: it reads GitHub through gh-read, Slack
-# through the Slack MCP's read tools, and processes with ps. With --kind claude it is Claude Sonnet, which may write anywhere.
+# sandbox, which writes only in a fixed empty folder, temp and gcloud's folder, with the network on: it reads GitHub, GCP and
+# the board itself, Slack through the Slack MCP's read tools, and processes with ps (요유 2026-11-07). With --kind claude it is
+# Claude Sonnet, which may write anywhere.
 # --kind auto uses Codex regardless of recorded weekly usage (요유 2026-11-07, api#1051: reset coupons are available).
 # The herdr startup/readiness responses used here provide no verified current quota-block signal.
 # Historical percentages and dialog text cannot prove one.
 # Until such a signal exists, auto never falls back to Claude. Startup and delivery failures retain their normal error paths.
 # A lead opens a pane for code, tests or docs with it (요유 2026-11-05). The main pane posts to Slack; its work panes only report results.
-# The main pane opens a Claude pane that does the job only with --why, the reason Codex cannot do it (api#1036): a Codex work pane
-# writes nothing outside its folder, so gcloud cannot refresh its login there and GCP commands fail (2026-11-05). A missing
-# reason or any reason mentioning Slack (case-insensitive) or 슬랙 is refused and sent to --kind auto. --why gcp and other
-# reasons still pass. Check panes and every other caller skip this check.
+# The main pane opens a Claude pane that does the job only with --why, the reason Codex cannot do it (api#1036). A missing
+# reason, or one mentioning Slack, 슬랙, GCP, gcloud, bq or BigQuery (any case), is refused and sent to --kind auto: a Codex
+# work pane runs GCP commands since 요유 2026-11-07. Steps on 요유's own account stay in the main pane. Other reasons pass.
+# Check panes and every other caller skip this check.
 # Claude work panes opened by a delegates_checks caller default to Sonnet 5.5 at high effort. --opus leaves model and effort
 # to the global defaults. Explicit agent arguments still win; checks, jobs and every other caller keep their existing policy.
 # --opener <terminal> needs no calling pane: workers-move runs it on 집맥 over ssh to carry on a 회사맥 pane's work at 퇴근 (api#1049).
@@ -42,11 +43,13 @@
 H=${HERDR_BIN_PATH:-herdr}
 USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
   --kind auto: Codex regardless of weekly usage. This launcher has no verified quota-block signal, so no automatic Claude fallback.
-    Use it for code, tests and docs; work panes report results. Yoyoo can reset exhausted quota with a coupon.
-  --why: in the main pane, why a pane that does the job must be Claude: gcp (it runs gcloud or other GCP commands) or another
-    reason in one line. A Claude pane without one, or with a reason mentioning Slack (any case) or 슬랙, is refused there.
+    Use it for code, tests, docs, GCP reads and network or process checks; work panes report results. Yoyoo can reset
+    exhausted quota with a coupon.
+  --why: in the main pane, why a pane that does the job must be Claude, in one line. A Claude pane without one, or with a
+    reason mentioning Slack, 슬랙, GCP, gcloud, bq or BigQuery (any case), is refused there: Codex runs GCP commands too.
     Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요
-  --check: a check pane (main pane only): Codex, read-only, regardless of weekly usage; --kind claude for a check that must write.
+  --check: a check pane (main pane only): Codex that cannot write the checked folder, with the network, regardless of weekly
+    usage; --kind claude for a check that must write.
   --artifact: keep the Artifact tool in a Claude pane (a job that publishes a page); every Claude pane starts without it otherwise.
   --skills: keep the design (taste-skill), office-file (docx/pdf/pptx/xlsx) and Claude-API skills in a Claude pane (UI or office-file job).
   --opus: opt out of the main pane Claude work trial (Sonnet 5.5/high); use global model/effort defaults for heavy work.
@@ -104,8 +107,13 @@ case "$kind" in
   # in shell_environment_policy.include_only, so these four names are listed there too (exact names: a glob would pass tokens).
   # Once Codex sees a release newer than it runs, its TUI opens on an update prompt nobody here answers, and mise installs a
   # release only a day after it comes out: every Codex pane failed to start that day (2026-11-06, 0.167.0).
+  # A work pane runs with no sandbox, as a Claude pane does (요유 2026-11-07): in workspace-write gcloud failed as it rewrote
+  # its login files, ps saw no other process, and the work-log outside the folder could not be written. The PreToolUse hooks
+  # both tools share (gcp-account-guard, secret-print-guard, no-sed-inplace, ...) are its guard, as in Claude. A check pane
+  # keeps a sandbox of its own below.
   codex) ready='.result.agent.interactive_ready'
     set -- -c check_for_update_on_startup=false "$@"
+    [ -n "$check" ] || set -- --sandbox danger-full-access --ask-for-approval never "$@"
     env_args=(--env "MISE_CONFIG_DIR=${MISE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/mise}"
       --env "MISE_DATA_DIR=${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"
       --env "MISE_STATE_DIR=${MISE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/mise}"
@@ -142,26 +150,32 @@ if [ -n "$check" ]; then
     # absolute path. Nobody answers its approval prompts, so a blocked write fails at once. That folder is no repo, so Codex asks
     # nothing on the way in: in a repo it does not trust yet it asks after it reports ready, and the instruction typed then
     # answers yes and is lost (2026-11-05, ~/.dotfiles).
-    # The sandbox has no network: with it, a command that can read Slack or GitHub can post or merge as well, and only the
-    # instruction stopped that. Reads leave through tools outside the sandbox that do no writes (요유 2026-11-05):
-    # - Codex rules in the folder's .codex, which the sandbox cannot write, let gh-read, ps and pgrep run outside it, each
-    #   only by its real path: Codex resolves an absolute path by its last part, so without host_executable a gh-read or ps
-    #   the agent wrote in temp would run outside too. ego-browser, which the user's own rules let out, drives a browser that
-    #   may be signed in to Slack, so here it is forbidden (the strictest rule wins). The folder is trusted, or Codex would
-    #   skip its rules. A rule is a prefix of one plain command, so `ps | grep` and `cd x && gh-read` run in the sandbox.
+    # The network is on and gcloud's folder writable, so a check reads GCP, GitHub and the board itself (요유 2026-11-07; it
+    # had no network from 2026-11-05, and two checks failed on a board read). That lets a command post or merge as well as
+    # read, as in a Claude check pane:
+    # - Codex rules in the folder's .codex, which the sandbox cannot write, forbid the gh verbs that write a pull request or
+    #   an issue. ponytail: a prefix of one plain command, so `gh -R x pr merge`, `gh api -X POST`, curl and board.sh writes
+    #   get past them; the instruction forbids those, and an MCP or ego-browser post is shut below.
+    # - The same rules let ps, pgrep and launchctl's read verbs run outside the sandbox, where they see other processes,
+    #   each only by its real path: Codex resolves an absolute path by its last part, so without host_executable a ps the
+    #   agent wrote in temp would run outside too. ego-browser, which the user's own rules let out, drives a browser that may
+    #   be signed in to Slack, so here it is forbidden (the strictest rule wins). The folder is trusted, or Codex would skip
+    #   its rules. A rule is a prefix of one plain command, so `ps | grep` runs in the sandbox and sees only itself.
     # - MCP servers and plugins run outside the sandbox too. Every server the user's config names is off but two that keep
     #   only their read tools, and Codex's connectors (apps) and plugins are off.
-    # ponytail: a check that needs the network for anything else (bq, curl, a package download) fails here; such a check
-    # opens with --kind claude. An allow rule added later to ~/.codex/rules applies here too.
-    target=$cwd cwd=$state/pane-spawn/check here=$(dirname "$(readlink -f "$0")")
+    # The shared PreToolUse hooks run here as in a work pane. An allow rule added later to ~/.codex/rules applies here too.
+    target=$cwd cwd=$state/pane-spawn/check
     mkdir -p "$cwd/.codex/rules" || die "cannot make $cwd"
     rules=$(mktemp "$cwd/.codex/rules/.check.XXXXXX") && cat > "$rules" <<EOF && mv -f "$rules" "$cwd/.codex/rules/check.rules" || die "cannot write $cwd/.codex/rules/check.rules"
 # Written by pane-spawn for its Codex check panes at each start; a change here is lost.
-prefix_rule(pattern=["$here/gh-read"], decision="allow")
 host_executable(name="ps", paths=["/bin/ps"])
 prefix_rule(pattern=["ps"], decision="allow")
 host_executable(name="pgrep", paths=["/usr/bin/pgrep"])
 prefix_rule(pattern=["pgrep"], decision="allow")
+host_executable(name="launchctl", paths=["/bin/launchctl"])
+prefix_rule(pattern=["launchctl", ["list", "print"]], decision="allow")
+prefix_rule(pattern=["gh", "pr", ["merge", "comment", "review", "close", "reopen", "edit", "create", "ready", "lock"]], decision="forbidden")
+prefix_rule(pattern=["gh", "issue", ["comment", "close", "reopen", "edit", "create", "delete", "transfer", "lock", "pin"]], decision="forbidden")
 prefix_rule(pattern=["ego-browser"], decision="forbidden")
 EOF
     mcp=$(python3 -I - "${CODEX_HOME:-$HOME/.codex}/config.toml" <<'EOF'
@@ -188,9 +202,11 @@ EOF
     # off, and a server with no command stops Codex from starting (Codex 0.166, 2026-11-05).
     for n in codex_worktrees codex_tui; do off+=(-c "mcp_servers.$n={command=\"/usr/bin/false\",enabled=false}"); done
     # The folder's path has dots (~/.local), which a dotted -c path would split, so its trust goes in as a table.
-    set -- --sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=false \
+    # writable_roots replaces the user's list, so a check pane writes nowhere else the config would let a work pane write.
+    set -- --sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=true \
+      -c "sandbox_workspace_write.writable_roots=[\"$HOME/.config/gcloud\"]" \
       -c "projects={\"$cwd\"={trust_level=\"trusted\"}}" "${off[@]}" --disable apps --disable plugins "$@"
-    prompt+=" 확인할 폴더는 $target 입니다. $target/AGENTS.md 가 있으면 먼저 읽으세요. 이 칸은 Codex 샌드박스 안에서 빈 작업 폴더 $cwd 를 쓰므로, 확인할 폴더는 절대경로로 읽으세요. 파일은 작업 폴더와 임시 폴더에만 쓸 수 있고, 확인할 폴더를 비롯한 다른 곳은 쓰기가 막힙니다. 네트워크도 막혀 있어 curl, gh, bq 는 실패합니다. 읽기는 이렇게 합니다. GitHub는 $here/gh-read 뒤에 gh 명령을 붙여 읽고(issue·pr·run·release view/list, pr diff/checks, search, GET api), 저장소는 -R owner/repo 로 정하세요. Slack은 slack MCP 의 읽기 도구(slack_get_thread_replies, slack_get_channel_history, slack_get_user_profile)로 읽습니다. 프로세스는 ps 나 pgrep 으로 봅니다. 이 명령들은 파이프, 리다이렉트, cd 없이 명령 하나로 실행해야 샌드박스 밖에서 돌고, 걸러 낼 때는 gh 의 --jq 나 ps 의 옵션을 쓰세요. 글쓰기, 댓글, 머지 같은 쓰기는 모두 막힙니다. 막혀서 확인하지 못한 항목은 통과로 쓰지 말고, 무엇이 막혀 못 했는지 쓰세요."
+    prompt+=" 확인할 폴더는 $target 입니다. $target/AGENTS.md 가 있으면 먼저 읽으세요. 이 칸은 Codex 샌드박스 안에서 빈 작업 폴더 $cwd 를 쓰므로, 확인할 폴더는 절대경로로 읽으세요. 파일은 작업 폴더와 임시 폴더에만 쓸 수 있고(gcloud 는 자기 설정 폴더에도 씁니다), 확인할 폴더를 비롯한 다른 곳은 쓰기가 막힙니다. 네트워크는 열려 있어 gh, gcloud, bq, curl 로 읽을 수 있습니다. GCP 는 에이전트 계정으로만 읽습니다. Slack은 slack MCP 의 읽기 도구(slack_get_thread_replies, slack_get_channel_history, slack_get_user_profile)로 읽습니다. 프로세스는 ps, pgrep, launchctl list/print 로 봅니다. 이 셋은 파이프, 리다이렉트, cd 없이 명령 하나로 실행해야 샌드박스 밖에서 돌아 다른 프로세스가 보이므로, 걸러 낼 때는 ps 의 옵션을 쓰세요. 확인 칸은 아무것도 쓰지 않습니다. 댓글, 머지, 보드 쓰기, Slack 글, 그 밖에 상태를 바꾸는 명령은 막히지 않은 것도 실행하지 마세요. 막혀서 확인하지 못한 항목은 통과로 쓰지 말고, 무엇이 막혀 못 했는지 쓰세요."
   fi
 fi
 main= hidden= sock= addr=
@@ -199,9 +215,11 @@ workers_help="start it with: launchctl kickstart gui/$(id -u)/com.yoyoo.herdr-wo
 if [ -z "$opener" ] && [ "term_$term" = "$(cat "$mainfile" 2>/dev/null)" ]; then
   [ -z "$same" ] || die "the main pane does no work, so it never adds a pane to its own tab"
   if [ -z "$check" ] && [ "$asked" = claude ]; then
-    [[ "$why" == *[![:space:]]* ]] || die "the main pane opens a Claude pane only with --why, the reason Codex cannot do the job: --why gcp (it runs gcloud or other GCP commands; a Codex work pane cannot write gcloud's login files) or --why \"<one line>\". Any other pane: --kind auto (Codex regardless of weekly usage)."
-    case "$why" in
-      *[sS][lL][aA][cC][kK]* | *슬랙*) die "Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요" ;;
+    [[ "$why" == *[![:space:]]* ]] || die "the main pane opens a Claude pane only with --why \"<one line>\", the reason Codex cannot do the job. Any other pane: --kind auto (Codex regardless of weekly usage)."
+    case "$(tr '[:upper:]' '[:lower:]' <<<"$why")" in
+      *slack* | *슬랙*) die "Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요" ;;
+      # ponytail: words, so a reason that names gcloud to say why Codex failed is refused too; it says what failed instead.
+      *gcp* | *gcloud* | *bigquery* | *bq*) die "GCP 명령도 Codex 칸이 합니다(요유 2026-11-07): --kind auto로 여세요. 요유 계정 단계는 메인 칸에서 합니다. Codex로 안 되는 다른 이유가 있으면 그것을 --why에 한 줄로 쓰세요" ;;
     esac
   fi
   main=1 hidden=1
