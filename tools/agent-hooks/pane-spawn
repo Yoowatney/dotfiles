@@ -124,12 +124,16 @@ case "$kind" in
     if [ -z "$check" ]; then
       [ -n "$own_approval" ] || set -- --ask-for-approval never "$@"
       if [ -n "$own_sandbox" ]; then :
-      # The 집맥's global config is the 회사맥's copy, and its guard (host_guard.py) refuses only the Write and Edit tools,
-      # so a shell write or apply_patch there would go through unsandboxed (check pane, 2026-11-08). There a work pane keeps
-      # workspace-write; --add-dir leaves the config's own writable folders as they are. ponytail: ps there sees no
-      # other process, and a caller's own --sandbox or --yolo still wins.
+      # The 집맥's global config is the 회사맥's copy, and its guard (host_guard.py) reads no shell write, so one there would
+      # go through unsandboxed (check pane, 2026-11-08). There a work pane keeps workspace-write; --add-dir leaves the
+      # config's own writable folders as they are. Codex keeps .git read-only even inside the folder, so the repo's git
+      # folders (a worktree's own one too) are added for commits. ponytail: ps there sees no other process, and a
+      # caller's own --sandbox or --yolo still wins.
       elif [ "$(head -1 "$HOME/.config/munice/host-role" 2>/dev/null)" = ambient-runner ]; then
-        set -- --sandbox workspace-write --add-dir "$HOME/.config/gcloud" -c sandbox_workspace_write.network_access=true "$@"
+        set -- -c sandbox_workspace_write.network_access=true "$@"
+        while IFS= read -r g; do set -- --add-dir "$g" "$@"; done < <(git -C "$cwd" rev-parse --path-format=absolute \
+          --absolute-git-dir --git-common-dir 2>/dev/null | uniq)
+        set -- --sandbox workspace-write --add-dir "$HOME/.config/gcloud" "$@"
       else
         set -- --sandbox danger-full-access "$@"
       fi

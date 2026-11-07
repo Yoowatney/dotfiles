@@ -236,8 +236,8 @@ if op == "open":
     except OSError:
         size = 0
     spawn = os.environ.get("WORKERS_MOVE_REMOTE_SPAWN") or home + "/.local/bin/pane-spawn"
-    # Claude, whatever the 회사맥 pane ran: a Codex pane has no network to push, and in a fresh worktree here it would stop at a
-    # trust dialog that eats the instruction (Claude review)
+    # Claude, whatever the 회사맥 pane ran: in a fresh worktree here a Codex pane would stop at a trust dialog that eats the
+    # instruction (Claude review)
     rc, o, e = run(spawn, "--opener", a["opener"], "--kind", "claude", "--cwd", a["folder"], a["name"],
                    a["prompt"].replace("{memo}", memo), timeout=600)
     addr = next((l for l in o.splitlines() if l.startswith("workers/")), "")

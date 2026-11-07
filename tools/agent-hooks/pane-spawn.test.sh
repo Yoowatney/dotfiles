@@ -177,9 +177,17 @@ has "--ask-for-approval never -c check_for_update_on_startup=false -s read-only"
 # the Write and Edit tools: a Codex shell write or apply_patch there went through once the sandbox was gone (check pane,
 # 2026-11-08). So a Codex work pane there keeps workspace-write, with gcloud's folder added and the network on.
 mkdir -p "$SANDBOX/home/.config/munice"; echo ambient-runner > "$SANDBOX/home/.config/munice/host-role"
-SESSIONLESS=1 ps --kind codex "조사" "지시" >/dev/null
+SESSIONLESS=1 ps --kind codex --cwd "$SANDBOX" "조사" "지시" >/dev/null # no repo: no git folder to add
 has "-- --sandbox workspace-write --add-dir $SANDBOX/home/.config/gcloud -c sandbox_workspace_write.network_access=true --ask-for-approval never $NOUPDATE" "a 집맥 Codex work pane keeps its sandbox, with gcloud and the network"
 hasnt "danger-full-access" "no 집맥 Codex work pane runs unsandboxed"
+# Codex keeps .git read-only inside the folder, so a commit needs the repo's git folders (a worktree's own one too).
+git init -q "$SANDBOX/repo" && git -C "$SANDBOX/repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m i
+git -C "$SANDBOX/repo" worktree add -q -b feat/x "$SANDBOX/wt"
+REAL=$(cd "$SANDBOX/repo" && pwd -P)
+SESSIONLESS=1 ps --kind codex --cwd "$SANDBOX/wt" "조사" "지시" >/dev/null
+has "--add-dir $SANDBOX/home/.config/gcloud --add-dir $REAL/.git --add-dir $REAL/.git/worktrees/wt -c sandbox_workspace_write.network_access=true" "a 집맥 worktree pane may write its git folders"
+SESSIONLESS=1 ps --kind codex --cwd "$SANDBOX/repo" "조사" "지시" >/dev/null
+has "--add-dir $SANDBOX/home/.config/gcloud --add-dir $REAL/.git -c sandbox_workspace_write.network_access=true" "a 집맥 checkout pane gets its .git once"
 SESSIONLESS=1 ps --kind codex "조사" "지시" -- -s read-only >/dev/null
 hasnt "--add-dir" "the caller's sandbox still wins on the 집맥"
 echo other > "$SANDBOX/home/.config/munice/host-role"
