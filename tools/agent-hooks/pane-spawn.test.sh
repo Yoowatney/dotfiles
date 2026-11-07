@@ -161,12 +161,12 @@ NOUPDATE="-c check_for_update_on_startup=false"
 UNBOXED="--sandbox danger-full-access --ask-for-approval never"
 has "--kind codex --pane w1:new --timeout 120000 -- $UNBOXED $NOUPDATE -m gpt-5" "a codex work pane runs unsandboxed, skips its update prompt, then its arguments"
 # Codex refuses an option given twice (`cannot be used multiple times`, Codex 0.167), so the caller's own choice wins.
-for own in "--sandbox read-only" "--sandbox=read-only" "-s read-only" "--full-auto" "--dangerously-bypass-approvals-and-sandbox"; do
+for own in "--sandbox read-only" "--sandbox=read-only" "-s read-only" "-sread-only" "--full-auto" "--yolo" "--dangerously-bypass-approvals-and-sandbox"; do
   # shellcheck disable=SC2086
   SESSIONLESS=1 ps --kind codex "조사" "지시" -- $own >/dev/null
   hasnt "danger-full-access" "the caller's sandbox wins ($own)"
 done
-for own in "--ask-for-approval on-request" "--ask-for-approval=untrusted" "-a on-request" "--full-auto" "--dangerously-bypass-approvals-and-sandbox"; do
+for own in "--ask-for-approval on-request" "--ask-for-approval=untrusted" "-a on-request" "-aon-request" "--full-auto" "--yolo" "--dangerously-bypass-approvals-and-sandbox"; do
   # shellcheck disable=SC2086
   SESSIONLESS=1 ps --kind codex "조사" "지시" -- $own >/dev/null
   hasnt "--ask-for-approval never" "the caller's approval policy wins ($own)"

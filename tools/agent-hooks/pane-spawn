@@ -115,9 +115,9 @@ case "$kind" in
     own_sandbox= own_approval=
     for a in "$@"; do # each argument whole, so an option named inside a -c value is no option (Codex review)
       case "$a" in
-        --dangerously-bypass-approvals-and-sandbox | --full-auto) own_sandbox=1 own_approval=1 ;;
-        -s | --sandbox | --sandbox=*) own_sandbox=1 ;;
-        -a | --ask-for-approval | --ask-for-approval=*) own_approval=1 ;;
+        --dangerously-bypass-approvals-and-sandbox | --yolo | --full-auto) own_sandbox=1 own_approval=1 ;;
+        -s* | --sandbox | --sandbox=*) own_sandbox=1 ;; # -sread-only too; Codex has no other short option starting so
+        -a* | --ask-for-approval | --ask-for-approval=*) own_approval=1 ;;
       esac
     done
     set -- -c check_for_update_on_startup=false "$@"
