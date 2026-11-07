@@ -173,6 +173,9 @@ for own in "--ask-for-approval on-request" "--ask-for-approval=untrusted" "-a on
 done
 SESSIONLESS=1 ps --kind codex "조사" "지시" -- -s read-only >/dev/null
 has "--ask-for-approval never -c check_for_update_on_startup=false -s read-only" "an approval the caller left out is still never"
+# Only an option counts, not its name inside another argument's value (Codex review).
+SESSIONLESS=1 ps --kind codex "조사" "지시" -- -c 'developer_instructions="Explain how --full-auto and -s work."' >/dev/null
+has "-- $UNBOXED $NOUPDATE -c developer_instructions=" "an option named inside a value leaves the defaults in"
 has "agent prompt w1:new 지시" "codex gets the instruction"
 hasnt "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" "a codex pane keeps its environment"
 

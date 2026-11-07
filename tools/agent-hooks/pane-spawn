@@ -112,13 +112,18 @@ case "$kind" in
   # both tools share (gcp-account-guard, secret-print-guard, no-sed-inplace, ...) are its guard, as in Claude. A check pane
   # keeps a sandbox of its own below. Codex refuses an option given twice, so one the caller passes after -- wins.
   codex) ready='.result.agent.interactive_ready'
-    own=" $* "
+    own_sandbox= own_approval=
+    for a in "$@"; do # each argument whole, so an option named inside a -c value is no option (Codex review)
+      case "$a" in
+        --dangerously-bypass-approvals-and-sandbox | --full-auto) own_sandbox=1 own_approval=1 ;;
+        -s | --sandbox | --sandbox=*) own_sandbox=1 ;;
+        -a | --ask-for-approval | --ask-for-approval=*) own_approval=1 ;;
+      esac
+    done
     set -- -c check_for_update_on_startup=false "$@"
     if [ -z "$check" ]; then
-      case "$own" in *" --dangerously-bypass-approvals-and-sandbox "* | *" --full-auto "*) ;; *)
-        case "$own" in *" -a "* | *" --ask-for-approval "* | *" --ask-for-approval="*) ;; *) set -- --ask-for-approval never "$@" ;; esac
-        case "$own" in *" -s "* | *" --sandbox "* | *" --sandbox="*) ;; *) set -- --sandbox danger-full-access "$@" ;; esac ;;
-      esac
+      [ -n "$own_approval" ] || set -- --ask-for-approval never "$@"
+      [ -n "$own_sandbox" ] || set -- --sandbox danger-full-access "$@"
     fi
     env_args=(--env "MISE_CONFIG_DIR=${MISE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/mise}"
       --env "MISE_DATA_DIR=${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"
