@@ -4,7 +4,8 @@
 #   codex-review-run <repo> <uncommitted|branch|commit:<sha>> <out-dir> [rules-file...]
 # Rules files go to Codex as developer_instructions (review mode loads only the repo's own AGENTS.md).
 # Writes <out-dir>/codex-verdict.md and codex-review-full.log (-2, -3, ... when taken) and prints both paths.
-# Exit: 0 no findings, 1 findings, 2 usage, 3 codex did not finish a review. The verdict is printed in every case.
+# Exit: 0 no findings, 1 findings, 2 usage, 3 codex did not finish a review (the reason and the log's last 20 lines
+# are printed instead of a verdict). The verdict and log paths are printed whenever codex ran.
 # It never commits, pushes, or passes --dangerously-bypass-approvals-and-sandbox: review stays read-only.
 # CODEX_BIN overrides the codex lookup (tests). CODEX_REVIEW_LIMIT (seconds, default 1200) ends a stuck run as exit 3.
 set -u
