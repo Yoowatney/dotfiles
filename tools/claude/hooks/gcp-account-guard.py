@@ -635,6 +635,9 @@ def hook(hook_input: dict, env: dict, riders, approvals, is_main, budget: float 
     if typed is None and not main:
         return riders(hook_input)
     reason = f"gcp-account-guard: {strict}\n{TYPED_NOTE}" if main else f"gcp-account-guard: {typed}"
+    if typed and typed.startswith("자격 증명 파일:") and is_main(env):
+        reason += ("\n메인 칸에서는 ✅ 요청 명령에서 GOOGLE_APPLICATION_CREDENTIALS에 한 번 할당하는 것은 ✅로 풀립니다. "
+                   "경로를 다른 곳에 적지 마세요(ls, 스크립트 본문, 주석 포함). 다른 ✅ 제한도 그대로 적용됩니다.")
     # 요유 no longer watches the terminal, so a Slack grant lifts only what a ✅ may: nothing that outlives the turn (review)
     liftable = slack_liftable(hook_input, env)
     turn = relayed_turn(hook_input, env) if liftable else None
