@@ -173,6 +173,19 @@ for own in "--ask-for-approval on-request" "--ask-for-approval=untrusted" "-a on
 done
 SESSIONLESS=1 ps --kind codex "조사" "지시" -- -s read-only >/dev/null
 has "--ask-for-approval never -c check_for_update_on_startup=false -s read-only" "an approval the caller left out is still never"
+# On the 집맥 (host-role ambient-runner) the global config is the 회사맥's copy, and its guard (host_guard.py) refuses only
+# the Write and Edit tools: a Codex shell write or apply_patch there went through once the sandbox was gone (check pane,
+# 2026-11-08). So a Codex work pane there keeps workspace-write, with gcloud's folder added and the network on.
+mkdir -p "$SANDBOX/home/.config/munice"; echo ambient-runner > "$SANDBOX/home/.config/munice/host-role"
+SESSIONLESS=1 ps --kind codex "조사" "지시" >/dev/null
+has "-- --sandbox workspace-write --add-dir $SANDBOX/home/.config/gcloud -c sandbox_workspace_write.network_access=true --ask-for-approval never $NOUPDATE" "a 집맥 Codex work pane keeps its sandbox, with gcloud and the network"
+hasnt "danger-full-access" "no 집맥 Codex work pane runs unsandboxed"
+SESSIONLESS=1 ps --kind codex "조사" "지시" -- -s read-only >/dev/null
+hasnt "--add-dir" "the caller's sandbox still wins on the 집맥"
+echo other > "$SANDBOX/home/.config/munice/host-role"
+SESSIONLESS=1 ps --kind codex "조사" "지시" >/dev/null
+has "-- $UNBOXED $NOUPDATE" "another role is no 집맥"
+rm "$SANDBOX/home/.config/munice/host-role"
 # Only an option counts, not its name inside another argument's value (Codex review).
 SESSIONLESS=1 ps --kind codex "조사" "지시" -- -c 'developer_instructions="Explain how --full-auto and -s work."' >/dev/null
 has "-- $UNBOXED $NOUPDATE -c developer_instructions=" "an option named inside a value leaves the defaults in"

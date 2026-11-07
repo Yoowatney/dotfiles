@@ -123,7 +123,16 @@ case "$kind" in
     set -- -c check_for_update_on_startup=false "$@"
     if [ -z "$check" ]; then
       [ -n "$own_approval" ] || set -- --ask-for-approval never "$@"
-      [ -n "$own_sandbox" ] || set -- --sandbox danger-full-access "$@"
+      if [ -n "$own_sandbox" ]; then :
+      # The 집맥's global config is the 회사맥's copy, and its guard (host_guard.py) refuses only the Write and Edit tools,
+      # so a shell write or apply_patch there would go through unsandboxed (check pane, 2026-11-08). There a work pane keeps
+      # workspace-write; --add-dir leaves the config's own writable folders as they are. ponytail: ps there sees no
+      # other process, and a caller's own --sandbox or --yolo still wins.
+      elif [ "$(head -1 "$HOME/.config/munice/host-role" 2>/dev/null)" = ambient-runner ]; then
+        set -- --sandbox workspace-write --add-dir "$HOME/.config/gcloud" -c sandbox_workspace_write.network_access=true "$@"
+      else
+        set -- --sandbox danger-full-access "$@"
+      fi
     fi
     env_args=(--env "MISE_CONFIG_DIR=${MISE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/mise}"
       --env "MISE_DATA_DIR=${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"
