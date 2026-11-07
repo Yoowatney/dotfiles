@@ -8,6 +8,7 @@
 # It never commits, pushes, or passes --dangerously-bypass-approvals-and-sandbox: review stays read-only.
 # CODEX_BIN overrides the codex lookup (tests). CODEX_REVIEW_LIMIT (seconds, default 1200) ends a stuck run as exit 3.
 set -u
+unset CDPATH   # an exported one makes cd print the path (breaking out=$(cd ...)) or pick another folder for a relative repo
 usage() { echo "codex-review-run: $*" >&2; echo "usage: codex-review-run <repo> <uncommitted|branch|commit:<sha>> <out-dir> [rules-file...]" >&2; exit 2; }
 [ $# -ge 3 ] || usage "give a repo, a scope and an output folder"
 repo=$1 scope=$2 out=$3; shift 3

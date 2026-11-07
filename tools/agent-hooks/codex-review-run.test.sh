@@ -67,8 +67,8 @@ has clean-file "$T/out/codex-verdict.md" 'No issues found.'
 has clean-env "$T/env" 'pane='
 lacks clean-env "$T/env" 'pane-under-test'
 
-rc=0   # an output folder relative to the caller, not to the repo
-(cd "$T" && FAKE_MODE=clean "$RUN" "$repo" uncommitted rel-out </dev/null) >"$T/rel.out" 2>&1 || rc=$?
+rc=0   # an output folder relative to the caller, not to the repo; an exported CDPATH makes cd print the path
+(cd "$T" && CDPATH=. FAKE_MODE=clean "$RUN" "$repo" uncommitted rel-out </dev/null) >"$T/rel.out" 2>&1 || rc=$?
 expect_rc relative "$rc" 0
 has relative "$T/rel.out" "verdict: $T/rel-out/codex-verdict.md"
 [ -s "$T/rel-out/codex-verdict.md" ] && ok 'relative: verdict written beside the caller' || bad 'relative: no verdict in the caller folder'
