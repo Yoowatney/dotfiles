@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+# Claude and Codex share this Stop entry point. Gate before cooldown or ingest.
+input="$(cat 2>/dev/null)"
+guard_script="$(python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0")"
+if printf '%s' "$input" | python3 -I "$(dirname "$guard_script")/stop-model-guard.py" --stdin; then
+    exit 0
+fi
+
 STATE_DIR="${LLM_WIKI_STATE_DIR:-$HOME/.local/share/llm-wiki}"
 INGEST_SCRIPT="${LLM_WIKI_INGEST_SCRIPT:-$STATE_DIR/ingest.sh}"
 COOLDOWN_SEC="${LLM_WIKI_COOLDOWN_SEC:-3600}"
