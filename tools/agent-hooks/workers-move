@@ -16,12 +16,12 @@ A move, per pane of the main pane on workers (agent name spawn-<main terminal>-,
    note that starts `[인계 메모] 옮김` or `[인계 메모] 옮기지 않음: <why>` and names its `폴더:`. A pane at a question dialog
    is not asked: typed text would answer the dialog.
 2. Once the note is its last reply, the folder is checked: a git folder must be clean, on a branch, and either a linked
-   worktree on a feature branch (pushed here: a Codex pane has no network) or the default branch with nothing unpushed. No
+   worktree on a feature branch (pushed here, so the 집맥 can fetch it) or the default branch with nothing unpushed. No
    commit is ever made here: a shared checkout may hold another session's files.
 3. 집맥 (ssh to ~/.config/herdr/remote-host): the same path is made ready (a worktree from that Mac's clone of the repo, or the
    existing checkout fast-forwarded), the note and the pane's first instruction are written to
    ~/.local/state/workers-move/memos/<agent>.md there, and `pane-spawn --opener <main terminal>` opens a pane on 집맥's workers
-   server that reads it (Codex, else Claude when Codex stops at a trust dialog).
+   server that reads it (always Claude: in a fresh worktree there a Codex pane stops at a trust dialog).
 4. Only then is the 회사맥 pane marked reported and closed: a 집맥 pane that did not open leaves the 회사맥 pane as it was.
 A pane that will not move stays, is marked reported (its note was its report), and `resume` tells it to go on. Each step is
 saved in moves.json, so a run cut by sleep goes on where it was. A run that died while opening a 집맥 pane, or an ssh call that
