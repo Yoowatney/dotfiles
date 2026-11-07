@@ -83,10 +83,20 @@ echo "--- verdict"; cat "$verdict"; echo "---"
 # The log prints Codex's final message twice (stream and result), and earlier lines can hold finding-like text Codex
 # read from files, so count distinct findings after the last `codex` line, not every match in the log.
 pat='^- \[P[0-9]\] '
+final() { awk 'FNR==NR { if ($0 == "codex") last = FNR; next } FNR > last' "$log" "$log"; }
 in_verdict=$(grep -E "$pat" "$verdict" | sort -u)
-in_log=$(awk 'FNR==NR { if ($0 == "codex") last = FNR; next } FNR > last' "$log" "$log" | grep -E "$pat" | sort -u)
+in_log=$(final | grep -E "$pat" | sort -u)
 count() { [ -z "$1" ] && echo 0 || wc -l <<<"$1" | tr -d ' '; }
 all=$(printf '%s\n%s\n' "$in_verdict" "$in_log" | grep -E "$pat" | sort -u)
 echo "findings: $(count "$all") (verdict $(count "$in_verdict"), log $(count "$in_log"))"
-comm -13 <(printf '%s\n' "$in_verdict") <(printf '%s\n' "$in_log") | grep -E "$pat" | sed 's/^/only in the log: /'
+# A finding only the log has is printed whole (its indented body too, first copy only), so it can be relayed as is.
+comm -13 <(printf '%s\n' "$in_verdict") <(printf '%s\n' "$in_log") | grep -E "$pat" | while IFS= read -r t; do
+  echo "only in the log: $t"
+  final | awk -v t="$t" 'p && /^  / { print; next } p { exit } $0 == t { p = 1 }'
+done
+if [ -z "$all" ] && grep -qE '\[P[0-9]\]' "$verdict"; then
+  # Exit 0 must mean "no finding", so a tag in another layout counts as findings; read the verdict above.
+  echo "codex-review-run: the verdict has [P#] tags not in the \"- [P#] \" form; counted as findings"
+  exit 1
+fi
 [ -z "$all" ]   # the exit code: 0 with no findings, 1 with any

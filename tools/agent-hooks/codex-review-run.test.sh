@@ -23,18 +23,20 @@ while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done
 f1='- [P1] Return the total, not the discount — /r/pricing.py:9-9'
 f2='- [P2] Reject floats — /r/pricing.py:3-3'
 f3='- [P3] Name the error — /r/pricing.py:4-4'
+f3body='  ValueError("negative") does not say which argument.'
 log() { printf '%s\n' "$@"; }
 case $FAKE_MODE in
   clean) log exec 'cat pricing.py' codex 'No issues found.'; echo 'No issues found.' >"$out" ;;
   findings|lostone)
     # A real log repeats the final block, and Codex may cat a file holding finding-like lines earlier on.
     log exec '- [P0] an old line Codex read from some file' codex 'Looking.' codex 'Two problems.' '' 'Full review comments:' '' "$f1" '  body' "$f2" '  body'
-    [ "$FAKE_MODE" = lostone ] && log "$f3" '  body'
+    [ "$FAKE_MODE" = lostone ] && log "$f3" "$f3body" ''
     log 'tokens used' codex 'Full review comments:' '' "$f1" '  body' "$f2" '  body'
-    [ "$FAKE_MODE" = lostone ] && log "$f3" '  body'
+    [ "$FAKE_MODE" = lostone ] && log "$f3" "$f3body" ''
     printf '%s\n' 'Two problems.' '' 'Full review comments:' '' "$f1" '  body' "$f2" '  body' >"$out" ;;
   fail) echo 'error: not logged in' >&2; exit 7 ;;
   empty) log codex '' ;;
+  oddformat) printf '%s\n' 'One problem.' '' '**[P1] Return the total** — /r/pricing.py:9' >"$out" ;;
   slow) sleep 5; echo 'late' >"$out" ;;
   slowchild) (sleep 2; touch "$FAKE_MARK") & sleep 10; echo 'late' >"$out" ;;
   firebase) touch firebase-debug.log; echo 'No issues found.' >"$out" ;;
@@ -84,6 +86,14 @@ run lostone lostone "$repo" uncommitted "$T/out"
 expect_rc lostone "$rc" 1
 has lostone "$T/lostone.out" 'findings: 3 (verdict 2, log 3)'
 has lostone "$T/lostone.out" 'only in the log: - [P3] Name the error'
+f3body='  ValueError("negative") does not say which argument.'   # as in the fake codex
+has lostone "$T/lostone.out" "$f3body"   # the body too, so the finding can be relayed whole
+[ "$(grep -cF -- "$f3body" "$T/lostone.out")" = 1 ] && ok 'lostone: the body is printed once' || bad 'lostone: body printed more than once'
+
+# A [P#] tag in another layout must not end as "no findings".
+run oddformat oddformat "$repo" uncommitted "$T/out"
+expect_rc oddformat "$rc" 1
+has oddformat "$T/oddformat.out" 'not in the "- [P#] " form'
 
 run fail fail "$repo" uncommitted "$T/out"
 expect_rc fail "$rc" 3
