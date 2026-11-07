@@ -64,6 +64,17 @@ class UnattendedSessionTest(unittest.TestCase):
         self.assertTrue(job_host.job_tab({"transcript_path": str(self.path)}, env))
         self.assertFalse(job_host.job_tab({"transcript_path": str(self.path)}, {}))
 
+    def test_codex_goal_and_harness_prompts_do_not_unlock(self):
+        for mode in ("dispatch", "ambient"):
+            for text in ('<codex_internal_context source="goal">Continue.</codex_internal_context>',
+                         '<codex_internal_context source="user_goal">User set a goal.</codex_internal_context>',
+                         'Future runtime context'):
+                record = user("codex", text)
+                record["payload"]["internal_chat_message_metadata_passthrough"] = {
+                    "content_item_metadata": [{"provenance": {"type": "harness", "hook": False}}]}
+                self.assertTrue(self.active("codex", mode, f"[{mode.replace('dispatch', 'auto-dispatch').replace('ambient', 'ambient-round')}] task",
+                                            extra=[record]))
+
     def test_ambient_wins_when_both_flags_are_set(self):
         self.active("codex", "ambient", "[auto-dispatch] task", "direct", "[ambient-round] task")
         self.assertTrue(job_host.job_tab({"transcript_path": str(self.path)},

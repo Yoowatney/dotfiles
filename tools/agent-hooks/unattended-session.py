@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 import sys
 
-SCAFFOLD = ("# AGENTS.md", "<environment_context>", "<user_instructions>", "<hook_prompt", "<user_action>")
+SCAFFOLD = ("# AGENTS.md", "<environment_context>", "<user_instructions>", "<hook_prompt", "<user_action>",
+            "<codex_internal_context")
 
 
 def text_content(content) -> str:
@@ -33,6 +34,11 @@ def human_prompt(record: dict) -> str:
         return text_content(attachment.get("prompt"))
     payload = record.get("payload")
     if record.get("type") == "response_item" and isinstance(payload, dict) and payload.get("role") == "user":
+        metadata = payload.get("internal_chat_message_metadata_passthrough") or {}
+        parts = metadata.get("content_item_metadata", []) if isinstance(metadata, dict) else []
+        if parts and all(isinstance(part, dict) and isinstance(part.get("provenance"), dict)
+                         and part["provenance"].get("type") == "harness" for part in parts):
+            return ""
         text = text_content(payload.get("content"))
         return "" if text.lstrip().startswith(SCAFFOLD) else text
     return ""
