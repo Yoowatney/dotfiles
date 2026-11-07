@@ -33,30 +33,35 @@
 # writes nothing outside its folder, so gcloud cannot refresh its login there and GCP commands fail (2026-11-05). A missing
 # reason or any reason mentioning Slack (case-insensitive) or 슬랙 is refused and sent to --kind auto. --why gcp and other
 # reasons still pass. Check panes and every other caller skip this check.
+# Claude work panes opened by a delegates_checks caller default to Sonnet 5.5 at high effort. --opus leaves model and effort
+# to the global defaults. Explicit agent arguments still win; checks, jobs and every other caller keep their existing policy.
 # --opener <terminal> needs no calling pane: workers-move runs it on 집맥 over ssh to carry on a 회사맥 pane's work at 퇴근 (api#1049).
 # The pane opens on this Mac's workers server in a tab of its own, as the main pane's do, and its agent name records that
 # terminal (the 회사맥 main pane) with `r` before the random part (herdr_peers.remote_pane). With workers down it opens nothing.
 # Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
 H=${HERDR_BIN_PATH:-herdr}
-USAGE='usage: pane-spawn [--new-tab] [--check] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
+USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
   --kind auto: Codex regardless of weekly usage. This launcher has no verified quota-block signal, so no automatic Claude fallback.
     Use it for code, tests and docs; work panes report results. Yoyoo can reset exhausted quota with a coupon.
   --why: in the main pane, why a pane that does the job must be Claude: gcp (it runs gcloud or other GCP commands) or another
     reason in one line. A Claude pane without one, or with a reason mentioning Slack (any case) or 슬랙, is refused there.
     Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요
-  --check: a check pane (main pane only): Codex, read-only, regardless of weekly usage; --kind claude for a check that must write.'
+  --check: a check pane (main pane only): Codex, read-only, regardless of weekly usage; --kind claude for a check that must write.
+  --opus: opt out of the main pane Claude work trial (Sonnet 5.5/high); use global model/effort defaults for heavy work.
+    Checks, Codex, dispatch, ambient and other callers keep their existing model policy. Explicit agent arguments win.'
 MIN_ROWS=${PANE_SPAWN_MIN_ROWS:-16} # a 46-row window holds 4 panes of 11-12 rows, which still show about 5 lines of work (2026-11-04); a fifth would leave 5-6
 die() { echo "pane-spawn: $*" >&2; exit 2; }
 # Every reader takes a tab named "자동 …" or "알아서 …" for a job's: pane-tell refuses its panes, and no mark goes on it. A work name that
 # starts that way made an ordinary pane unreachable (요유 2026-11-05), so no tab it names starts that way.
 tab_name() { case "$1" in "자동 "* | "알아서 "*) echo "일 $1" ;; *) echo "$1" ;; esac; }
 
-same= new_tab= check= kind= why= opener= cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
+same= new_tab= check= opus= kind= why= opener= cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
 while [ $# -gt 0 ]; do
   case "$1" in
     --same-tab) same=1; shift ;;
     --new-tab) new_tab=1; shift ;;
     --check) check=1; shift ;;
+    --opus) opus=1; shift ;;
     -h | --help) echo "$USAGE"; exit 0 ;;
     --kind | --cwd | --why | --opener)
       [ $# -ge 2 ] || die "$USAGE"
@@ -116,16 +121,13 @@ else
   [ -n "${term:-}" ] || die "herdr does not know this pane"
 fi
 export HERDR_PANE_ID=$me
+delegates=
+if [ -z "$opener" ] && python3 -I "$(dirname "$(readlink -f "$0")")/herdr_peers.py" --delegates-checks "term_$term"; then delegates=1; fi
 if [ -n "$check" ]; then
-  python3 -I "$(dirname "$(readlink -f "$0")")/herdr_peers.py" --delegates-checks "term_$term" || die "--check is for the main pane; any other lead checks a pane's result itself (직접 확인: run the test or command, or look at the changed behavior or data)"
+  [ -n "$delegates" ] || die "--check is for the main pane; any other lead checks a pane's result itself (직접 확인: run the test or command, or look at the changed behavior or data)"
   name="확인 $name"
   prompt+=' 이 칸은 확인 칸입니다. 다른 칸이 다 했다고 보고한 일을 확인만 합니다. 코드나 설정을 고치지 말고, 테스트나 명령을 직접 실행하거나 바뀐 동작과 데이터를 직접 보세요. 다른 칸의 보고를 다시 읽는 것은 확인이 아닙니다. 다른 칸을 열지 마세요. 보고 첫 줄에 실행한 명령, 본 결과, 통과 여부를 모두 쓰세요.'
-  # A check runs a command and reads what changed, so a Claude check pane runs Sonnet at high effort, which costs about half
-  # (2026-11-05). A --model or --effort the caller passes after -- wins. Revert: delete this block.
-  if [ "$kind" = claude ]; then
-    case " $* " in *" --effort "* | *" --effort="*) ;; *) set -- --effort high "$@" ;; esac
-    case " $* " in *" --model "* | *" --model="*) ;; *) set -- --model claude-sonnet-5-5 "$@" ;; esac
-  else
+  if [ "$kind" != claude ]; then
     # A check runs tests and reads GitHub but leaves the repo as it was, and the sandbox enforces that, not the instruction: Codex
     # starts in a fixed empty folder, which with temp is all its workspace-write sandbox lets it write, and reads the repo by
     # absolute path. Nobody answers its approval prompts, so a blocked write fails at once. That folder is no repo, so Codex asks
@@ -200,6 +202,21 @@ elif [ -n "$opener" ]; then # the 회사맥 main pane's pane, its report carried
   prompt+=' 보고 첫 줄에 이 칸에서 한 일을 한 문장으로 쓰세요. 메인 칸에는 그 줄과 `남은 것:` 줄만 가고 전문은 파일로 남습니다.'
 elif [[ "${label:-}" != *🫡* ]] && [ -z "${MUNICE_AUTO_DISPATCH:-}${MUNICE_AMBIENT:-}" ]; then
   case "${HERDR_SOCKET_PATH:-}" in */sessions/*) ;; *) hidden=1 ;; esac
+fi
+# Work trial and Claude checks share the existing Sonnet/high defaults; arguments after -- take precedence.
+# --opus opts out only work panes. It does not alter the established check-pane policy.
+trial=
+if [ -n "$delegates" ] && [ "$kind" = claude ] && [ -z "$check${MUNICE_AUTO_DISPATCH:-}${MUNICE_AMBIENT:-}" ]; then trial=1; fi
+if [ "$kind" = claude ] && { [ -n "$check" ] || { [ -n "$trial" ] && [ -z "$opus" ]; }; }; then
+  case " $* " in *" --effort "* | *" --effort="*) ;; *) set -- --effort high "$@" ;; esac
+  case " $* " in *" --model "* | *" --model="*) ;; *) set -- --model claude-sonnet-5-5 "$@" ;; esac
+fi
+if [ -n "$trial" ]; then
+  if [ -n "$opus" ]; then
+    echo "pane-spawn: Claude 전역 기본 모델·강도 사용 (--opus; 명시한 모델·강도 인자 우선)" >&2
+  else
+    echo "pane-spawn: Claude Sonnet 5.5·high 기본값 (Sonnet 시험 중, 무거운 일은 --opus; 명시한 모델·강도 인자 우선)" >&2
+  fi
 fi
 [ -z "$hidden" ] || sock=$("$H" session list --json 2>/dev/null | jq -r '.sessions[] | select(.name == "workers" and .running) | .socket_path' 2>/dev/null | head -1)
 [ -z "$main$opener" ] || [ -n "$sock" ] || { echo "pane-spawn: the workers herdr server is not running; $workers_help" >&2; exit 1; }

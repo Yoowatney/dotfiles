@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SUBJECT="$(cd "$(dirname "$0")" && pwd)/pane-spawn"
-SANDBOX="$(mktemp -d)"
+SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/pane-spawn.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT
 
 fail() {
@@ -201,6 +201,55 @@ not_main() { rm -f "$SANDBOX/home/.local/state/orchestrator/main"; }
 workers_up() { jq -n --arg w "$SANDBOX/sessions/workers/herdr.sock" --argjson r "${1:-true}" '{sessions: [{name: "default", running: true, socket_path: "/x/herdr.sock"}, {name: "workers", running: $r, socket_path: $w}]}' > "$SANDBOX/sessions.json"; }
 workers_up; echo '{"result":{"workspaces":[{"workspace_id":"w1","label":"workers"}]}}' > "$SANDBOX/workers-workspaces.json"
 
+# Main-pane Claude work defaults must not leak into other callers, checks or agent kinds.
+# Assert the actual agent-start arguments, not the instruction or launcher source.
+model_cases=0
+model_case() { # <model or empty> <effort or empty> <pane-spawn arguments...>
+  local model=$1 effort=$2 start
+  shift 2
+  ps "$@" > /dev/null 2>"$SANDBOX/model-err" || fail "model case failed to launch: $*: $(cat "$SANDBOX/model-err")"
+  start=$(grep ' agent start ' "$SANDBOX/log")
+  [[ "$start" != *" --opus"* ]] || fail "the launcher must consume --opus: $start"
+  if [ -n "$model" ]; then
+    [[ "$start" == *"--model $model"* ]] || fail "$*: expected model $model: $start"
+  else
+    [[ "$start" != *--model* ]] || fail "$*: expected no model override: $start"
+  fi
+  if [ -n "$effort" ]; then
+    [[ "$start" == *"--effort $effort"* ]] || fail "$*: expected effort $effort: $start"
+  else
+    [[ "$start" != *--effort* ]] || fail "$*: expected no effort override: $start"
+  fi
+  model_cases=$((model_cases + 1))
+}
+is_main
+model_case claude-sonnet-5-5 high --why gcp "Model defaults" "Run the task"
+grep -q 'Sonnet.*--opus' "$SANDBOX/model-err" || fail "the trial reports Sonnet and its opt-out on stderr"
+[ "$(wc -l < "$SANDBOX/model-err" | tr -d ' ')" = 1 ] || fail "the model notice is one line"
+model_case claude-sonnet-5-5 high --kind claude --why gcp "Model defaults" "Run the task"
+model_case '' '' --opus --why gcp "Model defaults" "Run the task"
+grep -q -- '--opus' "$SANDBOX/model-err" || fail "the opt-out reports the global default on stderr"
+model_case '' '' --kind claude --why gcp --opus "Model defaults" "Run the task"
+model_case opus xhigh --why gcp "Model defaults" "Run the task" -- --model opus --effort xhigh
+# The same caller-supplied overrides supported by Claude checks remain supported for work panes.
+ps --why gcp "Model defaults" "Run the task" -- --model=opus --effort=xhigh >/dev/null 2>"$SANDBOX/model-err"
+has "--model=opus --effort=xhigh" "explicit equals-form overrides pass through"
+hasnt "claude-sonnet-5-5" "no second model after an explicit override"
+hasnt "--effort high" "no second effort after an explicit override"
+model_cases=$((model_cases + 1))
+model_case claude-sonnet-5-5 high --check --kind claude "Model defaults" "Run the task"
+model_case claude-sonnet-5-5 high --opus --check --kind claude "Model defaults" "Run the task"
+model_case '' '' --check "Model defaults" "Run the task"
+model_case '' '' --kind codex "Model defaults" "Run the task"
+model_case '' '' --kind codex --opus "Model defaults" "Run the task"
+model_case '' '' --kind auto "Model defaults" "Run the task"
+MUNICE_AUTO_DISPATCH=1 model_case '' '' --why gcp "Model defaults" "Run the task"
+MUNICE_AMBIENT=1 model_case '' '' --why gcp "Model defaults" "Run the task"
+not_main
+CALLER_LABEL="🟢 👑 Lead" model_case '' '' "Model defaults" "Run the task"
+CALLER_LABEL="🟢 🫡 Worker" model_case '' '' "Model defaults" "Run the task"
+echo "ok: pane-spawn model defaults ($model_cases cases)"
+
 is_main; out=$(ps --why gcp "api#1 설계" "할 일")
 has "[workers] tab create --workspace w1 " "a pane the main pane opens goes to workers"
 hasnt "[default] tab create" "nothing opens beside the main pane"
@@ -326,7 +375,8 @@ rm -rf "$SANDBOX/home/.codex"
 grep -qF "$REAL_DIR/gh-read" "$RULES" || fail "gh-read by its real path: $(cat "$RULES")"
 ls -A "$CHECK_DIR/.codex/rules" | grep -qv '^check.rules$' && fail "no temp file is left beside the rules: $(ls -A "$CHECK_DIR/.codex/rules")"
 if command -v codex >/dev/null 2>&1; then
-  decide() { codex execpolicy check --resolve-host-executables -r "$RULES" -r "$SANDBOX/user.rules" -- "$@" | jq -r '.decision // "sandbox"'; }
+  mkdir -p "$SANDBOX/execpolicy-home" "$SANDBOX/execpolicy-tmp"
+  decide() { TMPDIR="$SANDBOX/execpolicy-tmp" CODEX_HOME="$SANDBOX/execpolicy-home" codex execpolicy check --resolve-host-executables -r "$RULES" -r "$SANDBOX/user.rules" -- "$@" | jq -r '.decision // "sandbox"'; }
   echo 'prefix_rule(pattern=["ego-browser"], decision="allow")' > "$SANDBOX/user.rules" # as in ~/.codex/rules/default.rules
   for c in "allow $REAL_DIR/gh-read pr view 3" "allow ps -A" "allow /bin/ps -A" "allow pgrep -fl codex" \
     "sandbox /tmp/x/gh-read pr view 3" "sandbox gh-read pr view 3" "sandbox /tmp/x/ps -A" "sandbox /tmp/x/pgrep x" \
