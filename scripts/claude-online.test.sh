@@ -44,6 +44,8 @@ settings=$(sed -n '2p' <<<"$out")
 jq -e '.enableWorkflows == false and .enabledPlugins["context7@claude-plugins-official"] == false and (has("hooks") | not)' <<<"$settings" >/dev/null || fail 'worker keeps the common profile and no safety settings'
 # api#1065: the Artifact tool's schema (~9k tokens) is resent on every call, so a pane under a lead starts without it.
 jq -e '.enableArtifact == false' <<<"$settings" >/dev/null || fail 'worker starts without the Artifact tool'
+# api#1068: a Bash result over 4000 chars reaches the conversation as a file path and a preview (claude's minimum for this setting).
+jq -e '.bashOutputMaxChars == 4000' <<<"$settings" >/dev/null || fail 'worker caps Bash output at 4000 chars'
 # A job that publishes a page opts back in (pane-spawn --artifact): the key goes, every other worker setting stays.
 opt_in=$(cd "$box/home/work/munice/sub" && ROLE=worker ARTIFACT=1 run)
 jq -e '(has("enableArtifact") | not) and .enableWorkflows == false and .env.ENABLE_CLAUDEAI_MCP_SERVERS == "false" and (.claudeMdExcludes | length) == 2' <<<"$(sed -n '2p' <<<"$opt_in")" >/dev/null || fail 'opt-in keeps Artifact and the rest of the worker profile'
@@ -87,7 +89,7 @@ jq -e '(has("claudeMdExcludes") | not) and (has("paneRules") | not) and .env.ENA
 
 # The main pane keeps every rule file whole.
 out=$(cd "$box/home/work/munice/sub" && ROLE=main run)
-jq -e '.enableArtifact == false and .enableWorkflows == false and (has("claudeMdExcludes") | not) and (has("deniedMcpServers") | not)' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'main profile changed'
+jq -e '.enableArtifact == false and .enableWorkflows == false and (has("claudeMdExcludes") | not) and (has("deniedMcpServers") | not) and (has("bashOutputMaxChars") | not)' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'main profile changed'
 ! grep -qx -- --append-system-prompt-file <<<"$out" || fail 'main pane gets filtered rules'
 printf 'term_test\n' >"$box/state/orchestrator/main"
 out=$(run)

@@ -20,6 +20,7 @@
       "deniedMcpServers": [{ "serverName": "rea" }, { "serverName": "obsidian" }],
       "permissions": { "deny": ["AskUserQuestion", "ScheduleWakeup", "SendFeedback"] },
       "enableArtifact": false,
+      "bashOutputMaxChars": 4000,
       "dietSkills": {
         "enabledPlugins": { "taste-skill@taste-skill": false },
         "skillOverrides": {
