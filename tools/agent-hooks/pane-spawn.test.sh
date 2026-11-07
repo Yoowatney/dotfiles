@@ -78,12 +78,22 @@ before "pane rename w1:new" "pane-label --sync-tabs"
 before "pane-label --sync-tabs" "agent start"
 has "--kind claude --pane w1:new" "claude by default"
 has "--env CLAUDE_STARTUP_ROLE=worker" "Claude work panes keep their startup profile through clear"
+hasnt "CLAUDE_STARTUP_ARTIFACT" "a Claude pane starts without the Artifact tool unless it asks (api#1065)"
 
 has "agent prompt w1:new 할 일입니다" "instruction delivered"
 has "요유는 이 칸을 보지 않으니" "a new pane learns its reports go to the lead"
 before "agent get w1:new" "agent prompt"
 before "agent prompt" "agent wait w1:new --until working --until blocked --until done"
 [[ "$out" == *"w1:new"* ]] || fail "prints the new pane: $out"
+
+# api#1065: --artifact keeps the Artifact tool in a Claude pane (the profile turns it off otherwise); Codex has no such tool.
+ps --artifact "발행" "지시" >/dev/null
+has "--env CLAUDE_STARTUP_ARTIFACT=1" "--artifact keeps the Artifact tool in a Claude pane, through clear"
+has "--env CLAUDE_STARTUP_ROLE=worker" "--artifact keeps the rest of the worker profile"
+SESSIONLESS=1 ps --artifact --kind codex "조사" "지시" >/dev/null
+hasnt "CLAUDE_STARTUP_ARTIFACT" "Codex panes are unaffected by --artifact"
+SESSIONLESS=1 ps --artifact --kind auto "조사" "지시" >/dev/null
+hasnt "CLAUDE_STARTUP_ARTIFACT" "auto resolves to Codex and is unaffected too"
 
 # 요유 2026-11-01: a job has one lead. A pane under a lead that opens a review pane stays under it, and that pane reports to it.
 CALLER_LABEL="🟢 🫡 구현" ps --same-tab "리뷰" "봐 줘" >/dev/null
@@ -236,6 +246,15 @@ ps --why gcp "Model defaults" "Run the task" -- --model=opus --effort=xhigh >/de
 has "--model=opus --effort=xhigh" "explicit equals-form overrides pass through"
 hasnt "claude-sonnet-5-5" "no second model after an explicit override"
 hasnt "--effort high" "no second effort after an explicit override"
+# api#1065: the main pane's Claude work and check panes start without the Artifact tool, and --artifact brings it back.
+ps --why gcp "Artifact off" "Run the task" >/dev/null 2>&1
+hasnt "CLAUDE_STARTUP_ARTIFACT" "a main-pane work pane starts without the Artifact tool"
+ps --check --kind claude "Artifact off" "Run the check" >/dev/null 2>&1
+hasnt "CLAUDE_STARTUP_ARTIFACT" "a Claude check pane starts without the Artifact tool"
+ps --check --kind claude --artifact "Artifact on" "Run the check" >/dev/null 2>&1
+has "--env CLAUDE_STARTUP_ARTIFACT=1" "a Claude check pane can opt back in"
+ps --why gcp --artifact "Artifact on" "Publish the page" >/dev/null 2>&1
+has "--env CLAUDE_STARTUP_ARTIFACT=1" "a main-pane work pane can opt back in"
 model_cases=$((model_cases + 1))
 model_case claude-sonnet-5-5 high --check --kind claude "Model defaults" "Run the task"
 model_case claude-sonnet-5-5 high --opus --check --kind claude "Model defaults" "Run the task"

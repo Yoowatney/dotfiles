@@ -40,13 +40,14 @@
 # terminal (the 회사맥 main pane) with `r` before the random part (herdr_peers.remote_pane). With workers down it opens nothing.
 # Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
 H=${HERDR_BIN_PATH:-herdr}
-USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
+USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
   --kind auto: Codex regardless of weekly usage. This launcher has no verified quota-block signal, so no automatic Claude fallback.
     Use it for code, tests and docs; work panes report results. Yoyoo can reset exhausted quota with a coupon.
   --why: in the main pane, why a pane that does the job must be Claude: gcp (it runs gcloud or other GCP commands) or another
     reason in one line. A Claude pane without one, or with a reason mentioning Slack (any case) or 슬랙, is refused there.
     Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요
   --check: a check pane (main pane only): Codex, read-only, regardless of weekly usage; --kind claude for a check that must write.
+  --artifact: keep the Artifact tool in a Claude pane (a job that publishes a page); every Claude pane starts without it otherwise.
   --opus: opt out of the main pane Claude work trial (Sonnet 5.5/high); use global model/effort defaults for heavy work.
     Checks, Codex, dispatch, ambient and other callers keep their existing model policy. Explicit agent arguments win.'
 MIN_ROWS=${PANE_SPAWN_MIN_ROWS:-16} # a 46-row window holds 4 panes of 11-12 rows, which still show about 5 lines of work (2026-11-04); a fifth would leave 5-6
@@ -55,13 +56,14 @@ die() { echo "pane-spawn: $*" >&2; exit 2; }
 # starts that way made an ordinary pane unreachable (요유 2026-11-05), so no tab it names starts that way.
 tab_name() { case "$1" in "자동 "* | "알아서 "*) echo "일 $1" ;; *) echo "$1" ;; esac; }
 
-same= new_tab= check= opus= kind= why= opener= cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
+same= new_tab= check= opus= artifact= kind= why= opener= cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
 while [ $# -gt 0 ]; do
   case "$1" in
     --same-tab) same=1; shift ;;
     --new-tab) new_tab=1; shift ;;
     --check) check=1; shift ;;
     --opus) opus=1; shift ;;
+    --artifact) artifact=1; shift ;;
     -h | --help) echo "$USAGE"; exit 0 ;;
     --kind | --cwd | --why | --opener)
       [ $# -ge 2 ] || die "$USAGE"
@@ -88,7 +90,10 @@ env_args=()
 case "$kind" in
   # Every Claude pane opened here works under a lead, so the advisor tool (a full uncached resend of the conversation per call)
   # is off: the pane's shell carries the variable, and the agent and its subagents inherit it. Sessions opened by hand keep it.
-  claude) ready='.result.agent.agent_session.value' env_args=(--env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 --env CLAUDE_STARTUP_ROLE=worker) ;;
+  claude) ready='.result.agent.agent_session.value' env_args=(--env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 --env CLAUDE_STARTUP_ROLE=worker)
+    # The Artifact tool's schema (~9k tokens) is resent on every call, so the worker profile turns it off (api#1065);
+    # a job that publishes a page, such as a client hand-off, opens with --artifact. Codex panes have no such tool.
+    [ -z "$artifact" ] || env_args+=(--env CLAUDE_STARTUP_ARTIFACT=1) ;;
   # Codex reports no session id before its first prompt. It runs commands with mise's shims first on PATH, so a test that swaps HOME
   # hid mise's config and installs: python3 re-ran its own shim for ever, or failed on mise's trust check (2026-11-05). mise's
   # folders by absolute path keep what it reads the same under any HOME. Codex hands a command only the variables its config lists

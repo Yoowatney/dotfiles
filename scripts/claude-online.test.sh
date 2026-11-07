@@ -34,14 +34,20 @@ cat >"$box/home/work/munice/CLAUDE.local.md" <<'MD'
 ## SKIP_LOCAL
 <!-- /pane:skip -->
 MD
-run() { env PATH="$box/bin:$PATH" HOME="$box/home" XDG_STATE_HOME="${STATE:-$box/state}" HERDR_PANE_ID=w1:p1 CLAUDE_STARTUP_ROLE="${ROLE:-}" CLAUDE_STARTUP_PROFILE="${PROFILE:-}" bash "$ROOT/scripts/claude-online" "$@"; }
+run() { env PATH="$box/bin:$PATH" HOME="$box/home" XDG_STATE_HOME="${STATE:-$box/state}" HERDR_PANE_ID=w1:p1 CLAUDE_STARTUP_ROLE="${ROLE:-}" CLAUDE_STARTUP_PROFILE="${PROFILE:-}" CLAUDE_STARTUP_ARTIFACT="${ARTIFACT:-}" bash "$ROOT/scripts/claude-online" "$@"; }
 fail() { echo "FAIL: $1"; exit 1; }
 arg_after() { awk -v f="$1" 'p { print; exit } $0 == f { p = 1 }'; }
 
 out=$(cd "$box/home/work/munice/sub" && ROLE=worker run 'literal argument $()')
 [[ "$out" == --settings$'\n'* ]] || fail 'worker has no startup settings'
 settings=$(sed -n '2p' <<<"$out")
-jq -e '.enableWorkflows == false and .enabledPlugins["context7@claude-plugins-official"] == false and (has("hooks") | not) and (has("enableArtifact") | not)' <<<"$settings" >/dev/null || fail 'worker keeps the common profile and no safety settings'
+jq -e '.enableWorkflows == false and .enabledPlugins["context7@claude-plugins-official"] == false and (has("hooks") | not)' <<<"$settings" >/dev/null || fail 'worker keeps the common profile and no safety settings'
+# api#1065: the Artifact tool's schema (~9k tokens) is resent on every call, so a pane under a lead starts without it.
+jq -e '.enableArtifact == false' <<<"$settings" >/dev/null || fail 'worker starts without the Artifact tool'
+# A job that publishes a page opts back in (pane-spawn --artifact): the key goes, every other worker setting stays.
+opt_in=$(cd "$box/home/work/munice/sub" && ROLE=worker ARTIFACT=1 run)
+jq -e '(has("enableArtifact") | not) and .enableWorkflows == false and .env.ENABLE_CLAUDEAI_MCP_SERVERS == "false" and (.claudeMdExcludes | length) == 2' <<<"$(sed -n '2p' <<<"$opt_in")" >/dev/null || fail 'opt-in keeps Artifact and the rest of the worker profile'
+jq -e '(has("enableArtifact") | not)' <<<"$(cd "$box/home/work/munice/sub" && ROLE=main ARTIFACT=1 run | sed -n '2p')" >/dev/null || fail 'opt-in works for the main role too'
 # Deny rules merge with every other source, so they only narrow; nothing here may allow, ask or change the mode.
 jq -e '(.permissions | keys) == ["deny"] and (.permissions.deny | index("AskUserQuestion"))' <<<"$settings" >/dev/null || fail 'worker permissions only deny: a pane never asks 요유'
 jq -e '.enabledPlugins["core-skills@hyperframes"] == false and (.deniedMcpServers | index({serverName: "rea"})) and .env.ENABLE_CLAUDEAI_MCP_SERVERS == "false" and .skillOverrides["hiring-panel"] == "off" and (has("paneRules") | not)' <<<"$settings" >/dev/null || fail 'worker drops unused plugins, MCP servers, claude.ai connectors and skills'

@@ -19,6 +19,7 @@
       },
       "deniedMcpServers": [{ "serverName": "rea" }, { "serverName": "obsidian" }],
       "permissions": { "deny": ["AskUserQuestion", "ScheduleWakeup", "SendFeedback"] },
+      "enableArtifact": false,
       "env": { "ENABLE_CLAUDEAI_MCP_SERVERS": "false" },
       "skillOverrides": {
         "closing-household-ledger": "off",

@@ -74,6 +74,8 @@ case "$role" in
     if [ "${CLAUDE_STARTUP_PROFILE:-}" != full ]; then
       profile="$(cd "$(dirname "$0")/.." && pwd)/tools/claude/startup-profile.json"
       settings=$(jq -c --arg role "$role" '.common * .roles[$role]' "$profile") || exit 1
+      # pane-spawn --artifact: a job that publishes a page keeps the Artifact tool; the rest of the profile stays (api#1065).
+      [ -z "${CLAUDE_STARTUP_ARTIFACT:-}" ] || settings=$(jq -c 'del(.enableArtifact)' <<<"$settings") || exit 1
       rules_file=""
       # A pane that cannot get the filtered copy starts with the full rule files rather than not at all.
       pane_rules || { rules_file=""; settings=$(jq -c 'del(.paneRules)' <<<"$settings") || exit 1; }
