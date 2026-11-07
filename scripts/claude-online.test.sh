@@ -34,7 +34,7 @@ cat >"$box/home/work/munice/CLAUDE.local.md" <<'MD'
 ## SKIP_LOCAL
 <!-- /pane:skip -->
 MD
-run() { env PATH="$box/bin:$PATH" HOME="$box/home" XDG_STATE_HOME="${STATE:-$box/state}" HERDR_PANE_ID=w1:p1 CLAUDE_STARTUP_ROLE="${ROLE:-}" CLAUDE_STARTUP_PROFILE="${PROFILE:-}" CLAUDE_STARTUP_ARTIFACT="${ARTIFACT:-}" bash "$ROOT/scripts/claude-online" "$@"; }
+run() { env PATH="$box/bin:$PATH" HOME="$box/home" XDG_STATE_HOME="${STATE:-$box/state}" HERDR_PANE_ID=w1:p1 CLAUDE_STARTUP_ROLE="${ROLE:-}" CLAUDE_STARTUP_PROFILE="${PROFILE:-}" CLAUDE_STARTUP_ARTIFACT="${ARTIFACT:-}" CLAUDE_STARTUP_SKILLS="${SKILLS:-}" bash "$ROOT/scripts/claude-online" "$@"; }
 fail() { echo "FAIL: $1"; exit 1; }
 arg_after() { awk -v f="$1" 'p { print; exit } $0 == f { p = 1 }'; }
 
@@ -48,6 +48,16 @@ jq -e '.enableArtifact == false' <<<"$settings" >/dev/null || fail 'worker start
 opt_in=$(cd "$box/home/work/munice/sub" && ROLE=worker ARTIFACT=1 run)
 jq -e '(has("enableArtifact") | not) and .enableWorkflows == false and .env.ENABLE_CLAUDEAI_MCP_SERVERS == "false" and (.claudeMdExcludes | length) == 2' <<<"$(sed -n '2p' <<<"$opt_in")" >/dev/null || fail 'opt-in keeps Artifact and the rest of the worker profile'
 jq -e '(has("enableArtifact") | not)' <<<"$(cd "$box/home/work/munice/sub" && ROLE=main ARTIFACT=1 run | sed -n '2p')" >/dev/null || fail 'opt-in works for the main role too'
+# api#1066: a pane under a lead starts without the skills its work never calls (design, office-file and Claude-API skills), so the
+# listing sent on every call shrinks. Plugin skills cannot be switched off one by one, so taste-skill goes as a plugin.
+jq -e '.skillOverrides as $o | .enabledPlugins["taste-skill@taste-skill"] == false and (["docx","pdf","pptx","xlsx","code-review","claude-api","update-config","run","loop","init"] | all($o[.] == "off")) and (has("dietSkills") | not)' <<<"$settings" >/dev/null || fail 'worker starts without the unrelated skills'
+# Skills that the lead's instructions and the rule files call must stay: superpowers, codex-review, agent-board, writing-*, QA and release skills.
+jq -e '.skillOverrides as $o | ["codex-review","agent-board","writing-plain-korean","writing-as-yoyoo","html-explainer","ego-browser","agent-reach","work-log","release-diff","search-history","save-session","merge-and-deploy","release-notify","dataviz","simplify","security-review","plugin-authoring"] | all($o[.] == null)' <<<"$settings" >/dev/null || fail 'worker keeps the skills that instructions call'
+jq -e '.enabledPlugins as $p | ["superpowers@claude-plugins-official","commit-commands@claude-plugins-official","ponytail@ponytail","fluent-korean@fluent-korean","core@munice","compliance@munice","ux-writing@munice"] | all($p[.] != false)' <<<"$settings" >/dev/null || fail 'worker keeps the plugins whose skills or hooks instructions call'
+# pane-spawn --skills opts back in: only the api#1066 cut returns; every earlier cut and the rest of the worker profile stay.
+skills_in=$(cd "$box/home/work/munice/sub" && ROLE=worker SKILLS=1 run)
+jq -e '(.enabledPlugins | has("taste-skill@taste-skill") | not) and (.skillOverrides | has("docx") or has("claude-api") | not) and .skillOverrides["hiring-panel"] == "off" and .enabledPlugins["core-skills@hyperframes"] == false and .enableArtifact == false and (has("dietSkills") | not) and (.claudeMdExcludes | length) == 2' <<<"$(sed -n '2p' <<<"$skills_in")" >/dev/null || fail '--skills brings back only the api#1066 cut'
+jq -e '(has("dietSkills") | not) and (.skillOverrides // {} | has("docx") | not) and (.enabledPlugins // {} | has("taste-skill@taste-skill") | not)' <<<"$(cd "$box/home/work/munice/sub" && ROLE=main run | sed -n '2p')" >/dev/null || fail 'the main pane keeps every skill'
 # Deny rules merge with every other source, so they only narrow; nothing here may allow, ask or change the mode.
 jq -e '(.permissions | keys) == ["deny"] and (.permissions.deny | index("AskUserQuestion"))' <<<"$settings" >/dev/null || fail 'worker permissions only deny: a pane never asks 요유'
 jq -e '.enabledPlugins["core-skills@hyperframes"] == false and (.deniedMcpServers | index({serverName: "rea"})) and .env.ENABLE_CLAUDEAI_MCP_SERVERS == "false" and .skillOverrides["hiring-panel"] == "off" and (has("paneRules") | not)' <<<"$settings" >/dev/null || fail 'worker drops unused plugins, MCP servers, claude.ai connectors and skills'

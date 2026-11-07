@@ -20,6 +20,21 @@
       "deniedMcpServers": [{ "serverName": "rea" }, { "serverName": "obsidian" }],
       "permissions": { "deny": ["AskUserQuestion", "ScheduleWakeup", "SendFeedback"] },
       "enableArtifact": false,
+      "dietSkills": {
+        "enabledPlugins": { "taste-skill@taste-skill": false },
+        "skillOverrides": {
+          "docx": "off",
+          "pdf": "off",
+          "pptx": "off",
+          "xlsx": "off",
+          "code-review": "off",
+          "claude-api": "off",
+          "update-config": "off",
+          "run": "off",
+          "loop": "off",
+          "init": "off"
+        }
+      },
       "env": { "ENABLE_CLAUDEAI_MCP_SERVERS": "false" },
       "skillOverrides": {
         "closing-household-ledger": "off",

@@ -95,6 +95,15 @@ hasnt "CLAUDE_STARTUP_ARTIFACT" "Codex panes are unaffected by --artifact"
 SESSIONLESS=1 ps --artifact --kind auto "조사" "지시" >/dev/null
 hasnt "CLAUDE_STARTUP_ARTIFACT" "auto resolves to Codex and is unaffected too"
 
+# api#1066: --skills keeps the design, office-file and Claude-API skills in a Claude pane (a UI or office-file job); the profile cuts them otherwise.
+ps "스킬 기본" "지시" >/dev/null
+hasnt "CLAUDE_STARTUP_SKILLS" "a Claude pane starts without the unrelated skills unless it asks (api#1066)"
+ps --skills "UI 작업" "지시" >/dev/null
+has "--env CLAUDE_STARTUP_SKILLS=1" "--skills keeps the cut skills in a Claude pane, through clear"
+has "--env CLAUDE_STARTUP_ROLE=worker" "--skills keeps the rest of the worker profile"
+SESSIONLESS=1 ps --skills --kind codex "조사" "지시" >/dev/null
+hasnt "CLAUDE_STARTUP_SKILLS" "Codex panes are unaffected by --skills"
+
 # 요유 2026-11-01: a job has one lead. A pane under a lead that opens a review pane stays under it, and that pane reports to it.
 CALLER_LABEL="🟢 🫡 구현" ps --same-tab "리뷰" "봐 줘" >/dev/null
 hasnt "pane-label --lead" "a pane under a lead does not become one"
@@ -255,6 +264,15 @@ ps --check --kind claude --artifact "Artifact on" "Run the check" >/dev/null 2>&
 has "--env CLAUDE_STARTUP_ARTIFACT=1" "a Claude check pane can opt back in"
 ps --why gcp --artifact "Artifact on" "Publish the page" >/dev/null 2>&1
 has "--env CLAUDE_STARTUP_ARTIFACT=1" "a main-pane work pane can opt back in"
+# api#1066: the main pane's Claude work and check panes start without the unrelated skills, and --skills brings them back.
+ps --why gcp "Skills off" "Run the task" >/dev/null 2>&1
+hasnt "CLAUDE_STARTUP_SKILLS" "a main-pane work pane starts without the unrelated skills"
+ps --check --kind claude "Skills off" "Run the check" >/dev/null 2>&1
+hasnt "CLAUDE_STARTUP_SKILLS" "a Claude check pane starts without the unrelated skills"
+ps --check --kind claude --skills "Skills on" "Run the check" >/dev/null 2>&1
+has "--env CLAUDE_STARTUP_SKILLS=1" "a Claude check pane can opt back in"
+ps --why gcp --skills "Skills on" "Build the page" >/dev/null 2>&1
+has "--env CLAUDE_STARTUP_SKILLS=1" "a main-pane work pane can opt back in"
 model_cases=$((model_cases + 1))
 model_case claude-sonnet-5-5 high --check --kind claude "Model defaults" "Run the task"
 model_case claude-sonnet-5-5 high --opus --check --kind claude "Model defaults" "Run the task"
