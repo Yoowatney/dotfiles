@@ -67,19 +67,21 @@ Artifact 도구는 스키마만 약 9k 토큰이라 모든 호출에 다시 실�
 
 ## 2026-11-07에 뺀 스킬 목록의 절반 (api#1066)
 
-스킬 이름·설명 목록(약 24.1k bytes)은 모든 호출에 다시 실린다. 10/31~11/07 작업·확인 칸 156개에서
-한 번도 부르지 않았고 일과 무관한 스킬을 `roles.worker.dietSkills`에 모았다. 래퍼가 이 묶음을
-설정에 합친 뒤 키를 지우므로 `claude`에는 `dietSkills`가 가지 않는다.
-- 플러그인째: `taste-skill`(디자인, 15개). 플러그인 스킬은 하나씩 끌 수 없다.
+스킬 이름·설명 목록(약 24.6k UTF-8 bytes, 스킬 64개)은 모든 호출에 다시 실린다. 10/31~11/07 작업·확인
+칸 156개에서 거의 부르지 않았고 일과 무관한 스킬을 `roles.worker.dietSkills`에 모았다. 뺀 스킬 중 호출이
+있었던 것은 `taste-skill:taste-skill`뿐이고 서로 다른 두 칸이 불렀다. 래퍼가 이 묶음을 설정에 합친 뒤
+키를 지우므로 `claude`에는 `dietSkills`가 가지 않는다.
+- 플러그인째: `taste-skill`(디자인, 13개). 플러그인 스킬은 하나씩 끌 수 없다.
 - `skillOverrides`: `docx`, `pdf`, `pptx`, `xlsx`, `code-review`, `claude-api`, `update-config`, `run`, `loop`, `init`.
 - 남긴 것: superpowers 전체, codex-review, agent-board, writing-*, ego-browser, html-explainer, dataviz,
   compliance, 릴리스·QA 스킬. ponytail은 SessionStart 훅이 같은 플러그인에 있어서 남겼다.
 - 규칙·훅·권한은 그대로다(테스트가 확인한다).
 
-같은 지시·같은 모델(Sonnet)로 시험 칸 둘을 비교하니 스킬 목록이 24,125에서 11,706 bytes로,
-첫 입력이 37,374에서 32,994 토큰으로 줄었다. 디자인·문서 파일·Claude API 일은 `pane-spawn --skills`로
-연다(`CLAUDE_STARTUP_SKILLS=1`, `/clear` 뒤에도 유지). 전역 CLAUDE.md는 UI 작업에 taste-skill을 먼저 부르라고
-하므로 UI 일에는 `--skills`가 필요하다. 메인 칸·Codex 칸·자동 칸·손으로 연 세션은 영향이 없다.
+같은 지시·같은 모델(Sonnet)로 시험 칸 둘을 비교하니 스킬 목록이 24,624에서 12,181 UTF-8 bytes(약 50.5%)로,
+스킬 개수는 64개에서 41개(23개 제거, 개수가 절반 준 것은 아니다)로, 첫 입력이 37,374에서 32,994 토큰으로
+줄었다. 디자인·문서 파일·Claude API 일은 `pane-spawn --skills`로 연다(`CLAUDE_STARTUP_SKILLS=1`,
+`/clear` 뒤에도 유지). 전역 CLAUDE.md는 UI를 만들거나 고칠 때 taste-skill을 먼저 부르라고 하므로 UI 일을
+맡기는 칸은 반드시 `--skills`로 연다(`--artifact`는 Artifact 도구만 되살린다). 메인 칸·Codex 칸·자동 칸·손으로 연 세션은 영향이 없다.
 되돌리기: 프로파일에서 `roles.worker.dietSkills`를 지운다.
 
 되돌리기: 프로파일에서 `roles.worker`의 해당 키를 지우면 다음에 여는 칸부터 원래대로

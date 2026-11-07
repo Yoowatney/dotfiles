@@ -76,7 +76,7 @@ case "$role" in
       settings=$(jq -c --arg role "$role" '.common * .roles[$role]' "$profile") || exit 1
       # pane-spawn --artifact: a job that publishes a page keeps the Artifact tool; the rest of the profile stays (api#1065).
       [ -z "${CLAUDE_STARTUP_ARTIFACT:-}" ] || settings=$(jq -c 'del(.enableArtifact)' <<<"$settings") || exit 1
-      # dietSkills (worker only): skills a pane's work never calls (api#1066). pane-spawn --skills keeps them; the key never reaches claude.
+      # dietSkills (worker only): skills a pane under a lead almost never calls (api#1066). pane-spawn --skills keeps them; the key never reaches claude.
       if [ -n "${CLAUDE_STARTUP_SKILLS:-}" ]; then settings=$(jq -c 'del(.dietSkills)' <<<"$settings") || exit 1
       else settings=$(jq -c '(. * (.dietSkills // {})) | del(.dietSkills)' <<<"$settings") || exit 1; fi
       rules_file=""

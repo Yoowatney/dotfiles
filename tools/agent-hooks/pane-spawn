@@ -96,7 +96,7 @@ case "$kind" in
     # The Artifact tool's schema (~9k tokens) is resent on every call, so the worker profile turns it off (api#1065);
     # a job that publishes a page, such as a client hand-off, opens with --artifact. Codex panes have no such tool.
     [ -z "$artifact" ] || env_args+=(--env CLAUDE_STARTUP_ARTIFACT=1)
-    # The worker profile also cuts skills no work calls (api#1066); --skills keeps them for a UI or office-file job.
+    # The worker profile also cuts skills a pane almost never calls (api#1066); --skills keeps them. A UI job needs it: the global rules say to call taste-skill first.
     [ -z "$skills" ] || env_args+=(--env CLAUDE_STARTUP_SKILLS=1) ;;
   # Codex reports no session id before its first prompt. It runs commands with mise's shims first on PATH, so a test that swaps HOME
   # hid mise's config and installs: python3 re-ran its own shim for ever, or failed on mise's trust check (2026-11-05). mise's
