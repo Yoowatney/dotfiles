@@ -1,0 +1,75 @@
+#!/bin/bash
+# One call for the codex-review skill: find codex, run `codex exec review` on one repo, and print the verdict with an
+# honest finding count, so an agent does not spend a model round trip on each of those steps.
+#   codex-review-run <repo> <uncommitted|branch|commit:<sha>> <out-dir> [rules-file...]
+# Rules files go to Codex as developer_instructions (review mode loads only the repo's own AGENTS.md).
+# Writes <out-dir>/codex-verdict.md and codex-review-full.log (-2, -3, ... when taken) and prints both paths.
+# Exit: 0 no findings, 1 findings, 2 usage, 3 codex did not finish a review. The verdict is printed in every case.
+# It never commits, pushes, or passes --dangerously-bypass-approvals-and-sandbox: review stays read-only.
+# CODEX_BIN overrides the codex lookup (tests). CODEX_REVIEW_LIMIT (seconds, default 1200) ends a stuck run as exit 3.
+set -u
+usage() { echo "codex-review-run: $*" >&2; echo "usage: codex-review-run <repo> <uncommitted|branch|commit:<sha>> <out-dir> [rules-file...]" >&2; exit 2; }
+[ $# -ge 3 ] || usage "give a repo, a scope and an output folder"
+repo=$1 scope=$2 out=$3; shift 3
+git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || usage "$repo is not a git work tree"
+case $scope in
+  uncommitted) flags=(--uncommitted) ;;
+  branch) flags=(--base origin/main) ;;
+  commit:?*) flags=(--commit "${scope#commit:}") ;;
+  *) usage "scope must be uncommitted, branch or commit:<sha>, not '$scope'" ;;
+esac
+rules=
+for f in "$@"; do
+  [ -r "$f" ] || usage "cannot read rules file $f"   # a missing rule file must not quietly review without its rules
+  rules+=$(cat "$f")$'\n'
+done
+
+codex=${CODEX_BIN:-$(cd ~ && mise which codex 2>/dev/null || command -v codex)}   # from ~: mise refuses an untrusted worktree
+[ -n "$codex" ] && [ -x "$codex" ] || { echo "codex-review-run: codex not found${codex:+ at $codex}" >&2; exit 3; }
+
+mkdir -p "$out" || exit 3
+i=1 sfx=
+while [ -e "$out/codex-verdict$sfx.md" ] || [ -e "$out/codex-review-full$sfx.log" ]; do i=$((i + 1)) sfx=-$i; done
+verdict="$out/codex-verdict$sfx.md" log="$out/codex-review-full$sfx.log"
+cd "$repo" || exit 2
+top=$(git rev-parse --show-toplevel)
+fb_before=no; [ -e "$top/firebase-debug.log" ] && fb_before=yes
+
+if [ "$scope" = branch ]; then
+  git fetch -q origin main || { echo "codex-review-run: git fetch origin main failed; the base would be stale" >&2; exit 3; }
+fi
+args=(exec review "${flags[@]}")
+[ -z "$rules" ] || args+=(-c "developer_instructions=$rules")
+args+=(-o "$verdict")
+limit=${CODEX_REVIEW_LIMIT:-1200}
+echo "codex-review-run: $codex ${flags[*]} in $top${rules:+ (with $# rules file(s))}"
+rc=0
+# stdin from /dev/null: with a pipe, codex waits for EOF (a run hung 76 minutes on 2026-10-13). alarm survives exec.
+perl -e 'alarm shift; exec @ARGV or die "cannot start $ARGV[0]: $!\n"' "$limit" "$codex" "${args[@]}" </dev/null >"$log" 2>&1 || rc=$?
+
+if [ "$fb_before" = no ] && [ -e "$top/firebase-debug.log" ] && [ -z "$(git ls-files -- "$top/firebase-debug.log")" ]; then
+  rm -f "$top/firebase-debug.log" && echo "removed firebase-debug.log (codex left it; it holds the signed-in email)"
+fi
+echo "verdict: $verdict"
+echo "log: $log"
+if [ "$rc" != 0 ]; then
+  [ "$rc" = 142 ] && echo "codex-review-run: stopped after ${limit}s" || echo "codex-review-run: codex exited $rc"
+  echo "--- last lines of the log"; tail -n 20 "$log"
+  exit 3
+fi
+if [ ! -s "$verdict" ] || ! grep -q '[^[:space:]]' "$verdict"; then
+  echo "codex-review-run: codex exited 0 but wrote no verdict"; echo "--- last lines of the log"; tail -n 20 "$log"
+  exit 3
+fi
+echo "--- verdict"; cat "$verdict"; echo "---"
+
+# The log prints Codex's final message twice (stream and result), and earlier lines can hold finding-like text Codex
+# read from files, so count distinct findings after the last `codex` line, not every match in the log.
+pat='^- \[P[0-9]\] '
+in_verdict=$(grep -E "$pat" "$verdict" | sort -u)
+in_log=$(awk 'FNR==NR { if ($0 == "codex") last = FNR; next } FNR > last' "$log" "$log" | grep -E "$pat" | sort -u)
+count() { [ -z "$1" ] && echo 0 || wc -l <<<"$1" | tr -d ' '; }
+all=$(printf '%s\n%s\n' "$in_verdict" "$in_log" | grep -E "$pat" | sort -u)
+echo "findings: $(count "$all") (verdict $(count "$in_verdict"), log $(count "$in_log"))"
+comm -13 <(printf '%s\n' "$in_verdict") <(printf '%s\n' "$in_log") | grep -E "$pat" | sed 's/^/only in the log: /'
+[ -z "$all" ]   # the exit code: 0 with no findings, 1 with any
