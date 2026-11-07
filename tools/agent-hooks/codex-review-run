@@ -27,7 +27,7 @@ done
 codex=${CODEX_BIN:-$(cd ~ && mise which codex 2>/dev/null || command -v codex)}   # from ~: mise refuses an untrusted worktree
 [ -n "$codex" ] && [ -x "$codex" ] || { echo "codex-review-run: codex not found${codex:+ at $codex}" >&2; exit 3; }
 
-mkdir -p "$out" || exit 3
+mkdir -p "$out" && out=$(cd "$out" && pwd) || exit 3   # absolute: the review runs from inside the repo
 i=1 sfx=
 while [ -e "$out/codex-verdict$sfx.md" ] || [ -e "$out/codex-review-full$sfx.log" ]; do i=$((i + 1)) sfx=-$i; done
 verdict="$out/codex-verdict$sfx.md" log="$out/codex-review-full$sfx.log"
@@ -43,9 +43,24 @@ args=(exec review "${flags[@]}")
 args+=(-o "$verdict")
 limit=${CODEX_REVIEW_LIMIT:-1200}
 echo "codex-review-run: $codex ${flags[*]} in $top${rules:+ (with $# rules file(s))}"
+# Codex follows the global rules and runs pane-label: with the herdr variables it renamed the calling pane, and its
+# `pane-label --free` turned a held 🔴 pane 🟢 (52 of 57 past review logs ran pane-label). Outside herdr it is a no-op.
+# shellcheck disable=SC2046  # one name per word
+unset $(compgen -e | grep '^HERDR_')
 rc=0
-# stdin from /dev/null: with a pipe, codex waits for EOF (a run hung 76 minutes on 2026-10-13). alarm survives exec.
-perl -e 'alarm shift; exec @ARGV or die "cannot start $ARGV[0]: $!\n"' "$limit" "$codex" "${args[@]}" </dev/null >"$log" 2>&1 || rc=$?
+# stdin from /dev/null: with a pipe, codex waits for EOF (a run hung 76 minutes on 2026-10-13).
+# Codex runs in its own process group so the time limit, or a signal to this script, ends the commands it started too.
+perl -e '
+  my $limit = shift;
+  my $pid = fork // die "fork: $!\n";
+  if (!$pid) { setpgrp(0, 0); exec @ARGV or die "cannot start $ARGV[0]: $!\n" }
+  my $stop = sub { kill "TERM", -$pid; sleep 1; kill "KILL", -$pid; exit shift };
+  $SIG{ALRM} = sub { $stop->(142) };
+  $SIG{$_} = sub { $stop->(143) } for qw(TERM INT HUP);
+  alarm $limit;
+  waitpid $pid, 0;
+  exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
+' "$limit" "$codex" "${args[@]}" </dev/null >"$log" 2>&1 || rc=$?
 
 if [ "$fb_before" = no ] && [ -e "$top/firebase-debug.log" ] && [ -z "$(git ls-files -- "$top/firebase-debug.log")" ]; then
   rm -f "$top/firebase-debug.log" && echo "removed firebase-debug.log (codex left it; it holds the signed-in email)"

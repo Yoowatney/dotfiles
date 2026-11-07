@@ -17,6 +17,7 @@ cat >"$T/codex" <<'EOF'
 # fake codex: exec review <scope...> [-c developer_instructions=...] -o <file>
 printf '%s\n' "$@" >"$FAKE_ARGS"
 cat >"$FAKE_STDIN"
+echo "pane=${HERDR_PANE_ID:-}" >"$FAKE_ENV"
 out=
 while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done
 f1='- [P1] Return the total, not the discount — /r/pricing.py:9-9'
@@ -35,11 +36,14 @@ case $FAKE_MODE in
   fail) echo 'error: not logged in' >&2; exit 7 ;;
   empty) log codex '' ;;
   slow) sleep 5; echo 'late' >"$out" ;;
+  slowchild) (sleep 2; touch "$FAKE_MARK") & sleep 10; echo 'late' >"$out" ;;
   firebase) touch firebase-debug.log; echo 'No issues found.' >"$out" ;;
 esac
 EOF
 chmod +x "$T/codex"
-export CODEX_BIN="$T/codex" FAKE_ARGS="$T/args" FAKE_STDIN="$T/stdin"
+export CODEX_BIN="$T/codex" FAKE_ARGS="$T/args" FAKE_STDIN="$T/stdin" FAKE_ENV="$T/env" FAKE_MARK="$T/child-ran"
+# Codex follows the global rules and runs pane-label; with these it would rename (or mark free) the calling pane.
+export HERDR_PANE_ID=pane-under-test HERDR_SOCKET_PATH="$T/no-socket"
 
 repo="$T/repo"
 git init -q -b main "$repo"
@@ -60,6 +64,14 @@ has clean "$T/clean.out" 'findings: 0'
 has clean-args "$T/args" '--uncommitted'
 [ -s "$T/stdin" ] && bad 'clean: codex read stdin' || ok 'clean: codex stdin is empty'
 has clean-file "$T/out/codex-verdict.md" 'No issues found.'
+has clean-env "$T/env" 'pane='
+lacks clean-env "$T/env" 'pane-under-test'
+
+rc=0   # an output folder relative to the caller, not to the repo
+(cd "$T" && FAKE_MODE=clean "$RUN" "$repo" uncommitted rel-out </dev/null) >"$T/rel.out" 2>&1 || rc=$?
+expect_rc relative "$rc" 0
+has relative "$T/rel.out" "verdict: $T/rel-out/codex-verdict.md"
+[ -s "$T/rel-out/codex-verdict.md" ] && ok 'relative: verdict written beside the caller' || bad 'relative: no verdict in the caller folder'
 
 run findings findings "$repo" uncommitted "$T/out"
 expect_rc findings "$rc" 1
@@ -85,6 +97,11 @@ has empty "$T/empty.out" 'wrote no verdict'
 CODEX_REVIEW_LIMIT=1 run slow slow "$repo" uncommitted "$T/out"
 expect_rc slow "$rc" 3
 has slow "$T/slow.out" 'stopped after 1s'
+
+CODEX_REVIEW_LIMIT=1 run slowchild slowchild "$repo" uncommitted "$T/out"
+expect_rc slowchild "$rc" 3
+sleep 3
+[ -e "$FAKE_MARK" ] && bad 'slowchild: a child of codex kept running after the time limit' || ok 'slowchild: the time limit ended codex and its children'
 
 run fb firebase "$repo" uncommitted "$T/out"
 expect_rc fb "$rc" 0
