@@ -54,7 +54,7 @@ import unicodedata
 sys.dont_write_bytecode = True  # no __pycache__ in the dotfiles at every stop
 
 STRIP = [
-    re.compile(r"(```|~~~)[\s\S]*?(?:\1|\Z)"),  # fenced code, also unclosed
+    re.compile(r"^[ \t]*(```|~~~)[\s\S]*?(?:\1|\Z)", re.M),  # fenced code, also unclosed; a fence opens at a line's start (a sentence that says ``` swallowed the 남은 것 line, 2026-11-07)
     re.compile(r"`[^`\n]*`"),  # inline code
     re.compile(r"^[ \t]*>[^\n]*", re.M),  # blockquote lines
     re.compile(r'"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’|「[^」\n]*」'),  # quoted text

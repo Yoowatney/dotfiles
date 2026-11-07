@@ -21,7 +21,7 @@ HANGUL_RATIO_MAX = 0.2  # Hangul/(Hangul+Latin): local English replies measured 
 
 # Removed before counting. ASCII-only classes on purpose: \w and \S match Hangul and would eat Korean text.
 STRIP = [
-    re.compile(r"(```|~~~)[\s\S]*?(?:\1|\Z)"),  # fenced code, also unclosed
+    re.compile(r"^[ \t]*(```|~~~)[\s\S]*?(?:\1|\Z)", re.M),  # fenced code, also unclosed; a fence opens at a line's start (a sentence that says ``` swallowed the 남은 것 line, 2026-11-07)
     re.compile(r"`[^`\n]*`"),  # inline code
     re.compile(r"^[ \t]*>[^\n]*", re.M),  # blockquote lines
     re.compile(r"^[ \t]*\|[^\n]*", re.M),  # table rows: data values, not prose

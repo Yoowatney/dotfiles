@@ -31,6 +31,22 @@ def result(text="1794000002.000300\n", error=False, ident="post"):
         {"type": "tool_result", "tool_use_id": ident, "is_error": error, "content": text}]}}
 
 
+class ProseTests(unittest.TestCase):
+    """A report that mentions a fence in a sentence still has its `남은 것:` line (19:03 report of 2026-11-07 was dropped)."""
+    LEFT = "남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨"
+
+    def test_a_fence_in_the_middle_of_a_line_opens_no_code(self):
+        for text in ("코드 블록(``` 와 `인라인`)은 그대로 둡니다.\n- 둘째 줄\n\n" + self.LEFT,
+                     "끝났습니다. ~~~ 는 물결 세 개입니다.\n" + self.LEFT):
+            self.assertIn("남은 것:", guard.prose(text))
+
+    def test_a_real_fence_still_hides_what_is_inside_it(self):
+        text = "명령입니다.\n```\n남은 것: 요유 몫: 없음\n```\n" + self.LEFT
+        self.assertEqual(guard.prose(text).count("남은 것:"), 1)
+        self.assertIn("남은 것:", guard.prose("```\n안\n```\n  ```\n들여 쓴 코드\n  ```\n" + self.LEFT))
+        self.assertNotIn("남은 것:", guard.prose("보고입니다.\n```\n열고 닫지 않은 코드\n" + self.LEFT))  # unclosed, as before
+
+
 class ThreadCallTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

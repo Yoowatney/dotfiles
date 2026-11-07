@@ -740,6 +740,7 @@ def selftest():
     os.environ.pop("HERDR_SOCKET_PATH", None)  # never the live server
     close = [
         "끝났습니다.\n\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨",  # this session, 2026-10-28
+        "코드 블록(``` 와 `인라인`)은 그대로 둡니다.\n\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨",  # a fence in a sentence hid this line, 2026-11-07
         "남은 것: 요유 몫: 없음 · 유요 몫: watch 대기 · 세션: 닫음",
         "남은 것: 요유 몫: GitHub에서 draft PR 머지 · 유요 몫: 없음 · 세션: 닫음",  # 요유's part is outside the tab
         "남은 것:\n- 요유 몫: 없음\n- 유요 몫: 없음\n- 세션: 닫아도 됨",
