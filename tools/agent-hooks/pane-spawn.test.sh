@@ -160,6 +160,19 @@ NOUPDATE="-c check_for_update_on_startup=false"
 # Claude pane it runs with no sandbox, guarded by the same PreToolUse hooks, and nobody answers an approval prompt.
 UNBOXED="--sandbox danger-full-access --ask-for-approval never"
 has "--kind codex --pane w1:new --timeout 120000 -- $UNBOXED $NOUPDATE -m gpt-5" "a codex work pane runs unsandboxed, skips its update prompt, then its arguments"
+# Codex refuses an option given twice (`cannot be used multiple times`, Codex 0.167), so the caller's own choice wins.
+for own in "--sandbox read-only" "--sandbox=read-only" "-s read-only" "--full-auto" "--dangerously-bypass-approvals-and-sandbox"; do
+  # shellcheck disable=SC2086
+  SESSIONLESS=1 ps --kind codex "조사" "지시" -- $own >/dev/null
+  hasnt "danger-full-access" "the caller's sandbox wins ($own)"
+done
+for own in "--ask-for-approval on-request" "--ask-for-approval=untrusted" "-a on-request" "--full-auto" "--dangerously-bypass-approvals-and-sandbox"; do
+  # shellcheck disable=SC2086
+  SESSIONLESS=1 ps --kind codex "조사" "지시" -- $own >/dev/null
+  hasnt "--ask-for-approval never" "the caller's approval policy wins ($own)"
+done
+SESSIONLESS=1 ps --kind codex "조사" "지시" -- -s read-only >/dev/null
+has "--ask-for-approval never -c check_for_update_on_startup=false -s read-only" "an approval the caller left out is still never"
 has "agent prompt w1:new 지시" "codex gets the instruction"
 hasnt "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" "a codex pane keeps its environment"
 
