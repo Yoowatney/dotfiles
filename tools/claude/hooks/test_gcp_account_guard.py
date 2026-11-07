@@ -1,6 +1,7 @@
 """Credential refusals explain the per-command ADC route only in the main pane."""
 import importlib.util
 from pathlib import Path
+import sys
 import unittest
 
 
@@ -60,4 +61,5 @@ class CredentialRefusalTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    # The repository pre-push hook discovers Python tests that support --selftest.
+    unittest.main(argv=[sys.argv[0]] if sys.argv[1:] == ["--selftest"] else None)
