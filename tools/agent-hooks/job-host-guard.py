@@ -16,6 +16,7 @@ the widest matcher, so this reaches open sessions and needs no new approval in C
 from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
 
 import hashlib
+import importlib.util
 import os
 import re
 import subprocess
@@ -30,7 +31,7 @@ ASK = ("job-host: 회사맥에 정기 잡을 올리거나 바꾸기 직전입니
        "아니면 이 호출을 버리고 회사서버맥에 올리세요. 어디에 둘지 판단할 수 없으면 요유에게 물으세요.")
 # Nobody reads a job tab, so a question it can answer by repeating itself is no stop (요유 2026-11-01, api#975).
 JOB_ASK = ("job-host: 자동 세션은 회사맥의 정기 잡을 올리거나 바꾸지 않습니다. 같은 호출을 반복해도 통과하지 않습니다. 하던 일은 여기서 멈추고, "
-           "어떤 잡을 왜 어느 머신에 둘지 board.sh comment로 남긴 뒤 owner를 yoyoo로 넘기세요. Claude 탭은 요유가 직접 입력하면 풀립니다.")
+           "어떤 잡을 왜 어느 머신에 둘지 board.sh comment로 남긴 뒤 owner를 yoyoo로 넘기세요. 이 탭에 요유가 직접 입력하면 풀립니다.")
 NAMES = re.compile(r"launchctl|crontab|install-launchd|LaunchAgents")
 HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?([^\n]*)\n(.*?)\n[ \t]*\1\b", re.S)
 QUOTED = re.compile(r"""'[^']*'|"(?:[^"\\]|\\.)*\"""")
@@ -88,16 +89,18 @@ def job_target(payload: dict) -> str | None:
 
 def job_tab(payload: dict, env: dict) -> bool:
     """A job tab nobody has typed in. The rule is dispatch/guard.sh's: 요유's own prompt lifts a dispatch tab for good and an
-    ambient tab until the next round; an unreadable transcript lifts nothing. A Codex job tab records no such prompt, so it stays on."""
-    ambient, marker = bool(env.get("MUNICE_AMBIENT")), "ambient-round" if env.get("MUNICE_AMBIENT") else "auto-dispatch"
-    if not ambient and not env.get("MUNICE_AUTO_DISPATCH"):
+    ambient tab until the next round; an unreadable transcript lifts nothing in either engine."""
+    if not env.get("MUNICE_AMBIENT") and not env.get("MUNICE_AUTO_DISPATCH"):
         return False
     try:
-        with open(str(payload.get("transcript_path") or ""), encoding="utf-8", errors="replace") as f:
-            prompts = [line for line in f if '"origin":{"kind":"human"}' in line.replace(" ", "")]
-    except OSError:
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "unattended-session.py")
+        spec = importlib.util.spec_from_file_location("unattended_session", path)
+        reader = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reader)
+        return reader.active(str(payload.get("transcript_path") or ""), "ambient" if env.get("MUNICE_AMBIENT") else "dispatch")
+    except Exception:
+        # This guard must survive a missing, partially synced, or broken reader.
         return True
-    return marker in prompts[-1] if ambient and prompts else all(marker in line for line in prompts)
 
 
 def check(payload: dict, env: dict) -> str | None:
