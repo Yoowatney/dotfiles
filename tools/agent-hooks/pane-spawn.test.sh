@@ -218,8 +218,16 @@ has "pane split --pane w7:p3 --direction right --cwd $PWD --no-focus --env MISE_
 has "$NPROC" "a Codex pane: the lower limit"
 # The pane's shell is what lowers it: zshrc reads the variable. Checked on a real zsh with this repo's zshrc.
 mkdir -p "$SANDBOX/zdot" && ln -s "$(cd "$(dirname "$SUBJECT")/../../shell/zsh" && pwd)/zshrc" "$SANDBOX/zdot/.zshrc"
-got=$(PANE_SPAWN_NPROC=4321 ZDOTDIR="$SANDBOX/zdot" zsh -i -c 'ulimit -Su' 2>/dev/null </dev/null | tail -1)
-[ "$got" = 4321 ] || fail "a pane's shell lowers its process limit to PANE_SPAWN_NPROC: got [$got]"
+# Hosted runners can have a hard limit below 4321. Stay strictly below it so
+# the assertion still fails when zshrc does not apply the requested soft cap.
+nproc=4321
+hard_nproc=$(zsh -fc 'ulimit -Hu')
+if [[ "$hard_nproc" =~ ^[0-9]+$ ]] && (( hard_nproc <= nproc )); then
+  nproc=$((hard_nproc - 1))
+fi
+(( nproc > 0 )) || fail "the process hard limit is too small for the shell probe"
+got=$(PANE_SPAWN_NPROC="$nproc" ZDOTDIR="$SANDBOX/zdot" zsh -i -c 'ulimit -Su' 2>/dev/null </dev/null | tail -1)
+[ "$got" = "$nproc" ] || fail "a pane's shell lowers its process limit to PANE_SPAWN_NPROC: expected [$nproc], got [$got]"
 
 # A pane that was not ready for the first start is tried again.
 FAIL_START=1 ps "재시도" "지시" >/dev/null
