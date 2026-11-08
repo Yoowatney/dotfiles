@@ -73,6 +73,21 @@ class WordingTests(unittest.TestCase):
                 self.assertTrue(hook.yoyoo_wording_problems({"channel_id": "C_MAIN_FIXTURE", "text": "text"}))
                 self.assertTrue(hook.yoyoo_wording_problems({"channel_id": "D_YOYOO_FIXTURE", "text": "text"}))
 
+    def test_a_stale_or_broken_shared_checker_refuses_instead_of_crashing(self):
+        # A crash lets the call through with every later check skipped, the tag of a teammate who left included.
+        for label, collect, words, target in (
+                ("collect without YOYOO_DM", 'MAIN_CHANNEL="C_MAIN_FIXTURE"\nYOYOO="U_YOYOO_FIXTURE"\n', 'import re\nPANE_WORD=re.compile("x")\n', "C_OTHER"),
+                ("collect fails on import", 'raise RuntimeError("fixture")\n', 'import re\nPANE_WORD=re.compile("x")\n', "C_OTHER"),
+                ("collect does not parse", 'MAIN_CHANNEL = (\n', 'import re\nPANE_WORD=re.compile("x")\n', "C_OTHER"),
+                ("detector without PANE_WORD", 'MAIN_CHANNEL="C_MAIN_FIXTURE"\nYOYOO="U_YOYOO_FIXTURE"\nYOYOO_DM="D_YOYOO_FIXTURE"\n', 'X = 1\n', "C_MAIN_FIXTURE")):
+            with self.subTest(label), tempfile.TemporaryDirectory() as folder:
+                for name, body in (("ambient/collect.py", collect), ("main/pane_wording.py", words)):
+                    (Path(folder) / name).parent.mkdir(exist_ok=True)
+                    (Path(folder) / name).write_text(body)
+                payload = {"tool_name": "mcp__slack__slack_post_message", "tool_input": {"channel_id": target, "text": "<@U0LEFT>"}}
+                with mock.patch.object(hook, "AGENT_BOARD", folder), mock.patch.object(hook, "fresh_reason", return_value=None):
+                    self.assertIn("용어 검사를 읽지 못했습니다", hook.check(payload) or "")
+
 
 if __name__ == "__main__":
     unittest.main()

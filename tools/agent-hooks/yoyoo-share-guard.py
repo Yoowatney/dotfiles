@@ -156,7 +156,7 @@ JOB_NOTE = ("자동 칸이 요유의 결정이나 손을 기다립니다. 결과
             "바로 처리할 일이 아니면 모아 둔 결정에 더하고 턴을 짧게 끝내세요. 그 칸은 입력을 받지 않으니 이어 갈 일은 새 칸에 맡기고, "
             "production 단계는 메인 칸에서 직접 하세요")
 CHECK_AGENT = re.compile(r"^spawn-[0-9A-Za-z]+-chk")  # pane-spawn --check's agent name, which a pane rename does not change
-BY_CHECK_PANE = re.compile(r"확인[ \t]*칸")
+BY_CHECK_PANE = re.compile(r"확인[ \t]*(?:칸|세션)")  # 세션 is the main pane skill's own word for it
 SPAWN_CHECK = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?pane-spawn(?:\s+--[\w-]+(?:\s+[^\s\"'-]\S*)?)*?\s+--check\b")
 QUOTED = re.compile(r"\"(?:\\.|[^\"\\])*\"|'[^']*'")
 # pane-spawn prints the pane alone on a line once it has opened, and starts each of its error lines, "shows no work" too, with its name (in
@@ -1388,7 +1388,9 @@ def selftest():
     check_told = ("[pane-tell: '확인 로그인' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] "
                   f"확인 칸의 마지막 보고입니다(칸을 닫기 전에 보냅니다). {CHECK_NOTE}:\nnpm test 12개 통과를 봤습니다.\n남은 것: 요유 몫: 없음 · 세션: 닫음")
     by_check = f"확인: 확인 칸이 `npm test`를 다시 돌려 12개 통과를 봤습니다.\n{bare}"
-    no_word = f"확인: `npm test` 12개 통과를 봤습니다.\n{bare}"
+    # the main pane skill's own example says 확인 세션 (the main pane was sent back twice for it, 2026-11-08)
+    by_check_session = f"확인: 확인 세션이 `npm test`를 다시 돌려 12개 통과를 봤습니다.\n{bare}"
+    no_word =f"확인: `npm test` 12개 통과를 봤습니다.\n{bare}"
     spawn_check = claude_call("Bash", "k1", command='pane-spawn --check "로그인" "npm test를 돌려 보세요"')
 
     def spawned(command, output="workers/w1:pQ"):
@@ -1507,6 +1509,7 @@ def selftest():
                 ("an instruction from a heredoc", [claude_in(told), *spawned("pane-spawn --check \"a\" \"$(cat <<'EOF'\nit's a; pane-spawn x\nEOF\n)\"")], bare),
                 ("the real main pane's command", [claude_in(told), *spawned(real_check)], bare),
                 ("what the check pane ran and saw", [claude_in(check_told)], by_check),
+                ("what the check session ran and saw", [claude_in(check_told)], by_check_session),
                 ("no command of its own after a check pane's report", [claude_in(told), spawn_check, said("m1", "맡겼습니다."), claude_in(check_told)], by_check),
                 ("answered in an earlier turn", [claude_in(check_told), said("m1", bare), claude_in("다음")], bare),
                 ("no pane report arrived", [claude_in("배포해 줘")], bare),
