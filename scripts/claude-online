@@ -86,4 +86,20 @@ case "$role" in
       [ -z "$rules_file" ] || profile_args+=(--append-system-prompt-file "$rules_file")
     fi ;;
 esac
+# A Claude check needs process and network inspection too. Protect the checked
+# folder in the whole process tree, including Edit/Write and shell children;
+# Claude's Bash-only sandbox would leave its file tools outside that boundary.
+# Resolve symlinks before building the Seatbelt literal, and fail closed.
+if [ -n "${CLAUDE_CHECK_TARGET:-}" ]; then
+  [ "$(uname -s)" = Darwin ] && [ -x /usr/bin/sandbox-exec ] || { echo 'claude-online: check protection requires macOS sandbox-exec' >&2; exit 1; }
+  target=$(cd "$CLAUDE_CHECK_TARGET" 2>/dev/null && pwd -P) || { echo 'claude-online: check target must be an existing folder' >&2; exit 1; }
+  literal=$(jq -Rn --arg target "$target" '$target') || exit 1
+  # ps is setuid and cannot exec under Seatbelt without this exception.
+  # Only Apple's immutable read-only binary leaves the sandbox. A copied or
+  # similarly named executable and shell redirections keep the write boundary.
+  seatbelt="(version 1)(allow default)(deny file-write* (subpath $literal))"
+  seatbelt+='(allow process-exec (literal "/bin/ps") (with no-sandbox))'
+  exec /usr/bin/sandbox-exec -p "$seatbelt" \
+    "${CLAUDE_BIN:-claude}" ${profile_args[@]+"${profile_args[@]}"} "$@"
+fi
 exec claude ${profile_args[@]+"${profile_args[@]}"} "$@"

@@ -374,6 +374,51 @@ check "and goes once the box is empty" "$(prompts)|$(grep -c '찬 칸' "$SANDBOX
 main_panes idle; b="$SANDBOX/state/pane-tell/batch/term_pM/open"; mkdir -p "$b"; echo 1 > "$b/.t"; printf '%s' "[pane-tell: 'x' …] 묵은 글" > "$b/0000000001.000000.1"
 out=$(pt "메인 오케" "새 글"); batched
 check "a batch nobody sent (the Mac restarted) goes at once, with the next message" "${out%% (*}|$(prompts)|$(tr '\n' ' ' < "$SANDBOX/log" | grep -c '묵은 글  \[pane-tell.*새 글')" "told w1:pM|1|1"
+# Lead/worker relays use the same hold and exceptions as the main, for fresh Claude and Codex receivers.
+echo unrelated_main > "$SANDBOX/state/orchestrator/main"
+peer_panes() { # receiver kind, receiver role, state
+  main_panes "$3"
+  jq --arg k "$1" --arg r "$2" '.result.panes[0].agent=$k |
+    .result.panes[0].label=("🟢 " + $r + " 대상") |
+    .result.panes[2].label=(if $r == "👑" then "🟢 🫡 구현" else "🟢 👑 리드" end)' \
+    "$SANDBOX/panes" > "$SANDBOX/peer-panes"
+  mv "$SANDBOX/peer-panes" "$SANDBOX/panes"
+  if [ "$1" = codex ]; then printf '› \033[2mAsk anything\033[0m\n' > "$SANDBOX/screen"; else claude_screen > "$SANDBOX/screen"; fi
+}
+for receiver in claude codex; do
+  for role in 👑 🫡; do
+    peer_panes "$receiver" "$role" idle
+    out1=$(pt w1:pM "첫 결과"); out2=$(pt w1:pM "둘째 결과")
+    check "$receiver $role: both normal relays held" "$(held "$out1")|$(held "$out2")|$(prompts)" \
+      "queued for w1:pM ($role 대상)|queued for w1:pM ($role 대상)|0"
+    batched
+    check "$receiver $role: one prompt after the hold with both marked messages" \
+      "$(prompts)|$(grep -c '\[pane-tell:' "$SANDBOX/log")" "1|2"
+    peer_panes "$receiver" "$role" working; out=$(pt w1:pM "진행 중 결과")
+    check "$receiver $role: working receiver takes it immediately" "${out%% (*}|$(prompts)" "told w1:pM|1"
+    for urgent_text in "장애: 요청 실패" "보안 확인 필요" "긴급 확인" "prod 허용" "staging 허용" "[main-refresh] 정리"; do
+      peer_panes "$receiver" "$role" idle
+      pt w1:pM "대기 결과" >/dev/null
+      out=$(pt w1:pM "$urgent_text"); batched
+      check "$receiver $role: $urgent_text flushes held result first, then goes alone" \
+        "${out%% (*}|$(prompts)|$(head -1 "$SANDBOX/log" | grep -c '대기 결과')|$(tail -1 "$SANDBOX/log" | grep -c '대기 결과')" "told w1:pM|2|1|0"
+    done
+    peer_panes "$receiver" "$role" idle
+    b="$SANDBOX/state/pane-tell/batch/term_pM/open"; mkdir -p "$b"; echo 1 > "$b/.t"
+    printf '%s' "[pane-tell: 'x' …] 묵은 결과" > "$b/0000000001.000000.1"
+    out=$(pt w1:pM "prod 허용"); batched
+    check "$receiver $role: a grant stays alone even after a stale batch" \
+      "${out%% (*}|$(prompts)|$(head -1 "$SANDBOX/log" | grep -c '묵은 결과')|$(tail -1 "$SANDBOX/log" | grep -c '묵은 결과')" "told w1:pM|2|1|0"
+    peer_panes "$receiver" "$role" idle
+    out=$(PANE_TELL_BATCH=0 pt w1:pM "바로 결과")
+    check "$receiver $role: explicit batching off" "${out%% (*}|$(prompts)" "told w1:pM|1"
+    touch "$SANDBOX/state/pane-tell/batch-off"
+    out=$(pt w1:pM "바로 결과")
+    check "$receiver $role: batch-off file" "${out%% (*}|$(prompts)" "told w1:pM|1"
+    rm -f "$SANDBOX/state/pane-tell/batch-off"
+  done
+done
+claude_screen > "$SANDBOX/screen"
 rm -f "$SANDBOX/state/orchestrator/main"; unset PANE_TELL_BATCH
 
 exit $fails

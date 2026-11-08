@@ -262,6 +262,47 @@ DATA_FILE = re.compile(r"(?:-d|--data(?:-binary|-raw)?|-F|--form)[=\s]+['\"]?(?:
 ASSIGN = re.compile(r"(?:^|[\s;&|(])(\w+)=(\"[^\"\n]*\"|'[^'\n]*'|[^\s;&|]+)")
 CD = re.compile(r"(?:^|[;&|]\s*)cd\s+(['\"]?)([^\s;&|'\"]+)\1", re.M)
 AGENT_BOARD = "/Users/yoyoo/work/munice/.agents/skills/agent-board"
+
+
+def wording_modules(target):
+    """Read the recipient identities and word detector from their existing source of truth."""
+    sys.path.insert(0, os.path.join(AGENT_BOARD, "ambient"))
+    modules = []
+    for name, path in (("_wording_collect", "ambient/collect.py"), ("_yoyoo_words", "main/pane_wording.py")):
+        if modules and target not in (modules[0].MAIN_CHANNEL, modules[0].YOYOO, modules[0].YOYOO_DM):
+            return modules[0], None
+        spec = importlib.util.spec_from_file_location(name, os.path.join(AGENT_BOARD, path))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        modules.append(module)
+    return modules
+
+
+def message_text(value):
+    """Extract display text from a send string or a structured edit/block message."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(message_text(item) for item in value)
+    if isinstance(value, dict):
+        visible = {"text", "markdown_text", "alt_text", "accessibility_label", "fallback", "title", "label", "description", "placeholder"}
+        return "\n".join(message_text(item) for key, item in value.items()
+                         if key in visible or isinstance(item, (dict, list)))
+    return ""
+
+
+def yoyoo_wording_problems(inp):
+    target = inp.get("channel_id") or inp.get("channel")
+    try:
+        collect, words = wording_modules(target)
+    except (OSError, ImportError):
+        return ["요유에게 보낼 글의 용어 검사를 읽지 못했습니다. 공용 전송 코드 설치를 확인하세요."]
+    if target in (collect.MAIN_CHANNEL, collect.YOYOO, collect.YOYOO_DM) and words.PANE_WORD.search(
+            message_text(inp.get("text") or inp.get("message"))):
+        return ['요유에게 보낼 글은 "칸" 대신 "세션"으로 쓰세요(메인 세션, 확인 세션, 부하 세션).']
+    return []
+
+
 DIRECT_FIX = (
     "세션이 블록 없이 Slack API를 직접 불러 글을 쓰려 했다. 그러면 `1.`, `- ` 줄이 목록이 아니라 글자로 나간다(cf#752). "
     f"공용 클라이언트를 쓸 것: 팀 채널·스레드·DM은 `python3 {AGENT_BOARD}/main/main-channel.py reply --channel <C|D|G…> "
@@ -609,17 +650,16 @@ def selftest():
     print("selftest ok")
 
 
-if __name__ == "__main__":
-    if "--selftest" in sys.argv:
-        selftest()
-        sys.exit()
-    payload = json.load(sys.stdin)
+def check(payload):
     tool = payload.get("tool_name") or ""
     inp = payload.get("tool_input") or {}
-    if "slack" in tool.lower() and "text" in inp:  # the Slack MCP post tools
-        found, fix = left_problems(inp.get("text") or ""), LEFT_FIX
-        if not found:
-            found, fix = problems(inp.get("text") or ""), FIX + "\n" + MENTION_FIX
+    if "slack" in tool.lower() and ("text" in inp or "message" in inp):  # the Slack MCP post tools
+        text = inp.get("text") or inp.get("message") or ""
+        found, fix = yoyoo_wording_problems(inp), '요유에게는 "세션"이라고 씁니다.'
+        if not found and "text" in inp:
+            found, fix = left_problems(text), LEFT_FIX
+        if not found and "text" in inp:
+            found, fix = problems(text), FIX + "\n" + MENTION_FIX
     else:
         cwd = payload.get("cwd") or os.getcwd()
         found, fix = left_bash_problems(inp.get("command") or "", cwd), LEFT_FIX
@@ -632,7 +672,14 @@ if __name__ == "__main__":
             found, fix = code_problems(tool, inp, cwd), CODE_FIX
         if not found and "slackcopy" in (inp.get("command") or ""):  # a markdown file headed for the clipboard
             found, fix = slackcopy_problems(inp["command"], load_members()), MENTION_FIX
-    reason = "Slack 형식 검사에 걸렸습니다.\n- " + "\n- ".join(found) + "\n" + fix if found else fresh_reason(payload)
+    return "Slack 형식 검사에 걸렸습니다.\n- " + "\n- ".join(found) + "\n" + fix if found else fresh_reason(payload)
+
+
+if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        selftest()
+        sys.exit()
+    reason = check(json.load(sys.stdin))
     if reason:  # JSON deny: Claude Code and Codex both read it
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",

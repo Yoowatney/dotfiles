@@ -218,8 +218,16 @@ has "pane split --pane w7:p3 --direction right --cwd $PWD --no-focus --env MISE_
 has "$NPROC" "a Codex pane: the lower limit"
 # The pane's shell is what lowers it: zshrc reads the variable. Checked on a real zsh with this repo's zshrc.
 mkdir -p "$SANDBOX/zdot" && ln -s "$(cd "$(dirname "$SUBJECT")/../../shell/zsh" && pwd)/zshrc" "$SANDBOX/zdot/.zshrc"
-got=$(PANE_SPAWN_NPROC=4321 ZDOTDIR="$SANDBOX/zdot" zsh -i -c 'ulimit -Su' 2>/dev/null </dev/null | tail -1)
-[ "$got" = 4321 ] || fail "a pane's shell lowers its process limit to PANE_SPAWN_NPROC: got [$got]"
+# Hosted runners can have a hard limit below 4321. Stay strictly below it so
+# the assertion still fails when zshrc does not apply the requested soft cap.
+nproc=4321
+hard_nproc=$(zsh -fc 'ulimit -Hu')
+if [[ "$hard_nproc" =~ ^[0-9]+$ ]] && (( hard_nproc <= nproc )); then
+  nproc=$((hard_nproc - 1))
+fi
+(( nproc > 0 )) || fail "the process hard limit is too small for the shell probe"
+got=$(PANE_SPAWN_NPROC="$nproc" ZDOTDIR="$SANDBOX/zdot" zsh -i -c 'ulimit -Su' 2>/dev/null </dev/null | tail -1)
+[ "$got" = "$nproc" ] || fail "a pane's shell lowers its process limit to PANE_SPAWN_NPROC: expected [$nproc], got [$got]"
 
 # A pane that was not ready for the first start is tried again.
 FAIL_START=1 ps "재시도" "지시" >/dev/null
@@ -492,8 +500,9 @@ hasnt "MISE_" "a Claude pane runs commands without the shims first, so it needs 
 ps --why skill "조사" "지시" >/dev/null
 has "--kind claude" "a pane that does the job is still Claude"
 hasnt "--sandbox" "and has no sandbox"
-# A check that must write to GitHub, Slack or the board asks for Claude: Sonnet at high effort, as before.
+# An explicit Claude check keeps process/network reads and protects the target.
 out=$(ps --check --kind claude "api#1 로그인" "npm test를 돌려 보세요")
+has "--env CLAUDE_CHECK_TARGET=$PWD" "a Claude check protects its checked folder for the whole process tree"
 has "[workers] tab create --workspace w2 --cwd $PWD --label 확인 api#1 로그인 --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1" "a workers pane has no advisor"
 has "--kind claude --pane w1:new --timeout 120000 -- --model claude-sonnet-5-5 --effort high" "a Claude check pane runs Sonnet at high effort"
 hasnt "--sandbox" "a Claude check pane gets no Codex flag"
