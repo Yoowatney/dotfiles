@@ -293,14 +293,15 @@ def message_text(value):
 
 def yoyoo_wording_problems(inp):
     target = inp.get("channel_id") or inp.get("channel")
+    # Any failure refuses: a crashed hook lets the call through with every later check skipped, the tag of
+    # a teammate who left included (a stale shared checkout lacks a name, review 2026-11-08).
     try:
         collect, words = wording_modules(target)
-    except (OSError, ImportError):
+        found = target in (collect.MAIN_CHANNEL, collect.YOYOO, collect.YOYOO_DM) and words.PANE_WORD.search(
+            message_text(inp.get("text") or inp.get("message")))
+    except Exception:
         return ["요유에게 보낼 글의 용어 검사를 읽지 못했습니다. 공용 전송 코드 설치를 확인하세요."]
-    if target in (collect.MAIN_CHANNEL, collect.YOYOO, collect.YOYOO_DM) and words.PANE_WORD.search(
-            message_text(inp.get("text") or inp.get("message"))):
-        return ['요유에게 보낼 글은 "칸" 대신 "세션"으로 쓰세요(메인 세션, 확인 세션, 부하 세션).']
-    return []
+    return ['요유에게 보낼 글은 "칸" 대신 "세션"으로 쓰세요(메인 세션, 확인 세션, 부하 세션).'] if found else []
 
 
 DIRECT_FIX = (
