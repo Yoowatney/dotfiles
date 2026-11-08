@@ -10,6 +10,7 @@ echo 'ip_address: 127.0.0.1'
 SH
 cat >"$box/bin/claude" <<'SH'
 #!/bin/bash
+[ -z "${CLAUDE_LOCAL_PROBE:-}" ] || exec /usr/bin/python3 "$CLAUDE_LOCAL_PROBE"
 printf '%s\n' "$@"
 SH
 cat >"$box/bin/herdr" <<'SH'
@@ -34,7 +35,7 @@ cat >"$box/home/work/munice/CLAUDE.local.md" <<'MD'
 ## SKIP_LOCAL
 <!-- /pane:skip -->
 MD
-run() { env PATH="$box/bin:$PATH" HOME="$box/home" XDG_STATE_HOME="${STATE:-$box/state}" HERDR_PANE_ID=w1:p1 CLAUDE_STARTUP_ROLE="${ROLE:-}" CLAUDE_STARTUP_PROFILE="${PROFILE:-}" CLAUDE_STARTUP_ARTIFACT="${ARTIFACT:-}" CLAUDE_STARTUP_SKILLS="${SKILLS:-}" bash "$ROOT/scripts/claude-online" "$@"; }
+run() { env PATH="$box/bin:$PATH" CLAUDE_BIN="$box/bin/claude" HOME="$box/home" XDG_STATE_HOME="${STATE:-$box/state}" HERDR_PANE_ID=w1:p1 CLAUDE_STARTUP_ROLE="${ROLE:-}" CLAUDE_STARTUP_PROFILE="${PROFILE:-}" CLAUDE_STARTUP_ARTIFACT="${ARTIFACT:-}" CLAUDE_STARTUP_SKILLS="${SKILLS:-}" bash "$ROOT/scripts/claude-online" "$@"; }
 fail() { echo "FAIL: $1"; exit 1; }
 arg_after() { awk -v f="$1" 'p { print; exit } $0 == f { p = 1 }'; }
 
@@ -97,4 +98,39 @@ jq -e '.enableArtifact == false' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fai
 [[ "$(ROLE=worker PROFILE=full run --version)" == --version ]] || fail 'full opt-out'
 rm "$box/state/orchestrator/main"
 [[ "$(run --version)" == --version ]] || fail 'a session opened by hand gets no profile'
+# A check's whole child tree may inspect processes/network, but cannot write its
+# target, even through a symlink. The executable is a local probe, never Claude.
+if [ "$(uname -s)" = Darwin ]; then
+  target="$box/target \"quoted\""
+  mkdir -p "$target" "$box/scratch"
+  printf original >"$target/existing"
+  ln -s "$target" "$box/target-link"
+  cat >"$box/check-probe.py" <<'PY'
+import http.server, os, pathlib, subprocess, threading, urllib.request
+target = pathlib.Path(os.environ['CLAUDE_CHECK_TARGET'])
+scratch = pathlib.Path(os.environ['CHECK_SCRATCH'])
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers(); self.wfile.write(b'ok')
+    def log_message(self, *args): pass
+server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+threading.Thread(target=server.handle_request, daemon=True).start()
+assert urllib.request.urlopen(f'http://127.0.0.1:{server.server_port}', timeout=3).read() == b'ok'
+server.server_close()
+(scratch / 'allowed').write_text('ok')
+for path in [target / 'new', target / 'existing', pathlib.Path(os.environ['CHECK_CANONICAL']) / 'new']:
+    try: path.write_text('changed')
+    except PermissionError: pass
+    else: raise AssertionError(f'check wrote target: {path}')
+assert (target / 'existing').read_text() == 'original'
+assert subprocess.check_output(['/bin/ps', '-p', '1', '-o', 'pid=']).strip() == b'1'
+# A shell child, including its redirection around an allowed ps, stays confined.
+for command in ['printf changed > "$CLAUDE_CHECK_TARGET/shell-new"', '/bin/ps -p 1 > "$CLAUDE_CHECK_TARGET/ps-new"']:
+    assert subprocess.run(['/bin/sh', '-c', command], stderr=subprocess.DEVNULL).returncode != 0
+print('PASS: fresh Claude launcher child reads ps/network; target and shell writes denied')
+PY
+  CLAUDE_CHECK_TARGET="$box/target-link" CHECK_CANONICAL="$target" CHECK_SCRATCH="$box/scratch" CLAUDE_LOCAL_PROBE="$box/check-probe.py" ROLE=worker run
+  # Invalid targets must fail closed instead of opening an unprotected check.
+  if CLAUDE_CHECK_TARGET="$box/missing" run >/dev/null 2>&1; then fail 'missing check target must refuse launch'; fi
+fi
 echo 'PASS: startup role, main detection, opt-out, arguments, safety settings, and filtered pane rules'

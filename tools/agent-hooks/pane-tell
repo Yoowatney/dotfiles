@@ -26,7 +26,8 @@
 #   pane-tell --raw <pane id> "<message>"       the same door for a prompt a machine types as it is, into any pane; one that
 #                                               has to wait stays for the session in the pane now, like every queued message
 #   pane-tell --box-ready <pane id> <kind>      exit 0 when the box is empty and in view (ambient/deliver.py asks this)
-# Batching (api#1051): a marked message for the main pane (the terminal in orchestrator/main) while it rests opens a batch, and
+# Batching (api#1051): a marked message for the main pane (the terminal in orchestrator/main), a lead (👑), or a worker (🫡)
+# while it rests opens a batch, and
 # all that comes for it in the next PANE_TELL_BATCH seconds (120; 0, or a file batch-off in the state folder, turns batching
 # off) goes as one prompt, each message with
 # its own mark, a blank line between: it prints "queued for … held …" and exits 0. The main pane read about 210k tokens a turn,
@@ -293,7 +294,12 @@ msg="[pane-tell: '${from:-자동 작업}' 세션이 보낸 글입니다. 요유�
 sender=$(awk -F'\t' -v me="$me" '$1 == me {print $7}' <<<"$mine")
 # A pane on another server is named with its server: a caller reusing a bare id would type into a different pane on its own.
 shown=$pane; [ -z "$there" ] || shown=$(srv "$there")/$pane
-if [ "$BATCH" -gt 0 ] 2>/dev/null && [ "$terminal" = "$(cat "${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main" 2>/dev/null)" ]; then
+batch_target=
+if [ -n "$terminal" ]; then
+  if [ "$terminal" = "$(cat "${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main" 2>/dev/null)" ]; then batch_target=1; fi
+  case "$name" in "👑 "* | "🫡 "*) batch_target=1 ;; esac
+fi
+if [ "$BATCH" -gt 0 ] 2>/dev/null && [ -n "$batch_target" ]; then
   umask 077 # messages can name customers
   dir=$STATE/batch/$terminal
   mkdir -p "$dir" || die "cannot keep the message"
@@ -301,20 +307,20 @@ if [ "$BATCH" -gt 0 ] 2>/dev/null && [ "$terminal" = "$(cat "${XDG_STATE_HOME:-$
     local j; j=$(take "$dir"); [ -n "$j" ] || return 0
     tell "$pane" "$kind" "$(cat "$j")" "$terminal" "" "" ""; local rc=$?; rm -f "$j"; return $rc
   }
-  # A batch older than its hold has no process left to send it (the Mac restarted): it goes now, with this message.
-  if [ -d "$dir/open" ] && [ $(( $(date +%s) - $(cat "$dir/open/.t" 2>/dev/null || echo 0) )) -gt $(( BATCH + 60 )) ] && add "$dir" "$msg"; then
-    if held_now; then echo "told $shown ($name)"; else echo "queued for $shown ($name): its input box is not empty, so this goes in once it is"; fi
-    exit 0
-  fi
   if urgent "$2"; then
     held_now # what was held goes first: a grant counts only for the turn it starts, so it must be the last prompt
   else
+    # A stale batch has no sender left (the Mac restarted). Urgent messages above must still arrive alone.
+    if [ -d "$dir/open" ] && [ $(( $(date +%s) - $(cat "$dir/open/.t" 2>/dev/null || echo 0) )) -gt $(( BATCH + 60 )) ] && add "$dir" "$msg"; then
+      if held_now; then echo "told $shown ($name)"; else echo "queued for $shown ($name): its input box is not empty, so this goes in once it is"; fi
+      exit 0
+    fi
     if [ ! -d "$dir/open" ] && case "$("$H" pane get "$pane" 2>/dev/null | jq -r '.result.pane.agent_status // ""')" in idle | done) true ;; *) false ;; esac &&
       mkdir "$dir/open" 2>/dev/null; then
       date +%s > "$dir/open/.t"
       nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' bash "$0" --flush "$dir" "$terminal" </dev/null >/dev/null 2>&1 &
     fi
-    if add "$dir" "$msg"; then echo "queued for $shown ($name): held up to ${BATCH}s to go in one prompt with what else comes for the main pane"; exit 0; fi
+    if add "$dir" "$msg"; then echo "queued for $shown ($name): held up to ${BATCH}s to go in one prompt with what else comes for this session"; exit 0; fi
   fi
 fi
 if tell "$pane" "$kind" "$msg" "$terminal" "$sid" "$sender" "${there:+$here}"; then echo "told $shown ($name)"; exit 0; fi

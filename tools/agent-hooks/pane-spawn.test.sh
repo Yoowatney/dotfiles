@@ -492,8 +492,9 @@ hasnt "MISE_" "a Claude pane runs commands without the shims first, so it needs 
 ps --why skill "조사" "지시" >/dev/null
 has "--kind claude" "a pane that does the job is still Claude"
 hasnt "--sandbox" "and has no sandbox"
-# A check that must write to GitHub, Slack or the board asks for Claude: Sonnet at high effort, as before.
+# An explicit Claude check keeps process/network reads and protects the target.
 out=$(ps --check --kind claude "api#1 로그인" "npm test를 돌려 보세요")
+has "--env CLAUDE_CHECK_TARGET=$PWD" "a Claude check protects its checked folder for the whole process tree"
 has "[workers] tab create --workspace w2 --cwd $PWD --label 확인 api#1 로그인 --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1" "a workers pane has no advisor"
 has "--kind claude --pane w1:new --timeout 120000 -- --model claude-sonnet-5-5 --effort high" "a Claude check pane runs Sonnet at high effort"
 hasnt "--sandbox" "a Claude check pane gets no Codex flag"

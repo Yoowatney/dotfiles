@@ -1,0 +1,33 @@
+name: Session tools
+on:
+  pull_request:
+    paths:
+      - 'tools/agent-hooks/pane-tell*'
+      - 'tools/agent-hooks/pane-spawn*'
+      - 'scripts/claude-online*'
+      - 'tools/claude/hooks/slack-format-check.py'
+      - 'tools/claude/hooks/test_slack_wording.py'
+      - '.github/workflows/session-tools.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/agent-hooks/pane-tell*'
+      - 'tools/agent-hooks/pane-spawn*'
+      - 'scripts/claude-online*'
+      - 'tools/claude/hooks/slack-format-check.py'
+      - 'tools/claude/hooks/test_slack_wording.py'
+      - '.github/workflows/session-tools.yml'
+permissions:
+  contents: read
+jobs:
+  session-tools:
+    runs-on: macos-14
+    env:
+      CLAUDE_BIN: /usr/bin/false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: bash tools/agent-hooks/pane-tell.test.sh
+      - run: bash tools/agent-hooks/pane-spawn.test.sh
+      - run: bash scripts/claude-online.test.sh
+      - run: python3 -m unittest discover -s tools/claude/hooks -p test_slack_wording.py
+      - run: python3 tools/claude/hooks/slack-format-check.py --selftest

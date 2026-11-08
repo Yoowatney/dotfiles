@@ -24,7 +24,7 @@
 # pane today); any other lead checks results itself, so there it is bad usage and opens nothing. A check pane is Codex in its
 # sandbox, which writes only in a fixed empty folder, temp and gcloud's folder, with the network on: it reads GitHub, GCP and
 # the board itself, Slack through the Slack MCP's read tools, and processes with ps (요유 2026-11-07). With --kind claude it is
-# Claude Sonnet, which may write anywhere.
+# Claude Sonnet, with the checked folder protected by Seatbelt.
 # --kind auto uses Codex regardless of recorded weekly usage (요유 2026-11-07, api#1051: reset coupons are available).
 # The herdr startup/readiness responses used here provide no verified current quota-block signal.
 # Historical percentages and dialog text cannot prove one.
@@ -48,8 +48,8 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] 
   --why: in the main pane, why a pane that does the job must be Claude, in one line. A Claude pane without one, or with a
     reason mentioning Slack, 슬랙, GCP, gcloud, bq or BigQuery (any case), is refused there: Codex runs GCP commands too.
     Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요
-  --check: a check pane (main pane only): Codex that cannot write the checked folder, with the network, regardless of weekly
-    usage; --kind claude for a check that must write.
+  --check: a fresh check (main pane only): neither agent can write the checked folder; process/network reads work.
+    Codex by default regardless of weekly usage; --kind claude selects Claude.
   --artifact: keep the Artifact tool in a Claude pane (a job that publishes a page); every Claude pane starts without it otherwise.
   --skills: keep the design (taste-skill), office-file (docx/pdf/pptx/xlsx) and Claude-API skills in a Claude pane (UI or office-file job).
   --opus: opt out of the main pane Claude work trial (Sonnet 5.5/high); use global model/effort defaults for heavy work.
@@ -81,8 +81,7 @@ done
 [ $# -ge 2 ] && [ -n "$1" ] && [ -n "$2" ] || die "$USAGE"
 [ -z "$opener" ] || [ -z "$check$same$new_tab" ] || die "--opener opens a moved pane's own tab: no --check, --same-tab or --new-tab"
 asked=${kind:-claude} # what the caller chose, before auto resolves to Codex
-# A check pane runs Codex regardless of weekly usage. A check that must write to
-# GitHub, Slack or the board, or to the repo it checks, passes --kind claude: the Codex pane below cannot.
+# A check pane runs Codex regardless of weekly usage. Both kinds protect the checked folder.
 [ -z "$check" ] || [ -n "$kind" ] || kind=auto
 [ "$kind" != auto ] || kind=codex
 kind=${kind:-claude}
@@ -168,7 +167,10 @@ if [ -n "$check" ]; then
   [ -n "$delegates" ] || die "--check is for the main pane; any other lead checks a pane's result itself (직접 확인: run the test or command, or look at the changed behavior or data)"
   name="확인 $name"
   prompt+=' 이 칸은 확인 칸입니다. 다른 칸이 다 했다고 보고한 일을 확인만 합니다. 코드나 설정을 고치지 말고, 테스트나 명령을 직접 실행하거나 바뀐 동작과 데이터를 직접 보세요. 다른 칸의 보고를 다시 읽는 것은 확인이 아닙니다. 다른 칸을 열지 마세요. 보고 첫 줄에 실행한 명령, 본 결과, 통과 여부를 모두 쓰세요.'
-  if [ "$kind" != claude ]; then
+  if [ "$kind" = claude ]; then
+    env_args+=(--env "CLAUDE_CHECK_TARGET=$cwd")
+    prompt+=' 대상 폴더 쓰기는 Claude 프로세스와 그 하위 명령 전체에서 막힙니다. 프로세스 목록은 /bin/ps로 읽고, 네트워크는 읽기 확인에만 쓰세요. pgrep와 launchctl은 macOS 제한으로 목록을 읽지 못할 수 있습니다.'
+  else
     # A check runs tests and reads GitHub but leaves the repo as it was, and the sandbox enforces that, not the instruction: Codex
     # starts in a fixed empty folder, which with temp is all its workspace-write sandbox lets it write, and reads the repo by
     # absolute path. Nobody answers its approval prompts, so a blocked write fails at once. That folder is no repo, so Codex asks
