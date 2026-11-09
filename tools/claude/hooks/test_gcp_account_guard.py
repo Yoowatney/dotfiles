@@ -121,7 +121,7 @@ class KeyCleanupApprovalTest(unittest.TestCase):
     def test_explicit_cleanup_options_and_quoting_keep_exact_approval(self):
         for cmd in (
             f"gcloud --configuration munice-admin iam --quiet service-accounts keys --iam-account '{self.account}' list",
-            f"gcloud iam service-accounts keys 'list' --format='value(name)' --iam-account={self.account}",
+            f"gcloud --configuration=munice-admin iam service-accounts keys 'list' --format='value(name)' --iam-account={self.account}",
             self.commands[1].replace(" keys ", " keys \\\n  "),
             self.commands[2] + " # api#1052",
         ):
@@ -129,14 +129,92 @@ class KeyCleanupApprovalTest(unittest.TestCase):
                 self.assertIsNone(self.run_hook(cmd))
                 self.assertIn(cmd, self.used)
 
-    def test_cleanup_needs_approval_even_on_agent_or_admin_session(self):
+    def test_writes_and_elevated_list_need_approval(self):
         for command in self.commands:
             for prefix in ("--configuration=munice-admin ", ""):
                 cmd = command.replace("--configuration=munice-admin ", prefix)
                 for env in ({}, {"MUNICE_GCP_ADMIN": "1"}):
                     with self.subTest(command=cmd, env=env):
-                        self.assertTrue(self.run_hook(cmd, approved=False, env=env))
+                        reason = self.run_hook(cmd, approved=False, env=env)
+                        if command == self.commands[0] and not prefix and not env:
+                            self.assertIsNone(reason)
+                        else:
+                            self.assertTrue(reason)
         self.assertFalse(self.used)
+
+    def test_agent_key_list_is_readable_in_every_session_without_slack(self):
+        command = self.commands[0].replace("--configuration=munice-admin ", "")
+        for kwargs in ({}, {"main": False}, {"main": False, "subordinate": True},
+                       {"env": {"HERDR_SESSION": "workers"}, "main": False, "subordinate": True},
+                       {"env": {"MUNICE_AUTO_DISPATCH": "1"}}, {"env": {"MUNICE_AMBIENT": "1"}}):
+            with self.subTest(kwargs=kwargs):
+                self.assertIsNone(self.run_hook(command, approved=False, **kwargs))
+        self.assertFalse(self.calls)
+        self.assertFalse(self.used)
+
+    def test_agent_key_list_keeps_ordinary_read_pipelines_and_wrappers(self):
+        cmd = self.commands[0].replace("--configuration=munice-admin ", "")
+        for command in (cmd + " | wc -l", cmd + " && echo finished", "env " + cmd,
+                        "command " + cmd, "time " + cmd):
+            with self.subTest(command=command):
+                self.assertIsNone(self.run_hook(command, approved=False, main=False, subordinate=True))
+        self.assertFalse(self.calls)
+
+    def test_agent_read_exception_never_lifts_identity_or_a_key_write(self):
+        cmd = self.commands[0].replace("--configuration=munice-admin ", "")
+        for command in ("CLOUDSDK_CORE_ACCOUNT=person@example.com " + cmd,
+                        "env CLOUDSDK_CORE_ACCOUNT=person@example.com " + cmd,
+                        "CLOUDSDK_ACTIVE_CONFIG_NAME=other-config " + cmd,
+                        "env CLOUDSDK_ACTIVE_CONFIG_NAME=other-config " + cmd,
+                        "export CLOUDSDK_ACTIVE_CONFIG_NAME=other-config; " + cmd,
+                        "GOOGLE_APPLICATION_CREDENTIALS=other-adc.json " + cmd,
+                        cmd + " --configuration=other-config", cmd + " --account=person@example.com",
+                        cmd + " --impersonate-service-account=other@example-project.iam.gserviceaccount.com",
+                        cmd + "; " + self.commands[2].replace("--configuration=munice-admin ", ""),
+                        "if true; then " + self.commands[2] + "; fi", "time " + self.commands[2]):
+            with self.subTest(command=command):
+                self.assertTrue(self.run_hook(command, approved=False))
+        self.assertFalse(self.used)
+
+    def test_key_command_text_is_not_execution(self):
+        for verb in ("list", "disable fake-key", "delete fake-key"):
+            text = f"gcloud iam service-accounts keys {verb} --iam-account={self.account}"
+            for cmd in (f"pane-tell main '{text}'", f"echo '{text}'", f"echo 'note; {text}'",
+                        f"cat <<'EOF'\n{text}\nEOF", f"sed -n '/{text}/p' docs/example.md",
+                        f"cat <<'123'\n{text}\n123", f"cat <<'END-TEXT'\n{text}\nEND-TEXT",
+                        f"cat <<'EOF'; sh -c true\n{text}\nEOF",
+                        f"gcloud version; echo '{text}'", f"echo done # ; {text}",
+                        f"command -v {text}",
+                        f"ls docs | xargs grep '{text}'", "pane-tell main 'service-accounts keys list'"):
+                for env in ({}, {"MUNICE_GCP_ADMIN": "1"}, {"HERDR_SESSION": "workers"}):
+                    with self.subTest(command=cmd, env=env):
+                        self.assertIsNone(self.run_hook(cmd, approved=False, env=env))
+        self.assertFalse(self.calls)
+
+    def test_actual_wrapped_or_embedded_key_writes_still_need_approval(self):
+        command = self.commands[2].replace("--configuration=munice-admin ", "")
+        for cmd in (command, "env " + command, "nohup " + command, "timeout 10 " + command,
+                    f"sh -c '{command}'", f"bash <<'EOF'\n{command}\nEOF",
+                    f'echo "$({command})"', f"echo fake-key | xargs {command}",
+                    f"echo x#note; {command}", f"cat <<EOF\n$({command})\nEOF",
+                    f"echo '<<EOF'\n{command}", f'echo "<<EOF $X"\n{command}',
+                    f"cat <<EOF # <<IGNORED\nhello\nEOF\n{command}",
+                    f"env bash <<'EOF'\n{command}\nEOF", f"command sh <<'EOF'\n{command}\nEOF",
+                    "nice -n 10 " + command, "sudo " + command, f"builtin eval '{command}'",
+                    "env --chdir /tmp " + command, ">/tmp/example-output " + command,
+                    f"echo '{command}' | sh", f"printf '%s\\n' '{command}' | bash", f"bash <<<'{command}'",
+                    "sudo -n " + command, "/usr/bin/time -o /tmp/example-time " + command,
+                    f"true; bash <<'EOF'\n{command}\nEOF", f"cat <<'EOF' | sh\n{command}\nEOF"):
+            with self.subTest(command=cmd):
+                self.assertTrue(self.run_hook(cmd, approved=False))
+        self.assertFalse(self.used)
+
+    def test_cleanup_parser_requires_gcloud_executable(self):
+        # Mutation: dropping words[0] == 'gcloud' must fail, even if hook classification rejects wrappers first.
+        for verb in ("list", "disable fake-key", "delete fake-key"):
+            for executable in ("echo", "fakecloud", "pane-tell"):
+                with self.subTest(executable=executable, verb=verb):
+                    self.assertFalse(GUARD.key_cleanup_only(f"{executable} iam service-accounts keys {verb}"))
 
     def test_reused_approval_refuses_each_command(self):
         for cmd in self.commands:
@@ -286,7 +364,11 @@ class KeyCleanupApprovalTest(unittest.TestCase):
                 for env in ({}, {"MUNICE_GCP_ADMIN": "1"}):
                     for main in (True, False):
                         with self.subTest(command=command, env=env, main=main):
-                            self.assertTrue(self.run_hook(command, approved=False, env=env, main=main))
+                            reason = self.run_hook(command, approved=False, env=env, main=main)
+                            if verb == "list" and not env:
+                                self.assertIsNone(reason)
+                            else:
+                                self.assertTrue(reason)
 
     def test_split_policy_words_cannot_use_generic_identity_approval(self):
         for suffix in ("i\\\nam roles list", "org-po\\\nlicies list", "projects get-iam-po\\\nlicy example-project"):
@@ -302,6 +384,14 @@ class KeyCleanupApprovalTest(unittest.TestCase):
             cmd = f"gcloud --configuration=munice-admin {flags}"
             with self.subTest(command=cmd):
                 self.assertTrue(self.run_hook(cmd))
+        self.assertFalse(self.calls)
+
+    def test_flags_file_refuses_case_variants_and_variable_command(self):
+        for cmd in ("GCLOUD --flags-file=f.yaml", "Gcloud --flags-file f.yaml",
+                    "g=gcloud; $g --flags-file=f.yaml", "g=Gcloud; $g --FLAGS-FILE f.yaml"):
+            for env in ({}, {"MUNICE_GCP_ADMIN": "1"}, {"HERDR_SESSION": "workers"}):
+                with self.subTest(command=cmd, env=env):
+                    self.assertTrue(self.run_hook(cmd, approved=False, env=env))
         self.assertFalse(self.calls)
 
 

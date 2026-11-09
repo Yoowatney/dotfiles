@@ -16,8 +16,9 @@ In the main pane `prod 허용`/`staging 허용` written by 요유 in any Slack c
 starts (api#1026): the relay names the message as `글 <channel>/<ts>`, and slack_approval.py reads author, time and words back
 from Slack, and only when the whole relayed text is that message's relay. `api#973 prod 허용` (an item right before the word, or
 opening the words) lifts only commands that name the item; an item named any other way, or an unclear grant, lifts nothing.
-Service account key list/disable/delete require their own exact-command main-pane Slack ✅, once within 10 minutes
-(api#1052), even on the agent account or in an admin session. Slack word grants never lift these commands.
+Service account key disable/delete and elevated key listing require their own exact-command main-pane Slack ✅,
+once within 10 minutes (api#1052). Agent-account key listing stays readable in every pane without approval.
+Slack word grants never lift the cleanup commands or elevated listing.
 
     gcp-account-guard.py --selftest
 """
@@ -27,6 +28,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -91,7 +93,7 @@ SLACK = os.path.expanduser("~/work/munice/.agents/skills/agent-board/main/slack_
 HOOK_BUDGET, SLACK_DEADLINE, SLACK_MIN = 8.0, 6.0, 1.0
 # What a Slack ✅ never lifts (condition 4 of the approval): `cla`'s marker, an agent or a shell that outlives the command,
 # IAM commands (except the three strictly parsed key cleanup commands below), org policies, credentials that outlive it
-# (tokens, signed JWTs, HMAC keys), flags files that can hide an entire IAM subcommand. Matched on the command and on it with quotes
+# (tokens, signed JWTs, HMAC keys), flags files that can hide identity selection and options. Matched on the command and on it with quotes
 # and backslashes removed. ponytail: a word list; a false hit only means the terminal, and 요유 reads the rest in the request.
 SLACK_NEVER = re.compile(
     r"\bMUNICE_GCP_ADMIN=|claude|codex|anthropic|gemini|aider|opencode|cursor-agent|(?<![\w.-])cla(?![\w.-])"
@@ -140,7 +142,8 @@ PERSIST = [  # outlives the command
 ]
 # Service account keys never expire and Yoyoo's account can lift the org policy that blocks them, so an AI
 # session never makes, uploads or re-enables one, nor changes an org policy, even when unlocked (terraform#1040).
-# gcloud key list/disable/delete require one main-pane Slack ✅ per command (api#1052), including agent/admin sessions.
+# Key disable/delete and elevated listing require one main-pane Slack ✅ per command (api#1052).
+# Agent-account key listing stays readable without approval, including in workers panes.
 # The Slack request's reason must give evidence that the key is unused: deletion cannot be undone.
 POSTS = (r"(?=.*(?:-X\s*['\"]?(?:POST|PATCH|DELETE)|--request[= ]['\"]?(?:POST|PATCH|DELETE)"
          r"|\s-d(?:\s|['\"@{])|--data|--json))")
@@ -163,9 +166,9 @@ KEYS = [  # matched per shell segment, after joining `\` continuations
 # Two linear searches avoid backtracking across repeated group names. The strict approval parser
 # below alone admits list/disable/delete; unknown or expanded forms stay refused.
 KEY_ACCOUNT, KEY_WORD = re.compile(r"\bservice-accounts\b"), re.compile(r"\bkeys\b")
-# gcloud YAML flags can inject the entire subcommand, even with no identity selection in the shell text.
-# Require explicit command words instead of inspecting a mutable file or accepting a word/Slack grant for it.
-GCLOUD_FLAGS = re.compile(r"\bgcloud\b[^\n;|&]*--flags-file\b")
+# Flags files can hide identity selection and command options outside the approved shell text.
+# Require explicit options instead of inspecting a mutable file or accepting a word/Slack grant for it.
+GCLOUD_FLAGS = re.compile(r"--flags-file\b", re.I)  # the executable may be a variable or have different case
 # A commit message, a PR body or a search may name a key command; such a segment only carries text.
 # No echo/printf (they feed `| sh`), and a segment with $( or a backtick still runs what it holds.
 # ponytail: a heredoc commit body is still read line by line, so commit long messages with -F <file>.
@@ -189,10 +192,159 @@ WRITERS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch"}
 READERS = {"Read", "Grep"}  # a credential file read into the transcript leaks the login
 
 
+def executable_words(words: list[str]) -> list[str]:
+    """Peel ordinary assignments, leading redirects and known command wrappers."""
+    words = list(words)
+    while words:
+        if re.match(r"\w+=", words[0]):
+            words.pop(0)
+            continue
+        if words[0].isdigit() and len(words) > 1 and words[1].startswith((">", "<")):
+            words.pop(0)
+        redirect = re.match(r"\d*(?:>>?|<)(.*)$", words[0])
+        if redirect:
+            words.pop(0)
+            if not redirect[1] and words:
+                words.pop(0)
+            continue
+        program = words[0].strip("'\"").rsplit("/", 1)[-1].lower()
+        if program not in {"env", "command", "builtin", "exec", "nohup", "timeout", "xargs", "time", "nice", "sudo",
+                           "if", "then", "else", "while", "until", "do", "!"}:
+            return words
+        words.pop(0)
+        if program == "command" and words and words[0] in {"-v", "-V"}:
+            return []  # shell command lookup does not execute its arguments
+        valued = {
+            "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+            "xargs": {"-I", "-n", "-P", "-L", "--max-args", "--max-procs", "--max-lines", "--replace"},
+            "nice": {"-n", "--adjustment"}, "sudo": {"-u", "--user", "-g", "--group", "-h", "--host"},
+            "time": {"-o", "--output", "-f", "--format"}, "timeout": {"-s", "--signal", "-k", "--kill-after"},
+        }.get(program, set())
+        while words and (words[0].startswith("-") or re.match(r"\w+=", words[0])):
+            flag = words.pop(0)
+            if flag in valued and words:
+                words.pop(0)
+        if program == "timeout" and words:
+            words.pop(0)
+    return words
+
+
+def gcloud_calls(cmd: str, depth: int = 0) -> list[str]:
+    """Recognize direct calls and common shell wrappers, keeping quoted text out of command position.
+
+    This is still an accident guard, not a shell interpreter: generated words and external scripts are out of sight.
+    A non-shell heredoc is data; a shell heredoc's body is code. Key creation keeps its older, broader text ban.
+    """
+    if depth > 8:
+        return []
+    lines, pending = [], []
+    for line in cmd.splitlines(keepends=True):
+        if pending:
+            delimiter, code, expand = pending[0]
+            if line.strip() == delimiter:
+                pending.pop(0)
+                lines.append("\n")
+            else:
+                lines.append(line if code else "\n")
+                if expand and not code:
+                    for substitution in re.finditer(r"\$\((.*?)\)|`([^`]+)`", line):
+                        lines.append((substitution[1] or substitution[2]) + "\n")
+            continue
+        # A heredoc operator in a quoted argument or a comment is only text.
+        quoted = list(re.finditer(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", line))
+        header = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", lambda m: " " * len(m[0]), line)
+        comment = re.search(r"(?<![^\s;&|()])#", header)
+        # Handle ordinary named heredocs; here-strings are not bodies.
+        for match in re.finditer(r"(?<!<)<<-?(?!<)[ \t]*('([^']+)'|\"([^\"]+)\"|([^\s;&|<>()]+))", line):
+            if (comment and match.start() >= comment.start()) or any(m.start() <= match.start() < m.end() for m in quoted):
+                continue
+            try:
+                marker = "__guard_here_input__"
+                header = line[:match.start()] + " " + marker + " " + line[match.end():]
+                lexer = shlex.shlex(header, posix=True, punctuation_chars=";&|()")
+                lexer.whitespace_split = True
+                header_chunks, header_separators, header_words, owner = [], [], [], 0
+                for word in lexer:
+                    if word and all(c in ";&|()" for c in word):
+                        header_chunks.append(executable_words(header_words))
+                        header_separators.append(word)
+                        header_words = []
+                    else:
+                        header_words.append(word)
+                        if word == marker:
+                            owner = len(header_chunks)
+                header_chunks.append(executable_words(header_words))
+                end = owner
+                while end < len(header_separators) and header_separators[end] == "|":
+                    end += 1
+                shell = any(words and words[0].rsplit("/", 1)[-1] in {"sh", "bash", "zsh", "ksh"}
+                            for words in header_chunks[owner:end + 1])
+            except ValueError:
+                shell = False
+            delimiter = match[2] or match[3] or match[4]
+            pending.append((delimiter.replace("\\", ""), shell, bool(match[4] and "\\" not in delimiter)))
+        lines.append(line)
+    literals = {}
+
+    def literal(match):
+        token = f"__guard_literal_{len(literals)}__"
+        literals[token] = match[0]
+        return token
+
+    masked = LITERAL.sub(literal, "".join(lines))
+    masked = re.sub(r"(?m)(?<![^\s;&|()])#.*", "", masked)  # # inside a word is not a shell comment
+    lexer = shlex.shlex(masked, posix=True, punctuation_chars=";&|()\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    chunks, separators, words, calls = [], [], [], []
+    try:
+        for word in lexer:
+            if word and all(c in ";&|()\n" for c in word):
+                chunks.append(words)
+                separators.append(word)
+                words = []
+            else:
+                for token, value in literals.items():
+                    word = word.replace(token, value)
+                words.append(word)
+                # A substitution in a double-quoted argument still executes. Single quotes are data.
+                if not word.startswith("'"):
+                    for substitution in re.finditer(r"\$\((.*?)\)|`([^`]+)`", word, re.S):
+                        calls.extend(gcloud_calls(substitution[1] or substitution[2], depth + 1))
+        chunks.append(words)
+    except ValueError:
+        return calls  # incomplete shell text is not an executable key command
+    for index, chunk in enumerate(chunks):
+        words = executable_words(chunk)
+        if words:
+            program = words[0].strip("'\"").rsplit("/", 1)[-1].lower()
+            if program == "gcloud":
+                calls.append(" ".join(words))
+            elif program in {"sh", "bash", "zsh", "ksh"}:
+                for i, flag in enumerate(words[1:], 1):
+                    if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", flag) and i + 1 < len(words):
+                        calls.extend(gcloud_calls(words[i + 1].strip("'\""), depth + 1))
+                        break
+                    if flag.startswith("<<<"):
+                        body = flag[3:] or (words[i + 1] if i + 1 < len(words) else "")
+                        calls.extend(gcloud_calls(body.strip("'\""), depth + 1))
+            elif program == "eval":
+                calls.extend(gcloud_calls(" ".join(w.strip("'\"") for w in words[1:]), depth + 1))
+            elif program in {"echo", "printf"} and index < len(separators) and separators[index] == "|":
+                target = executable_words(chunks[index + 1])
+                if target and target[0].rsplit("/", 1)[-1] in {"sh", "bash", "zsh", "ksh"}:
+                    start = 2 if program == "printf" else 1
+                    calls.extend(gcloud_calls(" ".join(w.strip("'\"") for w in words[start:]), depth + 1))
+    return calls
+
+
 def bash_problem(cmd: str) -> tuple[str, bool | str] | None:
     """(what, persists) for a refused command; "key" is unconditional, "cleanup" needs a main-pane Slack ✅."""
     flat = cmd.replace("\\\n", "")
-    cleanup = False
+    cleanup = any((m := KEY_ACCOUNT.search(text)) and KEY_WORD.search(text, m.end())
+                  for call in gcloud_calls(flat)
+                  for text in (call, re.sub(r"\$(?=['\"])|['\"\\]", "", call)))
     for segment in SEGMENTS.split(flat):
         # Dollar quotes also form shell words; do not evaluate their escapes or expansions.
         bare = re.sub(r"\$(?=['\"])|['\"\\]", "", segment)  # 'cre''ate' and cre\ate run as create
@@ -203,7 +355,6 @@ def bash_problem(cmd: str) -> tuple[str, bool | str] | None:
                 return what, "key"
         if GCLOUD_FLAGS.search(segment) or GCLOUD_FLAGS.search(bare):
             return "gcloud 명령 파일", "indirect"
-        cleanup |= any((m := KEY_ACCOUNT.search(text)) and KEY_WORD.search(text, m.end()) for text in (segment, bare))
     if KEY_TF.search(flat) and TF_SHELL_WRITE.search(flat):
         return "terraform 서비스 계정 키 리소스", "key"
     # The file an ADC assignment names is a SELECT, not a read of the credential store. Each is matched on the command and
@@ -284,7 +435,7 @@ def shell_words(line: str) -> list[str] | None:
     return words + [word] if started else words
 
 
-def key_cleanup_only(cmd: str) -> bool:
+def key_cleanup_only(cmd: str, *, read_only: bool = False) -> bool:
     """One explicit gcloud key list/disable/delete call, with known flags and no shell or flags-file indirection."""
     # A backslash inside a shell comment does not continue that line. Do not join a second command into the comment.
     if "#" in cmd and "\\\n" in cmd:
@@ -313,8 +464,32 @@ def key_cleanup_only(cmd: str) -> bool:
             positional.append(word)
         i += 1
     return (positional == ["iam", "service-accounts", "keys", "list"]
-            or (len(positional) == 5 and positional[:3] == ["iam", "service-accounts", "keys"]
+            or (not read_only and len(positional) == 5 and positional[:3] == ["iam", "service-accounts", "keys"]
                 and positional[3] in {"disable", "delete"}))
+
+
+def agent_key_list(cmd: str, env: dict) -> bool:
+    """Ordinary key metadata reads on the default agent identity need no Slack or main-pane privilege."""
+    if env.get("MUNICE_GCP_ADMIN") == "1" or ADC_ASSIGN.search(cmd) or any(p.search(cmd) for p, _ in SELECT):
+        return False
+    for match in re.finditer(r"\bCLOUDSDK_ACTIVE_CONFIG_NAME=([^\s;|&]+)", cmd):
+        if match[1].strip("'\"") != "munice":
+            return False
+    calls = [call for call in gcloud_calls(cmd.replace("\\\n", ""))
+             if KEY_ACCOUNT.search(call) and KEY_WORD.search(call)]
+    if not calls:
+        return False
+    for call in calls:
+        if not key_cleanup_only(call, read_only=True):
+            return False
+        words = shell_words(call)
+        for i, word in enumerate(words):
+            flag, eq, value = word.partition("=")
+            if flag == "--account":
+                return False
+            if flag == "--configuration" and (value if eq else words[i + 1]) != "munice":
+                return False
+    return True
 
 
 def staging_only(cmd: str) -> bool:
@@ -482,7 +657,7 @@ def tool_problem(payload: dict, env: dict, prompt: str | None = None) -> str | N
         return None
     what, persists = hit
     if persists == "indirect":
-        return (f"{what}: `--flags-file` 안에 IAM 명령 전체가 들어갈 수 있어 계정이나 허용 방식과 관계없이 실행하지 "
+        return (f"{what}: `--flags-file`이 요청에 없는 계정 선택과 옵션을 담을 수 있어 계정이나 허용 방식과 관계없이 실행하지 "
                 "않습니다. 실행할 명령과 옵션을 요청 글에 직접 적을 것. api#1052")
     if persists == "key":
         return (f"{what}: AI 세션은 서비스 계정 키를 만들거나 다시 켜지 않고 조직 정책도 바꾸지 않습니다(`{UNLOCK}`이나 "
@@ -490,6 +665,8 @@ def tool_problem(payload: dict, env: dict, prompt: str | None = None) -> str | N
                 "쓸 것. 그래도 키가 필요하면 무엇을 왜 만드는지 한국어 한 문장으로 요유에게 따로 묻고, 요유가 직접 "
                 "터미널에서 `!`로 실행한다. terraform#1040")
     if persists == "cleanup":
+        if agent_key_list(inp.get("command") or "", env):
+            return None
         return (f"{what}: 메인 세션의 Slack 실행 요청에 요유가 누른 ✅ 하나로 명령 하나만 한 번 실행합니다(10분 안). "
                 "`prod 허용`·`staging 허용`·관리자 세션으로는 풀리지 않습니다. 키 삭제는 되돌릴 수 없으니 요청 이유에 "
                 "그 키가 쓰이지 않는다는 근거를 적을 것. 리드 밑 세션은 메인 세션에 넘길 것. api#1052")
@@ -1162,7 +1339,10 @@ def selftest():
     for verb in ("list", "disable fake-key", "delete fake-key --quiet"):
         c = f"gcloud iam service-accounts keys {verb} --iam-account=unused@example.com"
         for env in ({}, {"MUNICE_GCP_ADMIN": "1"}):
-            assert "api#1052" in bash(c, env), f"key cleanup needs its own ✅: {c}"
+            if verb == "list" and not env:
+                assert bash(c, env) is None, f"agent key listing stays readable: {c}"
+            else:
+                assert "api#1052" in bash(c, env), f"key cleanup needs its own ✅: {c}"
     key_allow = [
         "gcloud resource-manager org-policies describe iam.disableServiceAccountKeyCreation --project=p --effective",
         "gcloud org-policies describe iam.disableServiceAccountKeyCreation --project=p",
