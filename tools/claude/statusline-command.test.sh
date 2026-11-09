@@ -13,7 +13,7 @@ export HOME="$T/home"                   # no real Codex records: the Codex part 
 export CODEX_HOME="$HOME/.codex"         # ignore an inherited Codex profile too
 # Freeze the clock at the process boundary, including codex-week, so minute/reset boundaries are exact.
 mkdir -p "$T/bin"
-export STATUSLINE_TEST_NOW=1804488000
+export STATUSLINE_TEST_NOW=$(/bin/date +%s)
 printf '#!/bin/bash\nif [ "$*" = +%%s ]; then echo "$STATUSLINE_TEST_NOW"; else exec /bin/date "$@"; fi\n' >"$T/bin/date"
 chmod +x "$T/bin/date"
 export PATH="$T/bin:$PATH"
@@ -104,6 +104,14 @@ out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/empty" run)
 check_exact "reset clears critical coloring as well as usage" "$out" \
 	$'Codex \e[94m\e[2m░░░░░░░░░░\e[0m \e[94m0%\e[0m (reset)'
 codex_record 46.0 "$reset" 60
+# A touched archive must not override the latest event used by routing.
+jq -c --arg at "$(date -u -r $(($(date +%s) - 7200)) +%Y-%m-%dT%H:%M:%S.000Z)" \
+  '.timestamp=$at | .payload.rate_limits.primary.used_percent=88' \
+  "$HOME/.codex/sessions/2026/11/06/rollout-a.jsonl" > "$HOME/.codex/sessions/2026/11/06/rollout-z.jsonl"
+touch -t "$(/bin/date -v-2H +%Y%m%d%H%M)" "$HOME/.codex/sessions/2026/11/06/rollout-a.jsonl"
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/empty" run | plain)
+check "display and routing both choose latest event time" "$out" '46%' '88%'
+rm "$HOME/.codex/sessions/2026/11/06/rollout-z.jsonl"
 out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run | plain)
 check "Codex uses the HUD's ten-cell rounded bar and reset wording" "$(sed -n 2p <<<"$out")" 'Usage Weekly ██████░░░░ 63% \(resets in 1d 10h\) │ Codex █████░░░░░ 46% \(resets in 5d 6h\)$'
 check "and adds no line of its own" "$(wc -l <<<"$out" | tr -d ' ')" '^2$'
@@ -212,5 +220,23 @@ check "a stuck workers server: the rest still shows" "$out" '↳ 옆 칸  단계
 [ $((SECONDS - started)) -lt 10 ] && r=soon || r=late
 check "a stuck workers server does not hold the line back" "$r" 'soon'
 rm -f "$T/fake/stuck"
+
+# Routing capture reads only the official statusline input and account metadata; failure never breaks the HUD.
+mkdir -p "$T/capture"
+echo '{"oauthAccount":{"accountUuid":"synthetic","hasExtraUsageEnabled":false}}' >"$T/capture/.claude.json"
+python3 -I - "$T" <<'PY'
+import datetime, json, pathlib, sys, time
+t = pathlib.Path(sys.argv[1]); now = time.time()
+transcript = t / 'capture-transcript.jsonl'
+transcript.write_text(json.dumps({'type':'assistant','timestamp':datetime.datetime.fromtimestamp(now, datetime.timezone.utc).isoformat()}))
+(t / 'capture-input.json').write_text(json.dumps({'session_id':'capture','transcript_path':str(transcript),
+ 'cost':{'total_api_duration_ms':100},'rate_limits':{'five_hour':{'used_percentage':12,'resets_at':now+1000},
+ 'seven_day':{'used_percentage':34,'resets_at':now+302400}}}))
+PY
+out=$(INPUT="$(cat "$T/capture-input.json")" XDG_STATE_HOME="$T/state" CLAUDE_CONFIG_DIR="$T/capture" run)
+if [ -f "$T/state/agent-quota/claude.json" ]; then r=captured; else r=missing; fi
+check "official quota input is captured for normal worker routing" "$r" '^captured$'
+out=$(INPUT='{"rate_limits":null}' XDG_STATE_HOME=/dev/null CLAUDE_CONFIG_DIR="$T/hud" run)
+check "quota capture failure keeps the HUD" "$out" 'Context' 'Traceback|agent-quota:'
 
 [ "$fails" -eq 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }

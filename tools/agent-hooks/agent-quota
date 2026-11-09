@@ -11,6 +11,7 @@ import platform
 import sys
 import tempfile
 import time
+import tomllib
 
 WEEK = 604800
 MAX_AGE = 600
@@ -148,6 +149,48 @@ def invalid(reason):
     return {"eligible": False, "reason": reason}
 
 
+API_ENV = {"OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY",
+           "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK",
+           "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"}
+
+
+def subscription_settings(kind, root, cwd):
+    # Inspect the target folder too: a project may override the caller's subscription login.
+    paths = [root / ("config.toml" if kind == "codex" else "settings.json")]
+    for folder in (cwd, *cwd.parents):
+        if kind == "codex":
+            paths.append(folder / ".codex/config.toml")
+        else:
+            paths.extend(folder / ".claude" / name for name in ("settings.json", "settings.local.json"))
+    if kind == "claude" and sys.platform == "darwin":
+        paths.append(Path("/Library/Application Support/ClaudeCode/managed-settings.json"))
+    for path in set(paths):
+        if not path.exists():
+            continue
+        try:
+            data = tomllib.loads(path.read_text()) if kind == "codex" else json.loads(path.read_text())
+            if not isinstance(data, dict):
+                return False
+            if kind == "claude":
+                env = data.get("env", {})
+                if not isinstance(env, dict) or any(env.get(key) for key in API_ENV):
+                    return False
+                if data.get("apiKeyHelper") or data.get("forceLoginMethod") not in (None, "claudeai"):
+                    return False
+            else:
+                profile = data.get("profiles", {}).get(data.get("profile"), {})
+                for settings in (data, profile):
+                    if not isinstance(settings, dict) or settings.get("model_provider") not in (None, "openai"):
+                        return False
+                    if settings.get("forced_login_method") not in (None, "chatgpt"):
+                        return False
+                if data.get("model_providers", {}).get("openai"):
+                    return False
+        except (OSError, ValueError, AttributeError, TypeError):
+            return False
+    return True
+
+
 def normalize(at, short, week, now, short_key, week_key, ceiling):
     if at is None or not 0 <= now - at <= MAX_AGE:
         return invalid("missing/stale/future observation")
@@ -162,7 +205,7 @@ def normalize(at, short, week, now, short_key, week_key, ceiling):
             "short": five, "week": seven, "gap": gap, "observed_at": at, "resets_at": wr}
 
 
-def codex_quota(now):
+def codex_quota(now, cwd):
     root, newest = latest_codex(now)
     auth_path = root / "auth.json"
     auth = read_json(auth_path)
@@ -171,6 +214,8 @@ def codex_quota(now):
         return invalid("subscription account unknown")
     if any(os.environ.get(k) for k in ("OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL")):
         return invalid("API environment override")
+    if not subscription_settings("codex", root, cwd):
+        return invalid("subscription settings unknown/overridden")
     if newest is None:
         return invalid("usage unknown")
     at, limits = newest
@@ -188,7 +233,7 @@ def codex_quota(now):
     return normalize(at, short, week, now, "used_percent", "used_percent", 95)
 
 
-def claude_quota(now):
+def claude_quota(now, cwd):
     snap = read_json(state_dir() / "claude.json")
     account = claude_account()
     current = identity(account.get("accountUuid"))
@@ -198,17 +243,24 @@ def claude_quota(now):
         return invalid("extra usage unknown/enabled")
     if any(os.environ.get(k) for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")):
         return invalid("API environment override")
+    root = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
+    if not subscription_settings("claude", root, cwd):
+        return invalid("subscription settings unknown/overridden")
     return normalize(epoch(snap.get("observed_at")), snap.get("five_hour"), snap.get("seven_day"), now, "used_percentage", "used_percentage", 80)
 
 
-def select(now, policy):
+def select(now, policy, cwd=None):
     result = {"kind": None, "policy": policy, "reason": "invalid policy"}
     if policy == "codex-only":
         return dict(result, kind="codex", reason="legacy policy; quota routing bypassed")
     if policy != "quota-aware":
         return result
-    codex, claude = codex_quota(now), claude_quota(now)
+    cwd = Path(cwd or Path.cwd()).resolve()
+    codex, claude = codex_quota(now, cwd), claude_quota(now, cwd)
     result.update(codex=codex, claude=claude)
+    # Unknown Codex usage is not evidence for switching. The legacy default can run only when its own safety is known.
+    if "week" not in codex:
+        return dict(result, reason="Codex subscription usage/safety unknown; no automatic switch")
     if codex["eligible"] and claude["eligible"]:
         # Keep Codex unless its week is ahead of pace and Claude offers >5pp relief.
         kind = "claude" if codex["gap"] >= 5 and (claude["gap"] <= 0 or codex["gap"] - claude["gap"] > 5) else "codex"
@@ -225,12 +277,12 @@ def policy_value():
 
 def main():
     now = time.time()
-    command = sys.argv[1] if len(sys.argv) == 2 else ""
+    command = sys.argv[1] if len(sys.argv) in (2, 3) else ""
     if command == "capture-claude":
         capture_claude(json.load(sys.stdin), now)
         return 0
     if command == "select":
-        result = select(now, policy_value())
+        result = select(now, policy_value(), sys.argv[2] if len(sys.argv) == 3 else None)
         folder = state_dir()
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(folder / "decisions.jsonl", os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
@@ -239,13 +291,17 @@ def main():
         print(json.dumps(result, allow_nan=False))
         return 0 if result["kind"] else 1
     if command == "codex-week":
+        # The display wrapper supplies its clock, also used by its reset wording.
+        if len(sys.argv) == 3:
+            now = float(sys.argv[2])
         _, newest = latest_codex(now)
         if newest:
             at, limits = newest
             for window in (limits.get("primary"), limits.get("secondary")):
                 if isinstance(window, dict) and window.get("window_minutes") == 10080:
-                    used, reset = percentage(window.get("used_percent")), epoch(window.get("resets_at"))
+                    used, reset = epoch(window.get("used_percent")), epoch(window.get("resets_at"))
                     if used is not None and reset is not None:
+                        used = max(0, min(100, used))
                         print(f"{0 if reset <= now else used:g}\t{int(reset)}\t{int(at)}")
                         return 0
         return 1

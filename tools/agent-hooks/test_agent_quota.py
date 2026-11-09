@@ -5,11 +5,13 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("agent-quota")
+sys.dont_write_bytecode = True
 
 
 class RoutingTests(unittest.TestCase):
@@ -17,6 +19,9 @@ class RoutingTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name)
+        previous_cwd = Path.cwd()
+        os.chdir(self.home)
+        self.addCleanup(os.chdir, previous_cwd)
         self.now = 1800000000
         self.env = patch.dict(os.environ, {"HOME": str(self.home),
             "CODEX_HOME": str(self.home / ".codex"),
@@ -51,11 +56,11 @@ class RoutingTests(unittest.TestCase):
         os.utime(path, (self.now,) * 2)
         return path
 
-    def capture(self, used=40, short=20, tick=100, now=None):
+    def capture(self, used=40, short=20, tick=100, now=None, response_at=None):
         stamp = self.now if now is None else now
         transcript = self.home / "transcript.jsonl"
         if not transcript.exists() or tick != 100:
-            self.write("transcript.jsonl", {"type": "assistant", "timestamp": datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc).isoformat()})
+            self.write("transcript.jsonl", {"type": "assistant", "timestamp": datetime.datetime.fromtimestamp(stamp if response_at is None else response_at, datetime.timezone.utc).isoformat()})
         row = {"session_id": "synthetic-session", "transcript_path": str(transcript), "cost": {"total_api_duration_ms": tick},
             "rate_limits": {"five_hour": {"used_percentage": short, "resets_at": self.now + 1000},
                             "seven_day": {"used_percentage": used, "resets_at": self.now + 302400}}}
@@ -83,11 +88,15 @@ class RoutingTests(unittest.TestCase):
 
     def test_unknown_usage(self):
         self.event(60, age=601)
-        self.assertEqual(self.select()["kind"], "claude")
+        self.assertIsNone(self.select()["kind"])
         snap = self.q.read_json(self.q.state_dir() / "claude.json")
         snap["observed_at"] = self.now - 601
         self.write("state/agent-quota/claude.json", snap)
         self.assertIsNone(self.select()["kind"])
+
+    def test_unknown_claude_retains_known_safe_codex(self):
+        (self.q.state_dir() / "claude.json").unlink()
+        self.assertEqual(self.select()["kind"], "codex")
 
     def test_codex_only(self):
         self.event(100, credits=True)
@@ -145,6 +154,22 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(self.select()["kind"], "claude")
         self.capture(80, short=80, tick=102)
         self.assertIsNone(self.select()["kind"])
+
+    def test_claude_api_settings_block_paid_routing(self):
+        self.event(99)
+        self.write(".claude/settings.json", {"env": {"ANTHROPIC_API_KEY": "synthetic"}})
+        self.assertIsNone(self.select()["kind"])
+
+    def test_codex_custom_provider_is_not_subscription(self):
+        (self.home / ".codex/config.toml").write_text('model_provider = "custom"\n')
+        self.assertIsNone(self.select()["kind"])
+
+    def test_capture_rejects_old_initial_transcript(self):
+        (self.q.state_dir() / "claude.json").unlink()
+        self.capture(tick=101, response_at=self.now - 900)
+        self.assertFalse((self.q.state_dir() / "claude.json").exists())
+        self.capture(tick=102)
+        self.assertEqual(self.q.read_json(self.q.state_dir() / "claude.json")["observed_at"], self.now)
 
 
 if __name__ == "__main__":

@@ -25,10 +25,9 @@
 # sandbox, which writes only in a fixed empty folder, temp and gcloud's folder, with the network on: it reads GitHub, GCP and
 # the board itself, Slack through the Slack MCP's read tools, and processes with ps (요유 2026-11-07). With --kind claude it is
 # Claude Sonnet, with the checked folder protected by Seatbelt.
-# --kind auto uses Codex regardless of recorded weekly usage (요유 2026-11-07, api#1051: reset coupons are available).
-# The herdr startup/readiness responses used here provide no verified current quota-block signal.
-# Historical percentages and dialog text cannot prove one.
-# Until such a signal exists, auto never falls back to Claude. Startup and delivery failures retain their normal error paths.
+# --kind auto selects a normal worker using fresh local subscription quota (agent-quota); the local policy codex-only
+# restores the previous Codex-only routing. Checks and explicitly chosen models/effort retain their existing runner.
+# Startup/readiness responses provide no verified current quota-block signal: failures never switch runners.
 # A lead opens a pane for code, tests or docs with it (요유 2026-11-05). The main pane posts to Slack; its work panes only report results.
 # The main pane opens a Claude pane that does the job only with --why, the reason Codex cannot do it (api#1036). A missing
 # reason, or one mentioning Slack, 슬랙, GCP, gcloud, bq or BigQuery (any case), is refused and sent to --kind auto: a Codex
@@ -42,9 +41,9 @@
 # Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
 H=${HERDR_BIN_PATH:-herdr}
 USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
-  --kind auto: Codex regardless of weekly usage. This launcher has no verified quota-block signal, so no automatic Claude fallback.
-    Use it for code, tests, docs, GCP reads and network or process checks; work panes report results. Yoyoo can reset
-    exhausted quota with a coupon.
+  --kind auto: choose a normal worker from fresh subscription quota and weekly pace; unknown/paid usage is excluded.
+    If neither runner qualifies, no pane opens. Set the agent-quota policy to codex-only for the previous routing.
+    Startup, readiness and delivery errors never switch runners. Checks and explicit model/effort keep their runner.
   --why: in the main pane, why a pane that does the job must be Claude, in one line. A Claude pane without one, or with a
     reason mentioning Slack, 슬랙, GCP, gcloud, bq or BigQuery (any case), is refused there: Codex runs GCP commands too.
     Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요
@@ -90,6 +89,32 @@ name=$1 prompt=$2
 prompt+=$'\n\n이 칸은 리드 밑 칸입니다. 요유는 이 칸을 보지 않으니 요유에게 직접 묻거나 `prod 허용`, `staging 허용`, `/clear`를 부탁하지 마세요. 질문, 결정 요청, 보고는 답을 `남은 것:` 줄로 끝내면 이 칸을 연 리드에게 갑니다. 보고는 리드가 읽으니 요유에게 쓰는 형식(설명 페이지, `무엇을:`/`왜:`, `원인:`/`조치:`/`재발 방지:`)은 쓰지 말고, 리드가 확인할 결과와 근거를 편하게 적으세요.'
 shift 2
 [ "${1:-}" != -- ] || shift
+auto_claude=
+if [ "$asked" = auto ] && [ -z "$check" ]; then
+  # Model/config arguments belong to the historical auto runner, Codex. Never reinterpret them as Claude flags.
+  pinned=$opus config_next=
+  for a in "$@"; do
+    if [ -n "$config_next" ]; then
+      case "$a" in model=* | model_reasoning_effort=* | model_provider=*) pinned=1 ;; esac
+      config_next=
+    fi
+    case "$a" in
+      -m | -m?* | --model | --model=* | --effort | --effort=*) pinned=1 ;;
+      -c | --config) config_next=1 ;;
+      -cmodel=* | -cmodel_reasoning_effort=* | -cmodel_provider=* | --config=model=* | --config=model_reasoning_effort=* | --config=model_provider=*) pinned=1 ;;
+    esac
+  done
+  if [ -z "$pinned" ]; then
+    quota=$(python3 -I "$(dirname "$(readlink -f "$0")")/agent-quota" select "$cwd")
+    quota_rc=$?
+    quota_kind=$(printf '%s' "$quota" | jq -r '.kind // empty' 2>/dev/null)
+    quota_reason=$(printf '%s' "$quota" | jq -r '.reason // "quota unavailable"' 2>/dev/null)
+    [ -n "$quota_reason" ] || quota_reason='quota unavailable'
+    echo "pane-spawn: auto ${quota_kind:-refused}: $quota_reason" >&2
+    if [ "$quota_rc" != 0 ]; then exit 1; fi
+    case "$quota_kind" in claude) kind=claude auto_claude=1 ;; codex) kind=codex ;; *) exit 1 ;; esac
+  fi
+fi
 env_args=()
 case "$kind" in
   # Every Claude pane opened here works under a lead, so the advisor tool (a full uncached resend of the conversation per call)
@@ -260,7 +285,7 @@ fi
 # --opus opts out only work panes. It does not alter the established check-pane policy.
 trial=
 if [ -n "$delegates" ] && [ "$kind" = claude ] && [ -z "$check${MUNICE_AUTO_DISPATCH:-}${MUNICE_AMBIENT:-}" ]; then trial=1; fi
-if [ "$kind" = claude ] && { [ -n "$check" ] || { [ -n "$trial" ] && [ -z "$opus" ]; }; }; then
+if [ "$kind" = claude ] && { [ -n "$check$auto_claude" ] || { [ -n "$trial" ] && [ -z "$opus" ]; }; }; then
   case " $* " in *" --effort "* | *" --effort="*) ;; *) set -- --effort high "$@" ;; esac
   case " $* " in *" --model "* | *" --model="*) ;; *) set -- --model claude-sonnet-5-5 "$@" ;; esac
 fi

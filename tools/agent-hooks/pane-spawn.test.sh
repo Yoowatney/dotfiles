@@ -55,12 +55,16 @@ echo "[\$s] pane-label \$*" >> "$SANDBOX/log"
 EOF
 chmod +x "$SANDBOX/pane-label"
 
-run_on() { local sock=$1; shift; rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits"; env -u HERDR_SOCKET_PATH -u XDG_STATE_HOME ${sock:+HERDR_SOCKET_PATH="$sock"} HOME="$SANDBOX/home" PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_RETRY_WAIT=0 bash "$SUBJECT" "$@"; }
+run_on() { local sock=$1; shift; rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits"; env -u HERDR_SOCKET_PATH -u XDG_STATE_HOME ${sock:+HERDR_SOCKET_PATH="$sock"} HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" CLAUDE_CONFIG_DIR="$SANDBOX/home/.claude" PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_RETRY_WAIT=0 bash "$SUBJECT" "$@"; }
 ps() { run_on "" "$@"; }
 log() { cat "$SANDBOX/log" 2>/dev/null || true; }
 has() { grep -qF -- "$1" "$SANDBOX/log" || fail "$2: no [$1] in: $(log)"; }
 hasnt() { if grep -qF -- "$1" "$SANDBOX/log"; then fail "$2: found [$1] in: $(log)"; fi; }
 before() { [ "$(grep -nF -- "$1" "$SANDBOX/log" | head -1 | cut -d: -f1)" -lt "$(grep -nF -- "$2" "$SANDBOX/log" | head -1 | cut -d: -f1)" ] || fail "[$1] should come before [$2]: $(log)"; }
+
+# Exercise the legacy surface under the documented rollback policy; quota-aware cases follow below.
+mkdir -p "$SANDBOX/home/.local/state/agent-quota"
+echo codex-only > "$SANDBOX/home/.local/state/agent-quota/policy"
 
 # The caller's tab as herdr reports it, one "<pane id> <x> <y> <height>" per pane.
 layout() { printf '%s\n' "$@" | jq -Rn '{result: {layout: {panes: [inputs | split(" ") | {pane_id: .[0], rect: {x: (.[1] | tonumber), y: (.[2] | tonumber), height: (.[3] | tonumber)}}]}}}' > "$SANDBOX/layout.json"; }
@@ -796,5 +800,67 @@ is_main; remote --opener term_65f21913323dc21 "이어 감" "지시" >/dev/null |
 has "agent start spawn-65f21913323dc21-r" "--opener is never the main pane itself, whose --why rule would refuse it"; not_main
 if remote --opener term_abc123 --check "x" "y" 2>/dev/null; then fail "--opener with --check is bad usage"; fi
 if remote --opener "" "x" "y" 2>/dev/null; then fail "an empty --opener is bad usage"; fi
+
+# Quota-aware normal workers; all data and agent starts remain synthetic.
+quota_fixture() { # <Codex weekly> <Claude weekly> [extra usage enabled]
+  env HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" CLAUDE_CONFIG_DIR="$SANDBOX/home/.claude" python3 -I - "$SUBJECT" "$1" "$2" "${3:-false}" <<'PY'
+import importlib.machinery, json, os, pathlib, sys, time, datetime
+q = importlib.machinery.SourceFileLoader('quota', str(pathlib.Path(sys.argv[1]).with_name('agent-quota'))).load_module()
+h = pathlib.Path.home(); now = time.time()
+def write(p, obj):
+    p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps(obj)); return p
+auth = write(h / '.codex/auth.json', {'auth_mode':'chatgpt', 'tokens':{'account_id':'test'}})
+os.utime(auth, (now - 100, now - 100))
+write(h / '.claude.json', {'oauthAccount':{'accountUuid':'test', 'hasExtraUsageEnabled':json.loads(sys.argv[4])}})
+stamp = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).isoformat()
+week = lambda used: {'used_percent':int(used), 'window_minutes':10080, 'resets_at':now+302400}
+write(h / '.codex/sessions/quota.jsonl', {'timestamp':stamp, 'payload':{'rate_limits':{'limit_id':'codex',
+    'primary':{'used_percent':20,'window_minutes':300,'resets_at':now+1000}, 'secondary':week(sys.argv[2]),
+    'credits':{'has_credits':False,'unlimited':False}}}})
+snap = {'account':q.identity('test'), 'machine':q.machine(), 'observed_at':now,
+    'five_hour':{'used_percentage':20,'resets_at':now+1000}, 'seven_day':{'used_percentage':int(sys.argv[3]),'resets_at':now+302400}}
+q.private_write(q.state_dir() / 'claude.json', snap)
+PY
+}
+echo quota-aware > "$SANDBOX/home/.local/state/agent-quota/policy"
+rm -rf "$SANDBOX/home/.codex/sessions"
+quota_fixture 65 40
+CALLER_LABEL="🟢 🫡 lead worker" ps --kind auto "quota" "instruction" >/dev/null 2>"$SANDBOX/err"
+has "--kind claude" "a normal non-main auto worker chooses Claude with weekly relief"
+has "--model claude-sonnet-5-5 --effort high" "auto Claude always defaults to Sonnet/high"
+hasnt "--sandbox" "Codex arguments never reach Claude"
+has "CLAUDE_STARTUP_ROLE=worker" "auto Claude keeps the worker profile"
+grep -q 'weekly pace' "$SANDBOX/err" || fail "selection has a reason"
+is_main
+ps --kind auto "quota" "instruction" >/dev/null 2>"$SANDBOX/err"
+has "--kind claude" "the main pane's auto Claude choice needs no explicit --why"
+ps --check "quota" "instruction" >/dev/null
+has "--kind codex" "checks ignore normal worker routing"
+not_main
+for args in '--model=gpt-example' '--effort=high' '-m gpt-example' '-c model_reasoning_effort=xhigh' '-c model="gpt-example"'; do
+  # Intentional splitting of this fixed list simulates the original argument tokens.
+  SESSIONLESS=1 ps --kind auto "model" "instruction" -- $args >/dev/null
+  has "--kind codex" "explicit model/effort pins the historical auto runner: $args"
+done
+quota_fixture 99 90
+if ps --kind auto "blocked" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "both reserves reached must refuse"; fi
+[ ! -e "$SANDBOX/log" ] || fail "blocked selection must not even query herdr"
+rm -rf "$SANDBOX/home/.codex/sessions" "$SANDBOX/home/.local/state/agent-quota/claude.json"
+if ps --kind auto "unknown" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "unknown usage must refuse"; fi
+[ ! -e "$SANDBOX/log" ] || fail "unknown selection opens no pane"
+quota_fixture 99 40 true
+if ps --kind auto "paid" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "paid Claude must be excluded"; fi
+ps --why "explicit choice" --kind claude "explicit" "instruction" >/dev/null
+has "--kind claude" "explicit Claude remains unchanged"
+quota_fixture 65 40
+if FAIL_START=9 ps --kind auto "failure" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "selected Claude start failure must fail"; fi
+has "--kind claude" "selected runner is retained on startup failure"
+hasnt "--kind codex" "no fallback to Codex after a Claude start failure"
+echo codex-only > "$SANDBOX/home/.local/state/agent-quota/policy"
+SESSIONLESS=1 ps --kind auto "rollback" "instruction" >/dev/null
+has "--kind codex" "one local policy value restores legacy selection"
+echo typo > "$SANDBOX/home/.local/state/agent-quota/policy"
+if ps --kind auto "bad policy" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "invalid policy must refuse"; fi
+[ ! -e "$SANDBOX/log" ] || fail "invalid policy opens no pane"
 
 echo "ok: pane-spawn"
