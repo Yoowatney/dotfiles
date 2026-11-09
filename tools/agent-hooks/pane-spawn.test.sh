@@ -805,6 +805,7 @@ if remote --opener "" "x" "y" 2>/dev/null; then fail "an empty --opener is bad u
 quota_fixture() { # <Codex weekly> <Claude weekly> [extra usage enabled]
   env HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" CLAUDE_CONFIG_DIR="$SANDBOX/home/.claude" python3 -I - "$SUBJECT" "$1" "$2" "${3:-false}" <<'PY'
 import importlib.machinery, json, os, pathlib, sys, time, datetime
+sys.dont_write_bytecode = True
 q = importlib.machinery.SourceFileLoader('quota', str(pathlib.Path(sys.argv[1]).with_name('agent-quota'))).load_module()
 h = pathlib.Path.home(); now = time.time()
 def write(p, obj):
@@ -862,5 +863,78 @@ has "--kind codex" "one local policy value restores legacy selection"
 echo typo > "$SANDBOX/home/.local/state/agent-quota/policy"
 if ps --kind auto "bad policy" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "invalid policy must refuse"; fi
 [ ! -e "$SANDBOX/log" ] || fail "invalid policy opens no pane"
+
+# Each regression runs independently so one broken contract does not hide the rest.
+regression_failures=0
+regression() {
+  if ( "$@" ); then echo "ok: $1"; else regression_failures=$((regression_failures + 1)); fi
+}
+regression_codex_arguments() {
+  echo quota-aware > "$SANDBOX/home/.local/state/agent-quota/policy"
+  quota_fixture 65 40
+  for args in '-c foo=bar' '-cfoo=bar' '--config=foo=bar' '-s read-only' '--sandbox=read-only' '-p myprofile' '--profile=myprofile'; do
+    ps --kind auto "args" "instruction" -- $args >/dev/null 2>"$SANDBOX/err" || fail "argument launch: $args"
+    has "--kind codex" "Codex-only arguments pin auto: $args"
+    has "$args" "arguments retained: $args"
+  done
+}
+regression_ambient_auto() {
+  echo quota-aware > "$SANDBOX/home/.local/state/agent-quota/policy"
+  quota_fixture 65 40
+  mkdir -p "$SANDBOX/home/.config/munice"
+  echo ambient-runner > "$SANDBOX/home/.config/munice/host-role"
+  ps --kind auto "ambient" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "ambient auto launch"
+  has "--kind codex" "ambient auto cannot switch to Claude"
+  has "--sandbox workspace-write" "ambient auto retains sandbox"
+}
+regression_shell_rollback() {
+  local failure=$1
+  rm -f "$SANDBOX/home/.config/munice/host-role"
+  echo codex-only > "$SANDBOX/home/.local/state/agent-quota/policy"
+  mkdir -p "$SANDBOX/rollback"
+  cp "$SUBJECT" "$SANDBOX/rollback/pane-spawn"
+  cp "$(dirname "$SUBJECT")/agent-quota" "$SANDBOX/rollback/agent-quota"
+  [ "$failure" != syntax ] || printf 'not valid python !!!\n' > "$SANDBOX/rollback/agent-quota"
+  SUBJECT="$SANDBOX/rollback/pane-spawn"
+  # A directory at the log path is unwritable even when the test runs as root.
+  rm -rf "$SANDBOX/home/.local/state/agent-quota/decisions.jsonl"
+  mkdir "$SANDBOX/home/.local/state/agent-quota/decisions.jsonl"
+  for interpreter in "$failure"; do
+    mkdir -p "$SANDBOX/no-python"
+    if [ "$interpreter" = missing ]; then
+      printf '#!/bin/bash\ncase "$2" in */agent-quota) echo called >> "%s";; esac\nexit 97\n' "$SANDBOX/python-called" > "$SANDBOX/no-python/python3"
+    elif [ "$interpreter" = system ]; then
+      printf '#!/bin/bash\ncase "$2" in */agent-quota) echo called >> "%s";; esac\nexec /usr/bin/python3 "$@"\n' "$SANDBOX/python-called" > "$SANDBOX/no-python/python3"
+    else
+      printf '#!/bin/bash\ncase "$2" in */agent-quota) echo called >> "%s";; esac\nexec "%s" "$@"\n' "$SANDBOX/python-called" "$(command -v python3)" > "$SANDBOX/no-python/python3"
+    fi
+    chmod +x "$SANDBOX/no-python/python3"
+    PATH="$SANDBOX/no-python:$PATH" SESSIONLESS=1 ps --kind auto "rollback" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "rollback must work before Python: $interpreter"
+    has "--kind codex" "shell rollback launches Codex: $interpreter"
+    [ ! -e "$SANDBOX/python-called" ] || fail "rollback invoked quota Python: $interpreter"
+  done
+}
+regression_quota_timeout() {
+  rm -f "$SANDBOX/home/.config/munice/host-role"
+  echo quota-aware > "$SANDBOX/home/.local/state/agent-quota/policy"
+  mkdir -p "$SANDBOX/slow-python"
+  printf '#!/bin/bash\ncase "$2" in */agent-quota) echo $$ > "%s"; exec /bin/sleep 3;; esac\nexec "%s" "$@"\n' "$SANDBOX/quota-pid" "$(command -v python3)" > "$SANDBOX/slow-python/python3"
+  chmod +x "$SANDBOX/slow-python/python3"
+  SECONDS=0
+  PATH="$SANDBOX/slow-python:$PATH" PANE_SPAWN_QUOTA_LIMIT=1 SESSIONLESS=1 ps --kind auto "timeout" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "timed out lookup must retain legacy Codex"
+  [ "$SECONDS" -lt 3 ] || fail "quota timeout did not bound lookup"
+  has "--kind codex" "timeout selects legacy Codex"
+  [ "$(wc -l < "$SANDBOX/err" | tr -d ' ')" = 1 ] || fail "timeout emits exactly one warning"
+  grep -qi 'timed out' "$SANDBOX/err" || fail "timeout warning explains fallback"
+  ! kill -0 "$(cat "$SANDBOX/quota-pid")" 2>/dev/null || fail "timed-out lookup still runs"
+}
+regression regression_codex_arguments
+regression regression_ambient_auto
+regression regression_shell_rollback missing
+regression regression_shell_rollback syntax
+regression regression_shell_rollback system
+regression regression_shell_rollback unwritable
+regression regression_quota_timeout
+[ "$regression_failures" = 0 ] || fail "$regression_failures quota regressions"
 
 echo "ok: pane-spawn"

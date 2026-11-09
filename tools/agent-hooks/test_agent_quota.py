@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import io
 from pathlib import Path
 import sys
 import tempfile
@@ -72,6 +73,58 @@ class RoutingTests(unittest.TestCase):
     def test_select_claude_when_codex_ahead(self):
         self.event(60)
         self.assertEqual(self.select()["kind"], "claude")
+
+    def test_week_only_record_from_local_codex_shape(self):
+        # Real field shape; timestamp/reset replaced with the synthetic clock.
+        row = json.loads(SCRIPT.with_name("fixtures").joinpath("codex-week-only.json").read_text())
+        path = self.write(".codex/sessions/a.jsonl", row)
+        os.utime(path, (self.now,) * 2)
+        result = self.select()
+        self.assertEqual(result["kind"], "codex")
+        self.assertEqual(result["codex"]["week"], 21)
+        self.assertIsNone(result["codex"]["short"])
+        row["payload"]["rate_limits"]["primary"]["used_percent"] = 99
+        self.write(".codex/sessions/a.jsonl", row)
+        os.utime(path, (self.now,) * 2)
+        self.assertEqual(self.select()["kind"], "claude")
+
+    def test_observation_written_during_scan_is_accepted(self):
+        self.event(age=-4)
+        self.assertEqual(self.select()["kind"], "codex")
+        self.event(age=-100)
+        self.assertIsNone(self.select()["kind"])
+
+    def test_display_reads_only_recent_five_files(self):
+        for n in range(30):
+            self.event(90, age=100, file=f"old-{n}.jsonl")
+            os.utime(self.home / f".codex/sessions/old-{n}.jsonl", (self.now - 100,) * 2)
+        opened = []
+        original = Path.open
+        def tracked(path, *args, **kwargs):
+            if path.suffix == ".jsonl":
+                opened.append(path)
+            return original(path, *args, **kwargs)
+        with patch.object(Path, "open", tracked), patch.object(sys, "argv", [str(SCRIPT), "codex-week", str(self.now)]), patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(self.q.main(), 0)
+        self.assertEqual(output.getvalue(), "40\t1800302400\t1800000000\n")
+        self.assertLessEqual(len(opened), 5)
+
+    def test_decisions_are_bounded_and_parseable(self):
+        folder = self.q.state_dir()
+        log = folder / "decisions.jsonl"
+        log.write_text((json.dumps({"reason": "x" * 2000}) + "\n") * 1100)
+        with patch.object(sys, "argv", [str(SCRIPT), "select"]), patch.object(self.q.time, "time", return_value=self.now), patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(self.q.main(), 0)
+        self.assertLessEqual(log.stat().st_size, 1048576)
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(rows[-1]["kind"], "codex")
+
+    def test_decision_discards_interrupted_last_row(self):
+        log = self.q.state_dir() / "decisions.jsonl"
+        log.write_bytes(b'{"kind":"codex"}\n{"kind":')
+        self.q.record_decision({"kind": "claude"}, self.now)
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual([row["kind"] for row in rows], ["codex", "claude"])
 
     def test_default_and_close_gaps_prefer_codex(self):
         self.assertEqual(self.select()["kind"], "codex")

@@ -1,0 +1,18 @@
+{
+  "timestamp": "2027-01-15T08:00:00+00:00",
+  "type": "event_msg",
+  "payload": {
+    "type": "token_count",
+    "rate_limits": {
+      "limit_id": "codex",
+      "limit_name": null,
+      "primary": {"used_percent": 21.0, "window_minutes": 10080, "resets_at": 1800302400},
+      "secondary": null,
+      "credits": {"has_credits": false, "unlimited": false, "balance": "0"},
+      "individual_limit": null,
+      "spend_control_reached": null,
+      "plan_type": "pro",
+      "rate_limit_reached_type": null
+    }
+  }
+}

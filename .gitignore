@@ -9,6 +9,8 @@ CLAUDE.md
 
 # Logs
 *.log
+__pycache__/
+*.py[cod]
 firebase-debug.log
 
 # Secrets

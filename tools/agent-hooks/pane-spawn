@@ -26,7 +26,8 @@
 # the board itself, Slack through the Slack MCP's read tools, and processes with ps (요유 2026-11-07). With --kind claude it is
 # Claude Sonnet, with the checked folder protected by Seatbelt.
 # --kind auto selects a normal worker using fresh local subscription quota (agent-quota); the local policy codex-only
-# restores the previous Codex-only routing. Checks and explicitly chosen models/effort retain their existing runner.
+# restores the previous Codex-only routing before Python runs. Forwarded arguments and ambient-runner stay on Codex.
+# A quota lookup exceeding six seconds warns once and retains the previous Codex routing.
 # Startup/readiness responses provide no verified current quota-block signal: failures never switch runners.
 # A lead opens a pane for code, tests or docs with it (요유 2026-11-05). The main pane posts to Slack; its work panes only report results.
 # The main pane opens a Claude pane that does the job only with --why, the reason Codex cannot do it (api#1036). A missing
@@ -43,6 +44,7 @@ H=${HERDR_BIN_PATH:-herdr}
 USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
   --kind auto: choose a normal worker from fresh subscription quota and weekly pace; unknown/paid usage is excluded.
     If neither runner qualifies, no pane opens. Set the agent-quota policy to codex-only for the previous routing.
+    A lookup exceeding six seconds warns once and retains Codex. Forwarded arguments and ambient-runner retain Codex.
     Startup, readiness and delivery errors never switch runners. Checks and explicit model/effort keep their runner.
   --why: in the main pane, why a pane that does the job must be Claude, in one line. A Claude pane without one, or with a
     reason mentioning Slack, 슬랙, GCP, gcloud, bq or BigQuery (any case), is refused there: Codex runs GCP commands too.
@@ -91,28 +93,38 @@ shift 2
 [ "${1:-}" != -- ] || shift
 auto_claude=
 if [ "$asked" = auto ] && [ -z "$check" ]; then
-  # Model/config arguments belong to the historical auto runner, Codex. Never reinterpret them as Claude flags.
-  pinned=$opus config_next=
-  for a in "$@"; do
-    if [ -n "$config_next" ]; then
-      case "$a" in model=* | model_reasoning_effort=* | model_provider=*) pinned=1 ;; esac
-      config_next=
-    fi
-    case "$a" in
-      -m | -m?* | --model | --model=* | --effort | --effort=*) pinned=1 ;;
-      -c | --config) config_next=1 ;;
-      -cmodel=* | -cmodel_reasoning_effort=* | -cmodel_provider=* | --config=model=* | --config=model_reasoning_effort=* | --config=model_provider=*) pinned=1 ;;
-    esac
-  done
-  if [ -z "$pinned" ]; then
-    quota=$(python3 -I "$(dirname "$(readlink -f "$0")")/agent-quota" select "$cwd")
+  # All forwarded arguments belong to the historical auto runner, Codex: even shared short flags differ in meaning.
+  pinned=$opus
+  [ $# -eq 0 ] || pinned=1
+  [ "$(head -1 "$HOME/.config/munice/host-role" 2>/dev/null)" != ambient-runner ] || pinned=1
+  quota_dir=$(dirname "$(readlink -f "$0")")
+  quota_policy_file=$state/agent-quota/policy
+  [ -e "$quota_policy_file" ] || quota_policy_file=$quota_dir/agent-quota-policy
+  quota_policy=$(cat "$quota_policy_file" 2>/dev/null)
+  # Recovery must work with a broken Python installation, quota script, or decision-log destination.
+  if [ -z "$pinned" ] && [ "$quota_policy" != codex-only ]; then
+    quota_limit=${PANE_SPAWN_QUOTA_LIMIT:-6}
+    [[ "$quota_limit" =~ ^[1-9][0-9]*$ ]] || quota_limit=6
+    # The lookup has no children. Reap it on timeout so slow reads cannot outlive the routing decision.
+    quota=$(perl -e '
+      my $limit = shift; my $pid = fork();
+      defined $pid or exit 125;
+      if (!$pid) { exec @ARGV; exit 125; }
+      $SIG{ALRM} = sub { kill "KILL", $pid; waitpid($pid, 0); exit 124; };
+      alarm $limit; waitpid($pid, 0); my $rc = $?; alarm 0;
+      exit($rc & 127 ? 128 + ($rc & 127) : $rc >> 8);
+    ' "$quota_limit" python3 -I "$quota_dir/agent-quota" select "$cwd")
     quota_rc=$?
-    quota_kind=$(printf '%s' "$quota" | jq -r '.kind // empty' 2>/dev/null)
-    quota_reason=$(printf '%s' "$quota" | jq -r '.reason // "quota unavailable"' 2>/dev/null)
-    [ -n "$quota_reason" ] || quota_reason='quota unavailable'
-    echo "pane-spawn: auto ${quota_kind:-refused}: $quota_reason" >&2
-    if [ "$quota_rc" != 0 ]; then exit 1; fi
-    case "$quota_kind" in claude) kind=claude auto_claude=1 ;; codex) kind=codex ;; *) exit 1 ;; esac
+    if [ "$quota_rc" = 124 ]; then
+      echo 'pane-spawn: quota lookup timed out; using legacy Codex' >&2
+    else
+      quota_kind=$(printf '%s' "$quota" | jq -r '.kind // empty' 2>/dev/null)
+      quota_reason=$(printf '%s' "$quota" | jq -r '.reason // "quota unavailable"' 2>/dev/null)
+      [ -n "$quota_reason" ] || quota_reason='quota unavailable'
+      echo "pane-spawn: auto ${quota_kind:-refused}: $quota_reason" >&2
+      if [ "$quota_rc" != 0 ]; then exit 1; fi
+      case "$quota_kind" in claude) kind=claude auto_claude=1 ;; codex) kind=codex ;; *) exit 1 ;; esac
+    fi
   fi
 fi
 env_args=()

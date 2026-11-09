@@ -15,6 +15,8 @@ import tomllib
 
 WEEK = 604800
 MAX_AGE = 600
+FUTURE_SLOP = 5  # A rollout can grow while the scan is in progress.
+DECISION_BYTES = 1048576
 
 
 def read_json(path):
@@ -117,10 +119,21 @@ def percentage_tick(value):
     return isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
 
 
-def latest_codex(now):
+def latest_codex(now, display=False):
     root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
     newest = None
+    paths = []
     for path in (root / "sessions").glob("**/*.jsonl"):
+        try:
+            modified = path.stat().st_mtime
+            if modified >= now - 8 * 86400:
+                paths.append((modified, path))
+        except OSError:
+            continue
+    # The display may omit archives; admission always checks all recent rollouts.
+    if display:
+        paths = sorted(paths, reverse=True)[:5]
+    for _, path in paths:
         try:
             if path.stat().st_mtime < now - 8 * 86400:
                 continue
@@ -191,17 +204,19 @@ def subscription_settings(kind, root, cwd):
     return True
 
 
-def normalize(at, short, week, now, short_key, week_key, ceiling):
-    if at is None or not 0 <= now - at <= MAX_AGE:
+def normalize(at, short, week, now, short_key, week_key, ceiling, optional_short=False):
+    if at is None or not -FUTURE_SLOP <= now - at <= MAX_AGE:
         return invalid("missing/stale/future observation")
-    if not isinstance(short, dict) or not isinstance(week, dict):
+    if (not isinstance(short, dict) and not (optional_short and short is None)) or not isinstance(week, dict):
         return invalid("missing limit window")
-    five, seven = percentage(short.get(short_key)), percentage(week.get(week_key))
-    sr, wr = epoch(short.get("resets_at")), epoch(week.get("resets_at"))
-    if five is None or seven is None or sr is None or wr is None or not now < sr <= now + 18000 or not now < wr <= now + WEEK:
+    five = percentage(short.get(short_key)) if short is not None else None
+    sr = epoch(short.get("resets_at")) if short is not None else None
+    seven, wr = percentage(week.get(week_key)), epoch(week.get("resets_at"))
+    if (short is not None and (five is None or sr is None or not now < sr <= now + 18000)) or seven is None or wr is None or not now < wr <= now + WEEK:
         return invalid("invalid/reset limit window")
     gap = seven - 100 * (now - (wr - WEEK)) / WEEK
-    return {"eligible": five < 80 and seven <= ceiling, "reason": "within reserve" if five < 80 and seven <= ceiling else "reserve reached",
+    eligible = (five is None or five < 80) and seven <= ceiling
+    return {"eligible": eligible, "reason": "within reserve" if eligible else "reserve reached",
             "short": five, "week": seven, "gap": gap, "observed_at": at, "resets_at": wr}
 
 
@@ -230,7 +245,7 @@ def codex_quota(now, cwd):
     windows = [limits.get("primary"), limits.get("secondary")]
     short = next((w for w in windows if isinstance(w, dict) and w.get("window_minutes") == 300), None)
     week = next((w for w in windows if isinstance(w, dict) and w.get("window_minutes") == 10080), None)
-    return normalize(at, short, week, now, "used_percent", "used_percent", 95)
+    return normalize(at, short, week, now, "used_percent", "used_percent", 95, optional_short=True)
 
 
 def claude_quota(now, cwd):
@@ -275,6 +290,35 @@ def policy_value():
     return (local if local.exists() else Path(__file__).with_name("agent-quota-policy")).read_text().strip()
 
 
+def record_decision(result, now):
+    folder = state_dir()
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(folder / "decisions.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        path = folder / "decisions.jsonl"
+        entry = (json.dumps(dict(result, timestamp=now), allow_nan=False) + "\n").encode()
+        retained = b""
+        if path.exists():
+            with path.open("rb") as stream:
+                size = stream.seek(0, 2)
+                start = max(0, size - (DECISION_BYTES - len(entry)))
+                stream.seek(start)
+                retained = stream.read()
+                if start:
+                    retained = retained.partition(b"\n")[2]
+                # Older append-only logs may end with a write interrupted halfway through a row.
+                retained = retained[:retained.rfind(b"\n") + 1]
+        fd, name = tempfile.mkstemp(dir=folder)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(retained + entry)
+            os.replace(name, path)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+
+
 def main():
     now = time.time()
     command = sys.argv[1] if len(sys.argv) in (2, 3) else ""
@@ -283,18 +327,14 @@ def main():
         return 0
     if command == "select":
         result = select(now, policy_value(), sys.argv[2] if len(sys.argv) == 3 else None)
-        folder = state_dir()
-        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(folder / "decisions.jsonl", os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "a") as stream:
-            stream.write(json.dumps(dict(result, timestamp=now), allow_nan=False) + "\n")
+        record_decision(result, now)
         print(json.dumps(result, allow_nan=False))
         return 0 if result["kind"] else 1
     if command == "codex-week":
         # The display wrapper supplies its clock, also used by its reset wording.
         if len(sys.argv) == 3:
             now = float(sys.argv[2])
-        _, newest = latest_codex(now)
+        _, newest = latest_codex(now, display=True)
         if newest:
             at, limits = newest
             for window in (limits.get("primary"), limits.get("secondary")):
