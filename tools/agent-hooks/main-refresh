@@ -13,7 +13,9 @@
 unset HERDR_PANE_ID
 now=; [ "${1:-}" != --now ] || now=1
 H=${HERDR_BIN_PATH:-herdr}
-TELL=${MAIN_REFRESH_PANE_TELL:-$(dirname "$0")/pane-tell}
+# Commands in ~/.local/bin are symlinks; adjacent helpers live beside the real script.
+HERE=$(/usr/bin/python3 -I -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "$0")
+TELL=${MAIN_REFRESH_PANE_TELL:-$HERE/pane-tell}
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}
 DIR=$STATE/orchestrator
 # 5 s: on a sleeping Mac the job gets only short dark-wake slices inside the window.
@@ -39,7 +41,7 @@ skip() {
     if [ -n "${HERDR_ERROR_NOTIFY:-}" ]; then
       "$HERDR_ERROR_NOTIFY" "메인 세션 새로 시작 실패" "$*" >/dev/null 2>&1
     else
-      /usr/bin/python3 -I "$(dirname "$0")/herdr-error-notify.py" "메인 세션 새로 시작 실패" "$*" >/dev/null 2>&1
+      /usr/bin/python3 -I "$HERE/herdr-error-notify.py" "메인 세션 새로 시작 실패" "$*" >/dev/null 2>&1
     fi || log "오류 알림을 보내지 못함: $*"
   fi
   exit 0

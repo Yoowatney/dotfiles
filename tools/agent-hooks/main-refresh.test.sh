@@ -339,5 +339,34 @@ check "new work triggers another handoff and then /clear" "$(cleared)|$(cat "$SA
 check "each retry has a distinct request" "$(grep 'handoff save' "$SANDBOX/told" | sort -u | wc -l | tr -d ' ')" 2
 check "routine skips and errors never use the legacy notification API" "$([ -f "$SANDBOX/legacy-alerts" ] && cat "$SANDBOX/legacy-alerts")" ""
 
+# Installed commands are symlinks into the checkout. Exercise the default helper path without an override;
+# both adjacent helpers are sandbox fakes, so a failure here can never reach a real terminal notification.
+mkdir -p "$SANDBOX/install/hooks" "$SANDBOX/install/bin"
+cp "$SUBJECT" "$SANDBOX/install/hooks/main-refresh"
+cp "$SANDBOX/pane-tell" "$SANDBOX/install/hooks/pane-tell"
+cat > "$SANDBOX/install/hooks/herdr-error-notify.py" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+pathlib.Path(os.environ["MAIN_REFRESH_FAKE_GATEWAY_LOG"]).write_text(json.dumps({
+    "helper": str(pathlib.Path(__file__).resolve()),
+    "args": sys.argv[1:],
+}))
+PY
+ln -s ../hooks/main-refresh "$SANDBOX/install/bin/main-refresh"
+original_subject=$SUBJECT; SUBJECT="$SANDBOX/install/bin/main-refresh"
+rm_stamp; touch "$SANDBOX/tell-fails"
+mr MAIN_REFRESH_HOUR=05 MAIN_REFRESH_FAKE_GATEWAY_LOG="$SANDBOX/default-gateway.json" \
+  env -u HERDR_ERROR_NOTIFY -u MAIN_REFRESH_NOTIFY -u MAIN_REFRESH_PANE_TELL
+SUBJECT=$original_subject; rm "$SANDBOX/tell-fails"
+check "a symlinked command finds the default helper beside its real script" \
+  "$(jq -r '.helper // empty' "$SANDBOX/default-gateway.json" 2>/dev/null)" \
+  "$(/usr/bin/python3 -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$SANDBOX/install/hooks/herdr-error-notify.py")"
+check "the default helper receives the genuine error title and body" \
+  "$(jq -r '.args | join("|")' "$SANDBOX/default-gateway.json" 2>/dev/null)" "메인 세션 새로 시작 실패|인계 요청을 보내지 못해 건너뜀"
+check "default pane-tell is also resolved beside the real script" "$(grep -c 'handoff save' "$SANDBOX/told")" 1
+
 [ "$fails" = 0 ] && echo "all ok"
 exit "$fails"
