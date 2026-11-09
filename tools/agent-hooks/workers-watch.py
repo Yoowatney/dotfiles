@@ -325,7 +325,7 @@ def tick(env, now: float) -> list:
     state = {k: v for k, v in state.items() if k == "_down" or isinstance(v, dict)}
     told: list = []
 
-    def tell(msg, opener="", home=False, moved=None) -> bool:
+    def tell(msg, opener="", home=False, moved=None, urgent=True) -> bool:
         """moved: (pane, name) of a pane workers-move opened here, whose lead is on the 회사맥: the day file takes what nobody
         here heard, and `workers-move bridge` carries it there. It is no alert someone took, so it is not in `told`."""
         pt = env.get("WORKERS_WATCH_PANE_TELL") or os.path.join(HERE, "pane-tell")
@@ -341,6 +341,8 @@ def tick(env, now: float) -> list:
                 return True
         if moved:
             return day_entry(env, now, moved[0], moved[1], f"[workers-watch] {msg}")
+        if not urgent:
+            return True  # routine cleanup needs no retry when nobody can receive its status
         if notify(env, msg):  # 요유's own screen needs no warning about 요유's own matters
             told.append(msg)
             return True
@@ -431,7 +433,7 @@ def tick(env, now: float) -> list:
                         rec["alerted"].append("idle")
                 if lost and reported and now - max(rec["since"], rec["lost_at"]) >= ORPHAN_TTL and not held:
                     closed = herdr_peers.herdr(env, "pane", "close", pane, socket=sock)  # {} when it failed: tried again next minute
-                    if closed and "closed" not in rec["alerted"] and tell(f"리드가 닫힌 밑 칸 {name}(workers/{pane})을 보고 1시간 뒤라 닫았습니다", home=home):
+                    if closed and "closed" not in rec["alerted"] and tell(f"리드가 닫힌 밑 칸 {name}(workers/{pane})을 보고 1시간 뒤라 닫았습니다", home=home, urgent=False):
                         rec["alerted"].append("closed")
         with_agent = {a.get("pane_id") for a in agents}
         for p in panes:
@@ -764,6 +766,19 @@ esac
         result("default-panes", "panes", LEADS); agents(agent("w1:pD", "term_D", "idle", seq=9, **K)); touch_reported("term_D", 67600); tick(67610)
         result("default-panes", "panes", [MAIN]); tick(67620); result("default-panes", "panes", LEADS); tick(67700)
         result("default-panes", "panes", [MAIN]); tick(71230); assert closed() == [], "a lead that came back starts the hour over"
+
+        # Completed orphan cleanup is routine status. Missing owners remain an
+        # error, but the later successful close must not use the error gateway.
+        os.remove(f"{d}/state/orchestrator/watch.json")
+        result("default-panes", "panes", [])
+        panes_on_workers(label("w1:pNS", "🟢 🫡 상태 확인"))
+        agents(agent("w1:pNS", "term_NS", "idle", seq=1, **K))
+        touch_reported("term_NS", 71240)
+        assert tick(71250) == [] and len(notified()) == 1 and "리드가 닫혔습니다" in notified()[0], "a missing owner still queues an error"
+        assert tick(74850) == [] and closed() == ["w1:pNS"] and notified() == [], "successful orphan cleanup is not a terminal error"
+        assert "closed" in watch()["term_NS"]["alerted"], "routine status without a recipient is accepted once"
+        result("default-panes", "panes", [MAIN])
+        assert tick(74910) == [] and notified() == [], "a later recipient gets no stale cleanup status"
 
         # A lead whose agent ended leaves its pane at a shell, where nobody hears: it counts as closed, or the pane would stay hidden for good.
         os.remove(f"{d}/state/orchestrator/watch.json"); panes_on_workers(label("w1:pS", "🟢 🫡 셸만 남음"))
