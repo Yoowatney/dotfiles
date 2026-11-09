@@ -6,6 +6,10 @@
 # Read input from stdin
 input=$(cat)
 
+# Cache only official quota fields, tied to the current account and assistant response time.
+# Missing metadata or an unwritable cache must never break the status line.
+printf '%s' "$input" | python3 -I "$(dirname "$(readlink -f "$0")")/../agent-hooks/agent-quota" capture-claude 2>/dev/null || true
+
 # This runs the launcher from the plugin cache because plugin sync installs the plugin on 집맥 but not the copy
 # /claude-hud:setup makes. Any installed copy works: the launcher picks the newest version. Node, not bun: bun reads
 # .env and bunfig.toml from the session folder, and a bunfig.toml preload would run that repo's code on every refresh.
