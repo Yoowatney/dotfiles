@@ -20,10 +20,15 @@ case "\$1 \$2" in
     # the session the pane list gives, or the one in cur-sid: a clear that happened meanwhile
     sid=\$(cat "$SANDBOX/cur-sid" 2>/dev/null || jq -r --arg p "\$3" '.result.panes[] | select(.pane_id == \$p) | .agent_session.value' "$SANDBOX/panes")
     jq -n --arg s "\$(cat "$SANDBOX/status")" --arg p "\$3" --arg sid "\$sid" '{result: {pane: {pane_id: \$p, agent_status: \$s, agent_session: {value: \$sid}}}}' ;;
-  "notification show") echo "\$3" >> "$SANDBOX/alerts" ;;
+  "notification show") echo "\$3" >> "$SANDBOX/alerts"; echo legacy >> "$SANDBOX/legacy-alerts" ;;
   "agent prompt") [ ! -f "$SANDBOX/prompt-fails" ] || exit 1 ;;
   *) exit 2 ;;
 esac
+EOS
+cat > "$SANDBOX/error-notify" <<EOS
+#!/usr/bin/env bash
+printf '%s|%s\n' "\$1" "\$2" >> "$SANDBOX/errors"
+[ ! -f "$SANDBOX/notify-fails" ]
 EOS
 # Fake pane-tell: logs its args. --box-ready: BOX_FULL always fails; BOX_FULL_AFTER fails from the second call;
 # BOX_WORK / BOX_LATE make the second call set the pane working / the hour to 09. A handoff request prints `told x`
@@ -86,7 +91,7 @@ case "\$2" in *"handoff save"*)
   [ -z "\${GO_LATE:-}" ] || echo 09 > "$SANDBOX/hour"
   [ -z "\${WORK_AFTER:-}" ] || echo working > "$SANDBOX/status"
   if [ "\${HANDOFF_AFTER:-0}" != never ]; then ( sleep "\${HANDOFF_AFTER:-0}"; if [ -n "\${HANDOFF_EMPTY:-}" ]; then : > "$SANDBOX/state/agent-handoff/\${HANDOFF_KEY:-w5:p3}.md"; else printf '%s\\n%s\\n' "\${2##* }" "handoff-\$n" > "$SANDBOX/state/agent-handoff/\${HANDOFF_KEY:-w5:p3}.md"; fi ); fi
-  if [ -n "\${QUEUED:-}" ]; then echo "queued (box busy)"; else echo "told x"; fi ;;
+  if [ -n "\${TELL_UNKNOWN:-}" ]; then echo "unknown"; elif [ -n "\${QUEUED:-}" ]; then echo "queued (box busy)"; else echo "told x"; fi ;;
 esac
 exit 0
 EOS
@@ -104,12 +109,12 @@ cat > "$SANDBOX/pg/pgrep" <<EOS
 echo '{"type":"user","message":{"content":"typed during the last checks"}}' >> "$SANDBOX/sid-main.jsonl"
 exit 1
 EOS
-chmod +x "$SANDBOX/herdr" "$SANDBOX/pane-tell" "$SANDBOX/bin/date" "$SANDBOX/pg/pgrep"
+chmod +x "$SANDBOX/herdr" "$SANDBOX/error-notify" "$SANDBOX/pane-tell" "$SANDBOX/bin/date" "$SANDBOX/pg/pgrep"
 
 S="$SANDBOX/state"
 mr() { # every call is sandboxed: state dir, herdr, pane-tell
-  rm -f "$SANDBOX/told" "$SANDBOX/herdr-log" "$SANDBOX/box-n" "$SANDBOX/request-n" "$S/orchestrator/refresh.log"; : > "$SANDBOX/alerts"
-  env XDG_STATE_HOME="$S" HERDR_BIN_PATH="$SANDBOX/herdr" MAIN_REFRESH_PANE_TELL="$SANDBOX/pane-tell" \
+  rm -f "$SANDBOX/told" "$SANDBOX/herdr-log" "$SANDBOX/box-n" "$SANDBOX/request-n" "$S/orchestrator/refresh.log"; : > "$SANDBOX/alerts"; : > "$SANDBOX/errors"
+  env XDG_STATE_HOME="$S" HERDR_BIN_PATH="$SANDBOX/herdr" HERDR_ERROR_NOTIFY="$SANDBOX/error-notify" MAIN_REFRESH_PANE_TELL="$SANDBOX/pane-tell" \
     MAIN_REFRESH_POLL=0.05 MAIN_REFRESH_QUIET=0 MAIN_REFRESH_RETRY_QUIET=0 MAIN_REFRESH_DEADLINE="${MAIN_REFRESH_DEADLINE:-5}" MAIN_REFRESH_HANDOFF_WAIT="${MAIN_REFRESH_HANDOFF_WAIT:-5}" \
     "$@" /bin/bash "$SUBJECT" ${MR_ARGS:-} >/dev/null 2>&1
 }
@@ -128,7 +133,7 @@ rm_stamp() { rm -f "$S/orchestrator"/refreshed-*; rm -f "$S"/agent-handoff/*.md 
 STAMP="$S/orchestrator/refreshed-$(date +%F)"
 
 set_main; status idle
-mr MAIN_REFRESH_HOUR=09; check "outside 05-06 nothing is sent, and the skip is announced" "$(told)|$(grep -c '건너뜀' "$SANDBOX/alerts")" "|1"
+mr MAIN_REFRESH_HOUR=09; check "outside 05-06 nothing is sent or alerted" "$(told)|$(cat "$SANDBOX/errors")" "|"
 rm_main; mr MAIN_REFRESH_HOUR=09; check "no main file stays silent even outside the window" "$(cat "$SANDBOX/alerts")" ""
 set_main
 rm_main; mr MAIN_REFRESH_HOUR=05; check "no main file: nothing, no alert" "$(told)|$(cat "$SANDBOX/alerts" 2>/dev/null)" "|"
@@ -141,22 +146,23 @@ check "the request names handoff save" "$(grep -c 'handoff save' "$SANDBOX/told"
 mr MAIN_REFRESH_HOUR=06; check "once a day" "$(told)" ""
 rm_stamp; status working; mr MAIN_REFRESH_HOUR=05 MAIN_REFRESH_DEADLINE=0.3
 check "a working main pane is never interrupted" "$(told)" ""
-check "the skip is announced" "$(grep -c '건너뜀' "$SANDBOX/alerts")" 1
+check "a working pane is a routine skip, without an error alert" "$(cat "$SANDBOX/errors")" ""
 [ ! -f "$STAMP" ] || fail "a skip leaves no stamp"
 status idle; mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=05 MAIN_REFRESH_HANDOFF_WAIT=0.3
 check "no handoff written: no /clear" "$(told)|$(cleared)" "--box-ready w5:p3 claude|w5:p3 [main-refresh] 새벽|0"
-check "no handoff: announced" "$(grep -c '건너뜀' "$SANDBOX/alerts")" 1
+check "no handoff: error gateway receives the warning" "$(grep -c '인계가 저장되지 않아' "$SANDBOX/errors")" 1
 check "no handoff: logged" "$(grep -c '인계가 저장되지 않아' "$S/orchestrator/refresh.log")" 1
 [ ! -f "$STAMP" ] || fail "no handoff leaves no stamp"
 rm_stamp; mr BOX_FULL=1 MAIN_REFRESH_HOUR=05   # 요유 left words in the box: --box-ready fails
 check "a full box from the start: no request, no /clear" "$(told)|$(cleared)" "--box-ready w5:p3 claude|0"
 check "the skip is logged" "$(grep -c '입력창' "$S/orchestrator/refresh.log")" 1
-check "the skip is announced too" "$(grep -c '건너뜀' "$SANDBOX/alerts")" 1
+check "typed input is a routine skip, without an error alert" "$(cat "$SANDBOX/errors")" ""
 [ ! -f "$STAMP" ] || fail "a full box leaves no stamp"
 
 # The box fills between the request and the clear: no /clear, and the memo is set aside.
 rm_stamp; mr BOX_FULL_AFTER=1 MAIN_REFRESH_HOUR=05
 check "box full after the request: no /clear" "$(told)|$(cleared)" "--box-ready w5:p3 claude|w5:p3 [main-refresh] 새벽|--box-ready w5:p3 claude|0"
+check "typed input after the request sends no error alert" "$(cat "$SANDBOX/errors")" ""
 [ ! -f "$S/agent-handoff/w5:p3.md" ] && [ -f "$S/agent-handoff/w5:p3.md.skipped" ] || fail "a skipped run sets its memo aside"
 rm_stamp
 # A queued result is followed until its request and handoff are visible, in the daily run too.
@@ -183,7 +189,7 @@ check "hour passed during the box check: no /clear" "$(cleared)" 0
 
 # A turn that just ended: wait for quiet. An old transcript goes ahead.
 rm_stamp; touch "$SANDBOX/sid-main.jsonl"; mr MAIN_REFRESH_QUIET=600 MAIN_REFRESH_HOUR=05 MAIN_REFRESH_DEADLINE=0.3
-check "recent turn: not asked, announced" "$(told)|$(grep -c '건너뜀' "$SANDBOX/alerts")" "|1"
+check "recent turn: not asked or alerted" "$(told)|$(cat "$SANDBOX/errors")" "|"
 rm_stamp; touch -t 202001010000 "$SANDBOX/sid-main.jsonl"; mr MAIN_REFRESH_QUIET=600 MAIN_REFRESH_HOUR=05
 check "old transcript: goes ahead" "$(cleared)" 1
 
@@ -219,7 +225,7 @@ rm_stamp; echo 05 > "$SANDBOX/hour"
 mr PATH="$SANDBOX/bin:$PATH" GO_LATE=1
 check "woke at 09: no /clear" "$(cleared)" 0
 [ ! -f "$STAMP" ] || fail "woke late leaves no stamp"
-check "woke late: announced" "$(grep -c '건너뜀' "$SANDBOX/alerts")" 1
+check "woke late: no error alert" "$(cat "$SANDBOX/errors")" ""
 
 # Woke at 09:00 during the first wait, pane idle: the request must not land in a pane in daytime use.
 rm_stamp; echo 05 > "$SANDBOX/hour"; touch "$SANDBOX/late-on-get"
@@ -235,7 +241,7 @@ check "late in the wait: stops on the hour, not the timeout" "$(grep -c '05~06�
 
 # A pane that went back to work after saving is not interrupted.
 rm_stamp; status idle; mr WORK_AFTER=1 MAIN_REFRESH_HOUR=05 MAIN_REFRESH_HANDOFF_WAIT=0.3
-check "handoff saved but pane working: no /clear, announced" "$(cleared)|$(grep -c '건너뜀' "$SANDBOX/alerts")" "0|1"
+check "handoff saved but pane working: no /clear or error alert" "$(cleared)|$(cat "$SANDBOX/errors")" "0|"
 status idle
 
 # launchd has no pane id, but a run from inside the main pane must not be refused as "this pane".
@@ -244,10 +250,15 @@ check "HERDR_PANE_ID never reaches pane-tell" "$(cat "$SANDBOX/tell-env")" unset
 
 # pane-tell or herdr failing is reported, never stamped.
 rm_stamp; touch "$SANDBOX/tell-fails"; mr MAIN_REFRESH_HOUR=05
-check "pane-tell fails: no /clear, announced" "$(cleared)|$(grep -c '건너뜀' "$SANDBOX/alerts")" "0|1"
+check "pane-tell fails: no /clear, error gateway called" "$(cleared)|$(grep -c '인계 요청을 보내지 못해' "$SANDBOX/errors")" "0|1"
 rm "$SANDBOX/tell-fails"; touch "$SANDBOX/prompt-fails"; rm_stamp; mr MAIN_REFRESH_HOUR=05
-check "agent prompt fails: announced, no stamp" "$(grep -c '건너뜀' "$SANDBOX/alerts")|$([ -f "$STAMP" ] && echo stamped)" "1|"
+check "agent prompt fails: error gateway called, no stamp" "$(grep -c '/clear를 보내지 못해' "$SANDBOX/errors")|$([ -f "$STAMP" ] && echo stamped)" "1|"
 rm "$SANDBOX/prompt-fails"
+rm_stamp; mr TELL_UNKNOWN=1 MAIN_REFRESH_HOUR=05
+check "an unrecognized delivery result uses the error gateway" "$(cleared)|$(grep -c '결과를 확인하지 못해' "$SANDBOX/errors")" "0|1"
+rm_stamp; touch "$SANDBOX/notify-fails" "$SANDBOX/tell-fails"; mr MAIN_REFRESH_HOUR=05
+check "a failed error gateway is recorded locally" "$(grep -c '오류 알림을 보내지 못함' "$S/orchestrator/refresh.log")" 1
+rm "$SANDBOX/notify-fails" "$SANDBOX/tell-fails"
 
 # Both requests name what a restart loses: watches and background jobs, each with the command that starts it again.
 rm_stamp; touch -t 202001010000 "$SANDBOX/sid-main.jsonl"; mr MAIN_REFRESH_HOUR=05
@@ -272,6 +283,7 @@ rm_stamp; now NEW_TURN=compact MAIN_REFRESH_HOUR=09; check "a compaction summary
 # Another run cleared the pane meanwhile: this run's checks read the old session, so it stops.
 rm_stamp; now NEW_TURN=cleared MAIN_REFRESH_HOUR=09; rm -f "$SANDBOX/cur-sid"
 check "a session that changed since the start: no /clear" "$(cleared)|$(grep -c '세션이 바뀌어' "$S/orchestrator/refresh.log")" "0|1"
+check "a changed session sends no error alert" "$(cat "$SANDBOX/errors")" ""
 # One run at a time: a second call while one waits does nothing; a lock left by a run that died 2 hours ago does not block.
 rm_stamp; mkdir "$S/orchestrator/refresh.lock"; now MAIN_REFRESH_HOUR=09
 check "a run in progress: herdr and pane-tell untouched" "$(told)|$([ -f "$SANDBOX/herdr-log" ] && echo called)|$(grep -c '진행 중' "$S/orchestrator/refresh.log")" "||1"
@@ -325,6 +337,7 @@ rm_stamp; now NEW_TURN_ONCE=1 MAIN_REFRESH_HOUR=09
 check "new work triggers another handoff and then /clear" "$(cleared)|$(cat "$SANDBOX/request-n")|$(tail -n 1 "$S/agent-handoff/w5:p3.md" 2>/dev/null)" "1|2|handoff-2"
 # The next answer must belong to a distinct request, even when the previous text is still last in the transcript.
 check "each retry has a distinct request" "$(grep 'handoff save' "$SANDBOX/told" | sort -u | wc -l | tr -d ' ')" 2
+check "routine skips and errors never use the legacy notification API" "$([ -f "$SANDBOX/legacy-alerts" ] && cat "$SANDBOX/legacy-alerts")" ""
 
 [ "$fails" = 0 ] && echo "all ok"
 exit "$fails"

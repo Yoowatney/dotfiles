@@ -7,7 +7,7 @@
 #                        From a pane on the workers server, drop both of its server variables to reach the main pane:
 #                        env -u HERDR_SOCKET_PATH -u HERDR_SESSION main-refresh --now
 # Test knobs: MAIN_REFRESH_HOUR (wins over the clock), _POLL, _DEADLINE, _HANDOFF_WAIT (seconds, fractions ok),
-# _QUIET, _RETRY_QUIET (whole seconds), _PANE_TELL, and HERDR_BIN_PATH.
+# _QUIET, _RETRY_QUIET (whole seconds), _PANE_TELL, HERDR_BIN_PATH, and HERDR_ERROR_NOTIFY.
 # A run from inside the main pane would make pane-tell refuse "this pane"; launchd sets none anyway.
 # HERDR_SOCKET_PATH stays: a run from a workers pane must find nothing, not reach the default server.
 unset HERDR_PANE_ID
@@ -29,9 +29,21 @@ if [[ "${HERDR_SOCKET_PATH:-}" == */sessions/*/herdr.sock ]]; then s=${HERDR_SOC
 log() { mkdir -p "$DIR" && echo "$(date '+%F %T') $*" >> "$DIR/refresh.log"; }
 # A skipped run must not leave its memo behind: a later hand /clear would load it and say "continue from this".
 skip() {
+  local error=
+  [ "${1:-}" != --error ] || { error=1; shift; }
   kill $(jobs -p) 2>/dev/null
   if [ -n "${req:-}" ] && newer; then mv -f "$hdir/$key.md" "$hdir/$key.md.skipped"; fi
-  log "$*"; "$H" notification show "메인 칸 새로 시작 건너뜀" --body "$*" >/dev/null 2>&1; exit 0; }
+  log "$*"
+  # Busy input, new work and the time window are expected skips. Only failed operations need an alert.
+  if [ -n "$error" ]; then
+    if [ -n "${HERDR_ERROR_NOTIFY:-}" ]; then
+      "$HERDR_ERROR_NOTIFY" "메인 세션 새로 시작 실패" "$*" >/dev/null 2>&1
+    else
+      /usr/bin/python3 -I "$(dirname "$0")/herdr-error-notify.py" "메인 세션 새로 시작 실패" "$*" >/dev/null 2>&1
+    fi || log "오류 알림을 보내지 못함: $*"
+  fi
+  exit 0
+}
 in_window() { [ -z "$now" ] || return 0; case "${MAIN_REFRESH_HOUR:-$(date +%H)}" in 05|06) return 0 ;; esac; return 1; }
 late() { in_window || skip "새벽 05~06시가 지나 건너뜀"; }
 status() { "$H" pane get "$1" 2>/dev/null | jq -r '.result.pane.agent_status // empty'; }
@@ -120,16 +132,20 @@ else ask="[main-refresh] 새벽 정리입니다. ${what}을 handoff save로 남�
 token="[request:$$:$attempt]"
 ask="$ask 인계 첫 줄에 다음 요청 번호를 그대로 남기세요: $token"
 out=$("$TELL" "$id" "$ask" 2>/dev/null) \
-  || skip "인계 요청을 보내지 못해 건너뜀"
+  || skip --error "인계 요청을 보내지 못해 건너뜀"
 case "$out" in
   told*) ;;
   queued*) log "인계 요청이 대기열에 들어감: 전달과 인계 저장을 기다림" ;;
-  *) skip "인계 요청 결과를 확인하지 못해 건너뜀" ;;
+  *) skip --error "인계 요청 결과를 확인하지 못해 건너뜀" ;;
 esac
 # -s: an empty memo is none. The nonce also rejects a newer memo saved before queued delivery.
 memo_ready() { [ -s "$hdir/$key.md" ] && newer && grep -Fqx -- "$token" "$hdir/$key.md"; }
 fresh() { memo_ready && idle; }
-wait_for "$HANDOFF_WAIT" fresh || skip "인계가 저장되지 않아 건너뜀"
+if ! wait_for "$HANDOFF_WAIT" fresh; then
+  same_session || skip "세션이 바뀌어 건너뜀"
+  memo_ready && skip "인계 뒤에 칸이 다시 일하고 있어 건너뜀"
+  skip --error "인계가 저장되지 않아 건너뜀"
+fi
 
 late
 if [ -n "$now" ]; then
@@ -173,7 +189,7 @@ if [[ "$last" != *"$ask" ]]; then
   skip "인계 뒤에 새 대화가 있어 건너뜀"
 fi
 # Straight through herdr, never pane-tell's queue: a queued /clear would fire hours later and wipe the main pane.
-"$H" agent prompt "$id" /clear >/dev/null 2>&1 || skip "/clear를 보내지 못해 건너뜀"
+"$H" agent prompt "$id" /clear >/dev/null 2>&1 || skip --error "/clear를 보내지 못해 건너뜀"
 [ -n "$now" ] || { mkdir -p "$DIR" && : > "$DIR/refreshed-$day"; }
 log "메인 칸 $id 새로 시작함${now:+ (--now)}"
 break
