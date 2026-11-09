@@ -34,6 +34,8 @@ def drain(host, run=subprocess.run):
             # Match the gateway's maximum import batch. Leave the remainder at
             # the source for subsequent minutes rather than wedging a backlog.
             rows = rows[:1000]
+            if any(not isinstance(r.get("id"), str) for r in rows):
+                raise ValueError("invalid remote identifier")
             ids = [str(uuid.UUID(r["id"])) for r in rows]
             if rows:
                 call(local + ["--import"], json.dumps(rows, ensure_ascii=False))

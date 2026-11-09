@@ -72,6 +72,17 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(len(imported), 1000)
         self.assertEqual(acknowledged, [r["id"] for r in rows[:1000]])
 
+    def test_non_string_remote_id_still_drains_local(self):
+        for invalid in ([], {}, None, 4):
+            with self.subTest(invalid=invalid):
+                calls = []
+                def run(cmd, **kw):
+                    calls.append(cmd)
+                    return subprocess.CompletedProcess(cmd, 0, json.dumps([dict(id=invalid)]), "")
+                relay.drain("test-host", run=run)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[-1][-1], "--drain")
+
 
 if __name__ == "__main__":
     unittest.main()
