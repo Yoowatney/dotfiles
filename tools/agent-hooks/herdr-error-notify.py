@@ -109,7 +109,9 @@ def parse_clients(output):
 
 
 def client_inventory():
-    result = subprocess.run(["/bin/ps", "-axo", "pid=,uid=,tty=,lstart=,comm=,args="],
+    # macOS comm truncates an absolute argv[0] to 15 characters. ucomm is the
+    # executable basename, so an absolute-path launch still identifies herdr.
+    result = subprocess.run(["/bin/ps", "-axo", "pid=,uid=,tty=,lstart=,ucomm=,args="],
                             capture_output=True, text=True, check=True, timeout=5)
     return parse_clients(result.stdout)
 

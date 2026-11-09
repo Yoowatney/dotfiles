@@ -2,14 +2,20 @@
 """Behavior checks: dropping the queue, client validation or sanitization breaks these."""
 import importlib.util
 from concurrent.futures import ThreadPoolExecutor
+import fcntl
 import json
 import os
 from pathlib import Path
 import pty
 import select
+import shutil
+import signal
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
+import time
 import unittest
 import uuid
 
@@ -93,6 +99,41 @@ class ErrorNotifyTests(unittest.TestCase):
         data += "\n125 999999 ttys002 Mon Nov 9 12:00:00 2026 herdr herdr"
         clients = self.mod.parse_clients(data)
         self.assertEqual([c.command for c in clients], ["herdr", "herdr session attach workers"])
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("herdr"),
+                         "requires macOS ps and the installed herdr client")
+    def test_real_macos_ps_recognizes_absolute_path_client_on_pty(self):
+        executable = str(Path(shutil.which("herdr")).absolute())
+        pid, master = pty.fork()
+        if pid == 0:
+            # A nested client exits immediately; this PTY represents a separate
+            # local terminal, not the session running the test.
+            for key in list(os.environ):
+                if key.startswith("HERDR") or key == "TMUX":
+                    os.environ.pop(key)
+            os.environ["TERM"] = "xterm-256color"
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+            os.execv(executable, [executable])
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                result = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "ucomm="],
+                                        capture_output=True, text=True, check=False)
+                if result.stdout.strip() == "herdr":
+                    break
+                time.sleep(0.05)
+            clients = self.mod.client_inventory()
+            matches = [client for client in clients if client.pid == pid]
+            self.assertEqual(len(matches), 1, "absolute-path herdr on a real PTY must be eligible")
+            self.assertTrue(matches[0].command.startswith(executable))
+            self.assertRegex(matches[0].tty, r"^ttys[0-9]+$")
+        finally:
+            os.close(master)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(pid, 0)
 
     def test_export_import_ack_preserve_ids_and_deduplicate(self):
         event = self.store.enqueue("Failure", "Body")
