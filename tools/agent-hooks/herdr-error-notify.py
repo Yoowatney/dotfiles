@@ -36,6 +36,10 @@ def sanitize(value, limit):
     """Remove terminal control characters, including OSC terminators."""
     if not isinstance(value, str):
         raise ValueError("notification text must be a string")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("notification text must be valid UTF-8") from exc
     return " ".join("".join(" " if ord(c) < 32 or 127 <= ord(c) <= 159 else c
                             for c in value).split())[:limit]
 

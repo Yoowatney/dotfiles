@@ -151,6 +151,15 @@ class ErrorNotifyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.import_events([dict(event, body="changed")])
 
+    def test_invalid_unicode_cannot_poison_the_pending_queue(self):
+        event = self.store.enqueue("Failure", "Existing valid error")
+        malformed = dict(event, id=str(uuid.uuid4()), body="bad\ud800")
+        with self.assertRaises(ValueError):
+            self.mod.validate_event(malformed)
+        with self.assertRaises(ValueError):
+            self.store.import_events([malformed])
+        self.assertEqual(self.store.export(), [event])
+
     def test_cli_export_import_ack_and_no_tty_override(self):
         env = dict(os.environ, XDG_STATE_HOME=self.tmp.name)
         event = self.store.enqueue("Failure", "Body")
