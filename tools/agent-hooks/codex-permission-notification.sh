@@ -13,6 +13,10 @@ append_log() {
 # The hidden workers herdr server: 요유 never enters those panes, and workers-watch tells the main pane what needs it.
 case "${HERDR_SOCKET_PATH:-}" in */sessions/workers/herdr.sock) append_log "SKIPPED workers pane ${HERDR_PANE_ID:-}"; exit 0 ;; esac
 
+# An input/permission request is ordinary status, not an error warning.
+append_log "SKIPPED status notification ${HERDR_PANE_ID:-}"
+exit 0
+
 append_log "=== $(date) ==="
 
 session=""

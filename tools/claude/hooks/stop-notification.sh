@@ -11,6 +11,10 @@ HOOK_INPUT=$(cat)
 # The hidden workers herdr server: 요유 never enters those panes, and workers-watch tells the main pane what needs it.
 case "${HERDR_SOCKET_PATH:-}" in */sessions/workers/herdr.sock) echo "SKIPPED workers pane ${HERDR_PANE_ID:-}" >> "$LOG_FILE"; exit 0 ;; esac
 
+# Completion is ordinary status. Error warnings have their own senders.
+echo "SKIPPED status notification ${HERDR_PANE_ID:-}" >> "$LOG_FILE"
+exit 0
+
 echo "=== $(date) ===" >> "$LOG_FILE"
 
 # tmux 세션/윈도우 정보 (알림에 직접 전달)
