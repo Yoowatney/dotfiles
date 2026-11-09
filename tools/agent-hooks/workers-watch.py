@@ -1092,6 +1092,13 @@ esac
 
 
 def main():
+    # Error banners bypass herdr's ordinary status toasts. Run even if tick fails:
+    # previously queued warnings must resume when a terminal attaches again.
+    try:
+        subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "herdr-error-drain.py")], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
     try:
         tick(os.environ, float(os.environ.get("WORKERS_WATCH_NOW") or time.time()))
     except Exception:
