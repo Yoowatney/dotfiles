@@ -27,11 +27,18 @@ case "\$1 \$2" in
     if [ -f "$SANDBOX/screen-\$3" ]; then cat "$SANDBOX/screen-\$3"
     elif [ -f "$SANDBOX/screen.\$n" ]; then cat "$SANDBOX/screen.\$n"; else cat "$SANDBOX/screen"; fi ;;
   "agent prompt") [ ! -f "$SANDBOX/refuse" ] || exit 1; printf '%s|%s\n' "\$3" "\$4" >> "$SANDBOX/log"; echo "\$s" >> "$SANDBOX/log-srv" ;;
-  "notification show") printf '%s\n' "\$5" >> "$SANDBOX/alerts"; echo "\$s" >> "$SANDBOX/alerts-srv" ;;
+  "notification show") echo legacy >> "$SANDBOX/legacy-alerts"; exit 98 ;;
   *) exit 2 ;;
 esac
 EOF
 chmod +x "$SANDBOX/herdr"
+cat > "$SANDBOX/error-notify" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$2" >> "$SANDBOX/alerts"
+echo default >> "$SANDBOX/alerts-srv"
+EOF
+chmod +x "$SANDBOX/error-notify"
+export HERDR_ERROR_NOTIFY="$SANDBOX/error-notify"
 panes() { # "<id>|<label>|<session>[|<tab id>[|<agent>]]" ...
   local p; for p in "$@"; do IFS='|' read -r id label sid tab kind <<<"$p"; jq -nc --arg i "$id" --arg l "$label" --arg s "$sid" --arg t "${tab:-w1:t1}" --arg k "${kind:-claude}" --arg term "term_${id##*:}" '{pane_id: $i, label: $l, agent_session: {value: $s}, cwd: "/w", tab_id: $t, agent: ($k | if . == "-" then null else . end), terminal_id: $term}'; done \
     | jq -s '{result: {panes: .}}' > "$SANDBOX/${PANES_FILE:-panes}"
@@ -251,19 +258,19 @@ pt default/w1:p9 "x" 2>/dev/null; check "its own server named in the address is 
 pt other/w1:p2 "x" 2>/dev/null; check "only default and workers are reachable by name" "$?|$(sent)" "2|"
 sessions_up stopped; pt workers/w1:p2 "x" 2>/dev/null; check "a stopped server has no such pane" "$?|$(sent)" "3|"
 sessions_up
-# main -> workers, the workers box is full: no notification, since 요유 never enters that pane and that server's banners are off;
-# the note to the sender reaches main on default.
+# main -> workers, a full box remains an error alert even with routine toasts disabled;
+# the note to the sender still reaches main on default.
 claude_screen "치던 글" > "$SANDBOX/screen-w1:p2"
 PANE_TELL_ALERT=0 PANE_TELL_WAIT=0.3 pt workers/w1:p2 "x" >/dev/null; settled
-check "a full box on workers sends no notification" "$(cat "$SANDBOX/alerts-srv" 2>/dev/null)" ""
+check "a full box on workers queues an error alert" "$(cat "$SANDBOX/alerts-srv" 2>/dev/null)" "default"
 check "the sender's note reaches the main pane on its server" "$(grep -c '^w1:p9|.*자동 안내' "$SANDBOX/log")|$(grep -c default "$SANDBOX/log-srv")" "1|1"
 # A job has no pane to hear it: the same stuck message would reach nobody, so the main pane hears.
 rm -f "$SANDBOX"/state/pane-tell/undelivered/*; mkdir -p "$SANDBOX/state/orchestrator"; echo term_p9 > "$SANDBOX/state/orchestrator/main"
 PANE_TELL_ALERT=0 PANE_TELL_WAIT=0.3 job workers/w1:p2 "x" >/dev/null; settled
-check "a job's message stuck on workers: the main pane hears, no notification" "$(grep -c '^w1:p9|.*자동 안내' "$SANDBOX/log")|$(cat "$SANDBOX/log-srv")|$(cat "$SANDBOX/alerts-srv" 2>/dev/null)" "1|default|"
+check "a job's message stuck on workers: main and the error gateway hear" "$(grep -c '^w1:p9|.*자동 안내' "$SANDBOX/log")|$(cat "$SANDBOX/log-srv")|$(cat "$SANDBOX/alerts-srv" 2>/dev/null)" "1|default|default"
 rm -f "$SANDBOX"/state/pane-tell/undelivered/* "$SANDBOX/state/orchestrator/main"
 PANE_TELL_ALERT=0 PANE_TELL_WAIT=0.3 job workers/w1:p2 "x" >/dev/null; settled
-check "no main pane: the message stays in the folder, no error" "$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')|$(cat "$SANDBOX/log-srv" 2>/dev/null)|$(cat "$SANDBOX/alerts-srv" 2>/dev/null)" "1||"
+check "no main pane: the message stays in the folder and the error gateway hears" "$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')|$(cat "$SANDBOX/log-srv" 2>/dev/null)|$(cat "$SANDBOX/alerts-srv" 2>/dev/null)" "1||default"
 rm -f "$SANDBOX"/state/pane-tell/undelivered/*
 # workers -> main, 요유's half-typed words fill main's box and the workers pane has already closed: 요유 must see the alert.
 rm -f "$SANDBOX/alerts-srv" "$SANDBOX/screen-w1:p2"; claude_screen "요유가 치던 글" > "$SANDBOX/screen-w1:p9"
@@ -421,4 +428,5 @@ done
 claude_screen > "$SANDBOX/screen"
 rm -f "$SANDBOX/state/orchestrator/main"; unset PANE_TELL_BATCH
 
+check "errors never use the disabled routine toast path" "$(test -f "$SANDBOX/legacy-alerts" && echo legacy || echo gateway)" "gateway"
 exit $fails

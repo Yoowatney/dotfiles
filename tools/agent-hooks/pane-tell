@@ -18,10 +18,10 @@
 # sending pane and runs on the receiver's server. After PANE_TELL_WAIT seconds, or when the receiver is gone or holds another
 # session, the message stays in ~/.local/state/pane-tell/undelivered/; `log` beside it says what became of each one. A
 # message that waits PANE_TELL_ALERT seconds (10 minutes) or ends up in that folder is announced, since a one-letter leftover
-# in a box once held a report back with nobody knowing (10/31): a herdr notification for 요유, the only one who can clear the
-# box, on the receiver's server where that box is, and a note to the sender on its own server, who would take it as
-# delivered, unless the sender is an auto session, for the reason above. A box on the workers server gets no notification:
-# the note goes to the sender, or to the main pane when a job sent it. Nothing here ever touches the box: what is in it may
+# in a box once held a report back with nobody knowing (10/31): a durable terminal error alert for 요유, the only one who can
+# clear the box, and a note to the sender on its own server, who would take it as delivered, unless the sender is an auto
+# session, for the reason above. A box on the workers server also queues an error alert; its note goes to the sender, or to
+# the main pane when a job sent it. Nothing here ever touches the box: what is in it may
 # be 요유's.
 #   pane-tell --raw <pane id> "<message>"       the same door for a prompt a machine types as it is, into any pane; one that
 #                                               has to wait stays for the session in the pane now, like every queued message
@@ -128,12 +128,20 @@ auto_reason() { # tab id, session id
 socket_of() { "$H" session list --json 2>/dev/null | jq -r --arg n "$1" '.sessions[] | select(.name == $n and .running) | .socket_path' 2>/dev/null | head -1; }
 
 warn() { # what happened, sender's terminal, sender's socket when on another server
-  local row
+  local row helper
+  if [ -n "${HERDR_ERROR_NOTIFY:-}" ]; then
+    "$HERDR_ERROR_NOTIFY" "칸 전달 대기" "$1" >/dev/null 2>&1 ||
+      echo "$(date '+%F %T') error notification queue failed" >> "$STATE/log"
+  else
+    # Resolve the installed symlink before locating the shared helper beside this script.
+    helper=$(/usr/bin/python3 -I -c 'import os, sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])), "herdr-error-notify.py"))' "$0")
+    /usr/bin/python3 -I "$helper" "칸 전달 대기" "$1" >/dev/null 2>&1 ||
+      echo "$(date '+%F %T') error notification queue failed" >> "$STATE/log"
+  fi
   case "${HERDR_SOCKET_PATH:-}" in
-    # 요유 never enters those panes and that server's banners are off. A job has no pane to hear it, so the main pane does.
+    # A job has no sender pane to hear it, so the main pane gets its note.
     */sessions/workers/herdr.sock)
       [ -n "$2" ] || set -- "$1" "$(cat "${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main" 2>/dev/null)" "$(socket_of default)" ;;
-    *) "$H" notification show "칸 전달 대기" --body "$1" >/dev/null 2>&1 ;; # the receiver's server: the full box is there
   esac
   echo "$(date '+%F %T') announced: $1" >> "$STATE/log"
   [ -n "$2" ] || return 0

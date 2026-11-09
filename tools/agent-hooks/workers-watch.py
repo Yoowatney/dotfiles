@@ -292,11 +292,13 @@ def kind(status) -> str:
 
 
 def notify(env, msg) -> bool:
-    """The last resort: 요유's own screen, on the server 요유 is attached to."""
-    sock = herdr_peers.socket_of(env, "default")
+    """The last resort: a durable error queue, independent of routine toasts."""
+    child = {**os.environ, **env}
+    override = child.get("HERDR_ERROR_NOTIFY")
+    command = [override] if override else ["/usr/bin/python3", "-I", os.path.join(HERE, "herdr-error-notify.py")]
     try:
-        return subprocess.run([env.get("HERDR_BIN_PATH") or "herdr", "notification", "show", "밑 칸을 맡을 곳이 없습니다", "--body", msg],
-                              env={**os.environ, **env, **({"HERDR_SOCKET_PATH": sock} if sock else {})}, timeout=5, stdin=subprocess.DEVNULL,
+        return subprocess.run([*command, "밑 칸을 맡을 곳이 없습니다", msg],
+                              env=child, timeout=15, stdin=subprocess.DEVNULL,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -495,7 +497,7 @@ case "$1 $2" in
   "session list") cat {d}/sessions.json ;;
   "pane list") cat {d}/$s-panes.json ;;
   "agent list") cat {d}/$s-agents.json ;;
-  "notification show") [ "${{NOTIFY_EXIT:-0}}" != 0 ] || echo "$s|$3|$5" >> {d}/notified; exit ${{NOTIFY_EXIT:-0}} ;;
+  "notification show") exit 98 ;;
   "agent read") [ "$s" = workers ] && [ "$4 $5" = "--source recent-unwrapped" ] && cat "{d}/screen-$3.txt" ;;
   "pane close") [ -f {d}/close-fails ] && exit 1; echo "$3" >> {d}/closed; echo '{{"result":{{"type":"ok"}}}}' ;;
   "pane get") jq --arg id "$3" '{{result: {{pane: ([.result.panes[] | select(.pane_id == $id)][0])}}}}' {d}/$s-panes.json ;;
@@ -503,12 +505,13 @@ case "$1 $2" in
   *) exit 2 ;;
 esac
 ''')
+        script(f"{d}/error-notify", f'[ "${{NOTIFY_EXIT:-0}}" != 0 ] || echo "default|$1|$2" >> {d}/notified\nexit ${{NOTIFY_EXIT:-0}}\n')
         # A refused or failed pane-tell logs nothing: only what was taken is in `told`.
         # --raw logs as "raw:<pane>@<server>|<text>", the server being the one HERDR_SOCKET_PATH names
         script(f"{d}/pane-tell", f'[ "$1" != "${{TELL_REFUSE:-}}" ] || exit 2\n'
                                  f'[ "$1" != --raw ] || {{ s=${{HERDR_SOCKET_PATH%/herdr.sock}}; set -- "raw:$2@${{s##*/}}" "$3"; }}\n'
                                  f'[ "${{TELL_EXIT:-0}}" != 0 ] || echo "$1|$2" >> {d}/told\nexit ${{TELL_EXIT:-0}}\n')
-        env = {"HOME": d, "XDG_STATE_HOME": f"{d}/state", "HERDR_BIN_PATH": f"{d}/herdr", "WORKERS_WATCH_PANE_TELL": f"{d}/pane-tell"}
+        env = {"HOME": d, "XDG_STATE_HOME": f"{d}/state", "HERDR_BIN_PATH": f"{d}/herdr", "WORKERS_WATCH_PANE_TELL": f"{d}/pane-tell", "HERDR_ERROR_NOTIFY": f"{d}/error-notify"}
         main_file = f"{d}/state/orchestrator/main"
 
         def result(name, key, rows):
