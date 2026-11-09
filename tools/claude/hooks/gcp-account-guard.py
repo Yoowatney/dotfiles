@@ -3,7 +3,7 @@
 
 AI sessions run as an agent service account (production read, staging write) through the
 default `munice` gcloud config and ADC files. Yoyoo's own account lives in the `munice-admin`
-config and `adc-munice-admin.json`. Two kinds of commands are refused:
+config and `adc-munice-admin.json`. Identity changes have two refusal kinds:
   - SELECT: one command picks another identity. Allowed when the session chose admin (`cla`
     sets MUNICE_GCP_ADMIN=1) or Yoyoo's latest typed prompt contains `prod 허용` (that turn only),
     except in the main pane or a subordinate pane: another session can type into its input box (api#1026).
@@ -16,6 +16,8 @@ In the main pane `prod 허용`/`staging 허용` written by 요유 in any Slack c
 starts (api#1026): the relay names the message as `글 <channel>/<ts>`, and slack_approval.py reads author, time and words back
 from Slack, and only when the whole relayed text is that message's relay. `api#973 prod 허용` (an item right before the word, or
 opening the words) lifts only commands that name the item; an item named any other way, or an unclear grant, lifts nothing.
+Service account key list/disable/delete require their own exact-command main-pane Slack ✅, once within 10 minutes
+(api#1052), even on the agent account or in an admin session. Slack word grants never lift these commands.
 
     gcp-account-guard.py --selftest
 """
@@ -88,12 +90,15 @@ SLACK = os.path.expanduser("~/work/munice/.agents/skills/agent-board/main/slack_
 # Both hook configs give 10 s, and a hook that times out lets the command run: the whole verdict ends within HOOK_BUDGET.
 HOOK_BUDGET, SLACK_DEADLINE, SLACK_MIN = 8.0, 6.0, 1.0
 # What a Slack ✅ never lifts (condition 4 of the approval): `cla`'s marker, an agent or a shell that outlives the command,
-# IAM grants, credentials that outlive it (tokens, signed JWTs, HMAC keys). Matched on the command and on it with quotes
+# IAM commands (except the three strictly parsed key cleanup commands below), org policies, credentials that outlive it
+# (tokens, signed JWTs, HMAC keys), flags files that can hide an entire IAM subcommand. Matched on the command and on it with quotes
 # and backslashes removed. ponytail: a word list; a false hit only means the terminal, and 요유 reads the rest in the request.
 SLACK_NEVER = re.compile(
     r"\bMUNICE_GCP_ADMIN=|claude|codex|anthropic|gemini|aider|opencode|cursor-agent|(?<![\w.-])cla(?![\w.-])"
     r"|\b(?:tmux|screen|nohup|setsid|disown|launchctl|crontab|mkfifo|socat|nc|ncat)\b"
-    r"|(?<![.@\w-])iam(?![.\w-])|iam-?policy|\bhmac\b|sign-?(?:jwt|blob)|generate(?:access|id)token", re.I)
+    r"|(?<![.@\w-])iam(?![.\w-])|iam-?policy|\borg-policies\b|(?:iam|orgpolicy)\.googleapis\.com|--flags-file\b"
+    r"|\b(?:get(?:Effective)?OrgPolicy|listOrgPolicies)\b"
+    r"|\bhmac\b|sign-?(?:jwt|blob)|generate(?:access|id)token", re.I)
 BACKGROUND = re.compile(r"(?<![>&|])&(?![&>])")  # `cmd &`; not &&, 2>&1, &> or |&, nor one inside a literal string
 SLACK_NOTE = "메인 칸은 Slack ✅로도 이 명령 하나를 한 번 실행할 수 있습니다(메인 칸 스킬 'Steps only 요유 can unlock')."
 TYPED_NOTE = ("메인 칸은 입력창에 들어온 `prod 허용`·`staging 허용`을 허용으로 치지 않습니다. "
@@ -135,7 +140,8 @@ PERSIST = [  # outlives the command
 ]
 # Service account keys never expire and Yoyoo's account can lift the org policy that blocks them, so an AI
 # session never makes, uploads or re-enables one, nor changes an org policy, even when unlocked (terraform#1040).
-# Listing, disabling and deleting keys stay allowed. Yoyoo runs a needed key with `!` in the terminal.
+# gcloud key list/disable/delete require one main-pane Slack ✅ per command (api#1052), including agent/admin sessions.
+# The Slack request's reason must give evidence that the key is unused: deletion cannot be undone.
 POSTS = (r"(?=.*(?:-X\s*['\"]?(?:POST|PATCH|DELETE)|--request[= ]['\"]?(?:POST|PATCH|DELETE)"
          r"|\s-d(?:\s|['\"@{])|--data|--json))")
 SA = r"serviceAccounts/[^\s/'\"]+/keys"
@@ -143,7 +149,8 @@ KEYS = [  # matched per shell segment, after joining `\` continuations
     (re.compile(rf"\bservice-accounts{OPTS}\s+keys{OPTS}\s+(?:create|upload|enable)\b"), "서비스 계정 키 만들기"),
     (re.compile(rf"\borg-policies{OPTS}\s+(?:disable-enforce|enable-enforce|set-policy|allow|deny|delete|reset|create"
                 r"|update|set-custom-constraint|delete-custom-constraint)\b"), "조직 정책 바꾸기"),
-    # POST to the keys collection creates; /keys/<id> (delete) and /keys/<id>:disable stay allowed.
+    # POST to the keys collection creates. This unconditional ban does not match delete/disable endpoints;
+    # it grants no Slack exception for an API call (only the three plain gcloud commands qualify).
     # `^`: the look-ahead runs once per segment, not at every position (it was quadratic on a long one: api#1026 review)
     (re.compile(rf"{SA}:upload|{SA}/[^\s/:'\"]+:enable|^{POSTS}.*{SA}(?![/\w:])"), "서비스 계정 키 API"),
     # Client libraries. Lower-case `create...` keeps log filters on `v1.CreateServiceAccountKey` readable.
@@ -152,6 +159,13 @@ KEYS = [  # matched per shell segment, after joining `\` continuations
     (re.compile(r"[.:](?:set|clear)OrgPolicy\b|\bOrgPolicyClient\b|^" + POSTS + r".*orgpolicy\.googleapis\.com"),
      "조직 정책 API"),
 ]
+# Classify the entire key group first, regardless of interposed/indirect flags or shell expansion.
+# Two linear searches avoid backtracking across repeated group names. The strict approval parser
+# below alone admits list/disable/delete; unknown or expanded forms stay refused.
+KEY_ACCOUNT, KEY_WORD = re.compile(r"\bservice-accounts\b"), re.compile(r"\bkeys\b")
+# gcloud YAML flags can inject the entire subcommand, even with no identity selection in the shell text.
+# Require explicit command words instead of inspecting a mutable file or accepting a word/Slack grant for it.
+GCLOUD_FLAGS = re.compile(r"\bgcloud\b[^\n;|&]*--flags-file\b")
 # A commit message, a PR body or a search may name a key command; such a segment only carries text.
 # No echo/printf (they feed `| sh`), and a segment with $( or a backtick still runs what it holds.
 # ponytail: a heredoc commit body is still read line by line, so commit long messages with -F <file>.
@@ -176,15 +190,20 @@ READERS = {"Read", "Grep"}  # a credential file read into the transcript leaks t
 
 
 def bash_problem(cmd: str) -> tuple[str, bool | str] | None:
-    """(what, persists) for the first refused part of a command; persists is "key" for KEYS."""
-    flat = cmd.replace("\\\n", " ")
+    """(what, persists) for a refused command; "key" is unconditional, "cleanup" needs a main-pane Slack ✅."""
+    flat = cmd.replace("\\\n", "")
+    cleanup = False
     for segment in SEGMENTS.split(flat):
-        bare = re.sub(r"['\"\\]", "", segment)  # 'cre''ate' and cre\ate run as create
+        # Dollar quotes also form shell words; do not evaluate their escapes or expansions.
+        bare = re.sub(r"\$(?=['\"])|['\"\\]", "", segment)  # 'cre''ate' and cre\ate run as create
         if TEXT_ONLY.match(segment) and not SUBST.search(LITERAL.sub("", segment)) and not PRE.search(bare):
             continue
         for pattern, what in KEYS:
             if pattern.search(segment) or pattern.search(bare):
                 return what, "key"
+        if GCLOUD_FLAGS.search(segment) or GCLOUD_FLAGS.search(bare):
+            return "gcloud 명령 파일", "indirect"
+        cleanup |= any((m := KEY_ACCOUNT.search(text)) and KEY_WORD.search(text, m.end()) for text in (segment, bare))
     if KEY_TF.search(flat) and TF_SHELL_WRITE.search(flat):
         return "terraform 서비스 계정 키 리소스", "key"
     # The file an ADC assignment names is a SELECT, not a read of the credential store. Each is matched on the command and
@@ -193,6 +212,8 @@ def bash_problem(cmd: str) -> tuple[str, bool | str] | None:
     for pattern, what in PERSIST:
         if pattern.search(unassigned) or pattern.search(re.sub(r"['\"\\]", "", unassigned)):
             return what, True
+    if cleanup:
+        return "서비스 계정 키 목록·끄기·삭제", "cleanup"
     for pattern, what in SELECT:
         if pattern.search(cmd) or pattern.search(re.sub(r"['\"\\]", "", cmd)):
             return what, False
@@ -261,6 +282,39 @@ def shell_words(line: str) -> list[str] | None:
     if quote:
         return None
     return words + [word] if started else words
+
+
+def key_cleanup_only(cmd: str) -> bool:
+    """One explicit gcloud key list/disable/delete call, with known flags and no shell or flags-file indirection."""
+    # A backslash inside a shell comment does not continue that line. Do not join a second command into the comment.
+    if "#" in cmd and "\\\n" in cmd:
+        return False
+    words = shell_words(cmd.replace("\\\n", ""))
+    if not words or words[0] != "gcloud":
+        return False
+    valued = {"--configuration", "--project", "--account", "--iam-account", "--format", "--filter", "--limit",
+              "--page-size", "--managed-by", "--sort-by", "--verbosity"}
+    positional, i = [], 1
+    while i < len(words):
+        word = words[i]
+        if word in {"--quiet", "-q"}:
+            i += 1
+            continue
+        if word.startswith("-"):
+            flag, eq, value = word.partition("=")
+            if flag not in valued:
+                return False
+            if not eq:
+                i += 1
+                value = words[i] if i < len(words) else ""
+            if not value or value.startswith("-"):
+                return False
+        else:
+            positional.append(word)
+        i += 1
+    return (positional == ["iam", "service-accounts", "keys", "list"]
+            or (len(positional) == 5 and positional[:3] == ["iam", "service-accounts", "keys"]
+                and positional[3] in {"disable", "delete"}))
 
 
 def staging_only(cmd: str) -> bool:
@@ -427,11 +481,18 @@ def tool_problem(payload: dict, env: dict, prompt: str | None = None) -> str | N
     if not hit:
         return None
     what, persists = hit
+    if persists == "indirect":
+        return (f"{what}: `--flags-file` 안에 IAM 명령 전체가 들어갈 수 있어 계정이나 허용 방식과 관계없이 실행하지 "
+                "않습니다. 실행할 명령과 옵션을 요청 글에 직접 적을 것. api#1052")
     if persists == "key":
         return (f"{what}: AI 세션은 서비스 계정 키를 만들거나 다시 켜지 않고 조직 정책도 바꾸지 않습니다(`{UNLOCK}`이나 "
                 "`cla`로도 안 풀림). 키는 만료가 없습니다. GCP 밖 기계라면 먼저 X.509 인증서 방식(terraform#1028)을 "
                 "쓸 것. 그래도 키가 필요하면 무엇을 왜 만드는지 한국어 한 문장으로 요유에게 따로 묻고, 요유가 직접 "
                 "터미널에서 `!`로 실행한다. terraform#1040")
+    if persists == "cleanup":
+        return (f"{what}: 메인 세션의 Slack 실행 요청에 요유가 누른 ✅ 하나로 명령 하나만 한 번 실행합니다(10분 안). "
+                "`prod 허용`·`staging 허용`·관리자 세션으로는 풀리지 않습니다. 키 삭제는 되돌릴 수 없으니 요청 이유에 "
+                "그 키가 쓰이지 않는다는 근거를 적을 것. 리드 밑 세션은 메인 세션에 넘길 것. api#1052")
     if persists:
         return (f"{what}: 명령이 끝난 뒤에도 남는 신원 변경이라 AI 세션에서는 하지 않습니다(`{UNLOCK}`이나 `cla`로도 "
                 "안 풀림). 필요하면 요유가 직접 터미널에서 할 것(예: `! gcloud auth login`). 재로그인 뒤에는 "
@@ -524,22 +585,25 @@ def subordinate_pane(env: dict) -> bool:
 
 
 def slack_liftable(payload: dict, env: dict) -> bool:
-    """A refusal a Slack ✅ may lift: one Bash command that picks another identity, outside job tabs, nothing broad."""
+    """A Slack ✅ may lift identity selection or one strict key cleanup command, outside job tabs, nothing broad."""
     inp = payload.get("tool_input") or {}
     if (payload.get("tool_name") != "Bash" or env.get("MUNICE_AUTO_DISPATCH") == "1" or env.get("MUNICE_AMBIENT") == "1"
             or inp.get("run_in_background")):  # a background run outlives the turn
         return False
     cmd = inp.get("command") or ""
     hit = bash_problem(cmd)
-    if not hit or hit[1] is not False:
+    if not hit or hit[1] not in (False, "cleanup"):
         return False
-    flat = cmd.replace("\\\n", " ")
-    seen = (flat, re.sub(r"['\"\\]", "", flat))
+    flat = cmd.replace("\\\n", "")
+    if any(unicodedata.category(c) in ("Cc", "Cf") for c in cmd if c not in "\n\t"):
+        return False
+    if hit[1] == "cleanup":
+        return key_cleanup_only(cmd)
+    seen = (flat, re.sub(r"\$(?=['\"])|['\"\\]", "", flat))
     # A key command anywhere, TEXT_ONLY segments included: bash_problem lets a commit message name one, a ✅ does not.
     never = [SLACK_NEVER, TOKEN_PRINT, KEY_TF] + [p for p, _ in KEYS]
-    return not (any(p.search(t) for p in never for t in seen) or BACKGROUND.search(re.sub(r'"[^"$`]*"', "", re.sub(r"'[^']*'", "", flat)))
-                # control and format characters (bidi, zero-width) can make the shown command differ from the one run
-                or any(unicodedata.category(c) in ("Cc", "Cf") for c in cmd if c not in "\n\t"))
+    return not (any(p.search(t) for p in never for t in seen)
+                or BACKGROUND.search(re.sub(r'"[^"$`]*"', "", re.sub(r"'[^']*'", "", flat))))
 
 
 def slack_approval(cmd: str, deadline: float, path: str = SLACK):
@@ -640,6 +704,9 @@ def hook(hook_input: dict, env: dict, riders, approvals, is_main, budget: float 
                    "경로를 다른 곳에 적지 마세요(ls, 스크립트 본문, 주석 포함). 다른 ✅ 제한도 그대로 적용됩니다.")
     # 요유 no longer watches the terminal, so a Slack grant lifts only what a ✅ may: nothing that outlives the turn (review)
     liftable = slack_liftable(hook_input, env)
+    cleanup = bash_problem((hook_input.get("tool_input") or {}).get("command") or "")
+    if cleanup and cleanup[1] == "cleanup" and subordinate_pane(env):
+        return reason
     turn = relayed_turn(hook_input, env) if liftable else None
     if not liftable or not (main or is_main(env)):
         return reason
@@ -1092,10 +1159,11 @@ def selftest():
         for env in ({}, {"MUNICE_GCP_ADMIN": "1"}, {"MUNICE_AMBIENT": "1"}):
             reason = bash(c, env)
             assert reason and "terraform#1040" in reason, f"key command should be denied: {c} {env} -> {reason}"
+    for verb in ("list", "disable fake-key", "delete fake-key --quiet"):
+        c = f"gcloud iam service-accounts keys {verb} --iam-account=unused@example.com"
+        for env in ({}, {"MUNICE_GCP_ADMIN": "1"}):
+            assert "api#1052" in bash(c, env), f"key cleanup needs its own ✅: {c}"
     key_allow = [
-        "gcloud iam service-accounts keys list --iam-account=a@x --managed-by=user",
-        "gcloud iam service-accounts keys disable 58992b45 --iam-account=a@x",
-        "gcloud iam service-accounts keys delete 58992b45 --iam-account=a@x --quiet",
         "gcloud resource-manager org-policies describe iam.disableServiceAccountKeyCreation --project=p --effective",
         "gcloud org-policies describe iam.disableServiceAccountKeyCreation --project=p",
         "gcloud logging read 'protoPayload.methodName=\"google.iam.admin.v1.CreateServiceAccountKey\"' --project=p",
