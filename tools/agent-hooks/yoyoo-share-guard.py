@@ -27,8 +27,9 @@ command of its own; relay_reason says how. Any other pane, a missing or stale ma
 There a stopped pane rides on the next message instead (note_next): each rewrite re-read its whole long session.
 In the main pane alone, any turn also comes back while 요유's Slack words the relay passed there have no reply after them
 (owed_reason, from the relay's local state).
-Thread calls also come back once when the current turn shows no successful post in the called thread or main channel.
-A scheduled post is not a reply. Chitchat may be skipped after that reminder; stop_hook_active lets the second stop through.
+Thread calls also return once for a necessity judgment when this turn has no successful post. A missing post does not
+create a reply obligation: receipts, progress acknowledgements and board notices are skipped. Personal-channel reports
+remain permitted under their own rules. stop_hook_active lets the second stop through without any post.
 A report with nothing left to do ends without a word: the question used to demand a rewrite. Of 102 fires on 10/28-10/31,
 25 went on to a tool call and 69 only wrote text, most of it the same report again.
 Claude runs it with --claude: the question goes back as Stop additionalContext, which Claude shows as "Stop hook feedback"
@@ -192,9 +193,15 @@ OWED_REASON = ("yoyoo-share-guard: 릴레이가 이 칸에 넘긴 요유의 Slac
                "이미 다른 길로 답했으면 릴레이가 1분 안에 그 답을 읽고 목록에서 지우니, 응답 없이 턴을 끝내세요.")
 THREAD_CALL = re.compile(r"\[Slack 스레드 요유 부름\][^\n]*?\(스레드 ([CG][A-Z0-9]+)/(\d+\.\d+), 글 [CG][A-Z0-9]+/\d+\.\d+\)")
 SLACK_TS = re.compile(r"\d+\.\d+")
-THREAD_CALL_REASON = ("yoyoo-share-guard: [Slack 스레드 요유 부름]으로 받은 글에 아직 게시한 답을 확인하지 못했습니다: {}. "
-                      "그 스레드나 #0-yoyooyo에 답하세요. 답글을 예약만 했다면 #0-yoyooyo에 언제 답하는지 지금 알리세요. "
-                      "이미 다른 경로로 답했는지도 확인하세요. 답할 필요 없는 잡담이면 그대로 끝내도 됩니다. "
+THREAD_CALL_REASON = ("yoyoo-share-guard: no posted answer was observed for this thread call: {}. "
+                      "Read the source and judge whether an answer is necessary: a teammate asked the bot or Yoyoo, "
+                      "Yoyoo instructed the bot in that thread, or a server answer is needed to unblock a teammate. "
+                      "Do not post a receipt, start/progress acknowledgement, news summary or board-recording notice, "
+                      "even after a direct request. If that is all you could say, skip the comment and continue the work. "
+                      "For a necessary answer, use the reply CLI's reason and source basis. "
+                      "Personal-channel item news is permission, not a requirement to fill the silence. "
+                      "Reactions keep their existing rules. Check whether an answer already went by another route. "
+                      "답할 필요 없는 잡담이면 그대로 끝내도 됩니다. "
                       "이 검사는 한 번만 돌려보내며 두 번째 종료는 통과합니다.")
 LONG_REASON = ("yoyoo-share-guard: 답이 깁니다. 긴 보고는 Codex가 씁니다. html-explainer 스킬대로 사실을 파일에 적어 explain-page로 맡기고, "
                "터미널에는 publish가 출력한 Codex의 글과 페이지 경로, 라벨 줄(무엇을, 왜, 남은 것 등)만 남기세요.")
@@ -719,7 +726,7 @@ def thread_call_reason(payload: dict, env) -> str | None:
     """Inspect the latest input and its completed tool calls, locally. Other panes and unreadable records fail open.
 
     Do not use replied/<thread>: only a completed call of this turn counts, not a reply written down earlier.
-    A new user input supersedes the previous turn, including a chitchat call intentionally skipped after one reminder.
+    A new user input supersedes the previous turn, including a call that needed no comment after one reminder.
     """
     path = payload.get("transcript_path")
     if not path:
