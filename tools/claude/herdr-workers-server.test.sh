@@ -19,5 +19,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.5
 done
 check "herdr's own notification is disabled on that server" "$(herdr --session "$S" notification show '임시 시험' --sound none | jq -r '.result.reason')" disabled
-check "only the delivery line differs from the main config" "$(diff "$HOME/.config/herdr/config.toml" "$DIR/config.toml" | grep -c '^[<>]')|$(grep -c '^delivery = "off"$' "$DIR/config.toml")" "2|1"
+check "the copied config disables delivery once" "$(grep -c '^delivery = "off"$' "$DIR/config.toml")" "1"
+diff <(sed 's/^delivery = .*/delivery = "off"/' "$HOME/.config/herdr/config.toml") "$DIR/config.toml" >/dev/null
+check "the config matches main with delivery disabled" "$?" "0"
 exit $fails
