@@ -55,10 +55,35 @@
 
 **Files:** Update this plan; add `docs/worker-quota-routing.md` (운영·복구·안전 한계만 기록).
 
-- [ ] 문법 검사, 직접 영향받는 테스트, 저장소 테스트 전체를 실행하고 PASS/FAIL을 기록한다.
-- [ ] 전역 규칙과 주 작업 폴더를 바꾸지 않았는지 git diff/status로 확인한다.
-- [ ] 문서·계획을 커밋하고 커밋 SHA·테스트 결과·복구 명령·미해결 안전 조건을 보고한다.
+- [x] 문법 검사, 직접 영향받는 테스트, 저장소 테스트 전체를 실행하고 PASS/FAIL을 기록한다.
+- [x] 전역 규칙과 주 작업 폴더를 바꾸지 않았는지 git diff/status로 확인한다.
+- [x] 문서·계획을 커밋하고 커밋 SHA·테스트 결과·복구 명령·미해결 안전 조건을 보고한다.
+
+### 검증 기록
+
+- `bash tools/agent-hooks/agent-quota.test.sh`: 16개 PASS.
+- `bash tools/agent-hooks/pane-spawn.test.sh`: PASS, `ok: pane-spawn`.
+- `bash tools/claude/statusline-command.test.sh`: PASS, `all passed`.
+- 변경한 Bash 파일의 `bash -n`, `git diff --check`: PASS.
+- `954ada3`의 커밋 사본을 `tools/git-hooks/pre-push`에 입력: 테스트 스크립트 45개 PASS, 종료 코드 0. 실제 push는 하지 않았다.
+- 두 문서의 `writing-plain-korean/check.py`: 직역과 20어절 초과 문장 없음.
+- 프로젝트에 등록된 `verify-*` 스킬은 없었다. 별도 스킬 검증은 실행하지 않았다.
+- 실제 설치된 `pane-spawn`은 원래 작업 폴더를 가리킨다. 기능 브랜치와 SHA-256이 달라 아직 설치되지 않았음을 확인했다.
+- 회사맥의 설치·비공개 전역 규칙·집맥은 수정하지 않았다. 보드·Slack에 쓰지 않았다.
+
+전체 테스트 재현 명령(커밋 사본 검사만 수행):
+
+```bash
+quota_sha=$(git rev-parse 954ada3)
+printf 'refs/heads/feat/api-1096-quota-routing %s refs/heads/feat/api-1096-quota-routing 0000000000000000000000000000000000000000\n' "$quota_sha" | bash tools/git-hooks/pre-push
+```
+
+로그는 `/tmp/api-1096-full.log`에 남겼다. 이후 커밋은 운영 문서와 이 기록만 바꾼다.
+독립 Claude 리뷰와 실제 계정에서의 검증은 메인이 진행한다.
+실행 중 추가 결제까지 막는다는 보장은 이 테스트의 검증 범위에 포함되지 않는다.
 
 ## Self-review
 
-명시적 선택·확인 세션·안전한 실패·근거 로그·복구를 각 작업에 배정했다. 실행 중 추가 결제의 절대 차단을 제공하는 CLI 옵션은 확인하지 못했으므로, 자동 실행의 안전 조건을 확인할 수 없을 때는 거부하고 이 한계를 리뷰에 올린다.
+명시적 선택·확인 세션·안전한 실패·근거 로그·복구를 각 작업에 배정했다.
+실행 중 추가 결제를 절대로 막는 CLI 옵션은 확인하지 못했다.
+시작 조건을 확인할 수 없으면 거부하고, 실행 중 결제 설정 변경의 한계는 리뷰에 올린다.
