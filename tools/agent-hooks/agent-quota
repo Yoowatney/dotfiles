@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Local subscription quota routing. Never requests credentials or buys credits."""
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import platform
+import sys
+import tempfile
+import time
+
+WEEK = 604800
+MAX_AGE = 600
+
+
+def read_json(path):
+    try:
+        value = json.loads(path.read_text())
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def state_dir():
+    return Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "agent-quota"
+
+
+def machine():
+    return hashlib.sha256(platform.node().encode()).hexdigest()
+
+
+def identity(value):
+    return hashlib.sha256(value.encode()).hexdigest() if isinstance(value, str) and value else None
+
+
+def claude_account():
+    config = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
+    # Claude uses ~/.claude.json, or $CLAUDE_CONFIG_DIR/.claude.json for a custom directory.
+    path = Path.home() / ".claude.json" if config == Path.home() / ".claude" else config / ".claude.json"
+    account = read_json(path).get("oauthAccount", {})
+    return account if isinstance(account, dict) else {}
+
+
+def epoch(value):
+    try:
+        if isinstance(value, str):
+            value = dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+    except (ValueError, OverflowError):
+        return None
+
+
+def percentage(value):
+    return epoch(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 100 else None
+
+
+def private_write(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, name = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(data, stream, allow_nan=False)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def capture_claude(data, now):
+    limits = data.get("rate_limits")
+    tick = data.get("cost", {}).get("total_api_duration_ms")
+    sid = data.get("session_id")
+    account = claude_account()
+    account_id = identity(account.get("accountUuid"))
+    if not isinstance(limits, dict) or not account_id or not isinstance(sid, str) or not percentage_tick(tick):
+        return
+    # An initial repaint can describe an idle session. Use its actual assistant response time.
+    response_at = None
+    try:
+        with Path(data["transcript_path"]).open("rb") as stream:
+            stream.seek(max(0, stream.seek(0, 2) - 262144))
+            for line in stream.read().splitlines():
+                try:
+                    event = json.loads(line)
+                    at = epoch(event.get("timestamp"))
+                    if event.get("type") == "assistant" and at is not None:
+                        response_at = max(response_at or at, at)
+                except (ValueError, AttributeError):
+                    continue
+    except (OSError, KeyError, TypeError):
+        return
+    if response_at is None or not 0 <= now - response_at <= MAX_AGE:
+        return
+    folder = state_dir()
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Serialize repaint watermarks across simultaneous statusline invocations.
+    fd = os.open(folder / "capture.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        watermark = folder / ("session-" + identity(sid) + ".json")
+        last = read_json(watermark)
+        if last.get("account") == account_id and last.get("tick", -1) >= tick:
+            return
+        private_write(watermark, {"account": account_id, "tick": tick})
+        record = {"account": account_id, "machine": machine(), "observed_at": response_at,
+                  "five_hour": limits.get("five_hour"), "seven_day": limits.get("seven_day")}
+        previous_at = epoch(read_json(folder / "claude.json").get("observed_at"))
+        if previous_at is None or previous_at <= response_at:
+            private_write(folder / "claude.json", record)
+
+
+def percentage_tick(value):
+    return isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+
+
+def latest_codex(now):
+    root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    newest = None
+    for path in (root / "sessions").glob("**/*.jsonl"):
+        try:
+            if path.stat().st_mtime < now - 8 * 86400:
+                continue
+            # The last token_count is near the end; bound I/O per active session.
+            with path.open("rb") as stream:
+                stream.seek(max(0, path.stat().st_size - 262144))
+                lines = stream.read().splitlines()
+            for line in lines:
+                try:
+                    row = json.loads(line)
+                    payload = row.get("payload", {})
+                    limits = payload.get("rate_limits")
+                    at = epoch(row.get("timestamp"))
+                    if not isinstance(limits, dict) or at is None or limits.get("limit_id", "codex") != "codex":
+                        continue
+                    if newest is None or at > newest[0]:
+                        newest = at, limits
+                except (ValueError, AttributeError):
+                    continue
+        except OSError:
+            continue
+    return root, newest
+
+
+def invalid(reason):
+    return {"eligible": False, "reason": reason}
+
+
+def normalize(at, short, week, now, short_key, week_key, ceiling):
+    if at is None or not 0 <= now - at <= MAX_AGE:
+        return invalid("missing/stale/future observation")
+    if not isinstance(short, dict) or not isinstance(week, dict):
+        return invalid("missing limit window")
+    five, seven = percentage(short.get(short_key)), percentage(week.get(week_key))
+    sr, wr = epoch(short.get("resets_at")), epoch(week.get("resets_at"))
+    if five is None or seven is None or sr is None or wr is None or not now < sr <= now + 18000 or not now < wr <= now + WEEK:
+        return invalid("invalid/reset limit window")
+    gap = seven - 100 * (now - (wr - WEEK)) / WEEK
+    return {"eligible": five < 80 and seven <= ceiling, "reason": "within reserve" if five < 80 and seven <= ceiling else "reserve reached",
+            "short": five, "week": seven, "gap": gap, "observed_at": at, "resets_at": wr}
+
+
+def codex_quota(now):
+    root, newest = latest_codex(now)
+    auth_path = root / "auth.json"
+    auth = read_json(auth_path)
+    tokens = auth.get("tokens", {})
+    if auth.get("auth_mode") != "chatgpt" or not isinstance(tokens, dict) or not identity(tokens.get("account_id")):
+        return invalid("subscription account unknown")
+    if any(os.environ.get(k) for k in ("OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL")):
+        return invalid("API environment override")
+    if newest is None:
+        return invalid("usage unknown")
+    at, limits = newest
+    try:
+        if at < auth_path.stat().st_mtime:
+            return invalid("observation predates current login")
+    except OSError:
+        return invalid("account unavailable")
+    credits = limits.get("credits")
+    if not isinstance(credits, dict) or credits.get("has_credits") is not False or credits.get("unlimited") is not False:
+        return invalid("paid credit availability unknown/enabled")
+    windows = [limits.get("primary"), limits.get("secondary")]
+    short = next((w for w in windows if isinstance(w, dict) and w.get("window_minutes") == 300), None)
+    week = next((w for w in windows if isinstance(w, dict) and w.get("window_minutes") == 10080), None)
+    return normalize(at, short, week, now, "used_percent", "used_percent", 95)
+
+
+def claude_quota(now):
+    snap = read_json(state_dir() / "claude.json")
+    account = claude_account()
+    current = identity(account.get("accountUuid"))
+    if not current or snap.get("account") != current or snap.get("machine") != machine():
+        return invalid("observation account/machine mismatch")
+    if account.get("hasExtraUsageEnabled") is not False:
+        return invalid("extra usage unknown/enabled")
+    if any(os.environ.get(k) for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")):
+        return invalid("API environment override")
+    return normalize(epoch(snap.get("observed_at")), snap.get("five_hour"), snap.get("seven_day"), now, "used_percentage", "used_percentage", 80)
+
+
+def select(now, policy):
+    result = {"kind": None, "policy": policy, "reason": "invalid policy"}
+    if policy == "codex-only":
+        return dict(result, kind="codex", reason="legacy policy; quota routing bypassed")
+    if policy != "quota-aware":
+        return result
+    codex, claude = codex_quota(now), claude_quota(now)
+    result.update(codex=codex, claude=claude)
+    if codex["eligible"] and claude["eligible"]:
+        # Keep Codex unless its week is ahead of pace and Claude offers >5pp relief.
+        kind = "claude" if codex["gap"] >= 5 and (claude["gap"] <= 0 or codex["gap"] - claude["gap"] > 5) else "codex"
+        return dict(result, kind=kind, reason="weekly pace and reserve")
+    if codex["eligible"] or claude["eligible"]:
+        return dict(result, kind="codex" if codex["eligible"] else "claude", reason="only eligible subscription")
+    return dict(result, reason="no fresh subscription within reserve with paid usage disabled")
+
+
+def policy_value():
+    local = state_dir() / "policy"
+    return (local if local.exists() else Path(__file__).with_name("agent-quota-policy")).read_text().strip()
+
+
+def main():
+    now = time.time()
+    command = sys.argv[1] if len(sys.argv) == 2 else ""
+    if command == "capture-claude":
+        capture_claude(json.load(sys.stdin), now)
+        return 0
+    if command == "select":
+        result = select(now, policy_value())
+        folder = state_dir()
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(folder / "decisions.jsonl", os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "a") as stream:
+            stream.write(json.dumps(dict(result, timestamp=now), allow_nan=False) + "\n")
+        print(json.dumps(result, allow_nan=False))
+        return 0 if result["kind"] else 1
+    if command == "codex-week":
+        _, newest = latest_codex(now)
+        if newest:
+            at, limits = newest
+            for window in (limits.get("primary"), limits.get("secondary")):
+                if isinstance(window, dict) and window.get("window_minutes") == 10080:
+                    used, reset = percentage(window.get("used_percent")), epoch(window.get("resets_at"))
+                    if used is not None and reset is not None:
+                        print(f"{0 if reset <= now else used:g}\t{int(reset)}\t{int(at)}")
+                        return 0
+        return 1
+    print("usage: agent-quota select|capture-claude|codex-week", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, TypeError, AttributeError) as error:
+        # Do not print input or exception messages, which might contain private JSON.
+        print("agent-quota: local quota unavailable (" + type(error).__name__ + ")", file=sys.stderr)
+        sys.exit(1)
