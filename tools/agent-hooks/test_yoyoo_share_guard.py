@@ -74,7 +74,7 @@ class ThreadCallTests(unittest.TestCase):
         return guard.decide(payload, self.env)
 
     def test_unanswered_call_returns_turn(self):
-        self.assertIn("스레드", self.reason([incoming()]) or "")
+        self.assertIn("CTEAM/1794000000.000100", self.reason([incoming()]) or "")
 
     def test_queued_call_returns_turn(self):
         queued = {"type": "attachment", "attachment": {"type": "queued_command", "prompt": CALL}}
@@ -91,6 +91,16 @@ class ThreadCallTests(unittest.TestCase):
         reason = self.reason([incoming()]) or ""
         self.assertIn("잡담", reason)
         self.assertIn("두 번째", reason)
+
+    def test_thread_reminder_requires_necessity_not_a_start_receipt(self):
+        reason = self.reason([incoming()]) or ""
+        for instruction in ("teammate asked", "Yoyoo instructed", "server answer",
+                            "Do not post a receipt", "skip the comment",
+                            "permission, not a requirement"):
+            with self.subTest(instruction=instruction):
+                self.assertIn(instruction, reason)
+        self.assertNotIn("답하세요.", reason)
+        self.assertNotIn("지금 알리세요.", reason)
 
     def test_other_pane_unchanged(self):
         self.panes("worker-terminal")
