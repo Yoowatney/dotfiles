@@ -804,9 +804,12 @@ if remote --opener "" "x" "y" 2>/dev/null; then fail "an empty --opener is bad u
 # Quota-aware normal workers; all data and agent starts remain synthetic.
 quota_fixture() { # <Codex weekly> <Claude weekly> [extra usage enabled]
   env HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" CLAUDE_CONFIG_DIR="$SANDBOX/home/.claude" python3 -I - "$SUBJECT" "$1" "$2" "${3:-false}" <<'PY'
-import importlib.machinery, json, os, pathlib, sys, time, datetime
+import importlib.machinery, importlib.util, json, os, pathlib, sys, time, datetime
 sys.dont_write_bytecode = True
-q = importlib.machinery.SourceFileLoader('quota', str(pathlib.Path(sys.argv[1]).with_name('agent-quota'))).load_module()
+loader = importlib.machinery.SourceFileLoader('quota', str(pathlib.Path(sys.argv[1]).with_name('agent-quota')))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+q = importlib.util.module_from_spec(spec)
+loader.exec_module(q)
 h = pathlib.Path.home(); now = time.time()
 def write(p, obj):
     p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps(obj)); return p
