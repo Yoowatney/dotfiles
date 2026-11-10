@@ -4,6 +4,7 @@ unset HERDR_SOCKET_PATH HERDR_PANE_ID XDG_STATE_HOME # never the live herdr, pan
 
 SUBJECT="$(cd "$(dirname "$0")" && pwd)/main-refresh"
 SANDBOX="$(mktemp -d)"
+TEST_TERM="term_M_$$"
 trap 'rm -rf "$SANDBOX"' EXIT
 fails=0
 check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected [$3] got [$2]"; fails=1; fi; }
@@ -17,6 +18,14 @@ echo "\$*" >> "$SANDBOX/herdr-log"
 case "\$1 \$2" in
   "pane list") cat "$SANDBOX/panes" ;;
   "pane get") [ ! -f "$SANDBOX/late-on-get" ] || echo 09 > "$SANDBOX/hour"
+    # The main pane starts answering between the readiness check and the session-id check.
+    if [ -n "\${BUSY_BEFORE_REQUEST:-}" ] && [ -f "$SANDBOX/box-n" ] && [ ! -f "$SANDBOX/request-n" ]; then
+      n=\$((\$(cat "$SANDBOX/ready-get-n" 2>/dev/null || echo 0) + 1)); echo "\$n" > "$SANDBOX/ready-get-n"
+      if [ "\$n" = 2 ]; then
+        echo working > "$SANDBOX/status"
+        ( sleep 0.3; echo idle > "$SANDBOX/status" ) >/dev/null 2>&1 &
+      fi
+    fi
     # the session the pane list gives, or the one in cur-sid: a clear that happened meanwhile
     sid=\$(cat "$SANDBOX/cur-sid" 2>/dev/null || jq -r --arg p "\$3" '.result.panes[] | select(.pane_id == \$p) | .agent_session.value' "$SANDBOX/panes")
     jq -n --arg s "\$(cat "$SANDBOX/status")" --arg p "\$3" --arg sid "\$sid" '{result: {pane: {pane_id: \$p, agent_status: \$s, agent_session: {value: \$sid}}}}' ;;
@@ -56,6 +65,7 @@ if [ "\$1" = --box-ready ]; then
 fi
 [ ! -f "$SANDBOX/tell-fails" ] || exit 1
 case "\$2" in *"handoff save"*)
+  [ "\$(cat "$SANDBOX/status")" != working ] || echo busy >> "$SANDBOX/unsafe-request"
   n=\$((\$(cat "$SANDBOX/request-n" 2>/dev/null || echo 0) + 1)); echo "\$n" > "$SANDBOX/request-n"
   t=\$(cat "$SANDBOX/state/agent-handoff/\${HANDOFF_KEY:-w5:p3}.md.transcript")
   if [ -n "\${DELIVER_AFTER:-}" ]; then
@@ -111,9 +121,21 @@ exit 1
 EOS
 chmod +x "$SANDBOX/herdr" "$SANDBOX/error-notify" "$SANDBOX/pane-tell" "$SANDBOX/bin/date" "$SANDBOX/pg/pgrep"
 
+# A delivery appears during the final checks, then disappears before the retry. It adds no new transcript message.
+mkdir -p "$SANDBOX/retry-pg"
+cat > "$SANDBOX/retry-pg/pgrep" <<EOS
+#!/bin/bash
+if [ -f "$SANDBOX/state/agent-handoff/w5:p3.md" ] && [ "\$(cat "$SANDBOX/box-n" 2>/dev/null)" = 2 ] && [ ! -f "$SANDBOX/pending-once" ]; then
+  : > "$SANDBOX/pending-once"
+  exit 0
+fi
+exit 1
+EOS
+chmod +x "$SANDBOX/retry-pg/pgrep"
+
 S="$SANDBOX/state"
 mr() { # every call is sandboxed: state dir, herdr, pane-tell
-  rm -f "$SANDBOX/told" "$SANDBOX/herdr-log" "$SANDBOX/box-n" "$SANDBOX/request-n" "$S/orchestrator/refresh.log"; : > "$SANDBOX/alerts"; : > "$SANDBOX/errors"
+  rm -f "$SANDBOX/told" "$SANDBOX/herdr-log" "$SANDBOX/box-n" "$SANDBOX/request-n" "$SANDBOX/ready-get-n" "$SANDBOX/unsafe-request" "$SANDBOX/pending-once" "$S/orchestrator/refresh.log"; : > "$SANDBOX/alerts"; : > "$SANDBOX/errors"
   env XDG_STATE_HOME="$S" HERDR_BIN_PATH="$SANDBOX/herdr" HERDR_ERROR_NOTIFY="$SANDBOX/error-notify" MAIN_REFRESH_PANE_TELL="$SANDBOX/pane-tell" \
     MAIN_REFRESH_POLL=0.05 MAIN_REFRESH_QUIET=0 MAIN_REFRESH_RETRY_QUIET=0 MAIN_REFRESH_DEADLINE="${MAIN_REFRESH_DEADLINE:-5}" MAIN_REFRESH_HANDOFF_WAIT="${MAIN_REFRESH_HANDOFF_WAIT:-5}" \
     "$@" /bin/bash "$SUBJECT" ${MR_ARGS:-} >/dev/null 2>&1
@@ -122,10 +144,10 @@ told() { [ -f "$SANDBOX/told" ] && awk '{print $1, $2, $3}' "$SANDBOX/told" | pa
 cleared() { grep -c '^agent prompt w5:p3 /clear$' "$SANDBOX/herdr-log" 2>/dev/null || true; }
 status() { echo "$1" > "$SANDBOX/status"; }
 panes() { # <pane id> <session id>
-  jq -nc --arg p "$1" --arg s "$2" '{result: {panes: [{pane_id: "w1:p9", terminal_id: "term_x", agent_session: {value: "other"}}, {pane_id: $p, terminal_id: "term_M", agent_session: {value: $s}}]}}' > "$SANDBOX/panes"
+  jq -nc --arg p "$1" --arg s "$2" --arg term "$TEST_TERM" '{result: {panes: [{pane_id: "w1:p9", terminal_id: "term_x", agent_session: {value: "other"}}, {pane_id: $p, terminal_id: $term, agent_session: {value: $s}}]}}' > "$SANDBOX/panes"
 }
 set_main() { # the main pane, and a transcript for its session that the handoff key's file names
-  echo term_M > "$S/orchestrator/main"; panes w5:p3 sid-main
+  echo "$TEST_TERM" > "$S/orchestrator/main"; panes w5:p3 sid-main
   : > "$SANDBOX/sid-main.jsonl"; echo "$SANDBOX/sid-main.jsonl" > "$S/agent-handoff/w5:p3.md.transcript"
 }
 rm_main() { rm -f "$S/orchestrator/main"; }
@@ -292,7 +314,7 @@ touch -t 202001010000 "$S/orchestrator/refresh.lock"; now MAIN_REFRESH_HOUR=09
 check "a stale lock: goes ahead" "$(cleared)" 1
 [ ! -d "$S/orchestrator/refresh.lock" ] || fail "a run removes its lock"
 # A pane-tell message queued for the main pane is tied to its session: a clear would strand it.
-rm_stamp; ( exec -a "pane-tell --deliver msg term_M sid-main term_x " sleep 5 ) & pend=$!
+rm_stamp; ( exec -a "pane-tell --deliver msg $TEST_TERM sid-main term_x " sleep 5 ) & pend=$!
 now MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.5; kill "$pend" 2>/dev/null; wait "$pend" 2>/dev/null
 check "a message waiting for the main pane: no /clear" "$(cleared)|$(grep -c '대기 중인 글' "$S/orchestrator/refresh.log")" "0|1"
 # A message that lands while the last checks run (here: during pgrep) is still caught: the transcript is read last.
@@ -330,6 +352,10 @@ check "queued delivery is followed through to /clear" "$(cleared)|$(cat "$SANDBO
 rm_stamp; now DELIVER_AFTER=0.2 QUEUED_STALE=1 MAIN_REFRESH_HOUR=09
 check "a save before queued delivery cannot answer that request" "$(cleared)|$(tail -n 1 "$S/agent-handoff/w5:p3.md" 2>/dev/null)" "1|delivered-handoff"
 sleep 1.2 # reap the delayed fake delivery even when the assertion above fails
+rm_stamp; now PATH="$SANDBOX/retry-pg:$PATH" MAIN_REFRESH_HOUR=09
+check "a retry reuses the saved handoff when no new message arrived" "$(cleared)|$(cat "$SANDBOX/request-n")" "1|1"
+rm_stamp; now BUSY_BEFORE_REQUEST=1 MAIN_REFRESH_HOUR=09
+check "a pane that starts answering during readiness is not interrupted" "$([ -f "$SANDBOX/unsafe-request" ] && cat "$SANDBOX/unsafe-request")|$(cleared)|$(cat "$SANDBOX/request-n")" "|1|1"
 rm_stamp; now BOX_DROP_ONCE=1 MAIN_REFRESH_HOUR=09
 check "a handoff removed during the final checks must be saved again" "$(cleared)|$(cat "$SANDBOX/request-n")|$(tail -n 1 "$S/agent-handoff/w5:p3.md" 2>/dev/null)" "1|2|handoff-2"
 # Regression: words received after the request require a new handoff; clearing the first would lose them.

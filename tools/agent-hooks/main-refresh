@@ -100,6 +100,20 @@ pending() { pgrep -f -- "--deliver [^ ]+ $term " >/dev/null; }
 same_session() {
   [ -z "$sid" ] || [ "$("$H" pane get "$id" 2>/dev/null | jq -r '.result.pane.agent_session.value // empty')" = "$sid" ]
 }
+newer() { [ -n "$(find "$hdir/$key.md" -newer "$lock" 2>/dev/null)" ]; }
+# -s: an empty memo is none. The nonce also rejects a newer memo saved before queued delivery.
+memo_ready() { [ -s "$hdir/$key.md" ] && newer && grep -Fqx -- "$token" "$hdir/$key.md"; }
+# The last real user message must still be our whole request (pane-tell prefixes it, so compare the end).
+# Images and queued input count as new work; meta lines, tool results and compaction summaries do not.
+request_current() {
+  local last
+  last=$(tail -n 2000 "$transcript" 2>/dev/null | jq -rs '[.[]
+    | if .type == "attachment" and .attachment.type? == "queued_command" then "queued"
+      elif .type == "user" and .isMeta != true and .isCompactSummary != true then
+        .message.content | if type == "string" then . else (map(select(.type != "tool_result")) | select(length > 0) | "array") end
+      else empty end][-1] // ""' 2>/dev/null)
+  [[ "$last" == *"$ask" ]]
+}
 if [ -n "${MAIN_REFRESH_DEADLINE:-}" ]; then deadline=$MAIN_REFRESH_DEADLINE
 elif [ -n "$now" ]; then deadline=1800
 else deadline=$(( $(date -j -f %H:%M:%S 07:00:00 +%s) - $(date +%s) )); [ "$deadline" -gt 0 ] || deadline=0; fi
@@ -119,12 +133,21 @@ else
 fi
 late # --box-ready takes a moment; the Mac may have slept across it
 same_session || skip "세션이 바뀌어 건너뜀"
+# The pane may have started answering during the readiness/session checks. Re-enter the wait before sending anything.
+if ! idle; then
+  [ -z "$now" ] || continue
+  skip "인계 요청 전에 칸이 다시 일하고 있어 건너뜀"
+fi
 
+# A final-check race can retry without adding any conversation. Reuse this request's saved answer in that case;
+# a missing memo or genuinely later user input still needs another request with its own nonce.
+if [ -n "${req:-}" ] && memo_ready && request_current; then
+  log "이미 저장된 인계로 확인을 계속함"
+else
 # The lock's mtime marks the request: find -newer compares to the nanosecond, so a handoff saved before it, even in the
 # same second, is never taken for the answer (whole-second times did, check pane 11/05).
 touch "$lock"; req=1
 attempt=$((attempt + 1))
-newer() { [ -n "$(find "$hdir/$key.md" -newer "$lock" 2>/dev/null)" ]; }
 # Background jobs outlive the clear and their end reaches the next session (tested 2026-11-05), which must know what each
 # one watches; one that has stopped is started again from its command, never a second copy of one still running.
 what="지금 도는 밑 칸과 각 칸의 일, 모아 둔 결정(보드 링크, 개인 결정 파일), 감시 중인 Slack 스레드와 각각의 재감시 명령, 답을 기다리는 요유 질문과 그 자리, 이 인계 요청 전에 새로 받은 글과 아직 처리하지 않은 요청(원문), 이 칸에서 백그라운드로 도는 작업(main-refresh 자신은 빼고)과 각각의 재시작 명령(명령 전문, 다음 세션은 pgrep -f로 이미 도는 것을 건너뛰고 다시 건다), 오늘 남은 일"
@@ -140,13 +163,12 @@ case "$out" in
   queued*) log "인계 요청이 대기열에 들어감: 전달과 인계 저장을 기다림" ;;
   *) skip --error "인계 요청 결과를 확인하지 못해 건너뜀" ;;
 esac
-# -s: an empty memo is none. The nonce also rejects a newer memo saved before queued delivery.
-memo_ready() { [ -s "$hdir/$key.md" ] && newer && grep -Fqx -- "$token" "$hdir/$key.md"; }
 fresh() { memo_ready && idle; }
 if ! wait_for "$HANDOFF_WAIT" fresh; then
   same_session || skip "세션이 바뀌어 건너뜀"
   memo_ready && skip "인계 뒤에 칸이 다시 일하고 있어 건너뜀"
   skip --error "인계가 저장되지 않아 건너뜀"
+fi
 fi
 
 late
@@ -171,18 +193,9 @@ if ! memo_ready; then
   fi
   skip "인계 파일이 바뀌어 건너뜀"
 fi
-# The last real user message must still be our whole request (pane-tell prefixes it, so compare the end): a person's
-# later message that merely mentions the marker is a new turn. An array that is not only tool results (an image) is one too,
-# and so are words that came while the pane worked: those are a queued_command attachment, not a user line (review 11/05).
-# A compaction summary is a user line but no message. 2000 lines: a save of 30 tool calls fills 200.
 # This check runs last, right before the /clear: a message that lands during any earlier check is still seen (11/05).
 # ponytail: what lands during the herdr call itself is not; closing that needs a send-if-idle in herdr.
-last=$(tail -n 2000 "$transcript" 2>/dev/null | jq -rs '[.[]
-  | if .type == "attachment" and .attachment.type? == "queued_command" then "queued"
-    elif .type == "user" and .isMeta != true and .isCompactSummary != true then
-      .message.content | if type == "string" then . else (map(select(.type != "tool_result")) | select(length > 0) | "array") end
-    else empty end][-1] // ""' 2>/dev/null)
-if [[ "$last" != *"$ask" ]]; then
+if ! request_current; then
   if [ -n "$now" ]; then
     log "인계 뒤에 새 대화가 있어 인계를 다시 요청함"
     QUIET=$RETRY_QUIET
