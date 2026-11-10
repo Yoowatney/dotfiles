@@ -22,6 +22,8 @@ class SecretFileOutputTests(unittest.TestCase):
     def test_content_readers_are_denied_locally_and_over_ssh(self):
         paths = (
             ".envrc", ".env", ".env.production", ".env.*",
+            ".env*", "*.env", "*/.env*", "**/.env*", "project-*.env", "*.env.*",
+            ".envrc*", ".envrc.*", "*.envrc*",
             "/workspace/project/.envrc", "credentials.json",
             "service-account.json", "private.pem", "~/.ssh/id_ed25519",
         )
@@ -60,7 +62,9 @@ class SecretFileOutputTests(unittest.TestCase):
     def test_examples_counts_and_existence_remain_allowed(self):
         for command in (
             "cat .env.example", "head .env.sample", "less .env.template",
+            "cat app.env.example", "head app.env.sample", "less app.env.template",
             "grep -c TOKEN .envrc", "rg --count TOKEN .env.production",
+            "grep -c TOKEN .env*", "rg --count TOKEN *.env", "test -f app.env",
             "grep -q TOKEN credentials.json", "test -f .envrc",
             "[ -e .env ] && echo exists", "ls -l .envrc", "stat .env",
             "source .envrc", "VALUE=$(cat .envrc)",
@@ -85,13 +89,15 @@ class SecretFileOutputTests(unittest.TestCase):
                 self.assertEqual(guard.tool_problem({"tool_name": tool, "tool_input": inp}) is not None, denied)
 
     def test_hook_protocol_returns_deny_before_any_command_runs(self):
-        payload = {"tool_name": "Bash", "tool_input": {"command": "cat /tmp/fixture/.envrc"}}
-        result = subprocess.run(
-            [sys.executable, "-I", str(GUARD)], input=json.dumps(payload),
-            text=True, capture_output=True, check=True,
-        )
-        response = json.loads(result.stdout or "{}")
-        self.assertEqual(response.get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
+        for command in ("cat /tmp/fixture/.envrc", "cat .env*", "cat *.env", "cat */.env*"):
+            with self.subTest(command=command):
+                payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+                result = subprocess.run(
+                    [sys.executable, "-I", str(GUARD)], input=json.dumps(payload),
+                    text=True, capture_output=True, check=True,
+                )
+                response = json.loads(result.stdout or "{}")
+                self.assertEqual(response.get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
 
 
 if __name__ == "__main__":

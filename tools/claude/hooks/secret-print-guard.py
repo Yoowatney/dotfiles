@@ -24,8 +24,8 @@ SECRET_PATH = re.compile(
     # Claude's deny list (settings.json) keeps these from Claude; Codex reads through the shell only, so this guard covers both.
     r"|\.(?:ssh|aws|gnupg)/[^\s'\"]+(?<!\.pub)(?=$|[\s'\"|;&)<>])|\.config/gh/hosts\.yml"
     r"|\.config/[^\s'\"]*?(?:\.env|token|secret|key|cred)[^\s'\"/]*)"
-    # any repo env file (.env, .env.staging, ...) except examples; values can span lines (PEM keys)
-    r"|(?:^|(?<=[\s'\"=/:(]))(?:\.env(?:rc|\.(?!(?:example|sample|template)(?=$|[\s'\"|;&)<>]))[\w.*?-]+)?"
+    # Environment basenames and globs (.env*, *.env, */.env*) except exact examples.
+    r"|(?:^|(?<=[\s'\"=/:(]))(?:(?:[\w.*?-]+)?\.env(?:rc[\w.*?-]*|[?*][\w.*?-]*|\.(?!(?:example|sample|template)(?=$|[\s'\"|;&)<>]))[\w.*?-]+)?"
     # the same values in a tracked file (`envs/env.mjs`), and key files by their usual names
     # ponytail: by name only; `rg -n TOKEN packages/` or a key file under another name still prints.
     r"|env\.(?:mjs|cjs|js|ts|json|ya?ml)"
