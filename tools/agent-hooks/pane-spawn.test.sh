@@ -86,6 +86,7 @@ hasnt "CLAUDE_STARTUP_ARTIFACT" "a Claude pane starts without the Artifact tool 
 
 has "agent prompt w1:new 할 일입니다" "instruction delivered"
 has "요유는 이 칸을 보지 않으니" "a new pane learns its reports go to the lead"
+has "Before reporting that the user should check something, first determine whether ego Lite or an API can inspect it; if available, check it yourself." "a new pane checks accessible evidence before asking the user"
 before "agent get w1:new" "agent prompt"
 before "agent prompt" "agent wait w1:new --until working --until blocked --until done"
 [[ "$out" == *"w1:new"* ]] || fail "prints the new pane: $out"
@@ -156,6 +157,7 @@ hasnt "tab create" "--same-tab opens no tab"
 
 # Agent arguments pass through, and Codex works without a session id until its first prompt.
 SESSIONLESS=1 ps --kind codex "조사" "지시" -- -m gpt-5 >/dev/null
+has "Before reporting that the user should check something, first determine whether ego Lite or an API can inspect it; if available, check it yourself." "Codex receives the same self-verification instruction"
 # 2026-11-06: once Codex sees a newer release than it runs, its TUI opens on an update prompt that nobody here answers, so
 # every Codex pane failed to start until 0.167.0 was installed (mise installs a release a day after it comes out).
 NOUPDATE="-c check_for_update_on_startup=false"

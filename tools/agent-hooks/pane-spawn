@@ -89,6 +89,7 @@ kind=${kind:-claude}
 name=$1 prompt=$2
 # 요유 talks only to the lead (2026-11-01), so a new pane hears it here and not from each lead's memory.
 prompt+=$'\n\n이 칸은 리드 밑 칸입니다. 요유는 이 칸을 보지 않으니 요유에게 직접 묻거나 `prod 허용`, `staging 허용`, `/clear`를 부탁하지 마세요. 질문, 결정 요청, 보고는 답을 `남은 것:` 줄로 끝내면 이 칸을 연 리드에게 갑니다. 보고는 리드가 읽으니 요유에게 쓰는 형식(설명 페이지, `무엇을:`/`왜:`, `원인:`/`조치:`/`재발 방지:`)은 쓰지 말고, 리드가 확인할 결과와 근거를 편하게 적으세요.'
+prompt+=' Before reporting that the user should check something, first determine whether ego Lite or an API can inspect it; if available, check it yourself.'
 shift 2
 [ "${1:-}" != -- ] || shift
 auto_claude=
