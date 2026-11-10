@@ -25,7 +25,7 @@ SECRET_PATH = re.compile(
     r"|\.(?:ssh|aws|gnupg)/[^\s'\"]+(?<!\.pub)(?=$|[\s'\"|;&)<>])|\.config/gh/hosts\.yml"
     r"|\.config/[^\s'\"]*?(?:\.env|token|secret|key|cred)[^\s'\"/]*)"
     # any repo env file (.env, .env.staging, ...) except examples; values can span lines (PEM keys)
-    r"|(?:^|(?<=[\s'\"=/:(]))(?:\.env(?:\.(?!example|sample|template)[\w.-]+)?"
+    r"|(?:^|(?<=[\s'\"=/:(]))(?:\.env(?:rc|\.(?!(?:example|sample|template)(?=$|[\s'\"|;&)<>]))[\w.*?-]+)?"
     # the same values in a tracked file (`envs/env.mjs`), and key files by their usual names
     # ponytail: by name only; `rg -n TOKEN packages/` or a key file under another name still prints.
     r"|env\.(?:mjs|cjs|js|ts|json|ya?ml)"
@@ -256,6 +256,22 @@ def shell_text(w: list[str]) -> str | None:
     return None
 
 
+def ssh_text(w: list[str]) -> str | None:
+    """SSH joins the words after its destination into a remote shell command."""
+    if not w or w[0].rsplit("/", 1)[-1] != "ssh":
+        return None
+    i = 1
+    while i < len(w) and w[i].startswith("-"):
+        flag = w[i]
+        i += 1
+        if flag == "--":
+            break
+        # Attached option values (-p2222, -oBatchMode=yes) occupy one word.
+        if len(flag) == 2 and flag[1] in "BbcDEeFIiJLlmOopQRSWw":
+            i += 1
+    return " ".join(w[i + 1:]) or None
+
+
 def reads_secret(body: str) -> bool:
     """A capture body whose output is a secret: the same reads this guard blocks when printed."""
     if CREDENTIAL_URL.search(body):
@@ -296,6 +312,12 @@ def rest_problem(cmd: str, shown: set[str], ran: list[str]) -> str | None:
 
 def bash_problem(cmd: str) -> str | None:
     text = HEREDOC.sub(lambda m: heredoc(m, cmd), cmd)
+    # Remote captures run on the other shell: keep them until its own check
+    # distinguishes using a value from printing it after assignment.
+    for seg in segments(text):
+        inner = ssh_text(words(seg))
+        if inner and (problem := bash_problem(inner)):
+            return problem
     visible = strip_captures(text)
     if CD_CODEX.search(visible):
         visible = re.sub(r"(?<![\w/.-])config\.toml\b", "~/.codex/config.toml", visible)
@@ -395,6 +417,7 @@ def selftest():
     git_quiet_forms_print_nothing()
     TC = "https://bigquerydatatransfer.googleapis.com/v1/projects/p/locations/l/transferConfigs"
     deny = [
+        "cat .envrc",
         "cat ~/.codex/config.toml",
         "grep -n -i slack ~/.codex/config.toml | head",
         "head -3 /Users/yoyoo/.config/gemini/.env",
@@ -606,7 +629,6 @@ def selftest():
         "cat .env.example",
         "grep -c ADMIN_USER .env.staging",
         "ls -a nightly_api | grep -E '^\\.env'",
-        "cat .envrc",
         f"curl -s -H \"Authorization: Bearer $T\" \"{TC}?fields=transferConfigs(name,displayName,schedule),nextPageToken\"",
         f"curl -s \"{TC}/c?fields=name,displayName,state\"",
         f"curl -s \"{TC}/c/runs?fields=transferRuns(name,state,errorStatus)\"",
