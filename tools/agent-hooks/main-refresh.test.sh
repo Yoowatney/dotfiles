@@ -282,9 +282,27 @@ rm_stamp; touch "$SANDBOX/notify-fails" "$SANDBOX/tell-fails"; mr MAIN_REFRESH_H
 check "a failed error gateway is recorded locally" "$(grep -c '오류 알림을 보내지 못함' "$S/orchestrator/refresh.log")" 1
 rm "$SANDBOX/notify-fails" "$SANDBOX/tell-fails"
 
-# Both requests name what a restart loses: watches and background jobs, each with the command that starts it again.
+# Both requests must ask for open state only. The emitted pane-tell payload is the agent's contract: adding general
+# history or lessons here would make every fresh main session load them again.
+handoff_contract() {
+  local mode="$1" request
+  request="$(grep 'handoff save' "$SANDBOX/told")"
+  check "$mode limits the handoff to five open-state categories" "$(printf '%s' "$request" | grep -c '열린 상태 다섯 가지만')" 1
+  check "$mode enumerates exactly five categories" "$(printf '%s' "$request" | grep -oE '\([1-5]\)' | tr '\n' ' ')" "(1) (2) (3) (4) (5) "
+  case "$request" in *"부하 세션"*"각 세션의 일"*) ;; *) fail "$mode keeps running subordinate sessions and their work" ;; esac
+  case "$request" in *"감시 중인 Slack 스레드"*"재감시 명령"*) ;; *) fail "$mode keeps watched threads and restart commands" ;; esac
+  case "$request" in *"답을 기다리는 요유 질문"*"회사 결정은 보드 링크"*"개인 결정은 파일 위치"*) ;; *) fail "$mode locates unanswered questions and company/personal decisions" ;; esac
+  case "$request" in *"백그라운드로 도는 작업(main-refresh 자신은 빼고)"*"재시작 명령(명령 전문"*"pgrep -f"*) ;; *) fail "$mode keeps background restart commands and skips running copies" ;; esac
+  case "$request" in *"오늘 남은 일"*"아직 처리하지 않은 요청은 원문 포함"*) ;; *) fail "$mode keeps the remaining work and unprocessed original requests" ;; esac
+  case "$request" in *"배운 요령은 ~/.claude/skills/main-orchestrator/references/에 적고 인계에는 쓰지 마세요"*) ;; *) fail "$mode sends lessons to references instead of the handoff" ;; esac
+  case "$request" in *"'앞 인계 그대로' 같은 사슬 참조는 쓰지 말고 필요한 줄은 직접 옮겨 적으세요"*) ;; *) fail "$mode forbids chained handoffs and requires the needed lines directly" ;; esac
+  case "$request" in *"모아 둔 결정"*) fail "$mode must not request accumulated decisions" ;; esac
+  HANDOFF_CONTRACT="${request#*열린 상태}"
+  HANDOFF_CONTRACT="${HANDOFF_CONTRACT% handoff save*}"
+}
 rm_stamp; touch -t 202001010000 "$SANDBOX/sid-main.jsonl"; mr MAIN_REFRESH_HOUR=05
 check "the daily request names the watches and the background jobs" "$(grep -c '재감시' "$SANDBOX/told")|$(grep -c '백그라운드' "$SANDBOX/told")" "1|1"
+handoff_contract "the daily request"; daily_contract="$HANDOFF_CONTRACT"
 
 # --now: at any hour, as often as asked, through the same gates (2026-11-05: nobody types /clear in the main pane any more).
 now() { MR_ARGS=--now mr "$@"; }
@@ -292,6 +310,7 @@ rm_stamp; now MAIN_REFRESH_HOUR=09
 check "--now outside 05-06: asks, then clears" "$(told)|$(cleared)" "--box-ready w5:p3 claude|w5:p3 [main-refresh] 대화가|--box-ready w5:p3 claude|1"
 [ ! -f "$STAMP" ] || fail "--now leaves no daily stamp, so 05:00 still runs"
 check "--now names the watches and the background jobs" "$(grep -c '재감시' "$SANDBOX/told")|$(grep -c '백그라운드' "$SANDBOX/told")" "1|1"
+handoff_contract "--now"; check "daily and --now use the same handoff contract" "$HANDOFF_CONTRACT" "$daily_contract"
 check "--now announces nothing when it went through" "$(cat "$SANDBOX/alerts")" ""
 rm -f "$S"/agent-handoff/*.md; now MAIN_REFRESH_HOUR=09; check "--now runs again the same day, with what the first left" "$(cleared)" 1
 # Its own wait for rest is 30 minutes, not the night's count down to 07:00 (0 in the day).
