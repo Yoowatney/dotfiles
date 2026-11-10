@@ -164,7 +164,38 @@ def wake(env, sock, rec, pane, address, job, now) -> None:
             f.write(f"{time.strftime('%F %T', time.localtime(now))} {address} wake {n + 1}\n")
 
 
-def settle(env, sock, a, rec, pane, reported: bool) -> None:
+def pending_messages(env, terminal: str) -> bool:
+    """Never discard a queued relay while cleaning up an unattended pane.
+
+    Legacy senders have no receiver record: hold cleanup conservatively until those messages drain.
+    Ignore stale receiver records whose payload has already been delivered. Errors hold cleanup too.
+    """
+    root = os.path.join(os.path.dirname(herdr_peers.state_dir(env)), "pane-tell")
+    try:
+        for path in glob.glob(os.path.join(root, "waiting", "*")):
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(os.path.join(root, "receivers", os.path.basename(path))) as f:
+                    receiver = f.read().splitlines()
+            except FileNotFoundError:
+                if os.path.exists(path):
+                    return True
+                continue
+            if len(receiver) != 2:
+                return True
+            if receiver[0] == terminal and receiver[1].endswith("/sessions/workers/herdr.sock"):
+                return True
+        # Include batches being joined or waiting to enter the regular delivery queue.
+        batch = os.path.join(root, "batch", terminal)
+        return any(os.path.isfile(p) and not os.path.basename(p).startswith(".")
+                   for p in glob.glob(os.path.join(batch, "*", "*"))) or any(
+                       glob.glob(os.path.join(batch, pattern)) for pattern in (".new.*", ".joined.*"))
+    except OSError:
+        return True
+
+
+def settle(env, sock, a, rec, pane, reported: bool, terminal: str) -> None:
     """Close a pane stopped STOPPED s or more, not held, whose report got out and whose own last reply says it may close
     (요유 2026-11-05, workers/w1:p6G): its own close can fail (the Mac was out of processes), and a herdr restart brings a pane
     back with no turn left to end, so no Stop hook comes again. A pane whose report never got out is never closed here; it gets
@@ -172,14 +203,14 @@ def settle(env, sock, a, rec, pane, reported: bool) -> None:
     close is tried every minute until the pane goes.
     ponytail: after a restart the floor is 0, so any report its session ever sent counts as this stop's."""
     session = (a.get("agent_session") or {}).get("value") or ""
-    if not reported or not session:
+    if not reported or not session or pending_messages(env, terminal):
         return
     if "closes" not in rec:
         try:
             rec["closes"] = atc.should_close(atc.last_reply(session, env.get("HOME") or ""))
         except Exception:  # unreadable now: read again next minute (Codex review)
             return
-    if rec["closes"]:
+    if rec["closes"] and not pending_messages(env, terminal):
         herdr_peers.herdr(env, "pane", "close", pane, socket=sock)  # {} when it failed: tried again next minute
 
 
@@ -420,7 +451,7 @@ def tick(env, now: float) -> list:
                         pass
                 if a.get("name") and now - rec["since"] >= STOPPED and not held:
                     try:
-                        settle(env, sock, a, rec, pane, reported)
+                        settle(env, sock, a, rec, pane, reported, term)
                     except Exception:
                         pass
                 limit = JOB_HELD if job and "🔴" in name else STOPPED
@@ -431,7 +462,7 @@ def tick(env, now: float) -> list:
                             if job else f"밑 칸 {name}(workers/{pane})이 보고 없이 15분째 멈춰 있습니다. {UNSENT}")
                     if tell(text, opener, home, moved):
                         rec["alerted"].append("idle")
-                if lost and reported and now - max(rec["since"], rec["lost_at"]) >= ORPHAN_TTL and not held:
+                if lost and reported and now - max(rec["since"], rec["lost_at"]) >= ORPHAN_TTL and not held and not pending_messages(env, term):
                     closed = herdr_peers.herdr(env, "pane", "close", pane, socket=sock)  # {} when it failed: tried again next minute
                     if closed and "closed" not in rec["alerted"] and tell(f"리드가 닫힌 밑 칸 {name}(workers/{pane})을 보고 1시간 뒤라 닫았습니다", home=home, urgent=False):
                         rec["alerted"].append("closed")
@@ -453,7 +484,7 @@ def tick(env, now: float) -> list:
                     and (trial(p.get("label")) or tell(f"{'자동 칸' if job else '밑 칸'} {p.get('label')}의 에이전트가 끝났습니다" + (". 보드 항목을 보고 이어 갈 일은 새 칸에 맡기세요. 빈 칸은 닫습니다." if job else ""), opener, home,
                                                        (p.get("pane_id"), p.get("label")) if remote else None)):
                 rec["alerted"].append("ended")
-            if job and "ended" in rec["alerted"]:  # a shell and no agent, once someone heard: tried every tick while it is listed
+            if job and "ended" in rec["alerted"] and not pending_messages(env, term):  # wait for queued relays too
                 herdr_peers.herdr(env, "pane", "close", p.get("pane_id"), socket=sock)
         # A pane that had an agent and is in neither list went without a word: workers restarted between two ticks (launchd
         # KeepAlive is faster than this watch), or the pane closed. A report it sent since its last state covers it.
@@ -846,6 +877,52 @@ esac
         tick(86000); tick(90000); closes()
         assert ever == {"w1:pQ", "w1:pR", "w1:pT"}, f"never the main pane, a 👑, a 🔴, a pane with a live child, one left open or unreported: {ever}"
         panes_on_workers(); agents(); tick(90060)
+
+        # Pending pane-tell messages must outlive every stopped-pane cleanup path.
+        panes_on_workers()
+        rows = [stopped("w1:pQ", "term_fQ", "sid-Q", done_reply),
+                stopped("w1:pT", "term_fT", "sid-T", done_reply)]
+        agents(*rows)
+        tick(91000)
+        for t in ("term_fQ", "term_fT"):
+            touch_reported(t, 91010)
+        queue = f"{d}/state/pane-tell"
+        write(f"{queue}/waiting/message", "private payload")
+        write(f"{queue}/receivers/message", f"term_fQ\n{W}\n")
+        tick(91900)
+        assert closes() == ["w1:pT"], "15-minute cleanup keeps only the receiver with a pending message"
+        os.remove(f"{queue}/receivers/message")
+        tick(91960)
+        assert closes() == [], "a legacy queue without receiver metadata conservatively holds cleanup"
+        os.remove(f"{queue}/waiting/message")
+        write(f"{queue}/receivers/message", f"term_fQ\n{W}\n")
+        write(f"{queue}/batch/term_fQ/.new.writer", "batch message being staged")
+        tick(92000)
+        assert closes() == ["w1:pT"], "a batch staging its first message keeps its receiver open"
+        os.remove(f"{queue}/batch/term_fQ/.new.writer")
+        write(f"{queue}/batch/term_fQ/open/00001", "held batch")
+        tick(92020)
+        assert closes() == ["w1:pT"], "a held batch also keeps its receiver open"
+        os.remove(f"{queue}/batch/term_fQ/open/00001")
+        tick(92080)
+        assert closes() == ["w1:pQ", "w1:pT"], "delivery resumes cleanup; stale receiver metadata does not hold it"
+        # Reading a large transcript can overlap a new relay arriving.
+        original_reply = atc.last_reply
+
+        def queue_during_reply(*args):
+            write(f"{queue}/waiting/late", "message arriving during transcript read")
+            write(f"{queue}/receivers/late", f"term_fQ\n{W}\n")
+            return done_reply
+
+        atc.last_reply = queue_during_reply
+        try:
+            os.remove(f"{d}/closed")
+            settle(env, W, rows[0], {}, "w1:pQ", True, "term_fQ")
+            assert closes() == [], "a message arriving during transcript read holds cleanup too"
+        finally:
+            atc.last_reply = original_reply
+        shutil.rmtree(queue)
+        panes_on_workers(); agents(); tick(92140)
 
         # 요유 2026-11-05: a Home lead's pane may reach the main pane, which is told to keep it off company Slack and the board.
         os.remove(f"{d}/state/orchestrator/watch.json"); result("default-panes", "panes", [MAIN]); panes_on_workers(label("w1:pX", "🟢 🫡 집 일"))

@@ -27,6 +27,8 @@ case "\$1 \$2" in
     if [ -f "$SANDBOX/screen-\$3" ]; then cat "$SANDBOX/screen-\$3"
     elif [ -f "$SANDBOX/screen.\$n" ]; then cat "$SANDBOX/screen.\$n"; else cat "$SANDBOX/screen"; fi ;;
   "agent prompt") [ ! -f "$SANDBOX/refuse" ] || exit 1; printf '%s|%s\n' "\$3" "\$4" >> "$SANDBOX/log"; echo "\$s" >> "$SANDBOX/log-srv" ;;
+  "agent send-keys") printf '%s|%s|%s\n' "\$s" "\$3" "\${*:4}" >> "$SANDBOX/keys"
+    cp "$SANDBOX/empty-codex" "$SANDBOX/screen" ;;
   "notification show") echo legacy >> "$SANDBOX/legacy-alerts"; exit 98 ;;
   *) exit 2 ;;
 esac
@@ -427,6 +429,44 @@ for receiver in claude codex; do
 done
 claude_screen > "$SANDBOX/screen"
 rm -f "$SANDBOX/state/orchestrator/main"; unset PANE_TELL_BATCH
+
+# Shell-mode recovery is restricted to the unattended workers server and a lone bang.
+sessions_up
+panes "w1:p9|🟢 sender|s9" "w1:pZ|🟢 target|sZ|w1:t1|codex"
+wpanes "w1:pZ|🟢 target|sZ|w1:t1|codex"
+printf '%b' "$BG  $OFF\n$C$OFF$BG $OFF$DIM${BG}Ask Codex$OFF\n$BG  $OFF\n  status\n" > "$SANDBOX/empty-codex"
+shell_screen() { printf '%b' "$BG  $OFF\n\033[1m\033[38;5;9m$BG!${1:-}$OFF\n$BG  $OFF\n  status\n  Shell mode\n"; }
+cp "$SANDBOX/empty-codex" "$SANDBOX/screen"
+rm -f "$SANDBOX/keys"
+PANE_TELL_BATCH=0 pt workers/w1:pZ "empty input" >/dev/null
+check "workers Codex: empty input delivers without keys" "$(sent)|$(cat "$SANDBOX/keys" 2>/dev/null)" "w1:pZ |"
+shell_screen > "$SANDBOX/screen"
+PANE_TELL_BATCH=0 pt workers/w1:pZ "bang recovery" >/dev/null
+# A bounded wait lets the pre-fix detached process expire without contaminating later checks.
+sleep 0.2
+check "workers Codex: lone bang is cleared and delivered" "$(sent)|$(cat "$SANDBOX/keys" 2>/dev/null)" "w1:pZ |workers|w1:pZ|esc esc Backspace"
+cp "$SANDBOX/empty-codex" "$SANDBOX/screen"; settled
+for server in default workers; do
+  for content in bang command multiline nofooter scrolled; do
+    [ "$server:$content" != workers:bang ] || continue
+    shell_screen > "$SANDBOX/screen"
+    case "$content" in
+      command) shell_screen ' echo keep' > "$SANDBOX/screen" ;;
+      multiline) printf '%b' "$BG  $OFF\n$BG!$OFF\n$BG  keep$OFF\n  Shell mode\n" > "$SANDBOX/screen" ;;
+      nofooter) printf '%b' "$BG!$OFF\n$BG  $OFF\n  status\n" > "$SANDBOX/screen" ;;
+      scrolled) echo 1 > "$SANDBOX/scrolled" ;;
+    esac
+    rm -f "$SANDBOX/keys"
+    PANE_TELL_BATCH=0 pt "$server/w1:pZ" "keep user input" >/dev/null
+    sleep 0.15
+    check "$server Codex: $content is never cleared or sent" "$(sent)|$(cat "$SANDBOX/keys" 2>/dev/null)" "|"
+    waiting=$(find "$SANDBOX/state/pane-tell/waiting" -type f | head -1)
+    check "$server Codex: queued message records receiver" "$(head -1 "$SANDBOX/state/pane-tell/receivers/${waiting##*/}" 2>/dev/null)" term_pZ
+    rm -f "$SANDBOX/scrolled"; cp "$SANDBOX/empty-codex" "$SANDBOX/screen"; settled
+    check "$server Codex: delivered queue removes receiver record" "$(ls "$SANDBOX/state/pane-tell/receivers" 2>/dev/null)" ""
+  done
+done
+claude_screen > "$SANDBOX/screen"
 
 check "errors never use the disabled routine toast path" "$(test -f "$SANDBOX/legacy-alerts" && echo legacy || echo gateway)" "gateway"
 exit $fails
