@@ -390,6 +390,105 @@ def write_context(path: str, context: dict):
     os.replace(temporary, path)
 
 
+NO_RECORD = re.compile(r"(?:남기지|기록하지|저장하지|적지|쓰지|올리지)\s*(?:말(?:아|고|\s|$)|마(?:세요|라|십시오|$))|"
+                       r"(?:기록|저장|작성|게시)\s*금지|(?:do\s+not|don't|never)\s+(?:record|log|save|write|post)\b", re.I)
+NO_RECORD_TITLE = re.compile(r"^[ \t]*(?:\#{1,6}[ \t]*)?(?:(?:\d+[.)]|[-*])[ \t]*)?"
+                             r"남기지[ \t]*말[ \t]*것[ \t]*[:：][ \t]*", re.M)
+RECORD_DESTINATIONS = (
+    ("work-log", re.compile(r"워크[\s-]*로그|work[\s-]*logs?", re.I)),
+    ("GitHub issue", re.compile(r"깃헙|깃허브|github|이슈|\bissues?\b", re.I)),
+    ("memory", re.compile(r"메모리|\bmemor(?:y|ies)\b", re.I)),
+    ("documentation", re.compile(r"문서|\bdocs?\b|\bdocumentation\b", re.I)),
+    ("Slack", re.compile(r"슬랙|\bslack\b", re.I)),
+)
+PROMPT_SCAFFOLD = ("# AGENTS.md", "<environment_context>", "<user_instructions>", "<hook_prompt",
+                   "<user_action>", "<codex_internal_context")
+
+
+def recording_restrictions(me, env) -> str:
+    """Carry only storage prohibitions, never the restricted subject or other source tasks.
+
+    Read source user envelopes, not assistant/tool evidence. Re-read for each result so an
+    instruction added to an already open Claude or Codex session also reaches its check.
+    """
+    session = (me.get("agent_session") or {}).get("value")
+    if not session:
+        return ""
+    home = env.get("HOME") or os.path.expanduser("~")
+    paths = glob.glob(f"{home}/.claude/projects/*/{glob.escape(session)}.jsonl")
+    paths += glob.glob(f"{home}/.codex/sessions/*/*/*/rollout-*-{glob.escape(session)}.jsonl")
+    destinations = set()
+    generic = False
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as stream:
+                for line in stream:
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    content = None
+                    if not all(isinstance(record.get(field) or {}, dict) for field in ("origin", "message", "attachment", "payload")):
+                        continue
+                    if record.get("type") == "user" and (record.get("origin") or {}).get("kind", "human") == "human":
+                        content = (record.get("message") or {}).get("content")
+                    elif record.get("type") == "attachment":
+                        queued = record.get("attachment") or {}
+                        origin = queued.get("origin") or {}
+                        if queued.get("type") == "queued_command" and isinstance(origin, dict) and origin.get("kind") == "human":
+                            content = queued.get("prompt")
+                    elif record.get("type") == "response_item":
+                        payload = record.get("payload") or {}
+                        metadata = payload.get("internal_chat_message_metadata_passthrough") or {}
+                        if not isinstance(metadata, dict):
+                            continue
+                        parts = metadata.get("content_item_metadata") or []
+                        if not isinstance(parts, list) or any(not isinstance(part, dict) or
+                                not isinstance(part.get("provenance") or {}, dict) for part in parts):
+                            continue
+                        harness = parts and all((part.get("provenance") or {}).get("type") == "harness" for part in parts)
+                        if payload.get("type") == "message" and payload.get("role") == "user" and not harness:
+                            content = payload.get("content")
+                    text = content if isinstance(content, str) else "\n".join(
+                        part["text"] for part in content or [] if isinstance(part, dict)
+                        and part.get("type") in ("text", "input_text")
+                        and isinstance(part.get("text"), str)) if isinstance(content, list) else ""
+                    if text.lstrip().startswith(PROMPT_SCAFFOLD):
+                        continue
+                    # A destination alone may be code-formatted; executable/code evidence remains stripped.
+                    text = re.sub(r"`([^`\n]+)`", lambda match: match[1] if any(
+                        pattern.fullmatch(match[1]) for _, pattern in RECORD_DESTINATIONS) else match[0], text)
+                    text = plain(text)
+                    for line in text.splitlines():
+                        title = NO_RECORD_TITLE.match(line)
+                        if not title:
+                            continue
+                        remainder = line[title.end():]
+                        listed = {label for label, pattern in RECORD_DESTINATIONS if pattern.search(remainder)}
+                        for _, pattern in RECORD_DESTINATIONS:
+                            remainder = pattern.sub("", remainder)
+                        # A destination list is a directive; a narrative after a topic label is not.
+                        if listed and not re.sub(r"\b(?:and|or)\b|[\s,;/&·.]+|와|과|및", "", remainder, flags=re.I):
+                            destinations.update(listed)
+                    # A topic label is not an instruction; keep any actual directive after it.
+                    for sentence in re.split(r"[\n.!?。]", NO_RECORD_TITLE.sub("", text)):
+                        if not NO_RECORD.search(sentence):
+                            continue
+                        found = {label for label, pattern in RECORD_DESTINATIONS if pattern.search(sentence)}
+                        destinations.update(found)
+                        generic |= not found and bool(re.search(r"기록|조사|분석|내용|결과|\brecord|\blog|\bsave", sentence, re.I))
+        except OSError:
+            continue  # a missing source must not break report delivery
+    if not destinations and not generic:
+        return ""
+    targets = ", ".join(label for label, _ in RECORD_DESTINATIONS if label in destinations)
+    if generic:
+        targets = ", ".join(filter(None, (targets, "별도 기록")))
+    return f" 원 작업의 기록 금지 제한을 이 확인 작업에도 적용합니다. 확인 내용과 결과를 {targets}에 남기지 마세요."
+
+
 def route_main_report(reply, me, name, lead, to, path, now, env, send):
     """None: ordinary relay. True: delivered or handed to a check. False: delivery failed; keep it for the watch."""
     if not herdr_peers.delegates_checks(env, to.get("terminal_id")) or herdr_peers.home_pane(name):
@@ -461,7 +560,8 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send):
                   f"그 항목의 일 칸 보고가 주장한 항목마다 테스트·명령을 직접 실행하거나 바뀐 동작·데이터를 직접 보세요. "
                   "보고를 다시 읽는 것은 확인이 아닙니다. 주장 밖의 새 문제를 찾거나 수정하지 마세요. "
                   "항목별 실행 명령과 실제 결과, 통과·실패·확인 불가를 적고 첫 줄에 전체 판정을 적으세요. "
-                  f"상관 표식 [ac-{key}]는 보고가 끝날 때까지 칸 이름에 남겨 두세요.")
+                  f"상관 표식 [ac-{key}]는 보고가 끝날 때까지 칸 이름에 남겨 두세요."
+                  + recording_restrictions(me, env))
         receiver_server = lead.split("/", 1)[0] if "/" in lead else herdr_peers.server_key(env)
         receiver_env = {**env, "HERDR_PANE_ID": to["pane_id"], "HERDR_SOCKET_PATH": herdr_peers.socket_of(env, receiver_server) or ""}
         for inherited in ("MUNICE_AUTO_DISPATCH", "MUNICE_AMBIENT", "HERDR_WORKSPACE_ID"):
