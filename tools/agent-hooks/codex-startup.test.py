@@ -48,6 +48,8 @@ class StartupTest(unittest.TestCase):
             self.assertTrue(startup.keep_skill('media', path))
             self.assertTrue(startup.keep_skill('full', path))
         self.assertTrue(startup.keep_skill('code', Path('/skills/unknown/skill-snapshot/SKILL.md')))
+        self.assertTrue(startup.keep_skill('code', Path('/skills/youtube-summary-workspace/unknown-safety/SKILL.md')))
+        self.assertTrue(startup.keep_skill('code', Path('/plugins/cache/youtube-summary-workspace/1.0/skills/unknown-safety/SKILL.md')))
 
     def test_main_checks_unknown_type_and_switch_use_original_home(self):
         with tempfile.TemporaryDirectory() as tmp:

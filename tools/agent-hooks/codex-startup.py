@@ -27,7 +27,7 @@ def keep_skill(kind, path):
         return True
     name = path.parent.name
     # This installer stores its skill below a snapshot directory, not its name.
-    if 'youtube-summary-workspace' in path.parts:
+    if name == 'skill-snapshot' and path.parent.parent.name == 'youtube-summary-workspace':
         name = 'youtube-summary-workspace'
     if name in PERSONAL or name.startswith('notion-'):
         return False

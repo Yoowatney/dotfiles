@@ -150,7 +150,7 @@ has '--env HERDR_CODEX_STARTUP_HELPER=' "the runner expands exclusions after ent
 hasnt 'skills.config=[' "large skill flags must not pass through terminal input"
 # The installed command is a symlink, often reached through another PATH link.
 # Startup metadata and accounting must use helpers beside the resolved script.
-real_subject=$SUBJECT
+real_subject=$(readlink -f "$SUBJECT")
 mkdir -p "$SANDBOX/bin" "$SANDBOX/links"
 ln -s "$real_subject" "$SANDBOX/links/pane-spawn"
 ln -s ../links/pane-spawn "$SANDBOX/bin/pane-spawn"
