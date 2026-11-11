@@ -136,6 +136,7 @@ check "large handoff stays out of startup context" "$([ ${#ctx} -lt 1500 ] && ec
 check "large handoff is saved without losing its end" "$(tail -1 "$dir/w1:p9.md.loaded")" TAIL_MARKER
 completed w1:p9
 drained
+check "large handoff finishes its kick before the next case" "$(prompts)" "w1:p9 "
 rm -f "$SANDBOX/prompts"
 
 # A handoff nobody picked up for a day belongs to work that has moved on.
@@ -205,6 +206,7 @@ check "outside herdr load prints nothing" "$(ho "" load)" ""
 ho w1:p1 bogus 2>/dev/null; check "unknown command exits 2" "$?" 2
 
 # A named herdr server keeps its handoffs in a folder named after its session, so the same pane id never shares one.
+rm -f "$SANDBOX/prompts"
 W="$SANDBOX/sessions/workers/herdr.sock"
 CASE=named-server
 printf 'workers 일\n' | HERDR_SOCKET_PATH=$W ho w1:p1 save >/dev/null
@@ -213,5 +215,6 @@ check "the default server's w1:p1 loads nothing of it" "$(ho w1:p1 load)" ""
 check "the workers pane loads its own" "$(HERDR_SOCKET_PATH=$W ho w1:p1 load | jq -r '.hookSpecificOutput.additionalContext' | grep -c 'workers 일')" 1
 completed w1:p1
 drained
+check "the workers kick finishes before cleanup" "$(prompts)" "w1:p1 "
 
 exit "$fails"
