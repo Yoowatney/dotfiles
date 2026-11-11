@@ -85,6 +85,12 @@ has "--env CLAUDE_STARTUP_ROLE=worker" "Claude work panes keep their startup pro
 hasnt "CLAUDE_STARTUP_ARTIFACT" "a Claude pane starts without the Artifact tool unless it asks (api#1065)"
 
 has "agent prompt w1:new 할 일입니다" "instruction delivered"
+has "For investigations and comparisons" "investigations get a default outcome contract"
+has "original question" "the user's question survives delegation"
+has "추천:" "the investigator must recommend an option"
+has "다음 행동:" "the investigator must name the next action"
+has "execute available read-only checks" "unknowns require available verification"
+has "For implementation-only or routine status tasks" "routine tasks do not need invented recommendations"
 has "요유는 이 칸을 보지 않으니" "a new pane learns its reports go to the lead"
 has "Before reporting that the user should check something, first determine whether ego Lite or an API can inspect it; if available, check it yourself." "a new pane checks accessible evidence before asking the user"
 before "agent get w1:new" "agent prompt"
@@ -204,6 +210,8 @@ rm "$SANDBOX/home/.config/munice/host-role"
 SESSIONLESS=1 ps --kind codex "조사" "지시" -- -c 'developer_instructions="Explain how --full-auto and -s work."' >/dev/null
 has "-- $UNBOXED $NOUPDATE -c developer_instructions=" "an option named inside a value leaves the defaults in"
 has "agent prompt w1:new 지시" "codex gets the instruction"
+has "For investigations and comparisons" "Codex investigators get the same outcome contract"
+has "execute available read-only checks" "Codex must investigate material unknowns within scope"
 hasnt "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" "a codex pane keeps its environment"
 
 # A Claude pane opened here runs without the advisor tool: the pane's shell gets the variable, so the agent and its subagents do.
@@ -397,6 +405,9 @@ has "[workers] pane rename w1:new 🟢 🫡 확인 api#1 로그인" "its name sa
 has "[workers] agent start spawn-65f21913323dc21-chk" "its agent name tells auto-tab-close, and still records who opened it"
 has "npm test를 돌려 보세요" "the instruction arrives"
 has "확인 칸입니다" "it hears what a check pane does"
+has "Check whether the result answers the original question as asked" "a checker checks question coverage, not just claims"
+has "recommendation and next action" "a checker checks the recommended follow-up"
+has "Do not mark an unanswered material question as passed" "a checker cannot pass an incomplete answer"
 has "고치지 말고" "a check pane changes nothing"
 has "다른 칸의 보고를 다시 읽는 것은 확인이 아닙니다" "rereading a report is no check"
 has "보고 첫 줄에" "its first line is what the main pane reads"

@@ -95,6 +95,23 @@ class RelayTests(unittest.TestCase):
         path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in records) + "\n")
         return path
 
+    def test_relay_requires_question_coverage_not_only_claim_checks(self):
+        self.finish()
+        prompt = self.spawns[0][0][-1]
+        self.assertIn("original question as asked", prompt)
+        self.assertIn("recommendation and next action", prompt)
+        self.assertNotIn("주장 밖의 새 문제를 찾거나", prompt)
+
+    def test_checker_gets_source_transcript_location_for_both_harnesses(self):
+        for codex in (False, True):
+            with self.subTest(codex=codex):
+                path = self.transcript([], codex=codex)
+                self.finish(DONE + str(codex))
+                prompt = self.spawns[-1][0][-1]
+                self.assertIn(str(path), prompt)
+                self.assertIn("source user requests", prompt)
+                path.unlink()
+
     def test_claude_recording_restrictions_follow_the_check_without_copying_subject(self):
         self.transcript([{"type": "user", "message": {"content":
             "이 임시 조사 내용은 깃헙 이슈나 워크로그 같은 건 일절 남기지말아줘. 테스트는 실행하세요."}}])
