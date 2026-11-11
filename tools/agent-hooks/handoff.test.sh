@@ -4,12 +4,48 @@ unset HERDR_SOCKET_PATH
 
 SUBJECT="$(cd "$(dirname "$0")" && pwd)/handoff"
 SANDBOX="$(mktemp -d)"
-trap 'rm -rf "$SANDBOX"' EXIT
+cleanup() {
+  local file child wrapper
+  for file in "$SANDBOX"/running/*; do
+    [ -f "$file" ] || continue
+    read -r child wrapper < "$file"
+    # Each supervised child owns a private process group. Check ancestry before
+    # signalling it: a completed child's PID must never target another process.
+    if [ "$(/bin/ps -p "$child" -o ppid= | tr -d ' ')" = "$wrapper" ]; then
+      kill -TERM -- "-$child" 2>/dev/null || :
+    fi
+    # The detached wrapper can be reparented after handoff exits. Its unique
+    # sandbox path still distinguishes it from an unrelated reused PID.
+    case "$(/bin/ps -p "$wrapper" -o command=)" in
+      *"$SANDBOX/bin/nohup"*) kill "$wrapper" 2>/dev/null || : ;;
+    esac
+  done
+  rm -rf "$SANDBOX"
+}
+trap cleanup EXIT
 fails=0
+CASE=setup
 check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected [$3] got [$2]"; fails=1; fi; }
 
 # A fake pbcopy for the no-herdr fallback, and a fake herdr that shows a Claude box and logs `agent prompt <pane> <text>`.
-mkdir -p "$SANDBOX/bin"
+mkdir -p "$SANDBOX/bin" "$SANDBOX/running"
+mkfifo "$SANDBOX/completed"
+exec 9<>"$SANDBOX/completed"
+# Keep the real detached handoff -> pane-tell -> queued worker path. A completion
+# handshake belongs to this invocation, unlike an arbitrary record in prompts.
+cat > "$SANDBOX/bin/nohup" <<EOF
+#!/usr/bin/env bash
+role=kick
+for arg in "\$@"; do [ "\$arg" != --deliver ] || role=queue; done
+/usr/bin/nohup perl -MPOSIX -e 'defined POSIX::setsid() or die "setsid: \$!"; exec @ARGV or die "exec: \$!"' "\$@" &
+child=\$!
+printf '%s %s\n' "\$child" "\$\$" > "$SANDBOX/running/\$\$"
+wait "\$child"
+rc=\$?
+printf '%s|%s|%s|%s\n' "\$HANDOFF_TEST_CASE" "\$HERDR_PANE_ID" "\$role" "\$rc" > "$SANDBOX/completed"
+rm -f "$SANDBOX/running/\$\$"
+exit "\$rc"
+EOF
 printf '#!/usr/bin/env bash\ncat > "%s/clip"\n' "$SANDBOX" > "$SANDBOX/bin/pbcopy"
 cat > "$SANDBOX/bin/herdr" <<EOF
 #!/usr/bin/env bash
@@ -17,17 +53,35 @@ case "\$1 \$2" in
   "pane get") jq -n --arg p "\$3" '{result: {pane: {pane_id: \$p, agent: "claude", terminal_id: "t1", scroll: {offset_from_bottom: 0}}}}' ;;
   "pane list") jq -n '{result: {panes: [{pane_id: "w8:p1", agent: "claude", terminal_id: "t1"}]}}' ;;
   "pane read") cat "$SANDBOX/screen" ;;
-  "agent prompt") printf '%s|%s\n' "\$3" "\$4" >> "$SANDBOX/prompts" ;;
+  "agent prompt")
+    grep -qF '치던 글' "$SANDBOX/screen" && touch "$SANDBOX/sent-into-draft"
+    sleep "\${HANDOFF_TEST_PROMPT_DELAY:-0}"
+    printf '%s|%s\n' "\$3" "\$4" >> "$SANDBOX/prompts" ;;
 esac
 EOF
-chmod +x "$SANDBOX/bin/pbcopy" "$SANDBOX/bin/herdr"
+chmod +x "$SANDBOX/bin/pbcopy" "$SANDBOX/bin/herdr" "$SANDBOX/bin/nohup"
 RULE=$(printf '─%.0s' $(seq 1 40))
 claude_screen() { printf '%s\n\xe2\x9d\xaf\xc2\xa0%s\n%s\n  footer\n' "$RULE" "${1:-}" "$RULE" > "$SANDBOX/screen"; }
 claude_screen
 ho() { local pane="$1"; shift; env XDG_STATE_HOME="$SANDBOX/state" HERDR_PANE_ID="$pane" HERDR_BIN_PATH="$SANDBOX/bin/herdr" \
-  HANDOFF_KICK_DELAY=0 PANE_TELL_SETTLE=0 PANE_TELL_POLL=0.05 CLAUDE_CODE_ENTRYPOINT="${EP:-cli}" PATH="$SANDBOX/bin:$PATH" bash "$SUBJECT" "$@"; }
-# The kick runs detached, so give it a moment to land.
-prompts() { local i; for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$SANDBOX/prompts" ] && break; sleep 0.2; done; cut -d'|' -f1 "$SANDBOX/prompts" 2>/dev/null | tr '\n' ' '; }
+  HANDOFF_TEST_CASE="$CASE" HANDOFF_KICK_DELAY=0 PANE_TELL_SETTLE=0 PANE_TELL_POLL=0.05 CLAUDE_CODE_ENTRYPOINT="${EP:-cli}" PATH="$SANDBOX/bin:$PATH" bash "$SUBJECT" "$@"; }
+completed() {
+  local event
+  # This is a deadlock watchdog, not the success condition. Success requires the
+  # expected process to finish with rc 0, before its files are read or removed.
+  if ! IFS= read -r -t 30 event <&9; then
+    echo "FAIL completion missing: $CASE|$1|${2:-kick}|0" >&2
+    exit 1
+  fi
+  [ "$event" = "$CASE|$1|${2:-kick}|0" ] || { echo "FAIL unexpected completion: $event" >&2; exit 1; }
+}
+pending() { find "$SANDBOX/state/pane-tell" -type f \( -path '*/waiting/*' -o -path '*/undelivered/*' \) 2>/dev/null; }
+drained() {
+  [ -z "$(pending)" ] || { echo "FAIL $CASE leaves a queued or undelivered message" >&2; exit 1; }
+  [ ! -e "$SANDBOX/sent-into-draft" ] || { echo "FAIL $CASE sent into a draft" >&2; exit 1; }
+  echo "ok   $CASE has no pending message or draft violation"
+}
+prompts() { cut -d'|' -f1 "$SANDBOX/prompts" 2>/dev/null | tr '\n' ' '; }
 dir="$SANDBOX/state/agent-handoff"
 # These free-form save/load cases exercise the unchanged main-session contract.
 # Ordinary validation and legacy reads are covered separately in handoff-state.test.py.
@@ -37,7 +91,9 @@ echo t1 > "$SANDBOX/state/orchestrator/main"
 printf '보드 api#1 이어서\n' | ho w1:p1 save >/dev/null
 check "save writes the pane's file" "$(cat "$dir/w1:p1.md")" "보드 api#1 이어서"
 check "another pane loads nothing" "$(ho w1:p2 load)" ""
-out=$(ho w1:p1 load)
+# Force delivery beyond the old two-second polling window even on an idle host.
+CASE=load-main
+out=$(HANDOFF_TEST_PROMPT_DELAY=3 ho w1:p1 load)
 # Claude and Codex both read SessionStart context from this JSON shape.
 check "load emits SessionStart JSON" "$(jq -r '.hookSpecificOutput.hookEventName' <<<"$out")" "SessionStart"
 ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out")
@@ -46,15 +102,22 @@ check "load says where it came from" "$(grep -c 'previous session in this pane' 
 # 요유 typed during the silent wait and the kick merged onto it (10/21); their words come first in that message.
 check "load says text before the kick marker is 요유's" "$(grep -c "before the \[handoff:" <<<"$ctx")" 1
 # Interactive sessions ignore initialUserMessage (tested 10/21), so load types the first prompt into its own pane.
+completed w1:p1
+drained
 check "load starts the first turn in its own pane" "$(prompts)" "w1:p1 "
 check "the kick says it was not typed by 요유" "$(grep -c '요유가 직접 친 글이 아닙니다' "$SANDBOX/prompts")" 1
 rm -f "$SANDBOX/prompts"
 check "load consumes it" "$(ho w1:p1 load)" ""
 check "nothing to load types nothing" "$(prompts)" ""
 # 요유 began typing after /clear: the kick waits for an empty box instead of merging with it.
+CASE=blocked-box
 claude_screen "치던 글"; printf '이어서\n' | ho w8:p1 save >/dev/null; ho w8:p1 load >/dev/null
+completed w8:p1
+check "blocked input queues exactly one message" "$(pending | wc -l | tr -d ' ')" 1
 check "words in the box hold the kick back" "$(prompts)" ""
 claude_screen
+completed w8:p1 queue
+drained
 check "the kick goes in once the box is empty" "$(prompts)" "w8:p1 "
 rm -f "$SANDBOX/prompts"
 
@@ -64,13 +127,16 @@ check "save takes a file argument" "$(cat "$dir/w1:p3.md")" "file arg"
 
 # Large notes stay complete on disk; loading must not inline an unbounded handoff.
 printf '%03000d\nTAIL_MARKER\n' 0 > "$SANDBOX/large.md"
+CASE=large-note
 ho w1:p9 save "$SANDBOX/large.md" >/dev/null
 ctx=$(ho w1:p9 load | jq -r '.hookSpecificOutput.additionalContext')
 check "large handoff points to its complete saved file" "$(grep -cF "$dir/w1:p9.md.loaded" <<<"$ctx")" 1
 check "large handoff must be read before continuing" "$(grep -c 'Read it in full before continuing' <<<"$ctx")" 1
 check "large handoff stays out of startup context" "$([ ${#ctx} -lt 1500 ] && echo short)" short
 check "large handoff is saved without losing its end" "$(tail -1 "$dir/w1:p9.md.loaded")" TAIL_MARKER
-prompts >/dev/null; rm -f "$SANDBOX/prompts"
+completed w1:p9
+drained
+rm -f "$SANDBOX/prompts"
 
 # A handoff nobody picked up for a day belongs to work that has moved on.
 printf 'old\n' | ho w1:p4 save >/dev/null
@@ -99,6 +165,7 @@ check "clear whose old transcript is gone prints nothing" "$(ss w2:p1 clear "$SA
   jq -nc '{type: "user", message: {content: "<command-name>/clear</command-name>"}}'
   jq -nc '{type: "user", message: {content: "[handoff: 자동으로 보낸 글]"}}'
 } > "$SANDBOX/b.jsonl"
+CASE=transcript-fallback
 out=$(ss w2:p1 clear "$SANDBOX/c.jsonl")
 ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out")
 check "fallback names the old transcript" "$(grep -c "$SANDBOX/b.jsonl" <<<"$ctx")" 1
@@ -107,6 +174,8 @@ check "fallback carries the last reply" "$(grep -c '사내 서버에서 돕니�
 check "fallback carries the last 남은 것 line" "$(grep -c '남은 것: 요유 몫: 키 발급' <<<"$ctx")" 1
 check "fallback skips hook text and the kick" "$(grep -c -e 'meta caveat' -e '<command-name>' -e '자동으로 보낸 글' <<<"$ctx")" 0
 # 요유 only types /clear, saved or not (10/23: "clear만 하면 알아서 핸드오프받고 되야하는거 아님?").
+completed w2:p1
+drained
 check "fallback starts the first turn in its own pane" "$(prompts)" "w2:p1 "
 check "the fallback kick points at the old session's record" "$(grep -c '직전 세션 기록' "$SANDBOX/prompts")" 1
 check "fallback says text before the kick marker is 요유's" "$(grep -c "before the \[handoff:" <<<"$ctx")" 1
@@ -119,9 +188,12 @@ check "and keeps the pane's transcript" "$(cat "$dir/w2:p1.md.transcript")" "$SA
 # An explicit save still wins over the fallback, kick included.
 printf '저장한 인수인계\n' | ho w2:p1 save >/dev/null
 cp "$SANDBOX/b.jsonl" "$SANDBOX/c.jsonl"
+CASE=saved-over-fallback
 ctx=$(ss w2:p1 clear "$SANDBOX/d.jsonl" | jq -r '.hookSpecificOutput.additionalContext')
 check "a saved handoff beats the fallback" "$(grep -c '저장한 인수인계' <<<"$ctx")" 1
 check "and the fallback stays out" "$(grep -c 'without saving a handoff' <<<"$ctx")" 0
+completed w2:p1
+drained
 check "a saved handoff still starts the turn" "$(prompts)" "w2:p1 "
 check "with the handoff kick" "$(grep -c '인수인계대로' "$SANDBOX/prompts")" 1
 check "outside herdr session prints nothing" "$(ss "" clear "$SANDBOX/e.jsonl")" ""
@@ -134,9 +206,12 @@ ho w1:p1 bogus 2>/dev/null; check "unknown command exits 2" "$?" 2
 
 # A named herdr server keeps its handoffs in a folder named after its session, so the same pane id never shares one.
 W="$SANDBOX/sessions/workers/herdr.sock"
+CASE=named-server
 printf 'workers 일\n' | HERDR_SOCKET_PATH=$W ho w1:p1 save >/dev/null
 check "a named server keeps its own folder" "$(cat "$dir/workers/w1:p1.md")" "workers 일"
 check "the default server's w1:p1 loads nothing of it" "$(ho w1:p1 load)" ""
 check "the workers pane loads its own" "$(HERDR_SOCKET_PATH=$W ho w1:p1 load | jq -r '.hookSpecificOutput.additionalContext' | grep -c 'workers 일')" 1
+completed w1:p1
+drained
 
 exit "$fails"
