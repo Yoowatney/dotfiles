@@ -33,8 +33,25 @@ unset $(git rev-parse --local-env-vars) $(compgen -e | grep -E '^(HERDR|CLAUDE|C
 run() {
   local log="$OUT/${1//\//_}.log" cmd=(bash "$1") rc=0
   [[ $1 != *.py ]] || cmd=(python3 -I "$1" --selftest)
-  # alarm survives exec and SIGALRM ends the test with exit 142. macOS has no `timeout` of its own.
-  perl -e 'alarm shift; exec @ARGV or die "cannot start $ARGV[0]: $!\n"' "$PRE_PUSH_LIMIT" "${cmd[@]}" </dev/null >"$log" 2>&1 || rc=$?
+  # Supervise a separate process group: alarming only the test shell leaves its children running.
+  # Keep exit 142 for the timeout diagnostic. macOS has no `timeout` of its own.
+  perl -e '
+    use POSIX qw(setpgid);
+    my $limit = shift;
+    my $pid = fork();
+    defined $pid or die "cannot fork: $!\n";
+    if (!$pid) {
+      defined setpgid(0, 0) or die "cannot create test process group: $!\n";
+      exec @ARGV or die "cannot start $ARGV[0]: $!\n";
+    }
+    setpgid($pid, $pid); # establish the group even if the child has not been scheduled yet
+    $SIG{ALRM} = sub { kill "KILL", -$pid; waitpid($pid, 0); exit 142; };
+    alarm $limit;
+    waitpid($pid, 0);
+    my $status = $?;
+    alarm 0;
+    exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
+  ' "$PRE_PUSH_LIMIT" "${cmd[@]}" </dev/null >"$log" 2>&1 || rc=$?
   [ "$rc" = 0 ] && return
   [ "$rc" = 142 ] && echo "stopped after ${PRE_PUSH_LIMIT}s" >>"$log"
   echo "$1" >>"$OUT/failed"
