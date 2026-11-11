@@ -41,6 +41,14 @@ class StartupTest(unittest.TestCase):
             self.assertIn('Main only', (source / 'AGENTS.md').read_text())
             self.assertEqual(json.loads(Path(plan['manifest']).read_text())['task_type'], 'code')
 
+    def test_youtube_skills_include_nested_installer_snapshots(self):
+        for path in (Path('/skills/youtube-summary/SKILL.md'),
+                     Path('/skills/youtube-summary-workspace/skill-snapshot/SKILL.md')):
+            self.assertFalse(startup.keep_skill('code', path))
+            self.assertTrue(startup.keep_skill('media', path))
+            self.assertTrue(startup.keep_skill('full', path))
+        self.assertTrue(startup.keep_skill('code', Path('/skills/unknown/skill-snapshot/SKILL.md')))
+
     def test_main_checks_unknown_type_and_switch_use_original_home(self):
         with tempfile.TemporaryDirectory() as tmp:
             for role, kind in [('main', 'code'), ('check', 'code'), ('worker', 'unknown')]:

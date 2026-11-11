@@ -16,7 +16,7 @@ except ImportError:  # Older system Python retains the full skill configuration.
     tomllib = None
 
 TYPES = {'code', 'research', 'media', 'office'}
-MEDIA = {'imagegen', 'asciinema-subtitles', 'media-use', 'youtube-summary-workspace'}
+MEDIA = {'imagegen', 'asciinema-subtitles', 'media-use', 'youtube-summary', 'youtube-summary-workspace'}
 OFFICE = {'documents', 'pdf', 'presentations', 'spreadsheets', 'google-docs', 'google-drive',
           'google-drive-comments', 'google-sheets', 'google-slides', 'template-creator'}
 PERSONAL = {'closing-household-ledger', 'create-pet', 'pets', 'update-pet', 'main-orchestrator'}
@@ -26,6 +26,9 @@ def keep_skill(kind, path):
     if kind not in TYPES:
         return True
     name = path.parent.name
+    # This installer stores its skill below a snapshot directory, not its name.
+    if 'youtube-summary-workspace' in path.parts:
+        name = 'youtube-summary-workspace'
     if name in PERSONAL or name.startswith('notion-'):
         return False
     if kind != 'media' and (name.startswith('hyperframes') or name in MEDIA):
