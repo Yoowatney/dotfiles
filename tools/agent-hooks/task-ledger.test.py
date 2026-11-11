@@ -17,8 +17,17 @@ class LedgerTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.env = dict(os.environ, AGENT_TASK_LEDGER_DIR=str(self.root / "state"))
-        self.env.pop("HERDR_TASK_ID", None)
+        # Hooks consume session metadata from the environment. A developer's
+        # parent job, role or model must never become part of these fixtures.
+        # HOME/XDG also isolate the deferred-work observer called by the hook.
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("HERDR", "CLAUDE", "CODEX", "MUNICE", "GIT_", "AGENT_", "XDG_"))}
+        self.env.update(HOME=str(self.root / "home"),
+                        XDG_STATE_HOME=str(self.root / "xdg-state"),
+                        XDG_CONFIG_HOME=str(self.root / "xdg-config"),
+                        XDG_DATA_HOME=str(self.root / "xdg-data"),
+                        XDG_CACHE_HOME=str(self.root / "xdg-cache"),
+                        AGENT_TASK_LEDGER_DIR=str(self.root / "state"))
         self.codex = self.root / "codex"
         self.claude = self.root / "claude"
         self.codex.mkdir()
