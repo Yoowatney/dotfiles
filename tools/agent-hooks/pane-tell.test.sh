@@ -5,6 +5,18 @@ unset HERDR_SOCKET_PATH XDG_STATE_HOME # never the live herdr or state
 SUBJECT="$(cd "$(dirname "$0")" && pwd)/pane-tell"
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
+processes_running() {
+  local rc=0
+  pgrep -f -- "$1" >/dev/null || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    echo "FAIL process query unavailable: pgrep exited $rc" >&2
+    exit 1
+  fi
+  return "$rc"
+}
+# The barriers below must distinguish an absent process from a denied query.
+# Check before creating delivery fixtures so a restricted host fails clearly.
+processes_running "$SANDBOX/state/pane-tell/waiting/" || :
 fails=0
 check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected [$3] got [$2]"; fails=1; fi; }
 
@@ -68,7 +80,7 @@ job() { rm -f "$SANDBOX/log" "$SANDBOX/log-srv" "$SANDBOX/alerts-srv" "$SANDBOX/
 sent() { cut -d'|' -f1 "$SANDBOX/log" 2>/dev/null | tr '\n' ' '; }
 # Waits for the detached delivery to finish: nothing is left waiting and the process itself is gone. It outlives its file while
 # it warns the sender, and those pane reads would land on the next check's counter ("typed between the two reads" failed 5 of 6).
-settled() { local i; for i in $(seq 1 100); do [ -z "$(ls "$SANDBOX/state/pane-tell/waiting" 2>/dev/null)" ] && ! pgrep -f "$SANDBOX/state/pane-tell/waiting/" >/dev/null && return; sleep 0.05; done; echo "FAIL a delivery never finished"; fails=1; }
+settled() { local i; for i in $(seq 1 100); do [ -z "$(ls "$SANDBOX/state/pane-tell/waiting" 2>/dev/null)" ] && ! processes_running "$SANDBOX/state/pane-tell/waiting/" && return; sleep 0.05; done; echo "FAIL a delivery never finished"; fails=1; }
 box() { printf '%b' "$2" | HERDR_BIN_PATH=/nonexistent bash "$SUBJECT" --box-empty "$1"; echo $?; }
 
 # A real installation links the launcher from a different directory. Exercise
@@ -367,7 +379,7 @@ main_panes() { # the main pane w1:pM in state $1, an ordinary pane w1:p3 in the 
     {pane_id: "w1:p9", label: "🟢 와우포인트 정리", agent_session: {value: "s9"}, cwd: "/w", tab_id: "w1:t1", agent: "claude", terminal_id: "term_p9"}]}}' > "$SANDBOX/panes"
   rm -f "$SANDBOX/log"
 }
-batched() { local i; for i in $(seq 1 200); do [ ! -d "$SANDBOX/state/pane-tell/batch/term_pM/open" ] && ! pgrep -f -- "--flush $SANDBOX/" >/dev/null && return; sleep 0.05; done; echo "FAIL a batch never went"; fails=1; }
+batched() { local i; for i in $(seq 1 200); do [ ! -d "$SANDBOX/state/pane-tell/batch/term_pM/open" ] && ! processes_running "--flush $SANDBOX/" && return; sleep 0.05; done; echo "FAIL a batch never went"; fails=1; }
 prompts() { cat "$SANDBOX/log" 2>/dev/null | grep -c '^w1:pM|'; }
 held() { sed 's/: held.*//' <<<"$1"; }
 HELD="queued for w1:pM (👑 메인 오케스트레이터)"
