@@ -7,6 +7,7 @@ trap 'rm -rf "$SANDBOX"' EXIT
 
 fail() {
     echo "FAIL: $*" >&2
+    [ ! -f "$SANDBOX/err" ] || cat "$SANDBOX/err" >&2
     exit 1
 }
 
@@ -97,6 +98,18 @@ before "agent get w1:new" "agent prompt"
 before "agent prompt" "agent wait w1:new --until working --until blocked --until done"
 [[ "$out" == *"w1:new"* ]] || fail "prints the new pane: $out"
 
+# Codex may report interactive readiness while its hook-review modal owns input.
+# Never send an instruction into that modal or silently trust the changed hooks.
+for readiness_shell in "$(command -v bash)" /bin/bash; do
+  rc=0
+  PANE_SPAWN_TEST_SHELL="$readiness_shell" SESSIONLESS=1 SCREEN='7 hooks need review' ps --kind codex "hook review" "Run tests" 2>"$SANDBOX/err" >/dev/null || rc=$?
+  [ "$rc" = 1 ] || fail "hook review ($readiness_shell): expected failure, got $rc"
+  hasnt "agent prompt" "a hook-review modal receives no instruction"
+  has "pane close w1:new" "the undelivered test pane is closed"
+  hasnt "--kind claude" "hook review does not switch runners"
+  grep -q 'hooks need review' "$SANDBOX/err" || fail "reports the hook review blocker"
+done
+
 # api#1065: --artifact keeps the Artifact tool in a Claude pane (the profile turns it off otherwise); Codex has no such tool.
 ps --artifact "발행" "지시" >/dev/null
 has "--env CLAUDE_STARTUP_ARTIFACT=1" "--artifact keeps the Artifact tool in a Claude pane, through clear"
@@ -114,6 +127,27 @@ has "--env CLAUDE_STARTUP_SKILLS=1" "--skills keeps the cut skills in a Claude p
 has "--env CLAUDE_STARTUP_ROLE=worker" "--skills keeps the rest of the worker profile"
 SESSIONLESS=1 ps --skills --kind codex "조사" "지시" >/dev/null
 hasnt "CLAUDE_STARTUP_SKILLS" "Codex panes are unaffected by --skills"
+
+# Typed workers receive context metadata, without changing runner or permissions.
+SESSIONLESS=1 ps --kind codex --task-type code --job-id test-job "test" "Run tests" >/dev/null
+has "--env HERDR_CODEX_STARTUP_ROLE=worker" "only workers opt into the startup profile"
+has "--env HERDR_CODEX_TASK_TYPE=code" "the requested task type survives clear"
+has "--env HERDR_TASK_ID=test-job" "request and execution share a job id"
+mkdir -p "$SANDBOX/home/.codex" "$SANDBOX/home/.agents/skills/hyperframes"
+printf 'Safety\n<!-- pane:skip -->\nMain only\n<!-- /pane:skip -->\n' > "$SANDBOX/home/.codex/AGENTS.md"
+printf 'demo\n' > "$SANDBOX/home/.agents/skills/hyperframes/SKILL.md"
+SESSIONLESS=1 ps --kind codex --task-type code "test" "Run tests" >/dev/null
+hasnt "--env CODEX_HOME=" "startup trimming keeps canonical credentials and state"
+has '--env HERDR_CODEX_STARTUP_HELPER=' "the runner expands exclusions after entering the shell"
+hasnt 'skills.config=[' "large skill flags must not pass through terminal input"
+rm -rf "$SANDBOX/home/.codex" "$SANDBOX/home/.agents"
+python3 "$(dirname "$SUBJECT")/task-ledger.py" --state-dir "$SANDBOX/home/.local/state/agent-task-ledger" record run --job-id parent-job --session-id parent-session
+CODEX_THREAD_ID=parent-session SESSIONLESS=1 ps --kind codex --job-id child-job "test" "Run tests" >/dev/null
+python3 - "$SANDBOX/home/.local/state/agent-task-ledger/events.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert any(e['kind'] == 'request' and e['job_id'] == 'child-job' and e.get('parent_job_id') == 'parent-job' for e in rows), 'shell environment filtering must not lose the parent job'
+PY
 
 # 요유 2026-11-01: a job has one lead. A pane under a lead that opens a review pane stays under it, and that pane reports to it.
 CALLER_LABEL="🟢 🫡 구현" ps --same-tab "리뷰" "봐 줘" >/dev/null
@@ -275,7 +309,7 @@ grep -q "pane-tell" "$SANDBOX/err" || fail "says what to do: $(cat "$SANDBOX/err
 # Bad usage.
 if ps "이름만" 2>/dev/null; then fail "missing instruction must exit non-zero"; fi
 if ps --kind gemini "이름" "지시" 2>/dev/null; then fail "unknown kind must exit non-zero"; fi
-if env -u HERDR_PANE_ID HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "이름" "지시" 2>/dev/null; then fail "outside herdr must exit non-zero"; fi
+if env -u HERDR_PANE_ID -u XDG_STATE_HOME HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "이름" "지시" 2>/dev/null; then fail "outside herdr must exit non-zero"; fi
 
 # The main pane does no work itself: what it opens goes to the workers server, and its address names that server.
 is_main() { mkdir -p "$SANDBOX/home/.local/state/orchestrator"; echo term_65f21913323dc21 > "$SANDBOX/home/.local/state/orchestrator/main"; }

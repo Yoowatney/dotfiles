@@ -42,6 +42,8 @@
 # Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
 H=${HERDR_BIN_PATH:-herdr}
 USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
+  --task-type code|research|media|office|full: worker startup catalog; unknown tasks retain full context.
+  --job-id ID: keep the original job id for a check or reassignment; otherwise a new id is generated.
   --kind auto: choose a normal worker from fresh subscription quota and weekly pace; unknown/paid usage is excluded.
     If neither runner qualifies, no pane opens. Set the agent-quota policy to codex-only for the previous routing.
     A lookup exceeding six seconds warns once and retains Codex. Forwarded arguments and ambient-runner retain Codex.
@@ -61,7 +63,7 @@ die() { echo "pane-spawn: $*" >&2; exit 2; }
 # starts that way made an ordinary pane unreachable (요유 2026-11-05), so no tab it names starts that way.
 tab_name() { case "$1" in "자동 "* | "알아서 "*) echo "일 $1" ;; *) echo "$1" ;; esac; }
 
-same= new_tab= check= opus= artifact= skills= kind= why= opener= cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
+same= new_tab= check= opus= artifact= skills= kind= why= opener= task_type= job_id= cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
 while [ $# -gt 0 ]; do
   case "$1" in
     --same-tab) same=1; shift ;;
@@ -71,9 +73,9 @@ while [ $# -gt 0 ]; do
     --artifact) artifact=1; shift ;;
     --skills) skills=1; shift ;;
     -h | --help) echo "$USAGE"; exit 0 ;;
-    --kind | --cwd | --why | --opener)
+    --kind | --cwd | --why | --opener | --task-type | --job-id)
       [ $# -ge 2 ] || die "$USAGE"
-      case "$1" in --kind) kind=$2 ;; --cwd) cwd=$2 ;; --why) why=$2 ;; --opener) opener=${2#term_}; [[ "$opener" =~ ^[0-9A-Za-z]+$ ]] || die "$USAGE" ;; esac
+      case "$1" in --kind) kind=$2 ;; --cwd) cwd=$2 ;; --why) why=$2 ;; --opener) opener=${2#term_}; [[ "$opener" =~ ^[0-9A-Za-z]+$ ]] || die "$USAGE" ;; --task-type) task_type=$2 ;; --job-id) job_id=$2 ;; esac
       shift 2 ;;
     --*) die "$USAGE" ;;
     *) break ;;
@@ -87,10 +89,38 @@ asked=${kind:-claude} # what the caller chose, before auto resolves to Codex
 [ "$kind" != auto ] || kind=codex
 kind=${kind:-claude}
 name=$1 prompt=$2
+case "$task_type" in
+  '') case "$name $prompt" in
+    *영상*|*애니메이션*|*hyperframes*) task_type=media ;;
+    *스프레드시트*|*xlsx*|*docx*|*슬라이드*) task_type=office ;;
+    *조사*|*research*|*검색*) task_type=research ;;
+    *구현*|*코드*|*시험*|*테스트*|*버그*|*test*|*implement*|*fix*) task_type=code ;;
+    *) task_type=full ;;
+    esac ;;
+  code|research|media|office|full) ;;
+  *) die "--task-type must be code, research, media, office or full" ;;
+esac
+[[ -z "$job_id" || "$job_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || die "invalid --job-id"
+job_id=${job_id:-job-$(date -u +%Y%m%dT%H%M%S)-$$-$RANDOM}
+ledger="$(dirname "$0")/task-ledger.py"
+parent_job=${HERDR_TASK_ID:-}
+# Codex's shell environment allowlist omits worker metadata, but it always
+# supplies CODEX_THREAD_ID. Recover the association without widening that list.
+if [ -z "$parent_job" ] && [ -n "${CODEX_THREAD_ID:-}" ] && [ -f "$ledger" ]; then
+  parent_job=$(python3 "$ledger" job-for-session "$CODEX_THREAD_ID" 2>/dev/null) || parent_job=
+fi
+record_task() {
+  [ ! -f "$ledger" ] || python3 "$ledger" record "$@" --job-id "$job_id" >/dev/null 2>&1 || echo 'pane-spawn: task ledger unavailable; launch continues' >&2
+}
+if [ "$job_id" != "$parent_job" ]; then
+  record_task request --event-id "request:$job_id" ${parent_job:+--parent-job-id "$parent_job"}
+fi
 # 요유 talks only to the lead (2026-11-01), so a new pane hears it here and not from each lead's memory.
 prompt+=$'\n\n이 칸은 리드 밑 칸입니다. 요유는 이 칸을 보지 않으니 요유에게 직접 묻거나 `prod 허용`, `staging 허용`, `/clear`를 부탁하지 마세요. 질문, 결정 요청, 보고는 답을 `남은 것:` 줄로 끝내면 이 칸을 연 리드에게 갑니다. 보고는 리드가 읽으니 요유에게 쓰는 형식(설명 페이지, `무엇을:`/`왜:`, `원인:`/`조치:`/`재발 방지:`)은 쓰지 말고, 리드가 확인할 결과와 근거를 편하게 적으세요.'
 prompt+=' Before reporting that the user should check something, first determine whether ego Lite or an API can inspect it; if available, check it yourself.'
 prompt+=$'\n\nFor investigations and comparisons, preserve the original question and the improvement the user is considering; current settings alone do not answer whether that improvement is possible. Include concrete 추천: and 다음 행동: lines before the final 남은 것: line: your recommended option, why, and the next action you will take. For material unknowns, execute available read-only checks within the authorized scope before reporting. If blocked, state the attempted check, the blocker, alternative evidence, and the next authorized step. Do not invent certainty or treat this instruction as permission for production changes, external messages, data writes, settings, or billing. For implementation-only or routine status tasks, report the requested outcome without inventing recommendations. In check panes, assess this contract rather than doing follow-up implementation.'
+prompt+=$'\nBefore the final 남은 것: line, include TASK_RESULT: pass|fail|unknown for your execution outcome (not independent verification). A check session uses TASK_CHECK: pass|fail|unknown instead. Preserve uncertainty; no marker is recorded as unknown.'
+prompt+=" Task accounting ID: $job_id. Reuse it for a check or reassignment."
 shift 2
 [ "${1:-}" != -- ] || shift
 auto_claude=
@@ -190,6 +220,16 @@ esac
 # runaway in a pane stops at 5000 while sessions opened by hand and launchd jobs keep 3000 to stop it with. The cap counts the
 # whole user, so near 5000 every pane opened here stops forking, not only the runaway one. Panes already open keep 8000.
 env_args+=(--env PANE_SPAWN_NPROC=5000)
+env_args+=(--env "HERDR_TASK_ID=$job_id")
+if [ -n "$check" ]; then
+  env_args+=(--env HERDR_TASK_ROLE=check --env HERDR_CODEX_STARTUP_ROLE=check)
+else
+  env_args+=(--env HERDR_TASK_ROLE=worker)
+  [ "$kind" != codex ] || env_args+=(--env HERDR_CODEX_STARTUP_ROLE=worker --env "HERDR_CODEX_TASK_TYPE=$task_type")
+  if [ "$kind" = codex ] && [ -f "$(dirname "$0")/codex-startup.py" ]; then
+    env_args+=(--env "HERDR_CODEX_STARTUP_HELPER=$(dirname "$(readlink -f "$0")")/codex-startup.py")
+  fi
+fi
 [ -n "$opener" ] || [ -n "${HERDR_PANE_ID:-}" ] || die "run this inside a herdr pane"
 command -v jq >/dev/null 2>&1 || die "jq not found"
 
@@ -389,10 +429,21 @@ for startup_poll in $(seq 1 60); do # `agent start` can return while a wrapper s
   [ "$startup_poll" != 60 ] || give_up "$kind never became ready"
   sleep "${PANE_SPAWN_POLL:-2}"
 done
+# Herdr can report interactive_ready while Codex's hook-review modal owns the
+# input box. Do not consume the instruction there, auto-trust hooks, or switch
+# runners. A human must review the changed declarations once before retrying.
+if [ "$kind" = codex ]; then
+  screen=$("$H" agent read "$pane" --source visible 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  case "$screen" in *"hooks need review"*|*"hook needs review"*)
+    give_up "codex hooks need review; no instruction was delivered. Review the changed hooks with /hooks in a manually opened Codex session, then retry this job with --job-id $job_id" ;;
+  esac
+fi
 # Codex can report ready before its input box takes text, and `agent prompt` still succeeds: on 2026-11-01 an instruction
 # vanished and the pane sat idle while its lead waited. So delivery counts only once the agent shows work. A miss is reported,
 # not resent or closed: the wait can also fail with the instruction accepted, and a resend would run the job twice.
 "$H" agent prompt "$pane" "$prompt" >/dev/null || give_up "the instruction was not delivered"
+session_id=$("$H" agent get "$pane" 2>/dev/null | jq -r '.result.agent.agent_session.value // empty')
+record_task run ${session_id:+--session-id "$session_id"}
 if ! "$H" agent wait "$pane" --until working --until blocked --until done --timeout "${PANE_SPAWN_START_WAIT:-30000}" >/dev/null 2>&1; then
   echo "$addr$pane"
   echo "pane-spawn: $addr$pane shows no work; if its input box is empty, send the instruction again with pane-tell" >&2

@@ -103,16 +103,22 @@ codex() {
   # needs its own server so hooks and shell commands address the current pane.
   local -a launch_args=()
   [[ ${HERDR_ENV:-} == 1 ]] && launch_args+=(--no-daemon)
+  # Expand the skill catalog after the terminal has received the short launch
+  # command. Serializing it into terminal input can exceed its line limit.
+  local -a runner=("$bin")
+  if [[ ${HERDR_CODEX_STARTUP_ROLE:-} == worker && -f ${HERDR_CODEX_STARTUP_HELPER:-} ]]; then
+    runner=(python3 "$HERDR_CODEX_STARTUP_HELPER" "$bin")
+  fi
   # `codex exec` with a prompt argument still reads "additional input" from a
   # non-TTY stdin until EOF, and an agent's background shell can leave that
   # stdin open: the run then waits forever before it starts (2026-11-04, a
   # review hung for 10 minutes). A prompt argument needs no stdin, so close it.
   # `codex exec -` and a trailing option (`review --uncommitted`) keep theirs.
   if [[ $1 == exec && ! -t 0 && ${@[-1]} != -* ]]; then
-    "$bin" "${launch_args[@]}" "$@" </dev/null
+    "${runner[@]}" "${launch_args[@]}" "$@" </dev/null
     return
   fi
-  "$bin" "${launch_args[@]}" "$@"
+  "${runner[@]}" "${launch_args[@]}" "$@"
 }
 
 # Editor

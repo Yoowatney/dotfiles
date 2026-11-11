@@ -558,6 +558,9 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send):
                            worker_address=herdr_peers.address(env, me['pane_id']),
                            worker_terminal=me.get("terminal_id"),
                            cwd=me.get("cwd") or os.path.expanduser("~"), kind=kind, kind_reason=kind_reason)
+            task_id = env.get("HERDR_TASK_ID", "")
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", task_id):
+                context["task_id"] = task_id  # Accounting only; routing/check policy is unchanged.
         # Persist the token before the instruction can reach a very fast check pane.
         write_context(context_path, context)
         sources = source_transcripts(me, env)
@@ -581,6 +584,8 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send):
             receiver_env.pop(inherited, None)
         spawn = env.get("AUTO_TAB_CLOSE_PANE_SPAWN") or os.path.join(HERE, "pane-spawn")
         args = [spawn, "--check", "--kind", context["kind"], "--cwd", context["cwd"], f"{context['job']} [ac-{key}]", prompt]
+        if context.get("task_id"):
+            args[1:1] = ["--job-id", context["task_id"]]
         # A failed delivery is retried, but never starts a second check for the same saved report.
         if not context.get("spawn_error"):
             try:
