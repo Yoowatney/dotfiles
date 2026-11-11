@@ -36,12 +36,18 @@ The saver records each checkout's current branch, full commit and dirty flag.
 `verified_commit` is the full hash **at verification time**; `verified_dirty` is
 the dirty flag at that time. Never infer either from the current checkout. Use
 null when unknown. Describe the actual verification and its evidence in `evidence`.
+Use `not verified` as the explicit unverified evidence marker. It remains unverified
+even if a commit and clean flag were also supplied. Case, surrounding whitespace
+and a trailing period do not change that marker's meaning; other prose is not
+automatically interpreted as proof that tests ran.
 
 A changed branch/commit, missing checkout, any dirty state or unknown verification
 produces a warning on read. A clean match only confirms code identity; environment,
 configuration and external state still need checking. Old freeform memos remain
 readable with an unverified warning. A handoff grants no new deployment or external
 write permission. Do not put private handoff contents in this public repository.
+Reading checks the required fields again, so a damaged or incomplete saved block
+cannot become a verified handoff. This check never replaces the saved Git snapshot.
 
 Outside herdr, saving still copies the prompt to the clipboard. The current
 implementation retains handoffs for 24 hours and consumes a memo once by renaming

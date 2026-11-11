@@ -90,6 +90,47 @@ class HandoffTest(unittest.TestCase):
         self.file.write_text("legacy note")
         self.assertIn("필수 항목 미확인", self.load())
 
+    def test_loaded_metadata_must_still_have_complete_required_fields(self):
+        # A damaged saved memo must not bypass the validation used by save.
+        for key, invalid in [(key, " \n ") for key in
+                             ("task", "completed", "remaining", "verification", "resume")] + [
+                                 ("code", "invalid"), ("version", True)]:
+            with self.subTest(field=key, value=invalid):
+                self.assertEqual(self.runho("save", self.memo()).returncode, 0)
+                data = dict(self.meta, version=1)
+                data[key] = invalid
+                self.file.write_text("```handoff\n" + json.dumps(data) + "\n```\n")
+                ctx = self.load()
+                self.assertIn("필수 항목 미확인", ctx)
+                self.assertNotIn("해당 없음", ctx)
+
+    def test_explicitly_unverified_evidence_never_confirms_code_identity(self):
+        repo = self.repo("repo")
+        for evidence in ("not verified", " Not Verified. ", "NOT VERIFIED"):
+            with self.subTest(evidence=evidence):
+                self.meta.update(code="repositories", repositories=[dict(path=str(repo),
+                    verified_commit=self.git(repo, "rev-parse", "HEAD"),
+                    verified_dirty=False, evidence=evidence)])
+                self.assertEqual(self.runho("save", self.memo()).returncode, 0)
+                ctx = self.load()
+                self.assertIn("이전 검증을 그대로 사용할 수 없음", ctx)
+                self.assertNotIn("코드 상태 일치", ctx)
+
+    def test_loaded_repository_evidence_must_remain_valid(self):
+        repo = self.repo("repo")
+        self.meta.update(code="repositories", repositories=[dict(path=str(repo),
+            verified_commit=self.git(repo, "rev-parse", "HEAD"), verified_dirty=False,
+            evidence="test run")])
+        for field, invalid in [("evidence", "   "), ("verified_dirty", 0)]:
+            with self.subTest(field=field):
+                self.assertEqual(self.runho("save", self.memo()).returncode, 0)
+                data = json.loads(self.file.read_text().split("```handoff\n")[1].split("\n```")[0])
+                data["repositories"][0][field] = invalid
+                self.file.write_text("```handoff\n" + json.dumps(data) + "\n```\n")
+                ctx = self.load()
+                self.assertIn("필수 항목 미확인", ctx)
+                self.assertNotIn("코드 상태 일치", ctx)
+
     def test_each_repo_records_current_and_verified_separately(self):
         a, b = self.repo("a"), self.repo("b")
         self.meta.update(code="repositories", repositories=[
@@ -100,22 +141,31 @@ class HandoffTest(unittest.TestCase):
         self.assertIn(str(a), saved)
         self.assertIn(str(b), saved)
         self.assertIn('"current"', saved)
+        data = json.loads(saved.split("```handoff\n")[1].split("\n```")[0])
+        self.assertEqual([entry["current"] for entry in data["repositories"]], [
+            dict(path=str(repo.resolve()), branch=self.git(repo, "branch", "--show-current"),
+                 commit=self.git(repo, "rev-parse", "HEAD"), dirty=False) for repo in (a, b)])
+        self.assertIsNone(data["repositories"][1]["verified_commit"])
+        self.assertIsNone(data["repositories"][1]["verified_dirty"])
         ctx = self.load()
         self.assertIn("이전 검증을 그대로 사용할 수 없음", ctx)
         self.assertIn(str(b), ctx)
 
     def test_changed_commit_dirty_branch_and_missing_repository(self):
-        repo = self.repo("repo")
-        self.meta.update(code="repositories", repositories=[dict(path=str(repo),
-            verified_commit=self.git(repo, "rev-parse", "HEAD"), verified_dirty=False, evidence="test run")])
-        original = self.memo()
-        self.assertEqual(self.runho("save", original).returncode, 0)
-        self.assertIn("코드 상태 일치", self.load())
         for change in ("dirty", "commit", "branch", "missing"):
+            # Each change starts with a clean, verified snapshot. A previous dirty
+            # or mismatched commit must not make the branch/missing tests pass.
+            repo = self.repo(change)
+            self.meta.update(code="repositories", repositories=[dict(path=str(repo),
+                verified_commit=self.git(repo, "rev-parse", "HEAD"), verified_dirty=False, evidence="test run")])
+            original = self.memo()
+            self.assertEqual(self.runho("save", original).returncode, 0)
+            self.assertIn("코드 상태 일치", self.load())
             self.assertEqual(self.runho("save", original).returncode, 0)
             if change == "dirty":
                 (repo / "untracked").write_text("new")
             elif change == "commit":
+                (repo / "file").write_text("changed")
                 self.git(repo, "add", ".")
                 self.git(repo, "commit", "-qm", "Change")
             elif change == "branch":
@@ -123,6 +173,24 @@ class HandoffTest(unittest.TestCase):
             else:
                 repo.rename(self.root / "moved")
             self.assertIn("이전 검증을 그대로 사용할 수 없음", self.load(), change)
+
+    def test_worktrees_keep_distinct_branch_and_dirty_snapshots(self):
+        repo = self.repo("repo")
+        worktree = self.root / "worktree"
+        self.git(repo, "worktree", "add", "-qb", "topic", str(worktree))
+        (repo / "file").write_text("uncommitted")
+        self.meta.update(code="repositories", repositories=[dict(path=str(path),
+            verified_commit=self.git(path, "rev-parse", "HEAD"), verified_dirty=False,
+            evidence="test run") for path in (repo, worktree)])
+        self.assertEqual(self.runho("save", self.memo()).returncode, 0)
+        saved = json.loads(self.file.read_text().split("```handoff\n")[1].split("\n```")[0])
+        a, b = [entry["current"] for entry in saved["repositories"]]
+        self.assertTrue(a["dirty"])
+        self.assertFalse(b["dirty"])
+        self.assertNotEqual(a["branch"], b["branch"])
+        ctx = self.load()
+        self.assertIn(str(repo.resolve()) + ": 이전 검증을 그대로 사용할 수 없음", ctx)
+        self.assertIn(str(worktree.resolve()) + ": 코드 상태 일치", ctx)
 
     def test_malformed_metadata_and_unknown_verification(self):
         self.assertNotEqual(self.runho("save", "```handoff\n{broken\n```\n").returncode, 0)
