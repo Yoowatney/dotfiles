@@ -69,7 +69,9 @@ completed() {
   local event
   # This is a deadlock watchdog, not the success condition. Success requires the
   # expected process to finish with rc 0, before its files are read or removed.
-  if ! IFS= read -r -t 30 event <&9; then
+  # The real delivery path starts several interpreters and CLI queries. Keep
+  # the completion/exit/queue assertions; allow shared-host startup contention.
+  if ! IFS= read -r -t 120 event <&9; then
     echo "FAIL completion missing: $CASE|$1|${2:-kick}|0" >&2
     exit 1
   fi

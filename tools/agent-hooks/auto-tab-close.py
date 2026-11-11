@@ -996,7 +996,10 @@ esac''')
                                            "AUTO_TAB_CLOSE_PANE_SPAWN": fake_spawn,
                                            "HERDR_ERROR_NOTIFY": fake_notify,
                                            "AUTO_TAB_CLOSE_POLL": "0.02", **env},
-                           timeout=10)
+                           # This bounds the full synthetic Stop flow, including
+                           # interpreter startup and multiple fake CLI queries.
+                           # Production query/startup deadlines stay unchanged.
+                           timeout=30)
         for f in pending():  # its step drops the file only as its last act, so a step without one has ended
             try:
                 with open(f, encoding="utf-8") as h:

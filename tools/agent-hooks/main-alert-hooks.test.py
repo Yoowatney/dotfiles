@@ -115,6 +115,18 @@ if __name__ == "__main__":
         path = self.home / "drains"
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
+    def test_slow_hook_startup_does_not_look_like_a_registration_block(self):
+        # A loaded host can delay the shell before the registration reader runs.
+        # Such startup latency must not be mistaken for opening a blocking FIFO.
+        bin_dir = self.home / "bin"
+        bin_dir.mkdir()
+        bash = bin_dir / "bash"
+        bash.write_text("#!/bin/sh\nsleep 2.2\nexec " + shlex.quote(shutil.which("bash")) + ' "$@"\n')
+        bash.chmod(0o755)
+        self.env["PATH"] = str(bin_dir) + os.pathsep + self.env["PATH"]
+        self.test_malformed_main_never_authorizes_matching_snapshot()
+        self.test_main_fifo_never_blocks_or_offers_in_any_hook()
+
     def test_prompt_preserves_label_context_and_offers_claim_without_ack(self):
         result = self.run_hook()
         self.assertIn("main pane", self.context(result))
@@ -139,7 +151,7 @@ if __name__ == "__main__":
         os.mkfifo(main)
         for event in ("SessionStart", "UserPromptSubmit", "Stop"):
             with self.subTest(event=event):
-                result = self.run_hook(event, bound=2)
+                result = self.run_hook(event)
                 self.assertEqual(self.calls(), [])
                 self.assertTrue(result is None or "CLAIM" not in self.context(result))
         self.assertFalse((self.home / "rename").exists(), "named SessionStart must keep its label")
@@ -150,7 +162,7 @@ if __name__ == "__main__":
             with self.subTest(registration=repr(invalid)):
                 main.write_text(invalid)
                 self.pane["terminal_id"] = invalid
-                self.assertIsNone(self.run_hook("SessionStart", bound=2))
+                self.assertIsNone(self.run_hook("SessionStart"))
                 self.assertEqual(self.calls(), [])
         self.assertFalse((self.home / "rename").exists())
 
@@ -160,7 +172,7 @@ if __name__ == "__main__":
         for invalid in (b"\xff", b"term-main\x00", b"term-main\nother", b"x" * 257):
             with self.subTest(data=repr(invalid)):
                 main.write_bytes(invalid)
-                result = subprocess.run(command, env=self.env, capture_output=True, timeout=2)
+                result = subprocess.run(command, env=self.env, capture_output=True, timeout=12)
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(result.stdout, b"")
         main.unlink()
@@ -171,15 +183,37 @@ if __name__ == "__main__":
                 if kind == "symlink": main.symlink_to(target)
                 elif kind == "directory": main.mkdir()
                 else: os.mkfifo(main)
-                result = subprocess.run(command, env=self.env, capture_output=True, timeout=2)
+                result = subprocess.run(command, env=self.env, capture_output=True, timeout=12)
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(result.stdout, b"")
                 main.rmdir() if kind == "directory" else main.unlink()
         for valid in ("term-main\n", " term-main \n", "term_65f2", "legacy.id:1-2"):
             with self.subTest(valid=valid):
                 main.write_text(valid)
-                result = subprocess.run(command[:-1] + [valid.strip()], env=self.env, capture_output=True, timeout=2)
+                result = subprocess.run(command[:-1] + [valid.strip()], env=self.env, capture_output=True, timeout=12)
                 self.assertEqual(result.returncode, 0)
+
+    def test_main_fifo_reader_returns_without_a_writer(self):
+        # Time only the real reader, after interpreter startup and module loading.
+        # Removing O_NONBLOCK must still fail within two seconds, even though
+        # whole-hook integration tests allow time for shell and process startup.
+        main = self.home / "state/orchestrator/main"
+        main.unlink()
+        os.mkfifo(main)
+        spec = importlib.util.spec_from_file_location("fifo_peers", self.hooks / "herdr_peers.py")
+        peers = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(peers)
+
+        def blocked(signum, frame):
+            self.fail("main registration reader blocked on a FIFO without a writer")
+
+        previous_handler = signal.signal(signal.SIGALRM, blocked)
+        previous_timer = signal.setitimer(signal.ITIMER_REAL, 2)
+        try:
+            self.assertEqual(peers.main_terminal(self.env), "")
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+            signal.signal(signal.SIGALRM, previous_handler)
 
     def test_stop_preserves_existing_reason_for_both_clients(self):
         for claude in (False, True):

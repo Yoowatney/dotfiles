@@ -165,7 +165,11 @@ class ErrorNotifyTests(unittest.TestCase):
                 if result.stdout.strip() == "herdr":
                     break
                 time.sleep(0.05)
-            clients = self.mod.client_inventory()
+            # Recognition depends on these macOS columns, not the time needed
+            # to enumerate unrelated sessions on a busy host. Query our child.
+            result = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "pid=,uid=,tty=,lstart=,ucomm=,args="],
+                                    capture_output=True, text=True, check=True, timeout=12)
+            clients = self.mod.parse_clients(result.stdout)
             matches = [client for client in clients if client.pid == pid]
             self.assertEqual(len(matches), 1, "absolute-path herdr on a real PTY must be eligible")
             self.assertTrue(matches[0].command.startswith(executable))
@@ -177,6 +181,23 @@ class ErrorNotifyTests(unittest.TestCase):
             except ProcessLookupError:
                 pass
             os.waitpid(pid, 0)
+
+    def test_client_inventory_keeps_full_query_and_five_second_bound(self):
+        result = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        command = ["/bin/ps", "-axo", "pid=,uid=,tty=,lstart=,ucomm=,args="]
+        with patch.object(self.mod.subprocess, "run", return_value=result) as query:
+            self.assertEqual(self.mod.client_inventory(), [])
+        query.assert_called_once_with(command, capture_output=True, text=True, check=True, timeout=5)
+        with patch.object(self.mod.subprocess, "run", side_effect=subprocess.TimeoutExpired(command, 5)):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.mod.client_inventory()
+
+    def test_inventory_timeout_keeps_notification_pending(self):
+        event = self.store.enqueue("Failure", "Retry after inventory timeout")
+        with patch.object(self.mod.subprocess, "run", side_effect=subprocess.TimeoutExpired("ps", 5)):
+            self.assertEqual(self.store.drain(self.mod.client_inventory), 0)
+        self.assertEqual(self.store.export(), [event])
+        self.assertNotIn(event["id"], self.store.read()["sent"])
 
     def test_export_import_ack_preserve_ids_and_deduplicate(self):
         event = self.store.enqueue("Failure", "Body")

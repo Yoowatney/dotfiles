@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import stat
 import sys
@@ -244,10 +245,40 @@ class InboxTest(unittest.TestCase):
         os.mkfifo(state)
         result = subprocess.run([sys.executable, "-I", str(PATH), "drain", "--terminal", "term_main",
                                  "--session", "session_one", "--hook-event", "UserPromptSubmit"],
-                                env=dict(os.environ, **self.env), capture_output=True, text=True, timeout=1)
+                                env=dict(os.environ, **self.env), capture_output=True, text=True, timeout=12)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
         self.assertTrue(stat.S_ISFIFO(state.stat().st_mode))
+
+    def test_slow_cli_startup_does_not_look_like_a_fifo_block(self):
+        from unittest.mock import patch
+        run = subprocess.run
+
+        def delayed(command, **kwargs):
+            command = [command[0], "-I", "-c",
+                       "import runpy,sys,time; time.sleep(1.2); sys.argv=sys.argv[1:]; "
+                       "runpy.run_path(sys.argv[0], run_name='__main__')", *command[2:]]
+            return run(command, **kwargs)
+
+        with patch.object(subprocess, "run", side_effect=delayed):
+            self.test_fifo_state_fails_without_waiting_for_a_writer_or_replacing_it()
+
+    def test_fifo_reader_rejects_without_waiting_for_a_writer(self):
+        fifo = Path(self.tmp.name) / "fifo"
+        os.mkfifo(fifo)
+
+        def blocked(signum, frame):
+            self.fail("inbox reader blocked on a FIFO without a writer")
+
+        # Bound the actual reader, excluding interpreter and import startup.
+        previous_handler = signal.signal(signal.SIGALRM, blocked)
+        previous_timer = signal.setitimer(signal.ITIMER_REAL, 1)
+        try:
+            with self.assertRaises(ValueError):
+                inbox._read(fifo, 256)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+            signal.signal(signal.SIGALRM, previous_handler)
 
     def test_fifo_main_registration_is_unknown_without_waiting_or_claiming(self):
         self.enqueue()
@@ -257,7 +288,7 @@ class InboxTest(unittest.TestCase):
         os.mkfifo(self.registration)
         result = subprocess.run([sys.executable, "-I", str(PATH), "drain", "--terminal", "term_main",
                                  "--session", "session_one", "--hook-event", "SessionStart"],
-                                env=dict(os.environ, **self.env), capture_output=True, text=True, timeout=1)
+                                env=dict(os.environ, **self.env), capture_output=True, text=True, timeout=12)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertEqual(state.read_bytes(), before)

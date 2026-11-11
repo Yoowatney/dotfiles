@@ -60,15 +60,24 @@ jobs:
         run: |
           brew install bash
           echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
-      - run: bash tools/agent-hooks/pane-tell.test.sh
+      - name: Check every pane-tell suite
+        run: |
+          set -e
+          for test in tools/agent-hooks/pane-tell.test.sh tools/agent-hooks/pane-tell-*.test.sh; do
+            bash "$test"
+          done
       - run: python3 tools/agent-hooks/pane-tell-order.test.py --selftest
-      - run: bash tools/agent-hooks/pane-tell-batch.test.sh
       - run: bash tools/agent-hooks/pane-relay-watch.test.sh
       - run: bash tools/agent-hooks/main-alert-inbox.test.sh
       - run: bash tools/agent-hooks/main-alert-wake.test.sh
       - run: bash tools/agent-hooks/main-alert-hooks.test.sh
       - run: bash tools/agent-hooks/main-user-relay.test.sh
-      - run: bash tools/agent-hooks/pane-spawn.test.sh
+      - name: Check every pane-spawn suite
+        run: |
+          set -e
+          for test in tools/agent-hooks/pane-spawn*.test.sh; do
+            bash "$test"
+          done
       - run: bash shell/zsh/codex-fn.test.sh
       - run: python3 tools/agent-hooks/codex-startup.test.py
       - run: python3 tools/agent-hooks/codex-memory.test.py
