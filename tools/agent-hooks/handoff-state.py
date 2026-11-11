@@ -51,11 +51,8 @@ def snapshot(path):
                 dirty=bool(git(root, "status", "--porcelain", "--untracked-files=normal")))
 
 
-def metadata(text):
-    matches = list(FENCE.finditer(text))
-    if len(matches) != 1:
-        raise ValueError("exactly one ```handoff JSON block is required")
-    data = json.loads(matches[0].group(1))
+def validate(data):
+    """Check required evidence without collecting or replacing saved Git state."""
     if not isinstance(data, dict):
         raise ValueError("handoff must be an object")
     for field in FIELDS:
@@ -66,7 +63,6 @@ def metadata(text):
         raise ValueError("code must be none or repositories; repositories must be a list")
     if (data["code"] == "none") != (len(data["repositories"]) == 0):
         raise ValueError("code=none requires []; otherwise name every repository")
-    paths = set()
     for repo in data["repositories"]:
         if not isinstance(repo, dict) or not all(k in repo for k in
                 ("path", "verified_commit", "verified_dirty", "evidence")):
@@ -80,6 +76,16 @@ def metadata(text):
         commit = repo["verified_commit"]
         if commit is not None and (not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40,64}", commit)):
             raise ValueError("verified_commit must be a full commit hash or null")
+
+
+def metadata(text):
+    matches = list(FENCE.finditer(text))
+    if len(matches) != 1:
+        raise ValueError("exactly one ```handoff JSON block is required")
+    data = json.loads(matches[0].group(1))
+    validate(data)
+    paths = set()
+    for repo in data["repositories"]:
         current = snapshot(repo["path"])
         if current["path"] in paths:
             raise ValueError("duplicate repository path")
@@ -116,7 +122,8 @@ def verification_status(text):
         # Reading never re-collects the saved snapshot or upgrades an old memo.
         matches = list(FENCE.finditer(text))
         data = json.loads(matches[0].group(1)) if len(matches) == 1 else {}
-        if data.get("version") != 1 or any(k not in data for k in FIELDS):
+        validate(data)
+        if type(data.get("version")) is not int or data["version"] != 1:
             raise ValueError("legacy")
         if data["code"] == "none" and data["repositories"] == []:
             return "코드: 해당 없음. 검증 근거와 다음 시작 조건은 인계 본문을 읽으세요."
@@ -129,7 +136,8 @@ def verification_status(text):
                 now = snapshot(path)
                 valid = (now == repo.get("current") and not now["dirty"] and
                          repo.get("verified_dirty") is False and
-                         now["commit"] == repo.get("verified_commit") and bool(repo.get("evidence")))
+                         now["commit"] == repo.get("verified_commit") and
+                         repo["evidence"].strip().rstrip(".").casefold() != "not verified")
             except (OSError, ValueError, subprocess.SubprocessError):
                 valid = False
             lines.append(path + ": " + ("코드 상태 일치 (환경·설정·외부 상태는 별도 확인)" if valid else
