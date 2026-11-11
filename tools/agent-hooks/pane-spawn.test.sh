@@ -101,13 +101,21 @@ before "agent prompt" "agent wait w1:new --until working --until blocked --until
 # Codex may report interactive readiness while its hook-review modal owns input.
 # Never send an instruction into that modal or silently trust the changed hooks.
 for readiness_shell in "$(command -v bash)" /bin/bash; do
+ for blocked_start in '' 1; do
   rc=0
-  PANE_SPAWN_TEST_SHELL="$readiness_shell" SESSIONLESS=1 SCREEN='7 hooks need review' ps --kind codex "hook review" "Run tests" 2>"$SANDBOX/err" >/dev/null || rc=$?
+  PANE_SPAWN_TEST_SHELL="$readiness_shell" BLOCKED_START="$blocked_start" SESSIONLESS=1 SCREEN='7 hooks need review' ps --kind codex --job-id hook-review-job "hook review" "Run tests" 2>"$SANDBOX/err" >/dev/null || rc=$?
   [ "$rc" = 1 ] || fail "hook review ($readiness_shell): expected failure, got $rc"
   hasnt "agent prompt" "a hook-review modal receives no instruction"
   has "pane close w1:new" "the undelivered test pane is closed"
   hasnt "--kind claude" "hook review does not switch runners"
   grep -q 'hooks need review' "$SANDBOX/err" || fail "reports the hook review blocker"
+  hasnt "send-keys" "hook recovery never approves a possibly stale review screen"
+  grep -q 'already-open review screen' "$SANDBOX/err" || fail "warns against trusting stale hook inventory"
+  grep -q 'After hook installation finishes, open a fresh Codex session' "$SANDBOX/err" || fail "recovery reads current hooks after installation"
+  grep -q 'If trust was already registered during installation, do not press t again' "$SANDBOX/err" || fail "installation trust does not require another approval"
+  grep -q -- '--job-id hook-review-job' "$SANDBOX/err" || fail "recovery preserves the failed job id"
+  if grep -q -- '--kind claude' "$SANDBOX/err"; then fail "hook review recovery must not suggest switching runners"; fi
+ done
 done
 
 # api#1065: --artifact keeps the Artifact tool in a Claude pane (the profile turns it off otherwise); Codex has no such tool.
@@ -140,6 +148,21 @@ SESSIONLESS=1 ps --kind codex --task-type code "test" "Run tests" >/dev/null
 hasnt "--env CODEX_HOME=" "startup trimming keeps canonical credentials and state"
 has '--env HERDR_CODEX_STARTUP_HELPER=' "the runner expands exclusions after entering the shell"
 hasnt 'skills.config=[' "large skill flags must not pass through terminal input"
+# The installed command is a symlink, often reached through another PATH link.
+# Startup metadata and accounting must use helpers beside the resolved script.
+real_subject=$SUBJECT
+mkdir -p "$SANDBOX/bin" "$SANDBOX/links"
+ln -s "$real_subject" "$SANDBOX/links/pane-spawn"
+ln -s ../links/pane-spawn "$SANDBOX/bin/pane-spawn"
+SUBJECT="$SANDBOX/bin/pane-spawn"
+SESSIONLESS=1 ps --kind auto --task-type code --job-id symlink-job "test" "Run tests" >/dev/null
+has "--env HERDR_CODEX_STARTUP_HELPER=$(dirname "$real_subject")/codex-startup.py" "installed symlinks retain the startup helper"
+python3 - "$SANDBOX/home/.local/state/agent-task-ledger/events.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert {'request', 'run'} <= {e['kind'] for e in rows if e['job_id'] == 'symlink-job'}, 'installed symlinks must record request and run together'
+PY
+SUBJECT=$real_subject
 rm -rf "$SANDBOX/home/.codex" "$SANDBOX/home/.agents"
 python3 "$(dirname "$SUBJECT")/task-ledger.py" --state-dir "$SANDBOX/home/.local/state/agent-task-ledger" record run --job-id parent-job --session-id parent-session
 CODEX_THREAD_ID=parent-session SESSIONLESS=1 ps --kind codex --job-id child-job "test" "Run tests" >/dev/null

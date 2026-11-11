@@ -102,7 +102,9 @@ case "$task_type" in
 esac
 [[ -z "$job_id" || "$job_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || die "invalid --job-id"
 job_id=${job_id:-job-$(date -u +%Y%m%dT%H%M%S)-$$-$RANDOM}
-ledger="$(dirname "$0")/task-ledger.py"
+# Installed PATH entries are symlinks; all sibling helpers belong to the source.
+helper_dir=$(dirname "$(readlink -f "$0")")
+ledger="$helper_dir/task-ledger.py"
 parent_job=${HERDR_TASK_ID:-}
 # Codex's shell environment allowlist omits worker metadata, but it always
 # supplies CODEX_THREAD_ID. Recover the association without widening that list.
@@ -129,7 +131,7 @@ if [ "$asked" = auto ] && [ -z "$check" ]; then
   pinned=$opus
   [ $# -eq 0 ] || pinned=1
   [ "$(head -1 "$HOME/.config/munice/host-role" 2>/dev/null)" != ambient-runner ] || pinned=1
-  quota_dir=$(dirname "$(readlink -f "$0")")
+  quota_dir=$helper_dir
   quota_policy_file=$state/agent-quota/policy
   [ -e "$quota_policy_file" ] || quota_policy_file=$quota_dir/agent-quota-policy
   quota_policy=$(cat "$quota_policy_file" 2>/dev/null)
@@ -226,8 +228,8 @@ if [ -n "$check" ]; then
 else
   env_args+=(--env HERDR_TASK_ROLE=worker)
   [ "$kind" != codex ] || env_args+=(--env HERDR_CODEX_STARTUP_ROLE=worker --env "HERDR_CODEX_TASK_TYPE=$task_type")
-  if [ "$kind" = codex ] && [ -f "$(dirname "$0")/codex-startup.py" ]; then
-    env_args+=(--env "HERDR_CODEX_STARTUP_HELPER=$(dirname "$(readlink -f "$0")")/codex-startup.py")
+  if [ "$kind" = codex ] && [ -f "$helper_dir/codex-startup.py" ]; then
+    env_args+=(--env "HERDR_CODEX_STARTUP_HELPER=$helper_dir/codex-startup.py")
   fi
 fi
 [ -n "$opener" ] || [ -n "${HERDR_PANE_ID:-}" ] || die "run this inside a herdr pane"
@@ -241,7 +243,7 @@ else
 fi
 export HERDR_PANE_ID=$me
 delegates=
-if [ -z "$opener" ] && python3 -I "$(dirname "$(readlink -f "$0")")/herdr_peers.py" --delegates-checks "term_$term"; then delegates=1; fi
+if [ -z "$opener" ] && python3 -I "$helper_dir/herdr_peers.py" --delegates-checks "term_$term"; then delegates=1; fi
 if [ -n "$check" ]; then
   [ -n "$delegates" ] || die "--check is for the main pane; any other lead checks a pane's result itself (직접 확인: run the test or command, or look at the changed behavior or data)"
   name="확인 $name"
@@ -272,7 +274,6 @@ if [ -n "$check" ]; then
     # The shared PreToolUse hooks run here as in a work pane. An allow rule added later to ~/.codex/rules applies here too.
     target=$cwd cwd=$state/pane-spawn/check
     mkdir -p "$cwd/.codex/rules" || die "cannot make $cwd"
-    helper_dir=$(dirname "$(readlink -f "$0")")
     rules=$(mktemp "$cwd/.codex/rules/.check.XXXXXX") && cat "$helper_dir/pane-spawn-check.rules" > "$rules" && mv -f "$rules" "$cwd/.codex/rules/check.rules" || die "cannot write $cwd/.codex/rules/check.rules"
     mcp=$(python3 -I "$helper_dir/pane-spawn-mcp.py" "${CODEX_HOME:-$HOME/.codex}/config.toml") || die "cannot turn off every MCP server in Codex's config, so a Codex check pane could write through one; open it with --kind claude"
     off=(); while IFS= read -r l; do [ -z "$l" ] || off+=("$l"); done < <(printf '%s\n' "$mcp")
@@ -385,6 +386,13 @@ fi
 pane-label --sync-tabs
 
 give_up() { "$H" pane close "$pane" >/dev/null 2>&1; echo "pane-spawn: $1" >&2; exit 1; }
+refuse_hook_review() {
+  [ "$kind" = codex ] || return 0
+  # An already-open review screen can overwrite current trust with stale hashes.
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in *"hooks need review"*|*"hook needs review"*)
+    give_up "codex hooks need review; no instruction was delivered and this blocked pane was closed. Do not trust hooks from an already-open review screen: it can save stale hashes. After hook installation finishes, open a fresh Codex session and review current changed hooks from your own reviewed commits. Alternatively, use official hooks/list and version-checked config/batchWrite to register only reviewed current hashes. If trust was already registered during installation, do not press t again. If hooks change during review, close and reopen before approval. Then retry this job with --job-id $job_id" ;;
+  esac
+}
 agent="spawn-$term-${check:+chk}${opener:+r}$home$RANDOM" # herdr allows 32 characters; terminal ids run about 15
 for try in 1 2 3; do # a pane opened a moment ago may not be at its shell prompt yet
   out=$("$H" agent start "$agent" --kind "$kind" --pane "$pane" --timeout 120000 ${1+--} "$@" 2>&1) && break
@@ -392,6 +400,7 @@ for try in 1 2 3; do # a pane opened a moment ago may not be at its shell prompt
   # dialog: a guess at which one it was (a trust question) sent the 2026-11-06 hunt the wrong way, and it was the update prompt.
   case "$out" in *"blocked during startup"*)
     screen=$("$H" agent read "$pane" --source visible 2>/dev/null | tr -s ' \n' '  ')
+    refuse_hook_review "$screen"
     give_up "$kind waits at a dialog as it starts, which nobody here answers. It shows: ${screen:0:400}. If it asks whether to trust $cwd, start $kind there by hand once and answer it; else open the pane with --kind claude. herdr: $out" ;;
   esac
   [ "$try" != 3 ] || give_up "$kind did not start: $out"
@@ -404,12 +413,9 @@ for startup_poll in $(seq 1 60); do # `agent start` can return while a wrapper s
 done
 # Herdr can report interactive_ready while Codex's hook-review modal owns the
 # input box. Do not consume the instruction there, auto-trust hooks, or switch
-# runners. A human must review the changed declarations once before retrying.
+# runners. Both startup paths use the same recovery instructions.
 if [ "$kind" = codex ]; then
-  screen=$("$H" agent read "$pane" --source visible 2>/dev/null | tr '[:upper:]' '[:lower:]')
-  case "$screen" in *"hooks need review"*|*"hook needs review"*)
-    give_up "codex hooks need review; no instruction was delivered. Review the changed hooks with /hooks in a manually opened Codex session, then retry this job with --job-id $job_id" ;;
-  esac
+  refuse_hook_review "$("$H" agent read "$pane" --source visible 2>/dev/null)"
 fi
 # Codex can report ready before its input box takes text, and `agent prompt` still succeeds: on 2026-11-01 an instruction
 # vanished and the pane sat idle while its lead waited. So delivery counts only once the agent shows work. A miss is reported,
