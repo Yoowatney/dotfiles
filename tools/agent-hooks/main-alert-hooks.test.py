@@ -235,6 +235,35 @@ if __name__ == "__main__":
         self.assertIn("CLAIM alert-1", self.context(result))
         self.assertIn("다시", self.context(result))
 
+    def test_stop_decision_failure_still_offers_priority_for_both_clients(self):
+        self.env["USER_RELAY_CONTEXT"] = "SYNTHETIC NEW USER REQUEST"
+        for claude in (False, True):
+            for missing in (False, True):
+                with self.subTest(claude=claude, last_message_missing=missing):
+                    payload = {"hook_event_name": "Stop", "session_id": "session-1",
+                               "transcript_path": str(self.home / "missing-transcript.jsonl")}
+                    if not missing:
+                        payload["last_assistant_message"] = None
+                    command = ["python3", "-I", str(self.hooks / "yoyoo-share-guard.py")]
+                    if claude:
+                        command.append("--claude")
+                    env = {**self.env, "PANE_JSON": json.dumps({"result": {"pane": self.pane}})}
+                    process = subprocess.run(command, input=json.dumps(payload), capture_output=True,
+                                             text=True, env=env, timeout=12)
+                    self.assertEqual(process.returncode, 0, process.stderr)
+                    self.assertTrue(process.stdout.strip(), "decision failure suppressed priority context")
+                    result = json.loads(process.stdout)
+                    self.assertTrue(self.context(result).startswith("SYNTHETIC NEW USER REQUEST"))
+                    self.assertIn("CLAIM alert-1", self.context(result))
+                    self.assertEqual(set(result), {"hookSpecificOutput"} if claude else {"decision", "reason"})
+
+    def test_stop_decision_failure_without_context_keeps_fail_open(self):
+        self.env["INBOX_EMPTY"] = "1"
+        for claude in (False, True):
+            with self.subTest(claude=claude):
+                self.assertIsNone(self.run_hook("Stop", claude=claude,
+                    last_assistant_message=None, transcript_path=str(self.home / "missing-transcript.jsonl")))
+
     def test_unverified_identity_never_reaches_drain(self):
         for event in ("UserPromptSubmit", "SessionStart", "Stop"):
             for invalid in ("missing-session", "other-session", "missing-terminal", "other-terminal", "query-fail", "unknown-pane"):
@@ -386,6 +415,53 @@ if __name__ == "__main__":
         old_ack = subprocess.run(shlex.split(old_command), env=self.env, capture_output=True, text=True, timeout=5)
         self.assertNotEqual(old_ack.returncode, 0)
         self.assertEqual(len(inbox.pending(self.env)), 1)
+
+    def assert_sdk_intake_is_skipped(self, event):
+        inbox = self.real_inbox()
+        path, body = self.real_waiting_relay()
+        before = path.read_bytes()
+        inbox.enqueue(self.env, "sdk-held", "Recovery fixture", "Private fixture")
+        self.env["CLAUDE_CODE_ENTRYPOINT"] = "sdk-cli"
+        result = self.run_hook(event)
+        context = self.context(result) if result else ""
+        self.assertNotIn(body, context)
+        self.assertNotIn("local-main-alert", context)
+        state = json.loads((self.home / "state/orchestrator/alerts/state.json").read_text())
+        self.assertIsNone(state["claim"])
+        self.assertFalse((self.home / "state/orchestrator/user-relays/state.json").exists())
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(len(inbox.pending(self.env)), 1)
+        if event == "UserPromptSubmit":
+            self.assertIn("main pane", context)
+        else:
+            self.assertIsNone(result)
+
+    def test_sdk_prompt_leaves_real_queues_unclaimed(self):
+        self.assert_sdk_intake_is_skipped("UserPromptSubmit")
+
+    def test_sdk_session_start_leaves_real_queues_unclaimed(self):
+        self.assert_sdk_intake_is_skipped("SessionStart")
+
+    def test_sdk_skip_preserves_correction_and_prompt_arming(self):
+        self.env["CLAUDE_CODE_ENTRYPOINT"] = "sdk-cli"
+        self.env["PANE_FIT_DIR"] = str(self.home / "pane-fit")
+        self.pane["terminal_id"] = "term-other"
+        self.pane["label"] = "Named worker"
+        result = self.run_hook(prompt="왜 또 그렇게 했어")
+        context = self.context(result)
+        self.assertIn("Named worker", context)
+        self.assertIn("A correction means prevent", context)
+        self.assertTrue((self.home / "pane-fit/session-1").is_file())
+        self.assertEqual(self.calls(), [])
+        self.assertFalse((self.home / "user-relay-drains").exists())
+
+    def test_sdk_skip_preserves_session_start_unnamed_rename(self):
+        self.env["CLAUDE_CODE_ENTRYPOINT"] = "sdk-cli"
+        self.pane["label"] = ""
+        self.assertIsNone(self.run_hook("SessionStart"))
+        self.assertEqual((self.home / "rename").read_text().strip(), "새 세션 project")
+        self.assertEqual(self.calls(), [])
+        self.assertFalse((self.home / "user-relay-drains").exists())
 
     def test_large_prompt_snapshot_and_context_use_normal_input_streams(self):
         inbox = self.real_inbox()

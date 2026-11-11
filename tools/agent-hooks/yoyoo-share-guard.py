@@ -939,7 +939,10 @@ def inbox_context(payload: dict, env) -> str | None:
 
 
 def hook_output(payload: dict, env, claude: bool = False) -> dict | None:
-    reason = decide(payload, env, claude)
+    try:
+        reason = decide(payload, env, claude)
+    except Exception:
+        reason = None  # Ordinary report checks fail open without suppressing waiting user context.
     context = inbox_context(payload, env)
     combined = "\n\n".join(part for part in (context, reason) if part)
     if not combined:

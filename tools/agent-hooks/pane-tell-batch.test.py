@@ -236,6 +236,10 @@ exec /usr/bin/nohup "$@"
             spec = importlib.util.spec_from_file_location("watch_killed_scheduler", source)
             watcher = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(watcher)
+            # Keep the watcher's baseline helpers inside the same private
+            # fixture when replacing HERE for the recovery subprocess.
+            for name in ("main-user-relay.py", "main-alert-inbox.py"):
+                (self.root / name).write_bytes((source.parent / name).read_bytes())
             # Resolve the real recovery subprocess to our shell/fake-herdr
             # fixture. Wake is outside this test's claim and never sees a pane.
             (self.root / "pane-tell").symlink_to(self.subject)

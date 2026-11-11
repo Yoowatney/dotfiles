@@ -37,7 +37,9 @@ main=$(printf '%s' "$pane" | jq -r '.main_terminal | select(type == "string") //
 session=$(printf '%s' "$input" | jq -r '.session_id | select(type == "string") // empty' 2>/dev/null)
 inbox= priority=
 pane_session=$(printf '%s' "$pane" | jq -r '.result.pane.agent_session.value | select(type == "string") // empty' 2>/dev/null)
-if [ -n "$term" ] && [ -n "$session" ] && [ "$session" = "$pane_session" ] && [ "$term" = "$main" ]; then
+# SDK children may inherit the interactive pane/SID; they must not lease its
+# pending work. Keep the existing label, correction and arming paths below.
+if [[ "${CLAUDE_CODE_ENTRYPOINT:-}" != sdk* ]] && [ -n "$term" ] && [ -n "$session" ] && [ "$session" = "$pane_session" ] && [ "$term" = "$main" ]; then
     priority=$(python3 -I "$(dirname "$0")/main-user-relay.py" drain --terminal "$term" --session "$session" --hook-event "$event" 2>/dev/null) || priority=
     if offered=$(python3 -I "$(dirname "$0")/main-alert-inbox.py" drain --terminal "$term" --session "$session" --hook-event "$event" 2>/dev/null); then
         inbox=$(printf '%s' "$offered" | jq -r --arg event "$event" 'select(.hookSpecificOutput.hookEventName == $event) | .hookSpecificOutput.additionalContext | select(type == "string")' 2>/dev/null)
