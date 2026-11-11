@@ -19,6 +19,7 @@ on:
       - 'tools/agent-hooks/codex-deferred*'
       - 'tools/agent-hooks/auto-tab-close.py'
       - 'tools/agent-hooks/test_auto_check_relay.py'
+      - 'tools/agent-hooks/test_startup_estimate.py'
       - 'scripts/claude-online*'
       - 'tools/claude/hooks/slack-format-check.py'
       - 'tools/claude/hooks/test_slack_wording.py'
@@ -43,6 +44,7 @@ on:
       - 'tools/agent-hooks/codex-deferred*'
       - 'tools/agent-hooks/auto-tab-close.py'
       - 'tools/agent-hooks/test_auto_check_relay.py'
+      - 'tools/agent-hooks/test_startup_estimate.py'
       - 'scripts/claude-online*'
       - 'tools/claude/hooks/slack-format-check.py'
       - 'tools/claude/hooks/test_slack_wording.py'
@@ -78,6 +80,7 @@ jobs:
           for test in tools/agent-hooks/pane-spawn*.test.sh; do
             bash "$test"
           done
+      - run: python3 -m unittest discover -s tools/agent-hooks -p test_startup_estimate.py
       - run: bash shell/zsh/codex-fn.test.sh
       - run: python3 tools/agent-hooks/codex-startup.test.py
       - run: python3 tools/agent-hooks/codex-memory.test.py

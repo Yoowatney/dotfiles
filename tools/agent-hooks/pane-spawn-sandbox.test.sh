@@ -55,6 +55,7 @@ hasnt "확인 칸입니다" "a pane that does the job is no check pane"
 
 # 요유 2026-11-05 (api#1002): a fresh pane checks a pane's report for the main pane. Its agent name says so; a rename cannot change that.
 out=$(ps --check "api#1 로그인" "npm test를 돌려 보세요")
+has 'Current KST time: 2026-11-12 01:09:00 KST' "Codex checks receive the current KST date and time"
 hasnt 'first response line must be `끝날 예상: HH:MM KST`' "checks retain their command-and-result first line"
 has "[workers] tab create --workspace " "a check pane opens with the other workers"
 has "[workers] pane rename w1:new 🟢 🫡 확인 api#1 로그인" "its name says it is a check pane"
@@ -195,6 +196,7 @@ has "--kind claude" "a pane that does the job is still Claude"
 hasnt "--sandbox" "and has no sandbox"
 # An explicit Claude check keeps process/network reads and protects the target.
 out=$(ps --check --kind claude "api#1 로그인" "npm test를 돌려 보세요")
+has 'Current KST time: 2026-11-12 01:09:00 KST' "Claude checks receive the current KST date and time"
 has "--env CLAUDE_CHECK_TARGET=$PWD" "a Claude check protects its checked folder for the whole process tree"
 has "[workers] tab create --workspace w2 --cwd $PWD --label 확인 api#1 로그인 --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1" "a workers pane has no advisor"
 has "--kind claude --pane w1:new --timeout 120000 -- --model claude-sonnet-5-5 --effort high" "a Claude check pane runs Sonnet at high effort"

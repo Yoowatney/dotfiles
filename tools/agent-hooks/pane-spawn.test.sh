@@ -18,6 +18,7 @@ has "--env CLAUDE_STARTUP_ROLE=worker" "Claude work panes keep their startup pro
 hasnt "CLAUDE_STARTUP_ARTIFACT" "a Claude pane starts without the Artifact tool unless it asks (api#1065)"
 
 has "agent prompt w1:new 할 일입니다" "instruction delivered"
+has 'Current KST time: 2026-11-12 01:09:00 KST' "Claude workers receive the current KST date and time"
 has 'first response line must be `끝날 예상: HH:MM KST`' "workers estimate their own completion at startup"
 has 'pane-tell default/w7:p3' "the startup estimate goes to the resolved caller"
 has 'PANE_TELL_BATCH=0 pane-tell' "the initial estimate does not wait for idle relay batching"
@@ -83,6 +84,7 @@ hasnt "tab create" "--same-tab opens no tab"
 # Agent arguments pass through, and Codex works without a session id until its first prompt.
 SESSIONLESS=1 ps --kind codex "조사" "지시" -- -m gpt-5 >/dev/null
 has 'first response line must be `끝날 예상: HH:MM KST`' "Codex estimates at startup too"
+has 'Current KST time: 2026-11-12 01:09:00 KST' "Codex workers receive the current KST date and time"
 has 'pane-tell default/w7:p3' "Codex relays to its caller too"
 has "Before reporting that the user should check something, first determine whether ego Lite or an API can inspect it; if available, check it yourself." "Codex receives the same self-verification instruction"
 # 2026-11-06: once Codex sees a newer release than it runs, its TUI opens on an update prompt that nobody here answers, so

@@ -247,6 +247,7 @@ else
   [ -n "${term:-}" ] || die "herdr does not know this pane"
 fi
 export HERDR_PANE_ID=$me
+prompt+=$'\n\nCurrent KST time: '"$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S KST')"'. Use this date and time when estimating completion; read the current clock again if startup or the task is delayed.'
 # Send estimates to the caller's server, before a main caller moves the work to workers.
 if [ -z "$check" ]; then
   prompt+=$'\n\nAt the start of each assignment, your first response line must be `끝날 예상: HH:MM KST`, using your own earliest realistic time to finish the assigned work and report it. Do not add buffer. Times in the assignment are upper bounds, never reasons to wait. Start immediately and report immediately when finished; revise the estimate when a delay becomes apparent. The startup estimate is not a completion report; keep the final report first-line contract.'
@@ -255,7 +256,7 @@ if [ -z "$check" ]; then
     case "${HERDR_SOCKET_PATH:-}" in
       */sessions/*/herdr.sock) estimate_server=${HERDR_SOCKET_PATH%/herdr.sock}; estimate_server=${estimate_server##*/} ;;
     esac
-    prompt+=" Before starting work, send that estimate once to the lead with PANE_TELL_BATCH=0 pane-tell $estimate_server/$me and a message containing the assignment name and the same estimate. This bypasses the idle relay batching window for the startup estimate only. A queued relay will be delivered automatically; continue work without resending it. This startup relay is authorized and does not request a check."
+    prompt+=" Before starting work, send that estimate once to the lead with PANE_TELL_BATCH=0 pane-tell $estimate_server/$me and a message containing the assignment name and the same estimate. This bypasses the idle relay batching window for the startup estimate only. If pane-tell asks you to confirm a suspicious time, check the current KST date and time and send the corrected or confirmed estimate once more. A queued relay will be delivered automatically; continue work without resending it. This startup relay is authorized and does not request a check."
   fi
 fi
 delegates=
