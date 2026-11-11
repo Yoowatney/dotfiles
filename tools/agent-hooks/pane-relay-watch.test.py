@@ -347,7 +347,7 @@ class BaselineTest(unittest.TestCase):
         watch.scan(self.env, 1100)
         self.assertEqual(len(self.pending()), 1)
 
-    def test_upgrade_supersedes_existing_individual_and_claim_not_receipt(self):
+    def test_upgrade_keeps_existing_claim_and_every_individual_alert(self):
         path = self.payload("waiting/old")
         identity = [path.stat().st_dev, path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns]
         import hashlib
@@ -359,12 +359,37 @@ class BaselineTest(unittest.TestCase):
         registration = Path(self.tmp.name) / "orchestrator/main"
         registration.write_text("term_main\n")
         inbox.drain(self.env, "term_main", "old_reader", "SessionStart", now=2)
+        before = json.loads((registration.parent / "alerts/state.json").read_text())["claim"]
+        later = self.payload("waiting/later", 610)
+        later_id = watch.event_identifier(str(later), watch.file_identity(later.stat()))
+        inbox.enqueue(self.env, later_id, "Later individual", "Metadata only", now=3)
+        young = self.payload("waiting/young", 1)
+        current = self.payload("waiting/current_user", 1)
+        current.write_text("[pane-tell: 'Synthetic sender' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, "
+                           "되돌리기 어려운 일은 요유에게 확인하세요] [Slack #synthetic 요유] Current synthetic request")
+        os.utime(current, (999, 999))
+        receivers = self.root / "receivers"
+        receivers.mkdir()
+        (receivers / current.name).write_text("term_main\ndefault\n")
         watch.scan(self.env, 1000)
         state = json.loads((registration.parent / "alerts/state.json").read_text())
-        self.assertIsNone(state["claim"])
+        self.assertEqual(state["claim"], before)
         self.assertEqual(state["receipts"], {})
         self.assertIsNone(state["events"][old_id]["receipt"])
-        self.assertEqual(len(self.pending()), 1)
+        self.assertEqual({event["event_id"] for event in self.pending()}, {old_id, later_id})
+        manifest = self.root / ".watch-baseline.json"
+        frozen = manifest.read_bytes()
+        self.assertEqual(json.loads(frozen)["entries"], {})
+        reloaded = load("upgrade_restart", "pane-relay-watch.py")
+        with mock.patch.object(reloaded, "notify", return_value=True):
+            reloaded.scan(self.env, 1700)
+        self.assertEqual(manifest.read_bytes(), frozen)
+        events = self.pending()
+        self.assertEqual(len(events), 4)
+        self.assertTrue({old_id, later_id} <= {event["event_id"] for event in events})
+        priority = watch.helper("main-user-relay")
+        self.assertIn("Current synthetic request", priority.drain(self.env, "term_main", "new_reader", "Stop", now=1701))
+        self.assertTrue(young.exists())
 
     def test_concurrent_scan_lock_has_no_baseline_or_duplicate_summary(self):
         self.payload("waiting/old")
@@ -375,6 +400,68 @@ class BaselineTest(unittest.TestCase):
         watch.scan(self.env, 1001)
         watch.scan(self.env, 1002)
         self.assertEqual(len(self.pending()), 1)
+
+    def test_new_alert_during_manifest_persist_is_outside_frozen_inventory(self):
+        self.payload("waiting/historical")
+        inbox = watch.helper("main-alert-inbox")
+        save = watch.save_metadata
+        real_helper = watch.helper
+        created = []
+
+        def persist(path, value):
+            if path.endswith(".watch-baseline.json"):
+                current = self.payload("waiting/concurrent", 700)
+                event_id = watch.event_identifier(str(current), watch.file_identity(current.stat()))
+                # An enqueue cannot pass the snapshot-to-manifest boundary.
+                with self.assertRaises(BlockingIOError):
+                    inbox.enqueue(self.env, event_id, "Concurrent individual", "Metadata only", now=1000)
+                created.append(event_id)
+            return save(path, value)
+
+        with mock.patch.object(watch, "save_metadata", side_effect=persist), \
+                mock.patch.object(watch, "helper", side_effect=lambda name: inbox if name == "main-alert-inbox" else real_helper(name)):
+            watch.scan(self.env, 1000)
+        self.assertEqual(len(created), 1)
+        self.assertTrue(inbox.enqueue(self.env, created[0], "Concurrent individual", "Metadata only", now=1001))
+        manifest = json.loads((self.root / ".watch-baseline.json").read_text())
+        self.assertEqual(len(manifest["entries"]), 1)
+        self.assertNotIn(created[0], manifest["entries"])
+        watch.scan(self.env, 1002)
+        self.assertIn(created[0], {event["event_id"] for event in self.pending()})
+
+    def test_unavailable_upgrade_snapshot_preserves_terminal_and_retries_main(self):
+        for reason in ("corrupt", "locked"):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory:
+                env = {"HOME": directory, "XDG_STATE_HOME": directory}
+                root = Path(directory) / "pane-tell"
+                (root / "waiting").mkdir(parents=True)
+                payload = root / "waiting/synthetic"
+                payload.write_text("Private synthetic report")
+                os.utime(payload, (1, 1))
+                inbox = watch.helper("main-alert-inbox")
+                inbox.enqueue(env, "prior-alert", "Prior", "Metadata only", now=1)
+                state = Path(directory) / "orchestrator/alerts/state.json"
+                original = state.read_bytes()
+                if reason == "corrupt":
+                    state.write_text("invalid JSON")
+                with (state.parent / "lock").open("a") as lock:
+                    if reason == "locked":
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    before = self.alert.call_count
+                    watch.scan(env, 1000)
+                    self.assertEqual(self.alert.call_count, before + 1)
+                    self.assertFalse((root / ".watch-baseline.json").exists())
+                    pending = json.loads((root / ".watch-pending.json").read_text())
+                    self.assertEqual(len(pending), 1)
+                    self.assertFalse(next(iter(pending.values()))["main"])
+                    self.assertTrue(next(iter(pending.values()))["terminal"])
+                if reason == "corrupt":
+                    self.assertEqual(state.read_text(), "invalid JSON")
+                    state.write_bytes(original)
+                watch.scan(env, 1001)
+                self.assertEqual(self.alert.call_count, before + 1)
+                self.assertEqual(len(inbox.pending(env)), 2)
+                self.assertEqual(json.loads((root / ".watch-baseline.json").read_text())["entries"], {})
 
     def test_current_caller_failure_is_not_baselined_even_on_first_launch(self):
         self.payload("waiting/historical")
@@ -432,7 +519,7 @@ class BaselineTest(unittest.TestCase):
         self.assertEqual(len(events), 2)
         self.assertEqual(sum("/synthetic/fresh-report" in e["body"] for e in events), 1)
 
-    def test_legacy_terminal_metadata_covers_a_gone_original_in_summary(self):
+    def test_upgrade_keeps_gone_original_individual_alert(self):
         path = self.payload("waiting/old")
         identity = watch.file_identity(path.stat())
         event_id = watch.event_identifier(str(path), identity)
@@ -443,10 +530,10 @@ class BaselineTest(unittest.TestCase):
         watch.scan(self.env, 1000)
         events = self.pending()
         self.assertEqual(len(events), 1)
-        self.assertNotEqual(events[0]["event_id"], event_id)
+        self.assertEqual(events[0]["event_id"], event_id)
         self.alert.assert_not_called()
 
-    def test_reused_path_keeps_both_legacy_and_current_initial_identities(self):
+    def test_upgrade_reused_path_keeps_old_and_new_individual_alerts(self):
         path = self.payload("waiting/old")
         identity = watch.file_identity(path.stat())
         old_id = watch.event_identifier(str(path), identity)
@@ -456,8 +543,8 @@ class BaselineTest(unittest.TestCase):
         path.write_text("Different initial backlog")
         os.utime(path, (300, 300))
         watch.scan(self.env, 1000)
-        self.assertEqual(len(self.pending()), 1)
-        self.assertNotEqual(self.pending()[0]["event_id"], old_id)
+        self.assertEqual(len(self.pending()), 2)
+        self.assertIn(old_id, {event["event_id"] for event in self.pending()})
 
     def test_corrupt_or_special_baseline_is_not_replaced_or_reinitialized(self):
         self.payload("waiting/old")

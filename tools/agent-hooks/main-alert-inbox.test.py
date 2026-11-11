@@ -49,6 +49,27 @@ class InboxTest(unittest.TestCase):
         self.assertIn(ONE, context["hookSpecificOutput"]["additionalContext"])
         self.assertEqual(context["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
 
+    def test_event_snapshot_is_read_only_and_holds_enqueue_boundary(self):
+        snapshot = getattr(inbox, "event_snapshot", None)
+        self.assertIsNotNone(snapshot, "upgrade detection requires a locked read-only event snapshot")
+        state = self.registration.parent / "alerts/state.json"
+        with snapshot(self.env) as events:
+            self.assertEqual(events, frozenset())
+            with self.assertRaises(BlockingIOError):
+                self.enqueue()
+        self.assertFalse(state.exists())
+        self.enqueue()
+        self.offer(now=100)
+        claim = self.claim()
+        inbox.ack(self.env, "term_main", "session_one", claim["token"], [ONE], now=101)
+        before = state.read_bytes()
+        with snapshot(self.env) as events:
+            self.assertEqual(events, frozenset({ONE}))  # Consumed history still identifies an upgrade.
+            with self.assertRaises(BlockingIOError):
+                self.enqueue(TWO)
+        self.assertEqual(state.read_bytes(), before)
+        self.assertTrue(self.enqueue(TWO))
+
     def test_conflicting_id_is_rejected_without_replacing_original(self):
         self.enqueue()
         with self.assertRaises(ValueError):

@@ -254,6 +254,17 @@ def summarize(env, event_id, title, body, event_ids, now=None):
     return True
 
 
+@contextmanager
+def event_snapshot(env):
+    """Read all persisted IDs while holding the enqueue/ack boundary.
+
+    A caller may durably freeze its own initialization decision before releasing
+    this lock. No inbox event, claim, receipt or state file is written here.
+    """
+    with _locked(env) as root:
+        yield frozenset(_state(root)["events"])
+
+
 def pending(env):
     """Read unconsumed metadata without claiming, offering or consuming it."""
     with _locked(env) as root:

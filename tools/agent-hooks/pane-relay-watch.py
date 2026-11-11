@@ -8,6 +8,7 @@ Caller failures keep receiver/report-path metadata, never the report text. An
 alert acknowledges neither delivery nor permission to resend a payload.
 """
 import fcntl
+from contextlib import ExitStack
 import glob
 import hashlib
 import importlib.util
@@ -189,31 +190,40 @@ def valid_identity(value):
 def baseline_metadata(env, path, inventory, previous, outbox, now):
     """Freeze an owned metadata-only inventory, including young queued files."""
     baseline = read_metadata(path)
+    inbox = helper("main-alert-inbox")
     if not baseline:
         # An existing empty/corrupt manifest is not permission to reinitialize.
         if os.path.lexists(path):
             raise ValueError("empty relay alert baseline")
-        # User Slack relays use the independent priority hook context path.
-        # They remain current work, even on a fresh watcher installation.
-        classifier = helper("main-user-relay")
-        current = {tuple(identity) for payload, identity in inventory.items()
-                   if classifier.is_user_relay(env, payload, identity)}
-        entries = {}
-        for collection in (previous, inventory):
-            for payload, identity in collection.items():
-                if isinstance(payload, str) and valid_identity(identity) and tuple(identity) not in current:
-                    entries[event_identifier(payload, identity)] = {"payload": payload, "identity": identity}
-        for event_id, event in outbox.items():
-            if not event.get("fresh", False) and tuple(event["identity"]) not in current:
-                entries.setdefault(event_id, {"payload": event["payload"], "identity": event.get("identity")})
-        baseline = {"version": 1, "created_at": now, "summary_id": "relay-backlog-" + uuid.uuid4().hex,
-                    "entries": entries}
-        save_metadata(path, baseline)
+        # An upgrade cannot infer which existing files predate the original
+        # installation. Freeze an empty baseline whenever inbox history exists.
+        # Keep its snapshot lock through manifest persistence so enqueue cannot
+        # slip between the upgrade decision and its durable initialization.
+        with ExitStack() as snapshot:
+            try:
+                existing = snapshot.enter_context(inbox.event_snapshot(env))
+            except (OSError, ValueError):
+                return None  # Main classification waits; terminal alerts remain independent.
+            entries = {}
+            if not existing:
+                # Current user Slack relays remain independent priority work.
+                classifier = helper("main-user-relay")
+                current = {tuple(identity) for payload, identity in inventory.items()
+                           if classifier.is_user_relay(env, payload, identity)}
+                for collection in (previous, inventory):
+                    for payload, identity in collection.items():
+                        if isinstance(payload, str) and valid_identity(identity) and tuple(identity) not in current:
+                            entries[event_identifier(payload, identity)] = {"payload": payload, "identity": identity}
+                for event_id, event in outbox.items():
+                    if not event.get("fresh", False) and tuple(event["identity"]) not in current:
+                        entries.setdefault(event_id, {"payload": event["payload"], "identity": event.get("identity")})
+            baseline = {"version": 1, "created_at": now, "summary_id": "relay-backlog-" + uuid.uuid4().hex,
+                        "entries": entries}
+            save_metadata(path, baseline)
     if not isinstance(baseline, dict) or set(baseline) != {"version", "created_at", "summary_id", "entries"} or \
             baseline["version"] != 1 or not isinstance(baseline["entries"], dict) or \
             not isinstance(baseline["created_at"], (int, float)) or not math.isfinite(baseline["created_at"]):
         raise ValueError("invalid relay alert baseline")
-    inbox = helper("main-alert-inbox")
     inbox._id(baseline["summary_id"])
     for event_id, entry in baseline["entries"].items():
         inbox._id(event_id)
@@ -294,8 +304,8 @@ def scan(env, now):
             baseline = baseline_metadata(env, baseline_path, inventory, previous, outbox, now)
         except ValueError:
             return []  # Refuse reinitialization of an unsafe or damaged manifest.
-        baseline_applied = summarize_baseline(env, baseline, baseline_path)
-        baseline_identities = {tuple(entry["identity"]) for entry in baseline["entries"].values()}
+        baseline_applied = baseline is not None and summarize_baseline(env, baseline, baseline_path)
+        baseline_identities = {tuple(entry["identity"]) for entry in baseline["entries"].values()} if baseline else set()
         accepted, alerts = {}, []
         for payload, identity in candidates.items():
             # It may have drained since scanning. Never read or modify its text.
@@ -329,8 +339,10 @@ def scan(env, now):
         for event_id, event in list(outbox.items()):
             alert_env = {**env, "PANE_TELL_ALERT_EVENT_ID": event_id,
                          "PANE_TELL_ALERT_CREATED_AT": event["created"]}
-            historical = event_id in baseline["entries"] or tuple(event.get("identity", ())) in baseline_identities
-            if historical:
+            historical = baseline is not None and (event_id in baseline["entries"] or tuple(event.get("identity", ())) in baseline_identities)
+            if baseline is None:
+                pass  # Preserve the main retry until its upgrade snapshot is readable.
+            elif historical:
                 event["main"] = baseline_applied
             elif not event["main"]:
                 event["main"] = enqueue_main(alert_env, event_id, event["title"], event["body"])
