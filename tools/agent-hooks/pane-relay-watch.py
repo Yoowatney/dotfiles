@@ -98,7 +98,11 @@ def failed(env, receiver, report, now=None):
         descriptor, temporary = tempfile.mkstemp(prefix=".new.", dir=root)
         try:
             with os.fdopen(descriptor, "w") as output:
-                json.dump({"receiver": receiver, "report": report}, output)
+                # This is a current failure, even if another tick initializes
+                # its historical inventory before our own tick can run.
+                json.dump({"receiver": receiver, "report": report, "main_alert_fresh": True}, output)
+                output.flush()
+                os.fsync(output.fileno())
             os.replace(temporary, os.path.join(root, "report." + os.path.basename(temporary)[5:]))
         finally:
             if os.path.exists(temporary):
@@ -121,10 +125,13 @@ def tick(env, now):
 
 
 def save_metadata(path, value):
+    raw = json.dumps(value)
+    if len(raw.encode()) > 4 * 1024 * 1024:
+        raise ValueError("relay metadata exceeds read limit")
     descriptor, temporary = tempfile.mkstemp(prefix=".watch-new.", dir=os.path.dirname(path))
     try:
         with os.fdopen(descriptor, "w") as output:
-            json.dump(value, output)
+            output.write(raw)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
@@ -157,9 +164,70 @@ def pending_metadata(path):
             not isinstance(key, str) or not isinstance(event, dict)
             or any(not isinstance(event.get(field), str) for field in ("title", "body", "created", "payload"))
             or any(not isinstance(event.get(field), bool) for field in ("main", "terminal"))
+            or not valid_identity(event.get("identity"))
+            or not isinstance(event.get("fresh", False), bool)
             for key, event in value.items()):
         raise ValueError("invalid relay alert outbox")
     return value
+
+
+def event_identifier(payload, identity):
+    digest = hashlib.sha256(json.dumps([payload, identity], sort_keys=True).encode()).digest()
+    return str(uuid.UUID(bytes=digest[:16], version=4))
+
+
+def file_identity(info):
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+
+
+def valid_identity(value):
+    return isinstance(value, list) and len(value) == 4 and all(type(n) is int and n >= 0 for n in value)
+
+
+def baseline_metadata(path, inventory, previous, outbox, now):
+    """Freeze an owned metadata-only inventory, including young queued files."""
+    baseline = read_metadata(path)
+    if not baseline:
+        # An existing empty/corrupt manifest is not permission to reinitialize.
+        if os.path.lexists(path):
+            raise ValueError("empty relay alert baseline")
+        entries = {}
+        for collection in (previous, inventory):
+            for payload, identity in collection.items():
+                if isinstance(payload, str) and valid_identity(identity):
+                    entries[event_identifier(payload, identity)] = {"payload": payload, "identity": identity}
+        for event_id, event in outbox.items():
+            if not event.get("fresh", False):
+                entries.setdefault(event_id, {"payload": event["payload"], "identity": event.get("identity")})
+        baseline = {"version": 1, "created_at": now, "summary_id": "relay-backlog-" + uuid.uuid4().hex,
+                    "entries": entries}
+        save_metadata(path, baseline)
+    if not isinstance(baseline, dict) or set(baseline) != {"version", "created_at", "summary_id", "entries"} or \
+            baseline["version"] != 1 or not isinstance(baseline["entries"], dict) or \
+            not isinstance(baseline["created_at"], (int, float)) or not math.isfinite(baseline["created_at"]):
+        raise ValueError("invalid relay alert baseline")
+    inbox = helper("main-alert-inbox")
+    inbox._id(baseline["summary_id"])
+    for event_id, entry in baseline["entries"].items():
+        inbox._id(event_id)
+        if not isinstance(entry, dict) or set(entry) != {"payload", "identity"} or \
+                not isinstance(entry["payload"], str) or not valid_identity(entry["identity"]):
+            raise ValueError("invalid relay baseline identity")
+    return baseline
+
+
+def summarize_baseline(env, baseline, path):
+    if not baseline["entries"]:
+        return True  # Empty first scan is still permanently initialized.
+    try:
+        helper("main-alert-inbox").summarize(
+            env, baseline["summary_id"], "기존 전달 보관 파일을 한 건으로 정리했습니다",
+            f"처음 감시할 때 이미 있던 보관 기록 {len(baseline['entries'])}건입니다. "
+            f"읽음이나 재전송 처리는 하지 않았습니다. 내용 없는 목록: {path}",
+            sorted(baseline["entries"]), now=baseline["created_at"])
+        return True
+    except (OSError, ValueError, KeyError, RuntimeError):
+        return False
 
 
 def scan(env, now):
@@ -169,16 +237,6 @@ def scan(env, now):
     limit = max(seconds(env, "PANE_TELL_ALERT", 600), seconds(env, "PANE_TELL_BATCH", 120) + 60)
     patterns = ("waiting/*", "undelivered/*", "batch/*/open/[0-9]*", "batch/*/sending.*/[0-9]*", "batch/*/claimed/[0-9]*",
                 "batch/*/.joined.*", "batch/*/.new.*", "failed-reports/report.*")
-    candidates = {}
-    for pattern in patterns:
-        for path in glob.glob(os.path.join(root, pattern)):
-            try:
-                info = os.stat(path, follow_symlinks=False)
-            except FileNotFoundError:
-                continue  # delivery won the race
-            failed_report = pattern == "failed-reports/report.*"
-            if stat.S_ISREG(info.st_mode) and info.st_size and (failed_report or now - info.st_mtime >= limit):
-                candidates[path] = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
     # Independent launchd ticks may overlap. Never hold up delivery on this lock.
     descriptor = os.open(os.path.join(root, ".watch.lock"), os.O_CREAT | os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "a") as lock:
@@ -190,6 +248,28 @@ def scan(env, now):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return []
+        candidates, inventory, fresh = {}, {}, set()
+        for pattern in patterns:
+            for payload in glob.glob(os.path.join(root, pattern)):
+                try:
+                    info = os.stat(payload, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue  # delivery won the race
+                if not stat.S_ISREG(info.st_mode) or not info.st_size:
+                    continue
+                identity = file_identity(info)
+                failed_report = pattern == "failed-reports/report.*"
+                if failed_report:
+                    try:
+                        failure = read_metadata(payload)
+                        if isinstance(failure, dict) and failure.get("main_alert_fresh") is True:
+                            fresh.add(payload)
+                    except (OSError, ValueError):
+                        pass
+                if payload not in fresh:
+                    inventory[payload] = identity
+                if failed_report or now - info.st_mtime >= limit:
+                    candidates[payload] = identity
         path = os.path.join(root, ".watch-alerts.json")
         try:
             previous = read_metadata(path)
@@ -202,6 +282,13 @@ def scan(env, now):
             outbox = pending_metadata(outbox_path)
         except (OSError, ValueError):
             return []  # Preserve damaged metadata for inspection; never overwrite it.
+        baseline_path = os.path.join(root, ".watch-baseline.json")
+        try:
+            baseline = baseline_metadata(baseline_path, inventory, previous, outbox, now)
+        except ValueError:
+            return []  # Refuse reinitialization of an unsafe or damaged manifest.
+        baseline_applied = summarize_baseline(env, baseline, baseline_path)
+        baseline_identities = {tuple(entry["identity"]) for entry in baseline["entries"].values()}
         accepted, alerts = {}, []
         for payload, identity in candidates.items():
             # It may have drained since scanning. Never read or modify its text.
@@ -221,22 +308,24 @@ def scan(env, now):
                 except (OSError, ValueError):
                     pass  # damaged failure metadata still needs an alert
             body = body[:700]  # Bound metadata before both transports.
-            digest = hashlib.sha256(json.dumps([payload, identity], sort_keys=True).encode()).digest()
-            event_id = str(uuid.UUID(bytes=digest[:16], version=4))
+            event_id = event_identifier(payload, identity)
             created = datetime.fromtimestamp(identity[3] / 1e9, timezone.utc).isoformat()
             terminal_done = previous.get(payload) == identity
             if terminal_done:
                 accepted[payload] = identity
             outbox.setdefault(event_id, {"title": title, "body": body, "created": created,
                                        "payload": payload, "identity": identity,
-                                       "main": False, "terminal": terminal_done})
+                                       "main": False, "terminal": terminal_done, "fresh": payload in fresh})
         # Persist both transports before attempting either one. The source may
         # drain immediately afterwards, but failed imports still have a retry.
         save_metadata(outbox_path, outbox)
         for event_id, event in list(outbox.items()):
             alert_env = {**env, "PANE_TELL_ALERT_EVENT_ID": event_id,
                          "PANE_TELL_ALERT_CREATED_AT": event["created"]}
-            if not event["main"]:
+            historical = event_id in baseline["entries"] or tuple(event.get("identity", ())) in baseline_identities
+            if historical:
+                event["main"] = baseline_applied
+            elif not event["main"]:
                 event["main"] = enqueue_main(alert_env, event_id, event["title"], event["body"])
             if not event["terminal"]:
                 event["terminal"] = notify(alert_env, event["title"], event["body"])
