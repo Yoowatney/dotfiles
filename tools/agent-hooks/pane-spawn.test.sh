@@ -29,7 +29,12 @@ case "\$1 \$2" in
   "session list") cat "$SANDBOX/sessions.json" ;;
   "workspace list") cat "$SANDBOX/\$s-workspaces.json" 2>/dev/null || echo '{"result":{"workspaces":[]}}' ;;
   "workspace create") [ -z "\${FAIL_WORKSPACE:-}" ] && printf '%s\n' '{"result":{"workspace":{"workspace_id":"w2"}}}' ;;
-  "pane get") jq -n --arg label "\${CALLER_LABEL:-}" '{result: {pane: {pane_id: "w7:p3", tab_id: "w7:t1", workspace_id: "w7", terminal_id: "term_65f21913323dc21", label: \$label}}}' ;; # moved: env says w1:p1
+  "pane get")
+    if [ -z "\${CALLER_LABEL:-}" ]; then
+      printf '%s\n' '{"result":{"pane":{"pane_id":"w7:p3","tab_id":"w7:t1","workspace_id":"w7","terminal_id":"term_65f21913323dc21","label":""}}}'
+    else
+      jq -n --arg label "\$CALLER_LABEL" '{result: {pane: {pane_id: "w7:p3", tab_id: "w7:t1", workspace_id: "w7", terminal_id: "term_65f21913323dc21", label: \$label}}}'
+    fi ;; # moved: env says w1:p1
   "agent list") cat "$SANDBOX/\$s-agents.json" 2>/dev/null || echo '{"result":{"agents":[]}}' ;;
   "tab rename") ;;
   "tab create") { [ -z "\${FAIL_WORKERS_TAB:-}" ] || [ "\$s" != workers ]; } && printf '%s\n' '{"result":{"root_pane":{"pane_id":"w1:new"},"tab":{"tab_id":"w1:t9"}}}' ;;
