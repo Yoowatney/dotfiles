@@ -739,6 +739,23 @@ hasnt "pane close" "an accepted job may still be running"
 usage 71 3600
 ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
 has "--kind codex" "a kind the caller names wins"
+# Automatic checks may be safely restarted only after the failed pane is closed.
+receipt="$SANDBOX/check-receipt.json"
+PANE_SPAWN_CHECK_RECEIPT="$receipt" ps --check --kind codex "receipt" "instruction" >/dev/null
+[ "$(jq -r .status "$receipt")" = started ] || fail "confirmed work records a started receipt"
+if PANE_SPAWN_CHECK_RECEIPT="$receipt" EXIT_START=1 ps --check --kind codex "receipt failure" "instruction" >/dev/null 2>&1; then fail "failed check must exit nonzero"; fi
+[ "$(jq -r .status "$receipt")" = closed ] || [ "$(jq -r .status "$receipt")" = not-opened ] || fail "failed startup leaves cleanup evidence"
+if PANE_SPAWN_CHECK_RECEIPT="$receipt" WAIT_STATUS=blocked ps --check --kind codex "receipt blocked" "instruction" >/dev/null 2>&1; then fail "blocked check must fail"; fi
+has "pane close w1:new" "opt-in read-only check cleanup precedes retry after ambiguous delivery"
+[ "$(jq -r .status "$receipt")" = closed ] || fail "ambiguous check delivery has a confirmed cancellation receipt"
+if PANE_SPAWN_CHECK_RECEIPT="$receipt" FAIL_WORKERS_TAB=1 ps --check --kind codex "missing creation response" "instruction" >/dev/null 2>&1; then fail "missing creation response must fail"; fi
+[ "$(jq -r .status "$receipt")" = creating ] || fail "missing creation response must remain uncertain"
+hasnt "pane close" "an unknown created address cannot be guessed for cleanup"
+workers_up false
+rm -f "$receipt"
+if PANE_SPAWN_CHECK_RECEIPT="$receipt" ps --check --kind codex "workers down" "instruction" >/dev/null 2>&1; then fail "unavailable workers must fail"; fi
+[ ! -e "$receipt" ] || fail "failure before launcher setup creates no receipt"
+workers_up
 ps --why skill "조사" "지시" >/dev/null
 has "--kind claude" "an ordinary pane never reads the usage"
 # api#1036: the main pane opens a Claude work pane only for a reason Codex cannot cover. Slack posts belong to the main pane,

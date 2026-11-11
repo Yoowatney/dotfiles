@@ -365,14 +365,40 @@ open_pane() { # <a pane whose tab takes the new one, or empty> <workspace> <name
         else ($all | map(.rect.x) | max) as $x | ($all | map(select(.rect.x == $x)) | max_by([.rect.height, .rect.y])) as $t
           | if $t.rect.height < $min then empty else "\($t.pane_id) down" end
         end' 2>/dev/null)
-    [ -z "$target" ] || pane=$("${call[@]}" pane split --pane "$target" --direction "$direction" --cwd "$cwd" --no-focus "${env_args[@]}" | jq -r '.result.pane.pane_id // empty')
+    if [ -n "$target" ]; then
+      check_receipt creating || return 1
+      pane=$("${call[@]}" pane split --pane "$target" --direction "$direction" --cwd "$cwd" --no-focus "${env_args[@]}" | jq -r '.result.pane.pane_id // empty')
+      # A missing creation response cannot prove that no pane was opened.
+      if [ -z "$pane" ] && [ -n "${PANE_SPAWN_CHECK_RECEIPT:-}" ] && [ -n "$check" ]; then return 0; fi
+    fi
   fi
-  [ -n "$pane" ] || pane=$("${call[@]}" tab create --workspace "$2" --cwd "$cwd" --label "$(tab_name "$3")" --no-focus "${env_args[@]}" | jq -r '.result.root_pane.pane_id // empty')
+  if [ -z "$pane" ]; then
+    check_receipt creating || return 1
+    pane=$("${call[@]}" tab create --workspace "$2" --cwd "$cwd" --label "$(tab_name "$3")" --no-focus "${env_args[@]}" | jq -r '.result.root_pane.pane_id // empty')
+  fi
   echo "$pane"
 }
 owner=${label#🔴}; owner=${owner#🟢}; owner=${owner# }; owner=${owner#👑}; owner=${owner#🫡}; owner=${owner# }; owner=${owner:-$name}
 case "$owner" in "새 세션 "*) owner=$name ;; esac # what a new session is called until its first task: no name (pane-label-nudge.sh)
 pane=
+# Automatic checks opt into cancellation receipts. Ordinary workers keep their existing delivery policy.
+# A timeout terminates this process group; EXIT closes its failed check before the caller retries.
+check_receipt() {
+  [ -n "${PANE_SPAWN_CHECK_RECEIPT:-}" ] && [ -n "$check" ] || return 0
+  jq -n --arg status "$1" --arg address "$addr$pane" '{status:$status,address:$address}' > "$PANE_SPAWN_CHECK_RECEIPT.tmp" &&
+    mv "$PANE_SPAWN_CHECK_RECEIPT.tmp" "$PANE_SPAWN_CHECK_RECEIPT"
+}
+check_cleanup() {
+  local rc=$?
+  if [ "$rc" != 0 ] && [ -n "$pane" ]; then
+    "$H" pane close "$pane" >/dev/null 2>&1 && check_receipt closed
+  fi
+}
+if [ -n "${PANE_SPAWN_CHECK_RECEIPT:-}" ] && [ -n "$check" ]; then
+  check_receipt not-opened || die "cannot record automatic check startup"
+  trap 'exit 124' TERM
+  trap check_cleanup EXIT
+fi
 if [ -n "$sock" ]; then
   pane=$( # a subshell, so a workers server that opens nothing leaves its socket nowhere for the fallback below
     export HERDR_SOCKET_PATH=$sock
@@ -401,7 +427,13 @@ fi
 "$H" pane rename "$pane" "🟢 🫡 $name" >/dev/null
 pane-label --sync-tabs
 
-give_up() { "$H" pane close "$pane" >/dev/null 2>&1; echo "pane-spawn: $1" >&2; exit 1; }
+give_up() {
+  if "$H" pane close "$pane" >/dev/null 2>&1; then
+    check_receipt closed
+    pane= # the EXIT trap must not close a reused address
+  fi
+  echo "pane-spawn: $1" >&2; exit 1
+}
 hook_review_problem() {
   echo "codex hooks need review; no instruction was delivered and this blocked pane was closed. Do not trust hooks from an already-open review screen: it can save stale hashes. After hook installation finishes, open a fresh Codex session and review current changed hooks from your own reviewed commits. Alternatively, use official hooks/list and version-checked config/batchWrite to register only reviewed current hashes. If trust was already registered during installation, do not press t again. If hooks change during review, close and reopen before approval. Then retry this job with --job-id $job_id"
 }
@@ -425,6 +457,9 @@ startup_problem() {
   fi
   if printf '%s\n' "$screen" | grep -Eiq 'error:.*(argument|unexpected|invalid)|cannot be used multiple times|command not found|agent process exited'; then
     echo "the agent exited or rejected its launch arguments; the instruction was not sent"; return 0
+  fi
+  if printf '%s\n' "$screen" | grep -Eiq 'usage limit|quota (exceeded|limit|reached)|rate limit|too many requests|you.ve hit your.*limit'; then
+    echo "the agent hit its usage limit; the instruction was not sent: ${screen:0:400}"; return 0
   fi
   return 1
 }
@@ -501,3 +536,4 @@ if [ "$delivered" != 0 ] || { [ "$status" != working ] && [ "$status" != done ];
   exit 1
 fi
 echo "$addr$pane"
+check_receipt started
