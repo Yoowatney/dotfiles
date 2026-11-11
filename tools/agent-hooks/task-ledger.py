@@ -409,6 +409,17 @@ def transcript_parent(path):
 def hook(args, state):
     try:
         payload = json.load(sys.stdin)
+        # Both tools already call this hook on SessionStart and Stop. Keep the
+        # content-bearing private deferral register separate from accounting,
+        # and run it even for sessions without a task accounting id.
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("codex_deferred", Path(__file__).with_name("codex-deferred.py"))
+            deferred = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(deferred)
+            deferred.observe(args.hook_event, payload)
+        except Exception:
+            pass
         sid = payload.get("session_id") or payload.get("sessionId")
         if not sid:
             return
