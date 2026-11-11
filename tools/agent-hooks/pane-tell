@@ -42,6 +42,7 @@
 # /clear meanwhile hands it to the next one.
 H=${HERDR_BIN_PATH:-herdr}
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}/pane-tell
+unset ORDERED_TERMINAL
 DRAFT_HELPER=$(python3 -I -c 'import os,sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])), "main-input-draft.py"))' "$0")
 PEERS="default workers"
 die() { echo "pane-tell: $*" >&2; exit 2; }
@@ -116,17 +117,97 @@ register_receiver() ( # waiting payload, terminal: metadata contains no message 
   umask 077
   mkdir -p "$STATE/receivers" && printf '%s\n%s\n' "$2" "${HERDR_SOCKET_PATH:-default}" > "$STATE/receivers/$(basename "$1")"
 )
+receiver_server() {
+  case "$1" in */sessions/workers/herdr.sock) echo workers ;; *) echo default ;; esac
+}
+predecessors() { # terminal: inspect metadata and existence only, never waiting message contents
+  python3 -I -c '
+import os, stat, sys
+from pathlib import Path
+state, terminal, server = sys.argv[1:]
+try:
+    entries = list(os.scandir(Path(state) / "receivers"))
+except FileNotFoundError:
+    entries = []
+for entry in sorted(entries, key=lambda entry: entry.name):
+    meta = Path(entry.path)
+    payload = Path(state) / "waiting" / meta.name
+    try:
+        mode = payload.stat().st_mode
+    except FileNotFoundError:
+        continue
+    if not stat.S_ISREG(mode):
+        raise ValueError("active waiting payload is not a regular file")
+    try:
+        fields = meta.read_text().splitlines()
+    except FileNotFoundError:
+        continue
+    if len(fields) != 2 or not fields[0] or not fields[1]:
+        raise ValueError("active receiver metadata is malformed")
+    recorded = "workers" if fields[1].endswith("/sessions/workers/herdr.sock") else "default"
+    if fields[0] == terminal and recorded == server:
+        print(payload)
+' "$STATE" "$1" "$(receiver_server "${HERDR_SOCKET_PATH:-}")"
+}
+predecessors_done() { # payload, optional predecessor from an older invocation
+  [ ! -f "${2:-}" ] || return 1
+  local previous
+  [ -f "$STATE/order/dependencies/$(basename "$1")" ] || return 0
+  while IFS= read -r previous; do
+    [ ! -f "$previous" ] || return 1
+  done < "$STATE/order/dependencies/$(basename "$1")"
+}
+order_failed() { # payload: report failure, retaining the original for inspection
+  local saved=$1 disposition=remains
+  if mkdir -p "$STATE/undelivered" && mv "$1" "$STATE/undelivered/"; then
+    saved=$STATE/undelivered/$(basename "$1"); disposition=saved
+  fi
+  # Timers are detached with stderr redirected. Use the existing external
+  # error gateway as well, so a retained batch never fails without an alert.
+  warn "전달 순서를 확인하지 못해 다른 세션의 글을 파일로 남겼습니다: $saved" "${2:-}" "${3:-}" || :
+  die "cannot check the delivery order; message $disposition at $saved"
+}
 
+ordered() { # terminal, operation, arguments: never held while a queued delivery waits
+  (umask 077; python3 -I -c '
+import fcntl, os, subprocess, sys
+path, script, *args = sys.argv[1:]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    sys.exit(subprocess.call(["/bin/bash", script, "--ordered", *args]))
+' "$STATE/order/$(receiver_server "${HERDR_SOCKET_PATH:-}")/$1.lock" "$0" "$@")
+}
+queue_file() { # payload, terminal, session, sender terminal, sender socket, optional foreground; under ordered()
+  local file
+  umask 077
+  mkdir -p "$STATE/waiting" "$STATE/undelivered" || die "cannot keep the message"
+  file=$(mktemp "$STATE/waiting/$(date +%s).XXXXXX") && mv "$1" "$file" || die "cannot keep the message"
+  mkdir -p "$STATE/order/dependencies" || die "cannot keep the delivery order"
+  # Snapshot every active predecessor, including queues created before this
+  # version. A cancelled middle message cannot disconnect an older dependency.
+  if ! predecessors "$2" > "$STATE/order/dependencies/$(basename "$file")"; then
+    rm -f "$STATE/order/dependencies/$(basename "$file")"
+    order_failed "$file" "$4" "$5"
+  fi
+  register_receiver "$file" "$2" || die "cannot keep the receiver"
+  if [ "${6:-}" = foreground ]; then
+    printf '%s\n' "$file"
+    return 0
+  fi
+  nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/bash "$0" --deliver "$file" "$2" "$3" "$4" "$5" </dev/null >/dev/null 2>&1 &
+}
 tell() { # pane, kind, message, receiver's terminal, its session, sender's terminal, sender's socket when on another server.
   # Returns 1 when it had to queue. The waiting process inherits HERDR_SOCKET_PATH, the receiver's server.
-  send "$1" "$2" "$3" && return 0
+  [ "${ORDERED_TERMINAL+x}" = x ] && [ "$ORDERED_TERMINAL" = "$4" ] || { ordered "$4" tell "$@"; return $?; }
+  local previous file
   umask 077 # messages can name customers
-  mkdir -p "$STATE/waiting" "$STATE/undelivered" || die "cannot keep the message"
-  local file
-  file=$(mktemp "$STATE/waiting/$(date +%s).XXXXXX") && printf '%s' "$3" > "$file" || die "cannot keep the message"
-  register_receiver "$file" "$4" || die "cannot keep the receiver"
+  mkdir -p "$STATE" || die "cannot keep the message"
+  file=$(mktemp "$STATE/.message.XXXXXX") && printf '%s' "$3" > "$file" || die "cannot keep the message"
+  previous=$(predecessors "$4") || order_failed "$file" "$6" "${7:-}"
+  if [ -z "$previous" ] && send "$1" "$2" "$3"; then rm -f "$file"; return 0; fi
   # Own session so neither the caller's tool runner nor the sending pane's close takes it down.
-  nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/bash "$0" --deliver "$file" "$4" "$5" "$6" "${7:-}" </dev/null >/dev/null 2>&1 &
+  queue_file "$file" "$4" "$5" "$6" "${7:-}"
   return 1
 }
 
@@ -184,7 +265,7 @@ warn() { # what happened, sender's terminal, sender's socket when on another ser
 }
 
 deliver() { # message file, receiver's terminal (a moved pane gets a new pane id), its session when queued, sender's terminal,
-  # sender's socket
+  # sender's socket, predecessor payload (if any)
   local list row pane kind sid label t0=$SECONDS warned=
   while (( SECONDS - t0 < ${PANE_TELL_WAIT:-86400} )); do
     sleep "${PANE_TELL_POLL:-5}"
@@ -193,9 +274,10 @@ deliver() { # message file, receiver's terminal (a moved pane gets a new pane id
       | [.pane_id, (.agent // ""), (.agent_session.value // ""), (.label // "이름 없는 칸")] | @tsv') || continue
     pane=$(printf '%s\n' "$row" | cut -f1); kind=$(printf '%s\n' "$row" | cut -f2); sid=$(printf '%s\n' "$row" | cut -f3); label=$(printf '%s\n' "$row" | cut -f4)
     [ -n "$kind" ] && { [ -z "$3" ] || [ "$sid" = "$3" ]; } || break
-    if send "$pane" "$kind" "$(cat "$1")"; then
+    if predecessors_done "$1" "${6:-}" && send "$pane" "$kind" "$(cat "$1")"; then
       rm -f "$1"
       rm -f "$STATE/receivers/$(basename "$1")"
+      ordered "$2" done "$1"
       echo "$(date '+%F %T') delivered $(basename "$1") to $pane" >> "$STATE/log"
       return
     fi
@@ -206,6 +288,7 @@ deliver() { # message file, receiver's terminal (a moved pane gets a new pane id
   done
   mv "$1" "$STATE/undelivered/"
   rm -f "$STATE/receivers/$(basename "$1")"
+  ordered "$2" done "$1"
   echo "$(date '+%F %T') undelivered $(basename "$1") for $2" >> "$STATE/log"
   warn "다른 칸에 보낸 글을 전달하지 못해 파일로 남겼습니다: $STATE/undelivered/$(basename "$1")" "$4" "$5"
 }
@@ -233,14 +316,65 @@ take() { # dir: takes the open batch and prints the file holding its messages jo
   rm -rf "$s"
   if [ -s "$out" ]; then echo "$out"; else rm -f "$out"; fi
 }
-if [ "${1:-}" = --deliver ]; then deliver "$2" "$3" "${4:-}" "${5:-}" "${6:-}"; exit; fi
+relay() { # pane, kind, message, terminal, session, sender, sender socket, shown address, name, body
+  local pane=$1 kind=$2 msg=$3 terminal=$4 sid=$5 sender=$6 sender_socket=$7 shown=$8 name=$9 body=${10}
+  local batch_target dir
+  batch_target=
+  if [ -n "$terminal" ]; then
+    if [ "$terminal" = "$(cat "${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main" 2>/dev/null)" ]; then batch_target=1; fi
+    case "$name" in "👑 "* | "🫡 "*) batch_target=1 ;; esac
+  fi
+  if [ "$BATCH" -gt 0 ] 2>/dev/null && [ -n "$batch_target" ]; then
+    umask 077 # messages can name customers
+    dir=$STATE/batch/$terminal
+    mkdir -p "$dir" || die "cannot keep the message"
+    held_now() { # sends the open batch now, unbound to the session like the batch itself
+      local j; j=$(take "$dir"); [ -n "$j" ] || return 0
+      tell "$pane" "$kind" "$(cat "$j")" "$terminal" "" "" ""; local rc=$?; rm -f "$j"; return $rc
+    }
+    if urgent "$body"; then
+      held_now # what was held goes first: a grant counts only for the turn it starts, so it must be the last prompt
+    else
+      # A stale batch has no sender left (the Mac restarted). Urgent messages above must still arrive alone.
+      if [ -d "$dir/open" ] && [ $(( $(date +%s) - $(cat "$dir/open/.t" 2>/dev/null || echo 0) )) -gt $(( BATCH + 60 )) ] && add "$dir" "$msg"; then
+        if held_now; then echo "told $shown ($name)"; else echo "queued for $shown ($name): its input box is not empty, so this goes in once it is"; fi
+        exit 0
+      fi
+      if [ ! -d "$dir/open" ] && case "$("$H" pane get "$pane" 2>/dev/null | jq -r '.result.pane.agent_status // ""')" in idle | done) true ;; *) false ;; esac &&
+        mkdir "$dir/open" 2>/dev/null; then
+        date +%s > "$dir/open/.t"
+        nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/bash "$0" --flush "$dir" "$terminal" </dev/null >/dev/null 2>&1 &
+      fi
+      if add "$dir" "$msg"; then echo "queued for $shown ($name): held up to ${BATCH}s to go in one prompt with what else comes for this session"; exit 0; fi
+    fi
+  fi
+  if tell "$pane" "$kind" "$msg" "$terminal" "$sid" "$sender" "$sender_socket"; then echo "told $shown ($name)"; exit 0; fi
+  echo "queued for $shown ($name): its input box is not empty, so this goes in once it is"
+}
+if [ "${1:-}" = --ordered ]; then
+  ORDERED_TERMINAL=$2; operation=$3; shift 3
+  case "$operation" in
+    tell) tell "$@"; exit ;;
+    flush)
+      f=$(take "$1"); [ -n "$f" ] || exit 0
+      queue_file "$f" "$ORDERED_TERMINAL" "" "" "" foreground
+      exit ;;
+    done)
+      rm -f "$STATE/order/dependencies/$(basename "$1")"
+      exit 0 ;;
+    relay) relay "$@"; exit ;;
+    *) die "unknown ordered operation" ;;
+  esac
+fi
+if [ "${1:-}" = --deliver ]; then deliver "$2" "$3" "${4:-}" "${5:-}" "${6:-}" "${7:-}"; exit; fi
 if [ "${1:-}" = --flush ]; then # dir, the main pane's terminal: sends the batch when its hold ends, through the usual queue
   sleep "$BATCH"
   # ponytail: a batch opened after an urgent message took this one goes early, with this wake
-  f=$(take "$2"); [ -z "$f" ] && exit 0
-  mkdir -p "$STATE/waiting" "$STATE/undelivered" && w=$(mktemp "$STATE/waiting/$(date +%s).XXXXXX") && mv "$f" "$w" || exit 1
-  register_receiver "$w" "$3" || exit 1
-  deliver "$w" "$3" "" "" ""
+  queued=$(ordered "$3" flush "$2") || exit $?
+  [ -n "$queued" ] || exit 0
+  # Keep --flush alive through delivery, as before, without retaining the order
+  # lock while an editor is busy. Registered dependencies preserve order.
+  deliver "$queued" "$3" "" "" "" ""
   exit
 fi
 if [ "${1:-}" = --box-ready ]; then box_ready "$2" "$3"; exit; fi
@@ -333,34 +467,7 @@ msg="[pane-tell: '${from:-자동 작업}' 세션이 보낸 글입니다. 요유�
 sender=$(printf '%s\n' "$mine" | awk -F'\t' -v me="$me" '$1 == me {print $7}')
 # A pane on another server is named with its server: a caller reusing a bare id would type into a different pane on its own.
 shown=$pane; [ -z "$there" ] || shown=$(srv "$there")/$pane
-batch_target=
-if [ -n "$terminal" ]; then
-  if [ "$terminal" = "$(cat "${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main" 2>/dev/null)" ]; then batch_target=1; fi
-  case "$name" in "👑 "* | "🫡 "*) batch_target=1 ;; esac
-fi
-if [ "$BATCH" -gt 0 ] 2>/dev/null && [ -n "$batch_target" ]; then
-  umask 077 # messages can name customers
-  dir=$STATE/batch/$terminal
-  mkdir -p "$dir" || die "cannot keep the message"
-  held_now() { # sends the open batch now, unbound to the session like the batch itself
-    local j; j=$(take "$dir"); [ -n "$j" ] || return 0
-    tell "$pane" "$kind" "$(cat "$j")" "$terminal" "" "" ""; local rc=$?; rm -f "$j"; return $rc
-  }
-  if urgent "$2"; then
-    held_now # what was held goes first: a grant counts only for the turn it starts, so it must be the last prompt
-  else
-    # A stale batch has no sender left (the Mac restarted). Urgent messages above must still arrive alone.
-    if [ -d "$dir/open" ] && [ $(( $(date +%s) - $(cat "$dir/open/.t" 2>/dev/null || echo 0) )) -gt $(( BATCH + 60 )) ] && add "$dir" "$msg"; then
-      if held_now; then echo "told $shown ($name)"; else echo "queued for $shown ($name): its input box is not empty, so this goes in once it is"; fi
-      exit 0
-    fi
-    if [ ! -d "$dir/open" ] && case "$("$H" pane get "$pane" 2>/dev/null | jq -r '.result.pane.agent_status // ""')" in idle | done) true ;; *) false ;; esac &&
-      mkdir "$dir/open" 2>/dev/null; then
-      date +%s > "$dir/open/.t"
-      nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/bash "$0" --flush "$dir" "$terminal" </dev/null >/dev/null 2>&1 &
-    fi
-    if add "$dir" "$msg"; then echo "queued for $shown ($name): held up to ${BATCH}s to go in one prompt with what else comes for this session"; exit 0; fi
-  fi
-fi
-if tell "$pane" "$kind" "$msg" "$terminal" "$sid" "$sender" "${there:+$here}"; then echo "told $shown ($name)"; exit 0; fi
-echo "queued for $shown ($name): its input box is not empty, so this goes in once it is"
+# Serialize batch take through send or durable queue registration, including
+# the urgent prompt after a batch. Queued workers never wait with this lock held.
+ordered "$terminal" relay "$pane" "$kind" "$msg" "$terminal" "$sid" "$sender" "${there:+$here}" "$shown" "$name" "$2"
+exit $?
