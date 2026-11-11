@@ -892,6 +892,45 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
     return " ".join(rewrites) or None
 
 
+def inbox_context(payload: dict, env) -> str | None:
+    """Offer only to the verified main agent; output never acknowledges a claim."""
+    if payload.get("stop_hook_active") or env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
+        return None
+    session = payload.get("session_id")
+    pane_id = env.get("HERDR_PANE_ID")
+    if not isinstance(session, str) or not session or not pane_id:
+        return None
+    try:
+        peers = peers_module()
+        pane = peers.herdr(env, "pane", "get", pane_id).get("pane") or {}
+        terminal = pane.get("terminal_id")
+        if (not isinstance(terminal, str) or not terminal
+                or (pane.get("agent_session") or {}).get("value") != session
+                or not peers.delegates_checks(env, terminal)):
+            return None
+        spec = importlib.util.spec_from_file_location("main_alert_inbox", os.path.join(os.path.dirname(__file__), "main-alert-inbox.py"))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        output = module.drain(env, terminal, session, "Stop")
+        specific = (output or {}).get("hookSpecificOutput") or {}
+        context = specific.get("additionalContext")
+        return context if specific.get("hookEventName") == "Stop" and isinstance(context, str) else None
+    except Exception:
+        return None  # An unreadable inbox must not erase an existing Stop reason.
+
+
+def hook_output(payload: dict, env, claude: bool = False) -> dict | None:
+    reason = decide(payload, env, claude)
+    context = inbox_context(payload, env)
+    combined = "\n\n".join(part for part in (reason, context) if part)
+    if not combined:
+        return None
+    if claude:
+        return {"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": combined}}
+    return {"decision": "block", "reason": combined}
+
+
 def selftest():
     import tempfile
 
@@ -1636,11 +1675,8 @@ if __name__ == "__main__":
         selftest()
         sys.exit()
     try:
-        reason = decide(json.load(sys.stdin), os.environ, "--claude" in sys.argv)
+        output = hook_output(json.load(sys.stdin), os.environ, "--claude" in sys.argv)
     except Exception:  # never break a session
         sys.exit(0)
-    if reason and "--claude" in sys.argv:
-        # Same once-per-turn continuation as a block (stop_hook_active is set), shown as feedback, not an error.
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": reason}}, ensure_ascii=False))
-    elif reason:
-        print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
+    if output:
+        print(json.dumps(output, ensure_ascii=False))

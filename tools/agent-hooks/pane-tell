@@ -179,17 +179,27 @@ with open(path, "a") as lock:
 ' "$STATE/order/$(receiver_server "${HERDR_SOCKET_PATH:-}")/$1.lock" "$0" "$@")
 }
 queue_file() { # payload, terminal, session, sender terminal, sender socket, optional foreground; under ordered()
-  local file
+  local file snapshot
   umask 077
   mkdir -p "$STATE/waiting" "$STATE/undelivered" || die "cannot keep the message"
-  file=$(mktemp "$STATE/waiting/$(date +%s).XXXXXX") && mv "$1" "$file" || die "cannot keep the message"
+  if [ -n "${7:-}" ]; then file=$STATE/waiting/$7; else
+    file=$(mktemp "$STATE/waiting/$(date +%s).XXXXXX") || die "cannot keep the message"
+    rm -f "$file" # reserve a unique name without leaving an empty orphan on failure
+  fi
   mkdir -p "$STATE/order/dependencies" || die "cannot keep the delivery order"
   # Snapshot every active predecessor, including queues created before this
   # version. A cancelled middle message cannot disconnect an older dependency.
-  if ! predecessors "$2" > "$STATE/order/dependencies/$(basename "$file")"; then
-    rm -f "$STATE/order/dependencies/$(basename "$file")"
-    order_failed "$file" "$4" "$5"
+  if [ ! -f "$STATE/order/dependencies/$(basename "$file")" ]; then
+    snapshot=$(mktemp "$STATE/order/dependencies/.new.XXXXXX") || die "cannot keep the delivery order"
+    if ! predecessors "$2" > "$snapshot"; then
+      rm -f "$snapshot"
+      order_failed "$1" "$4" "$5"
+    fi
+    mv "$snapshot" "$STATE/order/dependencies/$(basename "$file")" || die "cannot keep the delivery order"
   fi
+  # A deterministic batch handoff can be retried after registration failed.
+  # Keep the source until its dependency snapshot is durable.
+  if [ ! -s "$file" ]; then mv "$1" "$file" || die "cannot keep the message"; fi
   register_receiver "$file" "$2" || die "cannot keep the receiver"
   if [ "${6:-}" = foreground ]; then
     printf '%s\n' "$file"
@@ -309,12 +319,229 @@ add() { # dir, message
   rm -f "$tmp"; return 1
 }
 take() { # dir: takes the open batch and prints the file holding its messages joined in order; nothing when none is open
-  local s="$1/sending.$$.$RANDOM" out f
-  mv "$1/open" "$s" 2>/dev/null || return 0
-  out=$(mktemp "$1/.joined.XXXXXX") || return 0
-  for f in "$s"/[0-9]*; do [ -f "$f" ] || continue; [ ! -s "$out" ] || printf '\n\n' >> "$out"; cat "$f" >> "$out"; done
-  rm -rf "$s"
+  local s="$1/claimed" out f
+  [ -d "$s" ] || mv "$1/open" "$s" 2>/dev/null || return 0
+  out=$(mktemp "$1/.joined.XXXXXX") || return 2
+  for f in "$s"/[0-9]*; do
+    [ -f "$f" ] || continue
+    { [ ! -s "$out" ] || printf '\n\n' >> "$out"; } && cat "$f" >> "$out" || { rm -f "$out"; return 2; }
+  done
+  # claimed remains the original until its durable queue handoff is recorded.
   if [ -s "$out" ]; then echo "$out"; else rm -f "$out"; fi
+}
+batch_meta() { # action, dir, terminal; metadata contains routing, never message text
+  python3 -I -c '
+import json, os, pathlib, stat, sys, time, uuid
+action, directory, terminal, socket, server, delay, token = sys.argv[1:]
+d = pathlib.Path(directory)
+def exists(path):
+    try: path.stat(); return True
+    except FileNotFoundError: return False
+def read(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(fd, "r", encoding="utf-8") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError("batch metadata must be an owned regular file")
+        text = stream.read(65537)
+        if len(text) > 65536: raise ValueError("batch metadata is too large")
+    m = json.loads(text)
+    if (not isinstance(m, dict) or m.get("version") != 1 or m.get("terminal") != d.name or
+        m.get("server") not in ("default", "workers") or
+        not isinstance(m.get("socket"), str) or
+        not isinstance(m.get("generation"), str) or not m["generation"].isalnum() or
+        not isinstance(m.get("due"), int)):
+        raise ValueError("invalid batch metadata")
+    canonical = "workers" if m["socket"].endswith("/sessions/workers/herdr.sock") else "default"
+    if "/sessions/" in m["socket"] and not m["socket"].endswith(("/sessions/workers/herdr.sock", "/sessions/default/herdr.sock")):
+        raise ValueError("unsupported batch server socket")
+    if canonical != m["server"]: raise ValueError("ambiguous batch server")
+    return m
+def write(path, m):
+    tmp = path.with_name("." + path.name + ".new." + str(os.getpid()))
+    with open(tmp, "x") as f:
+        json.dump(m, f); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, path)
+    fd = os.open(path.parent, os.O_RDONLY)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+if action == "init":
+    path = d / "open/.meta"
+    if path.exists():
+        m = read(path)
+        if m["terminal"] != terminal or m["server"] != server or m["socket"] != socket:
+            raise ValueError("batch belongs to another server")
+    else:
+        now = int(time.time())
+        write(path, dict(version=1, terminal=terminal, server=server, socket=socket,
+                        generation=uuid.uuid4().hex, opened=now, due=now + int(delay)))
+elif action == "claim":
+    path = d / "claimed/.meta"
+    if not path.exists():
+        # Only an explicit legacy --flush has a trusted inherited route.
+        now = int(time.time())
+        write(path, dict(version=1, terminal=terminal, server=server, socket=socket,
+                        generation=uuid.uuid4().hex, opened=now, due=now))
+    m = read(path)
+    if m["terminal"] != terminal or m["server"] != server or m["socket"] != socket:
+        raise ValueError("batch route changed")
+    print(m["generation"])
+elif action == "handoff":
+    m = read(d / "claimed/.meta")
+    jobs = d / "jobs"; jobs.mkdir(exist_ok=True)
+    write(jobs / m["generation"], m)
+elif action == "generation":
+    print(read(d / "open/.meta")["generation"])
+elif action == "ready":
+    path = d / "claimed/.meta" if (d / "claimed").exists() else d / "open/.meta"
+    if not path.exists(): sys.exit(1)
+    m = read(path)
+    if m["terminal"] != terminal or m["server"] != server or m["socket"] != socket:
+        sys.exit(1)
+    if token and token != "recovery" and m["generation"] != token: sys.exit(1)
+    if token == "recovery" and path.parent.name == "open" and m["due"] > time.time(): sys.exit(1)
+elif action == "jobs":
+    jobs = d / "jobs"
+    if jobs.exists():
+        for path in jobs.iterdir():
+            if path.name.startswith("."): continue
+            m = read(path)
+            if path.name != m["generation"]: raise ValueError("batch job identity changed")
+            if m["server"] == server and m["socket"] == socket:
+                print("batch-" + m["generation"])
+elif action == "receipt":
+    m = read(d / "claimed/.meta")
+    committed = exists(d / "jobs" / m["generation"])
+    queued = exists(d.parent.parent / "waiting" / ("batch-" + m["generation"]))
+    print("queued" if queued else "completed" if committed else "new")
+' "$1" "$2" "${3:-}" "${HERDR_SOCKET_PATH:-}" "$(receiver_server "${HERDR_SOCKET_PATH:-}")" "$BATCH" "${4:-}"
+}
+batch_event() { # dir, event, status: no payload contents
+  python3 -I -c '
+import os, sys, time
+with open(sys.argv[1] + "/events", "a") as log:
+    log.write(" ".join([str(int(time.time())), *sys.argv[2:]]) + "\n")
+    log.flush(); os.fsync(log.fileno())
+' "$1" "$$" "$2" "${3:-}"
+}
+batch_flush() { # dir, terminal: under the canonical ordering lock
+  local joined generation file rc receipt
+  if [ -n "${3:-}" ]; then
+    batch_meta ready "$1" "$2" "$3"; rc=$?
+    [ "$rc" -ne 1 ] || return 0
+    [ "$rc" -eq 0 ] || return 2
+  fi
+  joined=$(take "$1") || return 2
+  [ -n "$joined" ] || return 0
+  generation=$(batch_meta claim "$1" "$2") || { rm -f "$joined"; return 2; }
+  receipt=$(batch_meta receipt "$1" "$2") || { rm -f "$joined"; return 2; }
+  if [ "$receipt" = completed ]; then
+    # A committed handoff is never replayed from the retained source after its
+    # queue has disappeared. Its UI outcome may be ambiguous after a crash.
+    rm -f "$joined"; rm -rf "$1/claimed"
+    return 0
+  fi
+  file=$(queue_file "$joined" "$2" "" "" "" foreground "batch-$generation") || { rm -f "$joined"; return 2; }
+  batch_meta handoff "$1" "$2" || return 2
+  rm -f "$joined"
+  rm -rf "$1/claimed"
+  printf '%s\n' "$file"
+}
+batch_deliver() { # payload, terminal: concurrent recovery ticks cannot send it twice
+  python3 -I -c '
+import fcntl, os, subprocess, sys
+payload, terminal, script, state = sys.argv[1:]
+os.makedirs(state + "/batch-locks", exist_ok=True)
+with open(state + "/batch-locks/" + os.path.basename(payload), "a") as lock:
+    try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError: sys.exit(0)
+    if os.path.isfile(payload):
+        sys.exit(subprocess.call(["/bin/bash", script, "--deliver", payload, terminal, "", "", ""]))
+' "$1" "$2" "$0" "$STATE"
+}
+batch_start() { # batch dir, payload, terminal; registration is already durable
+  nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/bash "$0" --batch-deliver "$2" "$3" </dev/null >/dev/null 2>&1 &
+  batch_event "$1" delivery-scheduled "$!"
+}
+recover_batch() { # optional batch directory; short scan/spawn, never waits for delivery
+  python3 -I -c '
+import json, os, pathlib, stat, subprocess, sys, time
+root, script, selected = sys.argv[1:]
+root = pathlib.Path(root)
+def read(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(fd, "r", encoding="utf-8") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError("batch metadata must be an owned regular file")
+        text = stream.read(65537)
+        if len(text) > 65536: raise ValueError("batch metadata is too large")
+    return json.loads(text)
+def exists(path):
+    try: path.stat(); return True
+    except FileNotFoundError: return False
+try:
+    if not exists(root): sys.exit(0)
+    directories = [pathlib.Path(selected)] if selected else sorted(root.iterdir())
+except OSError as error:
+    print("pane-tell: cannot inspect batch state: " + str(error), file=sys.stderr)
+    sys.exit(2)
+failed = False
+for d in directories:
+    try:
+        if not stat.S_ISDIR(d.stat().st_mode): continue
+        if d.parent != root: raise ValueError("batch directory is outside state")
+        paths = [p for p in (d / "open/.meta", d / "claimed/.meta") if exists(p)]
+        if exists(d / "open") and not exists(d / "open/.meta"):
+            raise ValueError("legacy batch has no trusted server metadata")
+        if exists(d / "claimed") and not exists(d / "claimed/.meta"):
+            raise ValueError("claimed batch has no trusted server metadata")
+        jobs = d / "jobs"
+        if exists(jobs): paths += [p for p in jobs.iterdir() if not p.name.startswith(".")]
+        routes = []
+        for path in paths:
+            try: m = read(path)
+            except FileNotFoundError: continue # an ordered handoff moved this generation
+            if (not isinstance(m, dict) or m.get("version") != 1 or m.get("terminal") != d.name or
+                m.get("server") not in ("default", "workers") or
+                not isinstance(m.get("socket"), str) or
+                not isinstance(m.get("generation"), str) or not m["generation"].isalnum() or
+                not isinstance(m.get("due"), int)):
+                raise ValueError("invalid batch metadata")
+            canonical = "workers" if m["socket"].endswith("/sessions/workers/herdr.sock") else "default"
+            if "/sessions/" in m["socket"] and not m["socket"].endswith(("/sessions/workers/herdr.sock", "/sessions/default/herdr.sock")):
+                raise ValueError("unsupported batch server socket")
+            if canonical != m["server"]: raise ValueError("ambiguous batch server")
+            if path.parent == jobs:
+                if path.name != m["generation"]: raise ValueError("batch job identity changed")
+                payload = root.parent / "waiting" / ("batch-" + m["generation"])
+                if not exists(payload):
+                    if not exists(d / "claimed"):
+                        history = d / "finished"; history.mkdir(exist_ok=True)
+                        try: os.replace(path, history / path.name)
+                        except FileNotFoundError: pass
+                    continue
+            elif path.parent.name == "open" and m["due"] > time.time(): continue
+            route = (m["terminal"], m["socket"])
+            if route not in routes: routes.append(route)
+        for terminal, socket in routes:
+            env = dict(os.environ, HERDR_SOCKET_PATH=socket)
+            child = subprocess.Popen(["/bin/bash", script, "--recover-one", str(d), terminal],
+                                     env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, start_new_session=True)
+            with open(d / "events", "a") as log:
+                log.write(str(int(time.time())) + " recovery-spawn " + str(child.pid) + "\n")
+                log.flush(); os.fsync(log.fileno())
+    except (OSError, ValueError, TypeError) as error:
+        failed = True
+        print("pane-tell: batch recovery retained " + str(d) + ": " + str(error), file=sys.stderr)
+        try:
+            with open(d / "events", "a") as log:
+                log.write(str(int(time.time())) + " recovery-blocked metadata\n")
+                log.flush(); os.fsync(log.fileno())
+        except OSError: pass # stderr/exit still report an unreadable journal
+sys.exit(2 if failed else 0)
+' "$STATE/batch" "$0" "${1:-}"
 }
 relay() { # pane, kind, message, terminal, session, sender, sender socket, shown address, name, body
   local pane=$1 kind=$2 msg=$3 terminal=$4 sid=$5 sender=$6 sender_socket=$7 shown=$8 name=$9 body=${10}
@@ -328,12 +555,34 @@ relay() { # pane, kind, message, terminal, session, sender, sender socket, shown
     umask 077 # messages can name customers
     dir=$STATE/batch/$terminal
     mkdir -p "$dir" || die "cannot keep the message"
+    # The historical namespace is terminal-only. Never mix a newly recorded
+    # batch with another server that happens to use the same terminal string.
+    [ ! -f "$dir/open/.meta" ] || batch_meta init "$dir" "$terminal" || die "batch belongs to another route"
     held_now() { # sends the open batch now, unbound to the session like the batch itself
-      local j; j=$(take "$dir"); [ -n "$j" ] || return 0
-      tell "$pane" "$kind" "$(cat "$j")" "$terminal" "" "" ""; local rc=$?; rm -f "$j"; return $rc
+      local j generation previous queued receipt
+      j=$(take "$dir") || return 2; [ -n "$j" ] || return 0
+      generation=$(batch_meta claim "$dir" "$terminal") || { rm -f "$j"; return 2; }
+      receipt=$(batch_meta receipt "$dir" "$terminal") || { rm -f "$j"; return 2; }
+      # An interrupted handoff must use its original queue identity. Only a
+      # batch with no handoff may retain the historical immediate-send path.
+      if [ "$receipt" = new ]; then
+        previous=$(predecessors "$terminal") || order_failed "$j" "" ""
+        if [ -z "$previous" ] && send "$pane" "$kind" "$(cat "$j")"; then
+          rm -f "$j"; rm -rf "$dir/claimed"
+          return 0
+        fi
+      fi
+      rm -f "$j"
+      queued=$(batch_flush "$dir" "$terminal") || return 2
+      [ -n "$queued" ] || return 0
+      batch_start "$dir" "$queued" "$terminal"
+      return 1
     }
+    # A failed older claim can coexist with a newly opened batch. Preserve both
+    # positions before considering a newer normal message or urgent grant.
+    if [ -d "$dir/claimed" ]; then held_now; rc=$?; [ "$rc" -le 1 ] || return "$rc"; fi
     if urgent "$body"; then
-      held_now # what was held goes first: a grant counts only for the turn it starts, so it must be the last prompt
+      held_now; rc=$?; [ "$rc" -le 1 ] || return "$rc"
     else
       # A stale batch has no sender left (the Mac restarted). Urgent messages above must still arrive alone.
       if [ -d "$dir/open" ] && [ $(( $(date +%s) - $(cat "$dir/open/.t" 2>/dev/null || echo 0) )) -gt $(( BATCH + 60 )) ] && add "$dir" "$msg"; then
@@ -343,12 +592,18 @@ relay() { # pane, kind, message, terminal, session, sender, sender socket, shown
       if [ ! -d "$dir/open" ] && case "$("$H" pane get "$pane" 2>/dev/null | jq -r '.result.pane.agent_status // ""')" in idle | done) true ;; *) false ;; esac &&
         mkdir "$dir/open" 2>/dev/null; then
         date +%s > "$dir/open/.t"
-        nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/bash "$0" --flush "$dir" "$terminal" </dev/null >/dev/null 2>&1 &
+        batch_meta init "$dir" "$terminal" || die "cannot keep batch routing metadata"
+        generation=$(batch_meta generation "$dir" "$terminal") || die "cannot read batch generation"
+        nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/bash "$0" --flush "$dir" "$terminal" "$generation" </dev/null >/dev/null 2>&1 &
+        batch_event "$dir" scheduled "$!"
       fi
+      [ ! -d "$dir/open" ] || batch_meta init "$dir" "$terminal" || die "cannot verify batch routing metadata"
       if add "$dir" "$msg"; then echo "queued for $shown ($name): held up to ${BATCH}s to go in one prompt with what else comes for this session"; exit 0; fi
     fi
   fi
-  if tell "$pane" "$kind" "$msg" "$terminal" "$sid" "$sender" "$sender_socket"; then echo "told $shown ($name)"; exit 0; fi
+  tell "$pane" "$kind" "$msg" "$terminal" "$sid" "$sender" "$sender_socket"; rc=$?
+  [ "$rc" -le 1 ] || return "$rc"
+  if [ "$rc" -eq 0 ]; then echo "told $shown ($name)"; exit 0; fi
   echo "queued for $shown ($name): its input box is not empty, so this goes in once it is"
 }
 if [ "${1:-}" = --ordered ]; then
@@ -356,8 +611,7 @@ if [ "${1:-}" = --ordered ]; then
   case "$operation" in
     tell) tell "$@"; exit ;;
     flush)
-      f=$(take "$1"); [ -n "$f" ] || exit 0
-      queue_file "$f" "$ORDERED_TERMINAL" "" "" "" foreground
+      batch_flush "$1" "$ORDERED_TERMINAL" "${2:-}"
       exit ;;
     done)
       rm -f "$STATE/order/dependencies/$(basename "$1")"
@@ -367,14 +621,46 @@ if [ "${1:-}" = --ordered ]; then
   esac
 fi
 if [ "${1:-}" = --deliver ]; then deliver "$2" "$3" "${4:-}" "${5:-}" "${6:-}" "${7:-}"; exit; fi
+if [ "${1:-}" = --recover-batch ]; then recover_batch "${2:-}"; exit; fi
+if [ "${1:-}" = --recover-one ]; then
+  # A recovery tick only registers durable work. Each payload has a separate
+  # nonblocking worker lock, so duplicate ticks do not duplicate its send.
+  batch_event "$2" recovery-start
+  queued=$(ordered "$3" flush "$2" recovery) || { batch_event "$2" recovery-exit 2; exit 2; }
+  jobs=$(batch_meta jobs "$2" "$3") || { batch_event "$2" recovery-exit 2; exit 2; }
+  for job in $jobs; do
+    payload=$STATE/waiting/$job
+    [ -f "$payload" ] || continue
+    batch_start "$2" "$payload" "$3"
+  done
+  batch_event "$2" recovery-exit 0
+  exit 0
+fi
+if [ "${1:-}" = --batch-deliver ]; then batch_deliver "$2" "$3"; exit; fi
 if [ "${1:-}" = --flush ]; then # dir, the main pane's terminal: sends the batch when its hold ends, through the usual queue
-  sleep "$BATCH"
+  batch_dir=$2
+  batch_event "$batch_dir" flush-start "${4:-legacy}"
+  # Keep an inherited wrapper cleanup hook when adding the lifecycle journal.
+  batch_previous_handler=$(trap -p EXIT)
+  if [ -n "$batch_previous_handler" ]; then
+    batch_previous_handler=${batch_previous_handler#trap -- }
+    batch_previous_handler=${batch_previous_handler% EXIT}
+    eval "batch_previous_handler=$batch_previous_handler"
+  fi
+  batch_finish() {
+    local rc=$?
+    batch_event "$batch_dir" flush-exit "$rc"
+    [ -z "$batch_previous_handler" ] || eval "$batch_previous_handler"
+    return "$rc"
+  }
+  trap batch_finish EXIT
+  sleep "$BATCH" || exit $?
   # ponytail: a batch opened after an urgent message took this one goes early, with this wake
-  queued=$(ordered "$3" flush "$2") || exit $?
+  queued=$(ordered "$3" flush "$2" "${4:-}") || exit $?
   [ -n "$queued" ] || exit 0
   # Keep --flush alive through delivery, as before, without retaining the order
   # lock while an editor is busy. Registered dependencies preserve order.
-  deliver "$queued" "$3" "" "" "" ""
+  batch_deliver "$queued" "$3"
   exit
 fi
 if [ "${1:-}" = --box-ready ]; then box_ready "$2" "$3"; exit; fi
