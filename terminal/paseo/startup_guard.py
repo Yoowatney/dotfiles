@@ -95,22 +95,27 @@ def unsafe(command, inherited_clean=False, depth=0):
                         return True
         is_app = binary == 'Paseo'
         if binary == 'open':
+            options_ended = False
             for i, arg in enumerate(args):
-                if arg in {'--args', '--'}:
+                if arg == '--args' and not options_ended:
                     break
-                if arg == '--env':
-                    if i + 1 >= len(args) or not allowed_assignment(args[i + 1]):
-                        clean = False
-                elif arg.startswith('--env='):
-                    if not allowed_assignment(arg.split('=', 1)[1]):
-                        clean = False
+                if arg == '--':
+                    options_ended = True
+                    continue
                 app = None
-                if arg in {'-a', '--application'} and i + 1 < len(args):
-                    app = args[i + 1]
-                elif arg.startswith('--application='):
-                    app = arg.split('=', 1)[1]
-                elif arg.startswith('-a'):
-                    app = arg[2:]
+                if not options_ended:
+                    if arg == '--env':
+                        if i + 1 >= len(args) or not allowed_assignment(args[i + 1]):
+                            clean = False
+                    elif arg.startswith('--env='):
+                        if not allowed_assignment(arg.split('=', 1)[1]):
+                            clean = False
+                    if arg in {'-a', '--application'} and i + 1 < len(args):
+                        app = args[i + 1]
+                    elif arg.startswith('--application='):
+                        app = arg.split('=', 1)[1]
+                    elif arg.startswith('-a'):
+                        app = arg[2:]
                 if app and Path(app.rstrip('/')).name.lower() in {'paseo', 'paseo.app'}:
                     is_app = True
                 if arg.rstrip('/').endswith('/Paseo.app'):
