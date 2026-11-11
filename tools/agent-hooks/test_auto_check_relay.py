@@ -18,6 +18,14 @@ CHECKED = "pytest를 다시 실행해 12개 통과를 봤습니다. PASS\n남은
 
 
 class RelayTests(unittest.TestCase):
+    def test_accounting_id_follows_worker_to_check_without_changing_receiver(self):
+        self.setUp_accounting_id = 'job-test-123'
+        self.env['HERDR_TASK_ID'] = self.setUp_accounting_id
+        self.finish()
+        args, env = self.spawns[0]
+        self.assertEqual(args[args.index('--job-id') + 1], self.setUp_accounting_id)
+        self.assertEqual(env['HERDR_PANE_ID'], self.main['pane_id'])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

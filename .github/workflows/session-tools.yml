@@ -4,6 +4,14 @@ on:
     paths:
       - 'tools/agent-hooks/pane-tell*'
       - 'tools/agent-hooks/pane-spawn*'
+      - 'shell/zsh/codex-fn.test.sh'
+      - 'shell/zsh/zshrc'
+      - 'tools/agent-hooks/codex-startup*'
+      - 'tools/agent-hooks/codex-memory*'
+      - 'tools/agent-hooks/install-codex-startup*'
+      - 'tools/agent-hooks/task-ledger*'
+      - 'tools/agent-hooks/auto-tab-close.py'
+      - 'tools/agent-hooks/test_auto_check_relay.py'
       - 'scripts/claude-online*'
       - 'tools/claude/hooks/slack-format-check.py'
       - 'tools/claude/hooks/test_slack_wording.py'
@@ -13,6 +21,14 @@ on:
     paths:
       - 'tools/agent-hooks/pane-tell*'
       - 'tools/agent-hooks/pane-spawn*'
+      - 'shell/zsh/codex-fn.test.sh'
+      - 'shell/zsh/zshrc'
+      - 'tools/agent-hooks/codex-startup*'
+      - 'tools/agent-hooks/codex-memory*'
+      - 'tools/agent-hooks/install-codex-startup*'
+      - 'tools/agent-hooks/task-ledger*'
+      - 'tools/agent-hooks/auto-tab-close.py'
+      - 'tools/agent-hooks/test_auto_check_relay.py'
       - 'scripts/claude-online*'
       - 'tools/claude/hooks/slack-format-check.py'
       - 'tools/claude/hooks/test_slack_wording.py'
@@ -32,6 +48,12 @@ jobs:
           echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
       - run: bash tools/agent-hooks/pane-tell.test.sh
       - run: bash tools/agent-hooks/pane-spawn.test.sh
+      - run: bash shell/zsh/codex-fn.test.sh
+      - run: python3 tools/agent-hooks/codex-startup.test.py
+      - run: python3 tools/agent-hooks/codex-memory.test.py
+      - run: python3 tools/agent-hooks/install-codex-startup.test.py
+      - run: python3 tools/agent-hooks/task-ledger.test.py
+      - run: python3 -m unittest discover -s tools/agent-hooks -p test_auto_check_relay.py
       - run: bash scripts/claude-online.test.sh
       - run: python3 -m unittest discover -s tools/claude/hooks -p test_slack_wording.py
       - run: python3 tools/claude/hooks/slack-format-check.py --selftest
