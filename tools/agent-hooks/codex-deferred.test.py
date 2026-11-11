@@ -3,13 +3,16 @@
 import concurrent.futures
 import datetime as dt
 import json
+import importlib.util
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).parent
 SCRIPT = ROOT / "codex-deferred.py"
@@ -47,15 +50,19 @@ class RecoveryTests(unittest.TestCase):
             self.env.pop(key, None)
         self.transcript = self.root / "codex.jsonl"
 
-    def run_script(self, script, *args, payload=None):
+    def run_script(self, script, *args, payload=None, drain=True):
         script = self.script if script == SCRIPT else self.hook_script
         result = subprocess.run([sys.executable, str(script), *args], env=self.env,
-                                input=json.dumps(payload or {}), text=True, capture_output=True)
+                                input=json.dumps(payload or {}), text=True, capture_output=True, timeout=10 if not drain else 60)
         self.assertEqual(result.returncode, 0, result.stderr)
+        if script == self.hook_script and drain:
+            # The real hook detaches delivery so a slow receiver cannot consume
+            # its 10s budget. Drain the notifier before asserting its receipt.
+            self.run_script(SCRIPT, "notify", "--wait")
         return result.stdout
 
-    def hook(self, event="Stop", **payload):
-        return self.run_script(HOOK, "hook", event, payload={"session_id": "session", **payload})
+    def hook(self, event="Stop", drain=True, **payload):
+        return self.run_script(HOOK, "hook", event, payload={"session_id": "session", **payload}, drain=drain)
 
     def state(self):
         return json.loads((self.root / "deferred/state.json").read_text())
@@ -63,7 +70,7 @@ class RecoveryTests(unittest.TestCase):
     def defer(self, text="Codex 사용량이 없어 교차 리뷰를 미룹니다. https://example.org/issues/1"):
         self.hook(last_assistant_message=text)
 
-    def success(self, age=0, error=False, final=True):
+    def success(self, age=0, error=False, final=True, drain=True, write_only=False):
         stamp = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=age)).isoformat()
         rows = [
             {"type": "session_meta", "payload": {"id": "session", "model_provider": "openai"}},
@@ -76,7 +83,8 @@ class RecoveryTests(unittest.TestCase):
             rows.append({"timestamp": stamp, "type": "event_msg", "payload": {
                 "type": "task_complete", "error": {"codex_error_info": "usage_limit_exceeded"}}})
         self.transcript.write_text("".join(json.dumps(r) + "\n" for r in rows))
-        self.hook(transcript_path=str(self.transcript))
+        if not write_only:
+            self.hook(transcript_path=str(self.transcript), drain=drain)
 
     def test_open_claude_stop_captures_without_task_accounting_id(self):
         self.defer()
@@ -84,6 +92,91 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(item["status"], "pending")
         self.assertIn("https://example.org/issues/1", item["links"])
         self.assertIsNone(item.get("notified_at"))
+
+    def test_missing_or_malformed_transcript_does_not_hide_payload_deferral(self):
+        for malformed in (False, True):
+            with self.subTest(malformed=malformed):
+                if malformed:
+                    self.transcript.write_text("not json\n")
+                self.hook(transcript_path=str(self.transcript),
+                          last_assistant_message="Codex quota exhausted; review deferred.")
+                self.assertEqual(self.state()["items"][0]["status"], "pending")
+
+    def test_historical_stop_replay_does_not_reopen_resolved_changed_work(self):
+        first = "Codex quota exhausted; first review deferred."
+        self.defer(first)
+        self.defer("Codex quota exhausted; second review deferred.")
+        self.run_script(SCRIPT, "resolve", "--id", "session", "--reason", "Main handled both reviews")
+        self.defer(first)
+        item = self.state()["items"][0]
+        self.assertEqual(item["status"], "resolved")
+        self.assertIn("second review", item["summary"])
+
+    def test_slow_accepted_delivery_is_not_repeated(self):
+        self.main_pane()
+        relay = self.hooks / "pane-tell"
+        relay.write_text("#!/bin/sh\nprintf 'accepted\\n' >> \"$TEST_RELAY_LOG\"\n"
+                         "sleep 3\nprintf 'queued for test-only\\n'\n")
+        self.defer()
+        self.success()
+        self.hook("SessionStart")
+        self.assertIsNotNone(self.state()["items"][0].get("queued_at"))
+        self.assertEqual((self.root / "relay.log").read_text().splitlines(), ["accepted"])
+
+    def test_pending_receipt_does_not_block_hooks_or_acknowledge_changed_work(self):
+        self.main_pane()
+        relay = self.hooks / "pane-tell"
+        relay.write_text("#!/bin/sh\nprintf 'accepted\\n' >> \"$TEST_RELAY_LOG\"\n"
+                         "while [ ! -e \"$TEST_RELAY_FAIL\" ]; do sleep 0.05; done\n"
+                         "printf 'queued for test-only\\n'\n")
+        release = self.root / "relay.fail"
+        try:
+            self.defer()
+            self.success(drain=False)
+            deadline = time.monotonic() + 15
+            while not (self.root / "relay.log").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue((self.root / "relay.log").exists(), "notifier did not start")
+            self.hook(last_assistant_message="Codex quota exhausted; newer review deferred.", drain=False)
+            self.assertIn("newer review", self.state()["items"][0]["summary"])
+        finally:
+            release.touch()
+            self.run_script(SCRIPT, "notify", "--wait")
+        self.assertIsNone(self.state()["items"][0].get("queued_at"), "old receipt must not acknowledge new work")
+        self.assertEqual((self.root / "relay.log").read_text().splitlines(), ["accepted"])
+
+    def test_fresh_recovery_during_pending_receipt_is_drained_without_another_hook(self):
+        self.main_pane()
+        (self.hooks / "pane-tell").write_text(
+            "#!/bin/sh\nprintf 'accepted\\n' >> \"$TEST_RELAY_LOG\"\n"
+            "while [ ! -e \"$TEST_RELAY_FAIL\" ]; do sleep 0.05; done\n"
+            "printf 'queued for test-only\\n'\n")
+        release = self.root / "relay.fail"
+        spec = importlib.util.spec_from_file_location("recovery_under_test", self.script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        # Control worker scheduling: the second attempt must lose the lock
+        # before the first receipt arrives, rather than happen to start later.
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(module, "start_notifier"):
+            module.observe("Stop", {"session_id": "session", "last_assistant_message": "Codex quota exhausted; first review deferred."})
+            self.success(write_only=True)
+            module.observe("Stop", {"session_id": "session", "transcript_path": str(self.transcript)})
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pending = pool.submit(module.notify_pending)
+                try:
+                    deadline = time.monotonic() + 15
+                    while not (self.root / "relay.log").exists() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    self.assertTrue((self.root / "relay.log").exists(), "notifier did not start")
+                    module.observe("Stop", {"session_id": "session", "last_assistant_message": "Codex quota exhausted; newer review deferred."})
+                    self.success(write_only=True)
+                    module.observe("Stop", {"session_id": "session", "transcript_path": str(self.transcript)})
+                    module.notify_pending()
+                finally:
+                    release.touch()
+                pending.result(timeout=15)
+            self.assertIsNotNone(self.state()["items"][0].get("queued_at"))
+            self.assertEqual((self.root / "relay.log").read_text().splitlines(), ["accepted", "accepted"])
 
     def test_claude_transcript_fallback_and_codex_final_are_both_captured(self):
         self.transcript.write_text(json.dumps({"type": "assistant", "message": {

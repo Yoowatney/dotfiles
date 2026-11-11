@@ -62,11 +62,14 @@ def transaction(change):
         return state
 
 
-def defer(state, identity, summary, source, links):
+def defer(state, identity, summary, source, links, replay_safe=False):
     previous = next((i for i in state["items"] if i["id"] == identity), None)
     content = {"summary": summary[:6000], "source": source[:2000], "links": sorted(set(links))}
     if previous and all(previous.get(k) == v for k, v in content.items()):
         return  # Replayed Stop hooks must not reopen or renotify the same task.
+    if replay_safe and previous and any(all(old.get(k) == v for k, v in content.items())
+                                       for old in previous.get("history", [])):
+        return  # An older Stop must not replace a newer commitment or resolution.
     item = previous or {"id": identity}
     if not previous:
         state["items"].append(item)
@@ -133,8 +136,8 @@ def blocked(text):
     return False
 
 
-def command(args, env=None):
-    return subprocess.run(args, env=env, capture_output=True, text=True, timeout=2)
+def command(args, env=None, timeout=2):
+    return subprocess.run(args, env=env, capture_output=True, text=True, timeout=timeout)
 
 
 def notify(state):
@@ -165,7 +168,11 @@ def notify(state):
                    "자동으로 일을 재개하거나 완료 처리하지 않았습니다.\n" + "\n".join(
                        f"- {i['id']}: {i['summary'][:800]} | {i['source']} | {' '.join(i['links'])}" for i in items[:10]) +
                    "\n전체 목록: " + str(state_dir() / "state.json"))
-        result = command([str(Path(__file__).with_name("pane-tell")), address, message])
+        # pane-tell can accept the message before its final input/receipt checks
+        # finish. Killing it at an arbitrary timeout makes acceptance ambiguous
+        # and causes a retry to send the same notice again. A detached notifier
+        # waits for its receipt without holding up either agent's 10s hook.
+        result = command([str(Path(__file__).with_name("pane-tell")), address, message], timeout=None)
         if result.returncode == 0 and result.stdout.startswith(("told ", "queued ")):
             for item in items[:10]:
                 item["queued_at"] = stamp()  # Queue acceptance, never a claim of receipt.
@@ -173,9 +180,51 @@ def notify(state):
         return
 
 
+def notify_pending(wait=False):
+    folder = state_dir()
+    if not (folder / "state.json").exists():
+        return
+    with (folder / ".notify.lock").open("a") as lock:
+        os.chmod(lock.name, 0o600)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except BlockingIOError:
+            return  # One notifier owns the outstanding receipt; never resend it.
+        try:
+            while True:
+                snapshot = transaction(lambda state: None)
+                unsent = {i["id"] for i in snapshot["items"] if not i.get("queued_at")}
+                notify(snapshot)
+                accepted = {i["id"]: i for i in snapshot["items"] if i["id"] in unsent and i.get("queued_at")}
+                if not accepted:
+                    return
+                def acknowledge(state):
+                    for item in state["items"]:
+                        old = accepted.get(item["id"])
+                        if (old and item["status"] == "pending" and not item.get("queued_at")
+                                and item["updated_at"] == old["updated_at"]):
+                            item.update(queued_at=old["queued_at"], recovery_evidence=old["recovery_evidence"])
+                transaction(acknowledge)
+                # A concurrent hook may have added work/recovery while this
+                # receipt was pending. Drain it before releasing notifier duty.
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            pass  # Preserve pending notices for the next hook if lookup/send fails.
+
+
+def start_notifier():
+    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "notify"],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+
+
 def observe(event, payload):
     try:
-        text, success = transcript(payload.get("transcript_path")) if event == "Stop" else ("", None)
+        text, success = "", None
+        if event == "Stop":
+            try:
+                text, success = transcript(payload.get("transcript_path"))
+            except (OSError, ValueError, TypeError):
+                pass  # A valid last_assistant_message still records a deferral.
         text = payload.get("last_assistant_message") or text
         capture = event == "Stop" and blocked(text)
         if not capture and not (state_dir() / "state.json").exists():
@@ -185,14 +234,11 @@ def observe(event, payload):
                 identity = os.environ.get("HERDR_TASK_ID") or payload.get("task_id") or payload.get("session_id") or payload.get("sessionId")
                 if identity:
                     defer(state, identity, text, str(payload.get("transcript_path") or identity),
-                          re.findall(r"https?://[^\s<>\])]+", text))
+                          re.findall(r"https?://[^\s<>\])]+", text), replay_safe=True)
             if success and not capture:
                 state["recovery"] = success
-            try:
-                notify(state)
-            except (OSError, ValueError, KeyError, subprocess.SubprocessError):
-                pass  # Missing main/server/timeout: durable pending record, retry next hook.
         transaction(update)
+        start_notifier()
     except Exception:
         pass  # A bookkeeping problem must not block either agent or destroy corrupt state.
 
@@ -205,10 +251,15 @@ def main():
         add.add_argument("--" + name, required=True)
     add.add_argument("--link", action="append", default=[])
     sub.add_parser("list")
+    send = sub.add_parser("notify", help="Retry pending main-pane notices")
+    send.add_argument("--wait", action="store_true", help="Wait for any active notifier's receipt")
     close = sub.add_parser("resolve")
     close.add_argument("--id", required=True)
     close.add_argument("--reason", required=True)
     args = parser.parse_args()
+    if args.action == "notify":
+        notify_pending(args.wait)
+        return
     def change(state):
         if args.action == "defer":
             defer(state, args.id, args.summary, args.source, args.link)
