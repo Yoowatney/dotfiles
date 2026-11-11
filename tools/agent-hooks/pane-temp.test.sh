@@ -36,7 +36,9 @@ printf '#!/bin/sh\nprintf "%%s" "$1" > "%s/first-arg"\necho "claude-started $*" 
 printf '#!/bin/sh\nsleep 3\necho codex-done >> "%s/log"\n' "$SANDBOX" > "$SANDBOX/codex"
 chmod +x "$SANDBOX/claude" "$SANDBOX/codex"
 
-pt() { rm -f "$SANDBOX/log"; env PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_TEMP_DIR="$SANDBOX/state" PANE_TEMP_RETRY_WAIT=0 "$@"; }
+# The fake pane close cannot end a pane's process tree. Bound every fixture's
+# timer, including failed starts, rather than leaving the production one-hour timer.
+pt() { rm -f "$SANDBOX/log"; env PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_TEMP_DIR="$SANDBOX/state" PANE_TEMP_RETRY_WAIT=0 PANE_TEMP_TTL=1 "$@"; }
 log() { cat "$SANDBOX/log" 2>/dev/null || true; }
 has() { grep -qF -- "$1" "$SANDBOX/log" || fail "$2: no [$1] in: $(log)"; }
 hasnt() { if grep -qF -- "$1" "$SANDBOX/log"; then fail "$2: found [$1] in: $(log)"; fi; }
