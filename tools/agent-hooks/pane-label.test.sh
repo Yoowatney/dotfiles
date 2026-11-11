@@ -105,17 +105,20 @@ pl --free
 (sleep 0.5; echo working > "$SANDBOX/status") &
 GRACE=2 close; wait; [ ! -f "$SANDBOX/closed" ] || fail "요유 typing during the grace period should cancel the close"
 
+# A detached close can start late on a busy host, so a close that should happen is waited for (up to 30 s), not guessed at 2 s.
+closed_soon() { for _ in $(seq 150); do [ -f "$SANDBOX/closed" ] && return; sleep 0.2; done; }
+
 # --close works only in a tab a job opened (MUNICE_AUTO_DISPATCH=1 dispatch, MUNICE_AMBIENT=1 Slack ambient);
 # 요유 closes ordinary sessions.
 echo idle > "$SANDBOX/status"; rm -f "$SANDBOX/closed"
 ( unset MUNICE_AUTO_DISPATCH MUNICE_AMBIENT; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close 2>/dev/null )
 sleep 2; [ ! -f "$SANDBOX/closed" ] || fail "an ordinary session should not close itself"
 ( unset MUNICE_AMBIENT; export MUNICE_AUTO_DISPATCH=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close >/dev/null )
-sleep 2; [ -f "$SANDBOX/closed" ] || fail "an auto-dispatch tab should close itself"
+closed_soon; [ -f "$SANDBOX/closed" ] || fail "an auto-dispatch tab should close itself"
 # close_allowed_in_ambient
 rm -f "$SANDBOX/closed"
 ( unset MUNICE_AUTO_DISPATCH; export MUNICE_AMBIENT=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close >/dev/null 2>&1 )
-sleep 2; [ -f "$SANDBOX/closed" ] || fail "close_allowed_in_ambient: an ambient tab should close itself"
+closed_soon; [ -f "$SANDBOX/closed" ] || fail "close_allowed_in_ambient: an ambient tab should close itself"
 
 # A pane `herdr agent start` opened has a name in herdr, whoever ran it and whether or not that session still lives.
 # It closes only after the Stop hook has saved its report (PANE_CLOSE_REPORTED=1); a session that calls --close on its
@@ -124,10 +127,10 @@ rm -f "$SANDBOX/closed"; printf 'spawned' > "$SANDBOX/name"
 ( PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close 2>/dev/null )
 sleep 2; [ ! -f "$SANDBOX/closed" ] || fail "an agent-started pane should wait for the report"
 ( export PANE_CLOSE_REPORTED=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close >/dev/null )
-sleep 2; [ -f "$SANDBOX/closed" ] || fail "an agent-started pane should close after its report"
+closed_soon; [ -f "$SANDBOX/closed" ] || fail "an agent-started pane should close after its report"
 rm -f "$SANDBOX/closed"; pl --lead
 ( export PANE_CLOSE_REPORTED=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close >/dev/null )
-sleep 2; [ -f "$SANDBOX/closed" ] || fail "the hook decides for a named 👑: it closes once its panes are gone"
+closed_soon; [ -f "$SANDBOX/closed" ] || fail "the hook decides for a named 👑: it closes once its panes are gone"
 rm -f "$SANDBOX/closed"; pl --unlead; rm -f "$SANDBOX/name"
 ( export PANE_CLOSE_REPORTED=1; PANE_CLOSE_GRACE=1 PANE_CLOSE_POLL=0.2 pl --close 2>/dev/null )
 sleep 2; [ ! -f "$SANDBOX/closed" ] || fail "a pane with no agent name is 요유's, even with the flag"

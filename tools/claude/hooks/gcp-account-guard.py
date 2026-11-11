@@ -1249,9 +1249,9 @@ def selftest():
     checks["broken_lines_do_not_crash"] = lambda: latest_turn(appended(claude_transcript("prod 허용"), *broken)) is not None
 
     def quick(cmd):
-        t = time.monotonic()
+        t = time.process_time()   # CPU time: a blow-up in the judging shows here, a busy host's waiting does not
         tool_problem({"tool_name": "Bash", "tool_input": {"command": cmd}, "transcript_path": staged}, {})
-        return time.monotonic() - t < 1.0
+        return time.process_time() - t < 1.0
     checks["long_command_judged_quickly"] = lambda: quick("echo " + "herdr " * 5000 + f"; gcloud {admin} run services list")
     checks["many_options_judged_quickly"] = lambda: quick("gcloud config" + " --a" * 26 + " x" + f"; gcloud {admin} run services list")
     risky = json.dumps({"tool_name": "Bash", "tool_input": {"command": f"gcloud {admin} run services update api"}}).encode()

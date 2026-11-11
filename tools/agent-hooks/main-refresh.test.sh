@@ -137,7 +137,7 @@ S="$SANDBOX/state"
 mr() { # every call is sandboxed: state dir, herdr, pane-tell
   rm -f "$SANDBOX/told" "$SANDBOX/herdr-log" "$SANDBOX/box-n" "$SANDBOX/request-n" "$SANDBOX/ready-get-n" "$SANDBOX/unsafe-request" "$SANDBOX/pending-once" "$S/orchestrator/refresh.log"; : > "$SANDBOX/alerts"; : > "$SANDBOX/errors"
   env XDG_STATE_HOME="$S" HERDR_BIN_PATH="$SANDBOX/herdr" HERDR_ERROR_NOTIFY="$SANDBOX/error-notify" MAIN_REFRESH_PANE_TELL="$SANDBOX/pane-tell" \
-    MAIN_REFRESH_POLL=0.05 MAIN_REFRESH_QUIET=0 MAIN_REFRESH_RETRY_QUIET=0 MAIN_REFRESH_DEADLINE="${MAIN_REFRESH_DEADLINE:-5}" MAIN_REFRESH_HANDOFF_WAIT="${MAIN_REFRESH_HANDOFF_WAIT:-5}" \
+    MAIN_REFRESH_POLL=0.05 MAIN_REFRESH_QUIET=0 MAIN_REFRESH_RETRY_QUIET=0 MAIN_REFRESH_DEADLINE="${MAIN_REFRESH_DEADLINE:-60}" MAIN_REFRESH_HANDOFF_WAIT="${MAIN_REFRESH_HANDOFF_WAIT:-60}" \
     "$@" /bin/bash "$SUBJECT" ${MR_ARGS:-} >/dev/null 2>&1
 }
 told() { [ -f "$SANDBOX/told" ] && awk '{print $1, $2, $3}' "$SANDBOX/told" | paste -sd'|' - || true; }

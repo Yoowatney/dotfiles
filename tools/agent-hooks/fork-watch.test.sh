@@ -8,7 +8,8 @@
 # real main pane's address.
 #   case 1: the runaway is alive; the watch stops its top and every member.
 #   case 2: its top is killed first, as TaskStop did on 2026-11-05; the rest, adopted by launchd, is still found and stopped.
-# Refuses to start at 1300 user processes or more; stops the runaway itself if the count passes its cap + 100.
+# Refuses to start when its cap (twice the count) would pass three quarters of kern.maxprocperuid; stops the runaway itself if the
+# count passes its cap + 100. A fixed 1300 refused on a busy host, where a dozen agent sessions alone hold 1400 processes.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 T=$(mktemp -d)
@@ -20,7 +21,7 @@ trap cleanup EXIT
 check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; fails=$((fails + 1)); fi; }
 
 base=$(users)
-[ "$base" -lt 1300 ] || { echo "skip: $base user processes already"; exit 1; }
+[ $((base * 2)) -lt $(($(sysctl -n kern.maxprocperuid) * 3 / 4)) ] || { echo "skip: $base user processes already"; exit 1; }
 cap=$((base * 2)) lim=$((base * 2 - 60)) stop=$((base * 2 + 100))
 mkdir -p "$T/state/orchestrator"
 cp "$HOME/.local/state/orchestrator/main" "$T/state/orchestrator/main" 2>/dev/null || echo "note: no main pane file"

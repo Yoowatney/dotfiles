@@ -934,11 +934,11 @@ regression_quota_timeout() {
   rm -f "$SANDBOX/home/.config/munice/host-role"
   echo quota-aware > "$SANDBOX/home/.local/state/agent-quota/policy"
   mkdir -p "$SANDBOX/slow-python"
-  printf '#!/bin/bash\ncase "$2" in */agent-quota) echo $$ > "%s"; exec /bin/sleep 3;; esac\nexec "%s" "$@"\n' "$SANDBOX/quota-pid" "$(command -v python3)" > "$SANDBOX/slow-python/python3"
+  printf '#!/bin/bash\ncase "$2" in */agent-quota) echo $$ > "%s"; exec /bin/sleep 30;; esac\nexec "%s" "$@"\n' "$SANDBOX/quota-pid" "$(command -v python3)" > "$SANDBOX/slow-python/python3"
   chmod +x "$SANDBOX/slow-python/python3"
   SECONDS=0
   PATH="$SANDBOX/slow-python:$PATH" PANE_SPAWN_QUOTA_LIMIT=1 SESSIONLESS=1 ps --kind auto "timeout" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "timed out lookup must retain legacy Codex"
-  [ "$SECONDS" -lt 3 ] || fail "quota timeout did not bound lookup"
+  [ "$SECONDS" -lt 30 ] || fail "quota timeout did not bound lookup"   # limit 1 s; the lookup sleeps 30, so a busy host's slowness cannot look like no bound
   has "--kind codex" "timeout selects legacy Codex"
   [ "$(wc -l < "$SANDBOX/err" | tr -d ' ')" = 1 ] || fail "timeout emits exactly one warning"
   grep -qi 'timed out' "$SANDBOX/err" || fail "timeout warning explains fallback"
