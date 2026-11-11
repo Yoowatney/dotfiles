@@ -47,7 +47,7 @@ class RelayTests(unittest.TestCase):
                         PANE_REPORT_DIR=str(self.root / "reports"), AUTO_TAB_CLOSE_PANE_SPAWN="/fake/pane-spawn",
                         AUTO_TAB_CLOSE_PANE_TELL="/fake/pane-tell", AUTO_TAB_CLOSE_PANE_LABEL="/fake/pane-label",
                         HERDR_ERROR_NOTIFY="/fake/herdr-error-notify", HERDR_BIN_PATH="/fake/herdr")
-        for target, value in (("herdr", self.herdr), ("subprocess.run", self.call_process),
+        for target, value in (("herdr", self.herdr), ("subprocess.run", self.call_process), ("subprocess.Popen", self.popen),
                               ("herdr_peers.all_panes", self.all_panes), ("herdr_peers.socket_of", self.socket_of)):
             if "." in target:
                 owner, attr = target.split(".")
@@ -59,6 +59,29 @@ class RelayTests(unittest.TestCase):
 
     def socket_of(self, env, name):
         return "/default/herdr.sock" if name == "default" else "/sessions/workers/herdr.sock"
+
+    def popen(self, args, **kwargs):
+        # Startup now uses Popen to cancel an entire failed launcher process
+        # group. Keep the real retry/receipt code; replace only process I/O.
+        failure = None
+        try:
+            result = self.call_process(args, **kwargs)
+        except subprocess.TimeoutExpired as exc:
+            failure = exc
+            result = subprocess.CompletedProcess(args, 124, "", "")
+
+        class Process:
+            pid = 999999999
+            returncode = result.returncode
+
+            def communicate(self, timeout=None):
+                nonlocal failure
+                if failure:
+                    exc, failure = failure, None
+                    raise exc
+                return result.stdout or "", result.stderr or ""
+
+        return Process()
 
     def all_panes(self, env):
         return {"term_M": ("default/w5:p3", self.main), "term_W": ("w1:p2", self.worker)}
@@ -296,7 +319,7 @@ class RelayTests(unittest.TestCase):
     def test_spawn_failure_preserves_and_delivers_original(self):
         self.spawn_error = "workers unavailable"
         self.finish()
-        self.assertEqual(len(self.spawns), 1)
+        self.assertEqual(len(self.spawns), 2)
         self.assertEqual(len(self.tells), 1)
         self.assertIn("workers unavailable", self.tells[0][1])
         self.assertIn(DONE.splitlines()[0], self.tells[0][1])

@@ -75,6 +75,9 @@ _spec.loader.exec_module(herdr_peers)  # the default and workers servers, and pa
 _spec = importlib.util.spec_from_file_location("relay_watch", os.path.join(HERE, "pane-relay-watch.py"))
 relay_watch = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(relay_watch)
+_spec = importlib.util.spec_from_file_location("check_start", os.path.join(HERE, "automatic-check-start.py"))
+check_start = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(check_start)
 
 SESSION = re.compile(r"세션[ \t]*\**[ \t]*[:：][ \t]*\**([^·\n]*)")
 LEFT = re.compile(r"남은[ \t]*것[ \t]*\**[ \t]*[:：]")
@@ -498,7 +501,7 @@ def recording_restrictions(me, env) -> str:
     return f" 원 작업의 기록 금지 제한을 이 확인 작업에도 적용합니다. 확인 내용과 결과를 {targets}에 남기지 마세요."
 
 
-def route_main_report(reply, me, name, lead, to, path, now, env, send):
+def route_main_report(reply, me, name, lead, to, path, now, env, send, send_immediate=None):
     """None: ordinary relay. True: delivered or handed to a check. False: delivery failed; keep it for the watch."""
     if not herdr_peers.delegates_checks(env, to.get("terminal_id")) or herdr_peers.home_pane(name):
         return None
@@ -562,7 +565,8 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send):
             context = dict(job=job, first=short_report(reply, None).splitlines()[0], report=path, entry=entry,
                            worker_address=herdr_peers.address(env, me['pane_id']),
                            worker_terminal=me.get("terminal_id"),
-                           cwd=me.get("cwd") or os.path.expanduser("~"), kind=kind, kind_reason=kind_reason)
+                           cwd=me.get("cwd") or os.path.expanduser("~"), kind=kind, kind_reason=kind_reason,
+                           report_received_at=time.time())
             task_id = env.get("HERDR_TASK_ID", "")
             if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", task_id):
                 context["task_id"] = task_id  # Accounting only; routing/check policy is unchanged.
@@ -591,25 +595,22 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send):
         args = [spawn, "--check", "--kind", context["kind"], "--cwd", context["cwd"], f"{context['job']} [ac-{key}]", prompt]
         if context.get("task_id"):
             args[1:1] = ["--job-id", context["task_id"]]
-        # A failed delivery is retried, but never starts a second check for the same saved report.
+        # Startup gets one bounded retry. Delivery retries retain the same attempt receipts.
         if not context.get("spawn_error"):
-            try:
-                result = subprocess.run(args, env=receiver_env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
-                match = re.search(r"^(?:\w+/)?w\w+:p\w+$", result.stdout or "", re.M)
-                if result.returncode == 0 and match:
-                    address = match[0]
-                    server, pid = address.split("/", 1) if "/" in address else ("default", address)
-                    checked = herdr(env, "pane", "get", pid, socket=herdr_peers.socket_of(env, server)).get("pane") or {}
-                    context.update(handed=True, checker_terminal=checked.get("terminal_id"), checker_address=address)
-                    write_context(context_path, context)
-                    return True
-                context["spawn_error"] = (result.stderr or result.stdout or f"exit {result.returncode}").strip()[:1200]
-            except (OSError, subprocess.TimeoutExpired) as error:
-                context["spawn_error"] = str(error)[:1200]
+            address, error = check_start.start(args, receiver_env, context_path + ".start", context,
+                                              lambda: write_context(context_path, context))
+            if address:
+                server, pid = address.split("/", 1) if "/" in address else ("default", address)
+                checked = herdr(env, "pane", "get", pid, socket=herdr_peers.socket_of(env, server)).get("pane") or {}
+                context.update(handed=True, checker_terminal=checked.get("terminal_id"), checker_address=address,
+                               check_started_at=time.time())
+                write_context(context_path, context)
+                return True
+            context["spawn_error"] = error
             write_context(context_path, context)
         message = (f"바로 전달하는 칸의 보고입니다(확인 칸을 열지 못했습니다). 결과는 아직 확인하지 못했습니다. "
                    f"확인 칸 시작 실패: {context['spawn_error']}\n확인 종류: {context['kind']} ({context['kind_reason']})\n{body}")
-        sent = send(message)
+        sent = (send_immediate or send)(message)
         if sent:
             context["fallback_delivered"] = True
             write_context(context_path, context)
@@ -666,18 +667,20 @@ def finish(reply: str, env):
 
     def tell(lead: str, to: dict) -> bool:
         pt = env.get("AUTO_TAB_CLOSE_PANE_TELL") or os.path.join(HERE, "pane-tell")
-        def send(message):
+        def send(message, immediate=False):
             try:
-                return subprocess.run([pt, lead, message], env=dict(env), timeout=10, **quiet).returncode == 0
+                relay_env = {**env, **({"PANE_TELL_BATCH": "0"} if immediate else {})}
+                return subprocess.run([pt, lead, message], env=relay_env, timeout=10, **quiet).returncode == 0
             except (OSError, subprocess.TimeoutExpired):
                 return False
         if not needs_yoyoo:
             try:
-                routed = route_main_report(reply, me, name, lead, to, path, now, env, send)
+                routed = route_main_report(reply, me, name, lead, to, path, now, env, send,
+                                           lambda message: send(message, immediate=True))
                 if routed is not None:
                     return routed
             except (OSError, ValueError, KeyError) as error:
-                return send(f"바로 전달하는 칸의 보고입니다(확인 자동 연결 실패). {error}\n{short_report(reply, None)}\n전체 보고: {path} ({now:%H:%M:%S} 항목)")
+                return send(f"바로 전달하는 칸의 보고입니다(확인 자동 연결 실패). {error}\n{short_report(reply, None)}\n전체 보고: {path} ({now:%H:%M:%S} 항목)", immediate=True)
         if needs_yoyoo:
             message = f"{share.JOB_NOTE}:\n{short_report(reply)}\n칸: {me.get('label') or ''}\n전체 보고: {path} ({now:%H:%M:%S} 항목)"
             return send(message)
@@ -956,8 +959,8 @@ case "$1 $2" in
 esac''')
     sessions(default=f"{sandbox}/herdr.sock")
     fake = script("pane-label", f'echo "reported=$PANE_CLOSE_REPORTED pane=$HERDR_PANE_ID $@" >> {sandbox}/calls')
-    fake_tell = script("pane-tell", f'echo "tell $1" >> {sandbox}/calls\n[ "$1" = "${{TELL_REFUSE:-}}" ] && exit 2\necho "$2" > {sandbox}/told\nsleep ${{TELL_SLEEP:-0}}\nexit ${{TELL_EXIT:-0}}')
-    fake_spawn = script("pane-spawn", 'echo "simulated check start failure" >&2\nexit 1')
+    fake_tell = script("pane-tell", f'echo "tell $1" >> {sandbox}/calls\n[ "$1" = "${{TELL_REFUSE:-}}" ] && exit 2\necho "$PANE_TELL_BATCH" > {sandbox}/batch\necho "$2" > {sandbox}/told\nsleep ${{TELL_SLEEP:-0}}\nexit ${{TELL_EXIT:-0}}')
+    fake_spawn = script("pane-spawn", f'echo attempt >> {sandbox}/spawns\necho "simulated check start failure" >&2\nexit 1')
     fake_notify = script("error-notify", f'printf "%s\\n" "$2" >> {sandbox}/relay-alerts')
 
     me = {"pane_id": "w1:p2", "tab_id": "w1:t1", "workspace_id": "w1", "label": "🟢 일", "cwd": "/w",
@@ -1412,6 +1415,8 @@ esac''')
     assert run(reported, on_workers) == (0, "", "tell default/w5:p3\n"), "a workers pane reports and stays available for follow-up"
     told = open(f"{sandbox}/told").read()
     assert told.startswith("바로 전달하는 칸의 보고입니다(") and "simulated check start failure" in told, "a failed automatic check preserves the original report"
+    assert open(f"{sandbox}/batch").read().strip() == "0", "failed starts bypass main's idle relay batch"
+    assert len(open(f"{sandbox}/spawns").readlines()) == 2, "one failed start gets exactly one retry"
     assert share.RELAY_NOTE not in told and share.DELEGATE_NOTE not in told, f"the fallback does not demand a check that failed to open: {told!r}"
     assert "조사를 마쳤습니다." in told and "남은 것: 요유 몫: 없음 · 세션: 닫음" in told
     assert "왜: 칸이 남습니다." not in told, "the main pane gets the short form; the whole reply stays in the file"
