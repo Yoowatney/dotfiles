@@ -108,7 +108,7 @@ def save(text):
         match, data = metadata(text)
         text = text[:match.start()] + "```handoff\n" + json.dumps(data, ensure_ascii=False, indent=2) + "\n```" + text[match.end():]
     atomic_write(pending(), text)
-    return "handoff: saved for the next session; 요유 only types /clear"
+    return "handoff: saved for the next session; Claude: /clear; Codex: /new, then a first regular message to load it"
 
 
 def verification_status(text):

@@ -63,7 +63,10 @@ class HandoffTest(unittest.TestCase):
                 self.assertEqual(self.file.read_text(), "prior")
 
     def test_no_code_and_legacy(self):
-        self.assertEqual(self.runho("save", self.memo()).returncode, 0)
+        saved = self.runho("save", self.memo())
+        self.assertEqual(saved.returncode, 0)
+        self.assertIn("/new", saved.stdout)
+        self.assertIn("first regular message", saved.stdout)
         self.assertIn("해당 없음", self.load())
         self.file.write_text("legacy note")
         self.assertIn("필수 항목 미확인", self.load())

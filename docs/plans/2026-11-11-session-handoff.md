@@ -29,27 +29,33 @@
 
 대상: `tools/agent-hooks/handoff`, `handoff-state.py`, `handoff-state.test.py`, `handoff.test.sh`.
 
-- [ ] 필수 항목, 여러 저장소, 코드 없음, 미검증, 저장 실패, 커밋/브랜치/작업폴더 변경, 옛 메모 시험을 먼저 작성한다.
-- [ ] 새 시험이 미구현 때문에 실패하는지 실행해 기록한다.
-- [ ] `handoff save`가 `handoff` JSON 펜스의 task/completed/remaining/verification/resume/code/repositories를 검사한다. 저장소 입력은 path/verified_commit/verified_dirty/evidence다. 현재 상태는 자동 수집한다.
-- [ ] 같은 폴더의 임시 파일에 쓰고 fsync 후 replace한다. 읽기는 오래된 메모를 무시하고 성공한 출력만 소비한다.
-- [ ] 메인 terminal 식별이 확인되면 자유문 저장을 유지한다. 확인 실패는 일반 검사로 처리한다.
-- [ ] 기존 셸 시험과 새 Python 시험을 실행한다.
+- [x] 필수 항목, 여러 저장소, 코드 없음, 미검증, 저장 실패, 커밋/브랜치/작업폴더 변경, 옛 메모 시험을 먼저 작성한다.
+- [x] 새 시험이 미구현 때문에 실패하는지 실행해 기록한다.
+- [x] `handoff save`가 `handoff` JSON 펜스의 task/completed/remaining/verification/resume/code/repositories를 검사한다. 저장소 입력은 path/verified_commit/verified_dirty/evidence다. 현재 상태는 자동 수집한다.
+- [x] 같은 폴더의 임시 파일에 쓰고 fsync 후 replace한다. 읽기는 오래된 메모를 무시하고, 문맥 구성 후 메모를 `.loaded`로 옮긴다.
+- [x] 메인 terminal 식별이 확인되면 자유문 저장을 유지한다. 확인 실패는 일반 검사로 처리한다.
+- [x] 기존 셸 시험과 새 Python 시험을 실행한다.
 
 ## 2. 시작 연결과 안내
 
 대상: `tools/agent-hooks/install-handoff.py`, `install-handoff.test.py`, `pane-label-nudge.sh`, `pane-label-nudge.test.sh`, `init.sh`, 전역 `~/.codex/hooks.json`, `~/.codex/AGENTS.md`.
 
-- [ ] 임시 설정에서 설치 재실행 시 다른 훅을 유지하고 하나만 등록하는 시험을 먼저 실행한다.
-- [ ] Codex용 `handoff session codex`는 시작 때 명시 인계를 우선 읽는다. 저장하지 않은 같은 pane의 이전 세션 발췌는 Codex 원문 형식으로 읽는다.
-- [ ] 세션 식별자는 transcript 경로가 없는 경우 Codex 원문 session_meta를 대조해 찾는다.
-- [ ] 공통 안내와 오래된 Codex 제외 안내를 갱신한다.
-- [ ] 설치·시작·회귀 시험을 실행한다.
+- [x] 임시 설정에서 설치 재실행 시 다른 훅을 유지하고 하나만 등록하는 시험을 먼저 실행한다.
+- [x] Codex용 `handoff session codex`는 시작 때 명시 인계를 우선 읽는다. 저장하지 않은 같은 pane의 이전 세션 발췌는 Codex 원문 형식으로 읽는다.
+- [x] 세션 식별자는 transcript 경로가 없는 경우 Codex 원문 session_meta를 대조해 찾는다.
+- [x] 공통 안내와 오래된 Codex 제외 안내를 갱신한다.
+- [x] 설치·시작·회귀 시험을 실행한다.
 
 ## 3. 실제 검증과 반영
 
-- [ ] Claude와 Codex의 이미 열린 시험 세션을 변경 전 만들고, 변경 후 저장·읽기를 확인한다.
-- [ ] Claude와 Codex의 새 시험 세션에서 저장·재시작·읽기를 확인한다. 모두 pane-temp로 열고 끝나면 닫는다.
-- [ ] 정상·실패 흐름과 메인 자동 인계 회귀 결과를 `/tmp/codex/2026-11-11-session-handoff/`에 저장한다.
-- [ ] 독립 검토에 diff와 검증 자료를 넘기고 중요 지적을 수정한다.
-- [ ] 관련 파일만 별도 커밋, 실제 사용 경로에 반영 후 push한다. 전역 변경은 복구용 사본과 diff를 비공개 근거 폴더에 둔다.
+- [x] Claude와 Codex의 이미 열린 시험 세션을 변경 전 만들고, 변경 후 저장·읽기를 확인한다.
+- [x] Claude와 Codex의 새 시험 세션에서 저장·재시작·읽기를 확인한다. 모두 pane-temp로 열고 끝나면 닫는다.
+- [x] 정상·실패 흐름과 메인 자동 인계 회귀 결과를 `/tmp/codex/2026-11-11-session-handoff/`에 저장한다.
+- [x] 독립 검토에 diff와 검증 자료를 넘기고 중요 지적을 수정한다.
+- [x] 관련 파일만 별도 커밋하고 실제 사용 경로에 반영한다. 전역 변경은 복구용 사본과 diff를 비공개 근거 폴더에 둔다.
+
+push 결과와 최종 회귀 시험의 결과는 비공개 완료 보고에 기록한다.
+
+## 실제 연결에서 확인한 제약
+
+Codex는 `/new` 뒤 첫 일반 메시지에서 세션을 만든다. 그때 시작 훅이 인계를 읽으므로, 짧은 계속 메시지가 필요하다. 성공 안내와 공통 안내에 이 조건을 적었다. Claude는 `/clear` 뒤 표시된 계속 메시지로 시작한다.

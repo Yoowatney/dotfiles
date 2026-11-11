@@ -1,6 +1,9 @@
 # Ordinary-session handoffs
 
 Both Claude and Codex load a saved handoff at session start in the same herdr pane.
+Codex creates the new session on its first regular message after `/new`; send a
+short continuation message to trigger its SessionStart hook. The saved note is
+then supplied as context, followed by a marked continuation prompt.
 Save a Markdown prompt with `handoff save <file>`. Include exactly one fenced
 `handoff` JSON object. The main pane's automatic handoff keeps its existing format.
 
