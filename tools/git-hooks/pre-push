@@ -2,7 +2,7 @@
 # Git pre-push: run the tests of the commits being pushed and refuse the push when one fails.
 #
 # It tests the commit, not the working tree: a half-edited file or an untracked test must not decide what goes out.
-# Tests are every tools/**/*.test.sh and every tools/**/*.py that mentions --selftest, so a new one needs no list.
+# Tests are every tools/**/*.test.{sh,py} and every tools/**/*.py that mentions --selftest, so a new one needs no list.
 # Git does not clone hook settings. Each clone turns this on with `git config core.hooksPath <clone>/tools/git-hooks`:
 # init.sh does that and verify.sh checks it. The path is absolute because a relative one resolves inside each worktree,
 # and a worktree on a branch older than this file would skip the hook without a word.
@@ -32,7 +32,13 @@ unset $(git rev-parse --local-env-vars) $(compgen -e | grep -E '^(HERDR|CLAUDE|C
 
 run() {
   local log="$OUT/${1//\//_}.log" cmd=(bash "$1") rc=0
-  [[ $1 != *.py ]] || cmd=(python3 -I "$1" --selftest)
+  case "$1" in
+    *.py)
+      cmd=(python3 -I "$1")
+      # Keep the invocation of existing selftests, including ones also named *.test.py.
+      if grep -q -e --selftest "$1"; then cmd+=(--selftest); fi
+      ;;
+  esac
   # Supervise a separate process group: alarming only the test shell leaves its children running.
   # Keep exit 142 for the timeout diagnostic. macOS has no `timeout` of its own.
   perl -e '
@@ -62,7 +68,7 @@ for sha in $shas; do
   export OUT="$T/$sha.out"
   mkdir "$OUT"
   cd "$T/$sha" || exit 1
-  list=$( { find tools -name '*.test.sh'; grep -rl --include='*.py' -e --selftest tools; } 2>/dev/null )
+  list=$( { find tools \( -name '*.test.sh' -o -name '*.test.py' \); grep -rl --include='*.py' -e --selftest tools; } 2>/dev/null | sort -u )
   if [ -z "$list" ]; then
     echo "pre-push: found no tests in ${sha:0:7}; refusing rather than passing untested" >&2
     exit 1

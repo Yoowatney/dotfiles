@@ -296,6 +296,61 @@ exec /usr/bin/nohup "$@"
     def test_no_batches_is_noop(self):
         self.assertEqual(self.call("--recover-batch").returncode, 0)
 
+    def test_general_waiting_recovers_without_batch_and_preserves_order(self):
+        (self.state.parent / "orchestrator").mkdir(parents=True)
+        (self.state.parent / "orchestrator/main").write_text("term_M\n")
+        waiting = self.state / "waiting"
+        receivers = self.state / "receivers"
+        dependencies = self.state / "order/dependencies"
+        for directory in (waiting, receivers, dependencies):
+            directory.mkdir(parents=True, exist_ok=True)
+        for name, text in (("100.first", "first"), ("101.second", "second")):
+            payload = waiting / name
+            payload.write_text(text)
+            os.utime(payload, (1, 1))
+            (receivers / name).write_text("term_M\ndefault\n")
+        (dependencies / "100.first").write_text("")
+        (dependencies / "101.second").write_text(str(waiting / "100.first") + "\n")
+        self.assertEqual(self.call("--recover-batch").returncode, 0)
+        self.wait_prompt([b"first", b"second"])
+        self.assertEqual(list(waiting.iterdir()), [])
+
+    def test_general_recovery_keeps_original_session_binding(self):
+        for name in ("waiting", "receivers", "delivery-routes", "undelivered", "order/dependencies"):
+            (self.state / name).mkdir(parents=True, exist_ok=True)
+        payload = self.state / "waiting/100.old-session"
+        payload.write_text("must not enter a replacement session")
+        os.utime(payload, (1, 1))
+        (self.state / "receivers" / payload.name).write_text("term_M\ndefault\n")
+        (self.state / "delivery-routes" / payload.name).write_text("old-session\n\n\n")
+        (self.state / "order/dependencies" / payload.name).write_text("")
+        self.assertEqual(self.call("--recover-batch").returncode, 0)
+        end = time.monotonic() + 7
+        while payload.exists() and time.monotonic() < end:
+            time.sleep(.01)
+        self.assertTrue((self.state / "undelivered" / payload.name).exists())
+        self.assertEqual(self.prompts(), [])
+
+    def test_general_recovery_retains_unprovable_session_or_order(self):
+        for name in ("waiting", "receivers", "delivery-routes", "order/dependencies"):
+            (self.state / name).mkdir(parents=True, exist_ok=True)
+        for name, missing in (("100.legacy", "session"), ("101.unordered", "order")):
+            with self.subTest(missing=missing):
+                payload = self.state / "waiting" / name
+                receiver = self.state / "receivers" / name
+                dependency = self.state / "order/dependencies" / name
+                payload.write_text("retain until routing and order can be proved")
+                os.utime(payload, (1, 1))
+                receiver.write_text("term_M\ndefault\n")
+                if missing == "session": dependency.write_text("")
+                else: (self.state / "delivery-routes" / name).write_text("sM\n\n\n")
+                self.assertEqual(self.call("--recover-batch").returncode, 0)
+                self.assertTrue(payload.exists())
+                self.assertEqual(self.prompts(), [])
+                payload.unlink()
+                receiver.unlink()
+                dependency.unlink(missing_ok=True)
+
     def test_scheduler_failure_records_exit_and_retains_original(self):
         self.open()
         sleeper = self.root / "bin/sleep"

@@ -115,7 +115,12 @@ fi
 
 register_receiver() ( # waiting payload, terminal: metadata contains no message text
   umask 077
-  mkdir -p "$STATE/receivers" && printf '%s\n%s\n' "$2" "${HERDR_SOCKET_PATH:-default}" > "$STATE/receivers/$(basename "$1")"
+  local route
+  mkdir -p "$STATE/receivers" "$STATE/delivery-routes" || return
+  route=$(mktemp "$STATE/delivery-routes/.new.XXXXXX") || return
+  printf '%s\n%s\n%s\n' "${3:-}" "${4:-}" "${5:-}" > "$route" &&
+    mv "$route" "$STATE/delivery-routes/$(basename "$1")" &&
+    printf '%s\n%s\n' "$2" "${HERDR_SOCKET_PATH:-default}" > "$STATE/receivers/$(basename "$1")"
 )
 receiver_server() {
   case "$1" in */sessions/workers/herdr.sock) echo workers ;; *) echo default ;; esac
@@ -200,12 +205,13 @@ queue_file() { # payload, terminal, session, sender terminal, sender socket, opt
   # A deterministic batch handoff can be retried after registration failed.
   # Keep the source until its dependency snapshot is durable.
   if [ ! -s "$file" ]; then mv "$1" "$file" || die "cannot keep the message"; fi
-  register_receiver "$file" "$2" || die "cannot keep the receiver"
+  register_receiver "$file" "$2" "$3" "$4" "$5" || die "cannot keep the receiver"
   if [ "${6:-}" = foreground ]; then
     printf '%s\n' "$file"
     return 0
   fi
-  nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/bash "$0" --deliver "$file" "$2" "$3" "$4" "$5" </dev/null >/dev/null 2>&1 &
+  nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/bash "$0" --deliver "$file" "$2" "$3" "$4" "$5" </dev/null >/dev/null 2>>"$STATE/worker-errors.log" &
+  echo "$(date '+%F %T') worker-scheduled $(basename "$file") pid=$!" >> "$STATE/log"
 }
 tell() { # pane, kind, message, receiver's terminal, its session, sender's terminal, sender's socket when on another server.
   # Returns 1 when it had to queue. The waiting process inherits HERDR_SOCKET_PATH, the receiver's server.
@@ -287,6 +293,7 @@ deliver() { # message file, receiver's terminal (a moved pane gets a new pane id
     if predecessors_done "$1" "${6:-}" && send "$pane" "$kind" "$(cat "$1")"; then
       rm -f "$1"
       rm -f "$STATE/receivers/$(basename "$1")"
+      rm -f "$STATE/delivery-routes/$(basename "$1")"
       ordered "$2" done "$1"
       echo "$(date '+%F %T') delivered $(basename "$1") to $pane" >> "$STATE/log"
       return
@@ -298,6 +305,7 @@ deliver() { # message file, receiver's terminal (a moved pane gets a new pane id
   done
   mv "$1" "$STATE/undelivered/"
   rm -f "$STATE/receivers/$(basename "$1")"
+  rm -f "$STATE/delivery-routes/$(basename "$1")"
   ordered "$2" done "$1"
   echo "$(date '+%F %T') undelivered $(basename "$1") for $2" >> "$STATE/log"
   warn "다른 칸에 보낸 글을 전달하지 못해 파일로 남겼습니다: $STATE/undelivered/$(basename "$1")" "$4" "$5"
@@ -447,27 +455,92 @@ batch_flush() { # dir, terminal: under the canonical ordering lock
   rm -rf "$1/claimed"
   printf '%s\n' "$file"
 }
-batch_deliver() { # payload, terminal: concurrent recovery ticks cannot send it twice
+batch_deliver() { # payload, terminal, optional original routing: one owner for every queue worker
   python3 -I -c '
 import fcntl, os, subprocess, sys
-payload, terminal, script, state = sys.argv[1:]
+payload, terminal, script, state, *route = sys.argv[1:]
 os.makedirs(state + "/batch-locks", exist_ok=True)
 with open(state + "/batch-locks/" + os.path.basename(payload), "a") as lock:
     try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError: sys.exit(0)
     if os.path.isfile(payload):
-        sys.exit(subprocess.call(["/bin/bash", script, "--deliver", payload, terminal, "", "", ""]))
-' "$1" "$2" "$0" "$STATE"
+        import time
+        with open(state + "/log", "a") as log:
+            log.write(time.strftime("%F %T") + " worker-start " + os.path.basename(payload)
+                      + " pid=" + str(os.getpid()) + "\n")
+        status = subprocess.call(["/bin/bash", script, "--deliver-owned", payload, terminal, *route])
+        with open(state + "/log", "a") as log:
+            log.write(time.strftime("%F %T") + " worker-exit " + os.path.basename(payload)
+                      + " status=" + str(status) + " waiting=" + str(os.path.isfile(payload)) + "\n")
+        sys.exit(status)
+' "$1" "$2" "$0" "$STATE" "${3:-}" "${4:-}" "${5:-}" "${6:-}"
 }
 batch_start() { # batch dir, payload, terminal; registration is already durable
-  nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/bash "$0" --batch-deliver "$2" "$3" </dev/null >/dev/null 2>&1 &
+  nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/bash "$0" --batch-deliver "$2" "$3" </dev/null >/dev/null 2>>"$STATE/worker-errors.log" &
   batch_event "$1" delivery-scheduled "$!"
 }
 recover_batch() { # optional batch directory; short scan/spawn, never waits for delivery
   python3 -I -c '
-import json, os, pathlib, stat, subprocess, sys, time
+import json, os, pathlib, shlex, stat, subprocess, sys, time
 root, script, selected = sys.argv[1:]
 root = pathlib.Path(root)
+def recover_waiting():
+    # Existing direct workers predate the shared ownership lock. Do not race
+    # them; new workers and all recovery workers also hold that lock.
+    table = subprocess.run(["/bin/ps", "-axo", "command="], check=True,
+                           capture_output=True, text=True).stdout
+    active = set()
+    for line in table.splitlines():
+        try: args = shlex.split(line)
+        except ValueError: continue
+        if (len(args) > 3 and os.path.basename(args[1]) == os.path.basename(script)
+                and args[2] in ("--deliver", "--deliver-owned", "--batch-deliver")):
+            active.add(args[3])
+    waiting = root.parent / "waiting"
+    if not waiting.is_dir(): return
+    for payload in sorted(waiting.iterdir()):
+        try:
+            info = payload.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or time.time() - info.st_mtime < 120 or str(payload) in active): continue
+            dependency = root.parent / "order/dependencies" / payload.name
+            dependency_info = dependency.lstat()
+            if not stat.S_ISREG(dependency_info.st_mode) or dependency_info.st_uid != os.getuid(): continue
+            metadata = root.parent / "receivers" / payload.name
+            fd = os.open(metadata, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+            with os.fdopen(fd) as stream:
+                meta_info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(meta_info.st_mode) or meta_info.st_uid != os.getuid(): continue
+                fields = stream.read(4097).splitlines()
+            if len(fields) != 2 or not fields[0].startswith("term_"): continue
+            terminal, socket = fields
+            route = ["", "", ""] # Legacy queues, like batch jobs, did not retain session metadata.
+            route_path = root.parent / "delivery-routes" / payload.name
+            try:
+                fd = os.open(route_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+                with os.fdopen(fd) as stream:
+                    route_info = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(route_info.st_mode) or route_info.st_uid != os.getuid(): continue
+                    route = stream.read(4097).splitlines()
+                if len(route) != 3: continue
+            except FileNotFoundError:
+                # Only the registered main accepts legacy reports across a
+                # refresh. Other old queues lack a provable session binding.
+                try: main = (root.parent.parent / "orchestrator/main").read_text().strip()
+                except OSError: continue
+                if terminal != main or socket.endswith("/sessions/workers/herdr.sock"): continue
+            if socket != "default" and not (socket.endswith("/herdr.sock") and "/sessions/" not in socket
+                    or socket.endswith(("/sessions/default/herdr.sock", "/sessions/workers/herdr.sock"))): continue
+            env = dict(os.environ)
+            if socket == "default": env.pop("HERDR_SOCKET_PATH", None)
+            else: env["HERDR_SOCKET_PATH"] = socket
+            child = subprocess.Popen(["/bin/bash", script, "--deliver", str(payload), terminal, *route],
+                env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+            with open(root.parent / "log", "a") as log:
+                log.write(time.strftime("%F %T") + " recovery-start " + payload.name + " pid=" + str(child.pid) + "\n")
+        except (OSError, ValueError):
+            continue # Retain the original and metadata for the next tick.
 def read(path):
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     with os.fdopen(fd, "r", encoding="utf-8") as stream:
@@ -481,6 +554,7 @@ def exists(path):
     try: path.stat(); return True
     except FileNotFoundError: return False
 try:
+    if not selected: recover_waiting()
     if not exists(root): sys.exit(0)
     directories = [pathlib.Path(selected)] if selected else sorted(root.iterdir())
 except OSError as error:
@@ -620,7 +694,10 @@ if [ "${1:-}" = --ordered ]; then
     *) die "unknown ordered operation" ;;
   esac
 fi
-if [ "${1:-}" = --deliver ]; then deliver "$2" "$3" "${4:-}" "${5:-}" "${6:-}" "${7:-}"; exit; fi
+if [ "${1:-}" = --deliver ]; then batch_deliver "$2" "$3" "${4:-}" "${5:-}" "${6:-}" "${7:-}"; exit; fi
+if [ "${1:-}" = --deliver-owned ]; then
+  deliver "$2" "$3" "${4:-}" "${5:-}" "${6:-}" "${7:-}"; exit
+fi
 if [ "${1:-}" = --recover-batch ]; then recover_batch "${2:-}"; exit; fi
 if [ "${1:-}" = --recover-one ]; then
   # A recovery tick only registers durable work. Each payload has a separate

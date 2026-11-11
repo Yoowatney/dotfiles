@@ -56,6 +56,35 @@ has "failing selftest: named" "$out" "tools/guard.py"
 
 fresh
 put tools/ok.test.sh "$GOOD"
+mkdir -p "$W/tools/agent-hooks"
+put tools/agent-hooks/herdr-error-notify.test.py "raise SystemExit('python test failed')"
+ci python-test
+push origin main
+check "a failing nested Python test: refused" "$([ "$rc" != 0 ] && echo refused)" refused
+has "a failing nested Python test: named" "$out" "tools/agent-hooks/herdr-error-notify.test.py"
+has "a failing nested Python test: its output is shown" "$out" "python test failed"
+
+fresh
+put tools/arguments.test.py "import sys
+assert len(sys.argv) == 1, sys.argv"
+ci python-test-arguments
+push origin main
+check "a Python test runs without selftest arguments and needs no shell test" "$rc" 0
+
+fresh
+put tools/once.test.py "# Existing --selftest discovery must keep its arguments and run this file once.
+import pathlib
+import sys
+assert sys.argv[1:] == ['--selftest'], sys.argv
+with pathlib.Path('$T/ran').open('a') as ran:
+    ran.write('run\\n')"
+ci python-test-once
+push origin main
+check "a Python test mentioning selftest preserves its existing arguments" "$rc" 0
+check "a Python test mentioning selftest runs exactly once" "$(cat "$T/ran" 2>/dev/null)" run
+
+fresh
+put tools/ok.test.sh "$GOOD"
 put tools/plain.py "raise SystemExit(1)"
 ci plain
 push origin main

@@ -70,7 +70,7 @@ def wake_main(env):
 
 
 def recover_batches(env):
-    if not os.path.isdir(os.path.join(state_root(env), "batch")):
+    if not any(os.path.isdir(os.path.join(state_root(env), name)) for name in ("batch", "waiting")):
         return
     try:
         subprocess.run(["/bin/bash", os.path.join(HERE, "pane-tell"), "--recover-batch"],
