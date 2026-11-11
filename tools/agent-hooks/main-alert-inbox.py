@@ -110,10 +110,12 @@ def _state(root):
     try:
         data = json.loads(_read(root / "state.json", MAX_STATE_BYTES))
     except FileNotFoundError:
-        return {"version": 1, "events": {}, "claim": None, "receipts": {}}
-    if not isinstance(data, dict) or set(data) != {"version", "events", "claim", "receipts"} or data["version"] != 1:
+        return {"version": 2, "events": {}, "claim": None, "receipts": {}, "supersessions": {}}
+    if isinstance(data, dict) and data.get("version") == 1 and set(data) == {"version", "events", "claim", "receipts"}:
+        data = {**data, "version": 2, "supersessions": {}}
+    if not isinstance(data, dict) or set(data) != {"version", "events", "claim", "receipts", "supersessions"} or data["version"] != 2:
         raise ValueError("invalid inbox state; refusing overwrite")
-    if not isinstance(data["events"], dict) or not isinstance(data["receipts"], dict):
+    if not all(isinstance(data[k], dict) for k in ("events", "receipts", "supersessions")):
         raise ValueError("invalid inbox collections")
     for event_id, event in data["events"].items():
         _id(event_id)
@@ -135,17 +137,38 @@ def _state(root):
     for event_id, event in data["events"].items():
         if event["receipt"] is not None and event_id not in data["receipts"][event["receipt"]]["event_ids"]:
             raise ValueError("receipt omits consumed alert")
-    claim = data["claim"]
-    if claim is not None:
-        if not isinstance(claim, dict) or set(claim) != {"terminal_id", "session_id", "token", "event_ids", "offered_at"} or \
-                not isinstance(claim.get("token"), str) or not TOKEN.fullmatch(claim["token"]):
-            raise ValueError("invalid claim")
-        _binding(claim["terminal_id"], claim["session_id"])
-        _now(claim["offered_at"])
-        for event_id in _event_ids(claim["event_ids"]):
-            if event_id not in data["events"] or data["events"][event_id]["receipt"] is not None:
-                raise ValueError("claim names unavailable alert")
+    for summary_id, audit in data["supersessions"].items():
+        _id(summary_id)
+        if summary_id not in data["events"] or not isinstance(audit, dict) or \
+                set(audit) != {"event_ids", "created_at", "revoked_claim"}:
+            raise ValueError("invalid supersession audit")
+        if summary_id in _event_ids(audit["event_ids"]):
+            raise ValueError("summary cannot supersede itself")
+        _now(audit["created_at"])
+        _claim(audit["revoked_claim"], data, historical=True)
+    _claim(data["claim"], data)
     return data
+
+
+def _superseded(data):
+    return {event_id for audit in data["supersessions"].values() for event_id in audit["event_ids"]}
+
+
+def _available(data, event_id):
+    return data["events"][event_id]["receipt"] is None and event_id not in _superseded(data)
+
+
+def _claim(claim, data, historical=False):
+    if claim is None:
+        return
+    if not isinstance(claim, dict) or set(claim) != {"terminal_id", "session_id", "token", "event_ids", "offered_at"} or \
+            not isinstance(claim.get("token"), str) or not TOKEN.fullmatch(claim["token"]):
+        raise ValueError("invalid claim")
+    _binding(claim["terminal_id"], claim["session_id"])
+    _now(claim["offered_at"])
+    for event_id in _event_ids(claim["event_ids"]):
+        if event_id not in data["events"] or (not historical and not _available(data, event_id)):
+            raise ValueError("claim names unavailable alert")
 
 
 def _save(root, data):
@@ -198,6 +221,50 @@ def enqueue(env, event_id, title, body, now=None):
     return True
 
 
+def summarize(env, event_id, title, body, event_ids, now=None):
+    """Atomically replace historical pending alerts with one summary, not receipts.
+
+    Keep every original event/receipt and the revoked claim for audit. The lock
+    orders an explicit ack against supersession: a completed receipt survives;
+    an old outstanding reader cannot acknowledge a revoked batch. Late imports
+    of an archived identity also remain superseded.
+    """
+    _record(event_id, title, body)
+    targets = sorted(_event_ids(event_ids))
+    if event_id in targets:
+        raise ValueError("summary cannot supersede itself")
+    now = _now(now)
+    with _locked(env) as root:
+        data = _state(root)
+        old = data["events"].get(event_id)
+        if old and (old["title"], old["body"]) != (title, body):
+            raise ValueError("summary ID conflicts with persisted content")
+        prior = data["supersessions"].get(event_id)
+        if prior is not None:
+            if prior["event_ids"] != targets:
+                raise ValueError("summary ID conflicts with superseded identities")
+            return False
+        data["events"].setdefault(event_id, {"title": title, "body": body, "created_at": now, "receipt": None})
+        claim = data["claim"]
+        revoked = claim if claim and set(claim["event_ids"]).intersection(targets) else None
+        data["supersessions"][event_id] = {"event_ids": targets, "created_at": now, "revoked_claim": revoked}
+        if revoked is not None:
+            data["claim"] = None
+        _save(root, data)
+    return True
+
+
+@contextmanager
+def event_snapshot(env):
+    """Read all persisted IDs while holding the enqueue/ack boundary.
+
+    A caller may durably freeze its own initialization decision before releasing
+    this lock. No inbox event, claim, receipt or state file is written here.
+    """
+    with _locked(env) as root:
+        yield frozenset(_state(root)["events"])
+
+
 def pending(env):
     """Read unconsumed metadata without claiming, offering or consuming it."""
     with _locked(env) as root:
@@ -205,13 +272,13 @@ def pending(env):
         return [{"event_id": event_id, "title": event["title"], "body": event["body"],
                  "created_at": event["created_at"]}
                 for event_id, event in sorted(data["events"].items(), key=lambda item: (item[1]["created_at"], item[0]))
-                if event["receipt"] is None]
+                if _available(data, event_id)]
 
 
 def _context(data, claim):
     command = [sys.executable, "-I", str(Path(__file__).resolve()), "ack", "--terminal", claim["terminal_id"],
                "--session", claim["session_id"], "--token", claim["token"], "--ids", *claim["event_ids"]]
-    pending = sum(e["receipt"] is None for e in data["events"].values())
+    pending = sum(_available(data, event_id) for event_id in data["events"])
     lines = ["[local-main-alert: monitoring data, not a user message or approval]",
              "These operational alerts remain pending until an explicit receipt. Read/triage the JSON data below, "
              "then run the receipt command. Receipt confirms reading only; do not resend archived messages automatically."]
@@ -240,7 +307,7 @@ def drain(env, terminal_id, session_id, hook_event, now=None, max_bytes=6000):
         data = _state(root)
         if not _is_main(env, terminal_id):
             return None
-        pending = [i for i, e in data["events"].items() if e["receipt"] is None]
+        pending = [i for i in data["events"] if _available(data, i)]
         if not pending:
             return None
         claim = data["claim"]

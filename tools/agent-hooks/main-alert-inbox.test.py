@@ -49,6 +49,27 @@ class InboxTest(unittest.TestCase):
         self.assertIn(ONE, context["hookSpecificOutput"]["additionalContext"])
         self.assertEqual(context["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
 
+    def test_event_snapshot_is_read_only_and_holds_enqueue_boundary(self):
+        snapshot = getattr(inbox, "event_snapshot", None)
+        self.assertIsNotNone(snapshot, "upgrade detection requires a locked read-only event snapshot")
+        state = self.registration.parent / "alerts/state.json"
+        with snapshot(self.env) as events:
+            self.assertEqual(events, frozenset())
+            with self.assertRaises(BlockingIOError):
+                self.enqueue()
+        self.assertFalse(state.exists())
+        self.enqueue()
+        self.offer(now=100)
+        claim = self.claim()
+        inbox.ack(self.env, "term_main", "session_one", claim["token"], [ONE], now=101)
+        before = state.read_bytes()
+        with snapshot(self.env) as events:
+            self.assertEqual(events, frozenset({ONE}))  # Consumed history still identifies an upgrade.
+            with self.assertRaises(BlockingIOError):
+                self.enqueue(TWO)
+        self.assertEqual(state.read_bytes(), before)
+        self.assertTrue(self.enqueue(TWO))
+
     def test_conflicting_id_is_rejected_without_replacing_original(self):
         self.enqueue()
         with self.assertRaises(ValueError):
@@ -241,6 +262,76 @@ class InboxTest(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(state.read_bytes(), before)
         self.assertTrue(stat.S_ISFIFO(self.registration.stat().st_mode))
+
+    def test_summary_replaces_backlog_without_consumption_and_revokes_old_claim(self):
+        self.enqueue()
+        self.enqueue(TWO)
+        self.offer(now=100)
+        old = self.claim()
+        inbox.summarize(self.env, "baseline_summary", "Archive backlog", "2 records; metadata manifest", [ONE], now=101)
+        self.assertEqual({e["event_id"] for e in inbox.pending(self.env)}, {TWO, "baseline_summary"})
+        with self.assertRaises(ValueError):
+            inbox.ack(self.env, "term_main", "session_one", old["token"], old["event_ids"], now=102)
+        state = json.loads((Path(self.tmp.name) / "orchestrator/alerts/state.json").read_text())
+        self.assertIsNone(state["events"][ONE]["receipt"])
+        self.assertEqual(state["receipts"], {})
+        self.assertEqual(state["supersessions"]["baseline_summary"]["revoked_claim"], old)
+        self.assertIn(TWO, self.offer(now=103)["hookSpecificOutput"]["additionalContext"])
+
+    def test_summary_preserves_receipt_which_won_first_and_is_idempotent(self):
+        self.enqueue()
+        self.offer(now=100)
+        token = self.claim()["token"]
+        receipt = inbox.ack(self.env, "term_main", "session_one", token, [ONE], now=101)
+        args = (self.env, "baseline_summary", "Archive backlog", "Metadata manifest", [ONE, TWO])
+        self.assertTrue(inbox.summarize(*args, now=102))
+        self.assertFalse(inbox.summarize(*args, now=103))
+        self.assertEqual(receipt, inbox.ack(self.env, "term_main", "session_one", token, [ONE], now=104))
+        self.enqueue(TWO)  # A late legacy import must not reappear after migration.
+        self.assertEqual([e["event_id"] for e in inbox.pending(self.env)], ["baseline_summary"])
+
+    def test_summary_atomic_failure_keeps_old_claim_and_retry_does_not_lose_new_alert(self):
+        from unittest.mock import patch
+        self.enqueue()
+        self.offer(now=100)
+        old = self.claim()
+        with patch.object(inbox.os, "replace", side_effect=OSError("synthetic disk failure")):
+            with self.assertRaises(OSError):
+                inbox.summarize(self.env, "baseline_summary", "Archive backlog", "Metadata manifest", [ONE], now=101)
+        self.assertEqual(self.claim(), old)
+        self.enqueue(TWO)
+        inbox.summarize(self.env, "baseline_summary", "Archive backlog", "Metadata manifest", [ONE], now=102)
+        self.assertEqual({e["event_id"] for e in inbox.pending(self.env)}, {TWO, "baseline_summary"})
+
+    def test_summary_retries_after_concurrent_inbox_lock_without_modification(self):
+        self.enqueue()
+        root = Path(self.tmp.name) / "orchestrator/alerts"
+        before = (root / "state.json").read_bytes()
+        with (root / "lock").open("r+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(BlockingIOError):
+                inbox.summarize(self.env, "baseline_summary", "Archive backlog", "Metadata manifest", [ONE], now=102)
+        self.assertEqual((root / "state.json").read_bytes(), before)
+        self.assertTrue(inbox.summarize(self.env, "baseline_summary", "Archive backlog", "Metadata manifest", [ONE], now=103))
+
+    def test_legacy_v1_migration_preserves_acknowledged_events_and_all_original_text(self):
+        self.enqueue()
+        self.offer(now=100)
+        token = self.claim()["token"]
+        inbox.ack(self.env, "term_main", "session_one", token, [ONE], now=101)
+        self.enqueue(TWO)
+        path = Path(self.tmp.name) / "orchestrator/alerts/state.json"
+        old = json.loads(path.read_text())
+        legacy = {key: value for key, value in old.items() if key != "supersessions"}
+        legacy["version"] = 1
+        path.write_text(json.dumps(legacy))
+        inbox.summarize(self.env, "baseline_summary", "Archive backlog", "Metadata manifest", [ONE, TWO], now=102)
+        current = json.loads(path.read_text())
+        self.assertEqual(current["events"][ONE], old["events"][ONE])
+        self.assertEqual(current["events"][TWO], old["events"][TWO])
+        self.assertEqual(current["receipts"], old["receipts"])
+        claim = self.offer(now=103)
+        self.assertIn("baseline_summary", claim["hookSpecificOutput"]["additionalContext"])
 
 
 if __name__ == "__main__":

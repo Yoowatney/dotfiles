@@ -4,6 +4,7 @@ on:
     paths:
       - 'tools/agent-hooks/pane-tell*'
       - 'tools/agent-hooks/main-alert-*'
+      - 'tools/agent-hooks/main-user-relay*'
       - 'tools/agent-hooks/pane-relay-watch*'
       - 'tools/agent-hooks/pane-label-nudge*'
       - 'tools/agent-hooks/yoyoo-share-guard.py'
@@ -27,6 +28,7 @@ on:
     paths:
       - 'tools/agent-hooks/pane-tell*'
       - 'tools/agent-hooks/main-alert-*'
+      - 'tools/agent-hooks/main-user-relay*'
       - 'tools/agent-hooks/pane-relay-watch*'
       - 'tools/agent-hooks/pane-label-nudge*'
       - 'tools/agent-hooks/yoyoo-share-guard.py'
@@ -65,6 +67,7 @@ jobs:
       - run: bash tools/agent-hooks/main-alert-inbox.test.sh
       - run: bash tools/agent-hooks/main-alert-wake.test.sh
       - run: bash tools/agent-hooks/main-alert-hooks.test.sh
+      - run: bash tools/agent-hooks/main-user-relay.test.sh
       - run: bash tools/agent-hooks/pane-spawn.test.sh
       - run: bash shell/zsh/codex-fn.test.sh
       - run: python3 tools/agent-hooks/codex-startup.test.py

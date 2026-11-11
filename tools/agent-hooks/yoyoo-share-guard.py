@@ -894,7 +894,7 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
 
 def inbox_context(payload: dict, env) -> str | None:
     """Offer only to the verified main agent; output never acknowledges a claim."""
-    if payload.get("stop_hook_active") or env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
+    if env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
         return None
     session = payload.get("session_id")
     pane_id = env.get("HERDR_PANE_ID")
@@ -908,22 +908,43 @@ def inbox_context(payload: dict, env) -> str | None:
                 or (pane.get("agent_session") or {}).get("value") != session
                 or not peers.delegates_checks(env, terminal)):
             return None
-        spec = importlib.util.spec_from_file_location("main_alert_inbox", os.path.join(os.path.dirname(__file__), "main-alert-inbox.py"))
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        output = module.drain(env, terminal, session, "Stop")
-        specific = (output or {}).get("hookSpecificOutput") or {}
-        context = specific.get("additionalContext")
-        return context if specific.get("hookEventName") == "Stop" and isinstance(context, str) else None
+        def load(name):
+            spec = importlib.util.spec_from_file_location(name.replace("-", "_"), os.path.join(os.path.dirname(__file__), name + ".py"))
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            return module
+
+        contexts = []
+        try:
+            priority = load("main-user-relay").drain(env, terminal, session, "Stop")
+            if isinstance(priority, str) and priority:
+                contexts.append(priority)
+        except Exception:
+            pass  # Priority inspection must not erase other pending reasons.
+        # A recursive Stop can still introduce a newly waiting user message.
+        # Ordinary claims retain their existing non-recursive behavior.
+        if not payload.get("stop_hook_active"):
+            try:
+                output = load("main-alert-inbox").drain(env, terminal, session, "Stop")
+                specific = (output or {}).get("hookSpecificOutput") or {}
+                context = specific.get("additionalContext")
+                if specific.get("hookEventName") == "Stop" and isinstance(context, str):
+                    contexts.append(context)
+            except Exception:
+                pass
+        return "\n\n".join(contexts) or None
     except Exception:
         return None  # An unreadable inbox must not erase an existing Stop reason.
 
 
 def hook_output(payload: dict, env, claude: bool = False) -> dict | None:
-    reason = decide(payload, env, claude)
+    try:
+        reason = decide(payload, env, claude)
+    except Exception:
+        reason = None  # Ordinary report checks fail open without suppressing waiting user context.
     context = inbox_context(payload, env)
-    combined = "\n\n".join(part for part in (reason, context) if part)
+    combined = "\n\n".join(part for part in (context, reason) if part)
     if not combined:
         return None
     if claude:

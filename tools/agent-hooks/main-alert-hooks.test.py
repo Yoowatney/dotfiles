@@ -28,6 +28,8 @@ class MainAlertHooksTest(unittest.TestCase):
         self.herdr = self.home / "herdr"
         self.herdr.write_text('''#!/usr/bin/env python3
 import json, os, sys, time
+with open(os.environ["HOME"] + "/herdr-commands", "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\\n")
 if sys.argv[1:3] == ["pane", "get"]:
     if os.environ.get("QUERY_SLEEP"): time.sleep(3)
     if os.environ.get("QUERY_FAIL"):
@@ -59,6 +61,19 @@ if __name__ == "__main__":
     flags = dict(zip(args[::2], args[1::2]))
     result = drain(os.environ, flags["--terminal"], flags["--session"], flags["--hook-event"])
     if result: print(json.dumps(result))
+''')
+        (self.hooks / "main-user-relay.py").write_text('''import os, sys
+def drain(env, terminal_id, session_id, hook_event, now=None):
+    if env.get("USER_RELAY_FAIL"): raise RuntimeError("relay unavailable")
+    with open(env["HOME"] + "/user-relay-drains", "a") as f:
+        f.write(hook_event + "\\n")
+    return env.get("USER_RELAY_CONTEXT") or None
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    assert args.pop(0) == "drain"
+    flags = dict(zip(args[::2], args[1::2]))
+    result = drain(os.environ, flags["--terminal"], flags["--session"], flags["--hook-event"])
+    if result: print(result)
 ''')
         state = self.home / "state" / "orchestrator"
         state.mkdir(parents=True)
@@ -185,6 +200,70 @@ if __name__ == "__main__":
         self.assertIsNone(self.run_hook("Stop", stop_hook_active=True))
         self.assertEqual(self.calls(), [])
 
+    def test_waiting_user_full_text_is_first_in_next_prompt_hook(self):
+        # The occupied input remains occupied: the hook must not call prompt or
+        # clear it, and does not depend on the ordinary inbox's existing lease.
+        full = "[priority-user-relay]\n[Slack #test 요유] " + "fixture text " * 1000
+        self.env["USER_RELAY_CONTEXT"] = full
+        result = self.run_hook(prompt="occupied draft remains here")
+        context = self.context(result)
+        self.assertTrue(context.startswith(full), "full priority text must precede all other context")
+        self.assertGreater(context.index("CLAIM alert-1"), len(full))
+        self.assertEqual((self.home / "user-relay-drains").read_text(), "UserPromptSubmit\n")
+
+    def test_active_stop_still_offers_new_user_text_for_both_clients(self):
+        self.env["USER_RELAY_CONTEXT"] = "[priority-user-relay] [Slack #test 요유 반응] :white_check_mark:"
+        for claude in (False, True):
+            with self.subTest(claude=claude):
+                result = self.run_hook("Stop", claude=claude, stop_hook_active=True)
+                self.assertIsNotNone(result)
+                self.assertTrue(self.context(result).startswith(self.env["USER_RELAY_CONTEXT"]))
+                self.assertNotIn("CLAIM alert-1", self.context(result))
+        self.assertEqual(self.calls(), [], "recursive Stop must not re-offer ordinary claims")
+
+    def test_priority_precedes_rewrite_reason_and_inbox(self):
+        self.env["USER_RELAY_CONTEXT"] = "[priority-user-relay] full fixture"
+        for claude in (False, True):
+            with self.subTest(claude=claude):
+                result = self.run_hook("Stop", claude=claude, last_assistant_message="머지할까요?")
+                self.assertTrue(self.context(result).startswith(self.env["USER_RELAY_CONTEXT"]))
+                self.assertIn("CLAIM alert-1", self.context(result))
+
+    def test_priority_failure_does_not_hide_existing_reason_or_inbox(self):
+        self.env["USER_RELAY_FAIL"] = "1"
+        result = self.run_hook("Stop", last_assistant_message="머지할까요?")
+        self.assertIn("CLAIM alert-1", self.context(result))
+        self.assertIn("다시", self.context(result))
+
+    def test_stop_decision_failure_still_offers_priority_for_both_clients(self):
+        self.env["USER_RELAY_CONTEXT"] = "SYNTHETIC NEW USER REQUEST"
+        for claude in (False, True):
+            for missing in (False, True):
+                with self.subTest(claude=claude, last_message_missing=missing):
+                    payload = {"hook_event_name": "Stop", "session_id": "session-1",
+                               "transcript_path": str(self.home / "missing-transcript.jsonl")}
+                    if not missing:
+                        payload["last_assistant_message"] = None
+                    command = ["python3", "-I", str(self.hooks / "yoyoo-share-guard.py")]
+                    if claude:
+                        command.append("--claude")
+                    env = {**self.env, "PANE_JSON": json.dumps({"result": {"pane": self.pane}})}
+                    process = subprocess.run(command, input=json.dumps(payload), capture_output=True,
+                                             text=True, env=env, timeout=12)
+                    self.assertEqual(process.returncode, 0, process.stderr)
+                    self.assertTrue(process.stdout.strip(), "decision failure suppressed priority context")
+                    result = json.loads(process.stdout)
+                    self.assertTrue(self.context(result).startswith("SYNTHETIC NEW USER REQUEST"))
+                    self.assertIn("CLAIM alert-1", self.context(result))
+                    self.assertEqual(set(result), {"hookSpecificOutput"} if claude else {"decision", "reason"})
+
+    def test_stop_decision_failure_without_context_keeps_fail_open(self):
+        self.env["INBOX_EMPTY"] = "1"
+        for claude in (False, True):
+            with self.subTest(claude=claude):
+                self.assertIsNone(self.run_hook("Stop", claude=claude,
+                    last_assistant_message=None, transcript_path=str(self.home / "missing-transcript.jsonl")))
+
     def test_unverified_identity_never_reaches_drain(self):
         for event in ("UserPromptSubmit", "SessionStart", "Stop"):
             for invalid in ("missing-session", "other-session", "missing-terminal", "other-terminal", "query-fail", "unknown-pane"):
@@ -224,6 +303,52 @@ if __name__ == "__main__":
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def real_waiting_relay(self, name="123.synthetic", text=None):
+        shutil.copy2(HERE / "main-user-relay.py", self.hooks / "main-user-relay.py")
+        root = self.home / "state/pane-tell"
+        for kind in ("waiting", "receivers"):
+            (root / kind).mkdir(parents=True, exist_ok=True)
+        body = ("[pane-tell: 'Synthetic sender' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] "
+                "[Slack #synthetic 요유] " + (text or "Complete synthetic request"))
+        path = root / "waiting" / name
+        path.write_text(body)
+        (root / "receivers" / name).write_text("term-main\ndefault\n")
+        return path, body
+
+    def test_real_waiting_original_reaches_next_hook_while_input_stays_occupied(self):
+        self.env["INBOX_EMPTY"] = "1"
+        # Larger than the macOS exec argument budget: full context must travel
+        # over a stream instead of a jq --arg process argument.
+        path, body = self.real_waiting_relay(text="Synthetic full original " * 55000 + "FINAL_MARKER")
+        self.pane["input_text"] = "occupied draft must remain here"
+        before = path.read_bytes()
+        result = self.run_hook(prompt="occupied draft must remain here")
+        context = self.context(result)
+        self.assertTrue(context.startswith("[Untrusted waiting Slack relay monitoring data]"))
+        self.assertIn(body, context)
+        self.assertIn("FINAL_MARKER", context)
+        self.assertEqual(path.read_bytes(), before)
+        calls = [json.loads(line) for line in (self.home / "herdr-commands").read_text().splitlines()]
+        self.assertTrue(calls)
+        self.assertTrue(all(command[:2] in (["pane", "get"], ["pane", "list"]) for command in calls), calls)
+        self.assertEqual(self.pane["input_text"], "occupied draft must remain here")
+        path.unlink()  # Existing successful delivery removes the original.
+        result = self.run_hook()
+        self.assertNotIn("Synthetic full original", self.context(result))
+
+    def test_real_new_user_reaction_reaches_recursive_stop_without_replaying_delivery(self):
+        self.env["INBOX_EMPTY"] = "1"
+        for claude in (False, True):
+            with self.subTest(claude=claude):
+                path, body = self.real_waiting_relay(name="456.synthetic-" + str(claude))
+                path.write_text(body.replace("요유]", "요유 반응]") + " :white_check_mark:")
+                original = path.read_text()
+                result = self.run_hook("Stop", claude=claude, stop_hook_active=True)
+                self.assertIn(original, self.context(result))
+                self.assertIsNone(self.run_hook("Stop", claude=claude, stop_hook_active=True))
+                path.unlink()
+                self.assertIsNone(self.run_hook("Stop", claude=claude, stop_hook_active=True))
 
     def test_real_queue_all_hook_events_require_explicit_ack(self):
         inbox = self.real_inbox()
@@ -290,6 +415,53 @@ if __name__ == "__main__":
         old_ack = subprocess.run(shlex.split(old_command), env=self.env, capture_output=True, text=True, timeout=5)
         self.assertNotEqual(old_ack.returncode, 0)
         self.assertEqual(len(inbox.pending(self.env)), 1)
+
+    def assert_sdk_intake_is_skipped(self, event):
+        inbox = self.real_inbox()
+        path, body = self.real_waiting_relay()
+        before = path.read_bytes()
+        inbox.enqueue(self.env, "sdk-held", "Recovery fixture", "Private fixture")
+        self.env["CLAUDE_CODE_ENTRYPOINT"] = "sdk-cli"
+        result = self.run_hook(event)
+        context = self.context(result) if result else ""
+        self.assertNotIn(body, context)
+        self.assertNotIn("local-main-alert", context)
+        state = json.loads((self.home / "state/orchestrator/alerts/state.json").read_text())
+        self.assertIsNone(state["claim"])
+        self.assertFalse((self.home / "state/orchestrator/user-relays/state.json").exists())
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(len(inbox.pending(self.env)), 1)
+        if event == "UserPromptSubmit":
+            self.assertIn("main pane", context)
+        else:
+            self.assertIsNone(result)
+
+    def test_sdk_prompt_leaves_real_queues_unclaimed(self):
+        self.assert_sdk_intake_is_skipped("UserPromptSubmit")
+
+    def test_sdk_session_start_leaves_real_queues_unclaimed(self):
+        self.assert_sdk_intake_is_skipped("SessionStart")
+
+    def test_sdk_skip_preserves_correction_and_prompt_arming(self):
+        self.env["CLAUDE_CODE_ENTRYPOINT"] = "sdk-cli"
+        self.env["PANE_FIT_DIR"] = str(self.home / "pane-fit")
+        self.pane["terminal_id"] = "term-other"
+        self.pane["label"] = "Named worker"
+        result = self.run_hook(prompt="왜 또 그렇게 했어")
+        context = self.context(result)
+        self.assertIn("Named worker", context)
+        self.assertIn("A correction means prevent", context)
+        self.assertTrue((self.home / "pane-fit/session-1").is_file())
+        self.assertEqual(self.calls(), [])
+        self.assertFalse((self.home / "user-relay-drains").exists())
+
+    def test_sdk_skip_preserves_session_start_unnamed_rename(self):
+        self.env["CLAUDE_CODE_ENTRYPOINT"] = "sdk-cli"
+        self.pane["label"] = ""
+        self.assertIsNone(self.run_hook("SessionStart"))
+        self.assertEqual((self.home / "rename").read_text().strip(), "새 세션 project")
+        self.assertEqual(self.calls(), [])
+        self.assertFalse((self.home / "user-relay-drains").exists())
 
     def test_large_prompt_snapshot_and_context_use_normal_input_streams(self):
         inbox = self.real_inbox()
