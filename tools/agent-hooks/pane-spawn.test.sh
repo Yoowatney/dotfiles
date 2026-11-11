@@ -297,7 +297,7 @@ grep -q "pane-tell" "$SANDBOX/err" || fail "says what to do: $(cat "$SANDBOX/err
 # Bad usage.
 if ps "이름만" 2>/dev/null; then fail "missing instruction must exit non-zero"; fi
 if ps --kind gemini "이름" "지시" 2>/dev/null; then fail "unknown kind must exit non-zero"; fi
-if env -u HERDR_PANE_ID HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "이름" "지시" 2>/dev/null; then fail "outside herdr must exit non-zero"; fi
+if env -u HERDR_PANE_ID -u XDG_STATE_HOME HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "이름" "지시" 2>/dev/null; then fail "outside herdr must exit non-zero"; fi
 
 # The main pane does no work itself: what it opens goes to the workers server, and its address names that server.
 is_main() { mkdir -p "$SANDBOX/home/.local/state/orchestrator"; echo term_65f21913323dc21 > "$SANDBOX/home/.local/state/orchestrator/main"; }
