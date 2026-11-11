@@ -18,6 +18,7 @@ sys.dont_write_bytecode = True
 import json
 import os
 import re
+import stat
 import subprocess
 
 PEERS = ("default", "workers")
@@ -32,11 +33,22 @@ def state_dir(env) -> str:
 
 
 def main_terminal(env) -> str:
-    """The terminal id `pane-label --main` wrote, or "" when there is no main pane."""
+    """Read one bounded terminal id; absent, malformed or unsafe files name no main."""
     try:
-        with open(os.path.join(state_dir(env), "main")) as f:
-            return f.read().strip()
-    except OSError:
+        # Opening a FIFO must not wait for a writer before we can reject it.
+        fd = os.open(os.path.join(state_dir(env), "main"), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                return ""
+            data = stream.read(257)
+        if len(data) > 256:
+            return ""
+        terminal = data.decode("utf-8").strip()
+        # Herdr uses term_<id>; accept legacy fixture/id punctuation too, but
+        # never multiple ids, control bytes or a shell-stripped NUL.
+        return terminal if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", terminal) else ""
+    except (OSError, UnicodeError, ValueError):
         return ""
 
 

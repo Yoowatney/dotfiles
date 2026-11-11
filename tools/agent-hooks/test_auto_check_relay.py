@@ -39,13 +39,14 @@ class RelayTests(unittest.TestCase):
         self.checker = None
         self.names = {"w1:p2": "spawn-M-1"}
         self.tells, self.spawns, self.closed, self.alerts = [], [], [], []
+        self.wake_queries = []
         self.spawn_error = None
         self.tell_exit = 0
         self.env = dict(HOME=str(self.root), XDG_STATE_HOME=str(self.root / "state"),
                         HERDR_PANE_ID="w1:p2", HERDR_SOCKET_PATH="/sessions/workers/herdr.sock",
                         PANE_REPORT_DIR=str(self.root / "reports"), AUTO_TAB_CLOSE_PANE_SPAWN="/fake/pane-spawn",
                         AUTO_TAB_CLOSE_PANE_TELL="/fake/pane-tell", AUTO_TAB_CLOSE_PANE_LABEL="/fake/pane-label",
-                        HERDR_ERROR_NOTIFY="/fake/herdr-error-notify")
+                        HERDR_ERROR_NOTIFY="/fake/herdr-error-notify", HERDR_BIN_PATH="/fake/herdr")
         for target, value in (("herdr", self.herdr), ("subprocess.run", self.call_process),
                               ("herdr_peers.all_panes", self.all_panes), ("herdr_peers.socket_of", self.socket_of)):
             if "." in target:
@@ -75,6 +76,11 @@ class RelayTests(unittest.TestCase):
         raise AssertionError(args)
 
     def call_process(self, args, **kwargs):
+        if args == ["/fake/herdr", "pane", "list"]:
+            self.wake_queries.append((args, kwargs["env"]))
+            # The registered main has no active runtime in this fixture. The
+            # real wake must stop here and leave its durable alert unconsumed.
+            return subprocess.CompletedProcess(args, 0, json.dumps({"result": {"panes": [self.main]}}), "")
         if args[0].endswith("pane-spawn"):
             self.spawns.append((args, kwargs["env"]))
             if self.spawn_error:
@@ -327,12 +333,27 @@ class RelayTests(unittest.TestCase):
         self.assertTrue(Path(metadata["report"]).is_file())
         self.assertIn(metadata["report"], body)
         self.assertIn(CHECKED, Path(metadata["report"]).read_text())
+        self.assertEqual(len(self.wake_queries), 1)
+        wake_env = self.wake_queries[0][1]
+        for name in ("HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HERDR_SESSION"):
+            self.assertNotIn(name, wake_env, "main wake must not inherit the worker route")
+        inbox_path = self.state / "alerts/state.json"
+        inbox = json.loads(inbox_path.read_text())
+        self.assertEqual(len(inbox["events"]), 1)
+        alert = next(iter(inbox["events"].values()))
+        self.assertEqual((alert["title"], alert["body"]), (title, body))
+        self.assertIsNone(alert["receipt"], "enqueue and wake never acknowledge consumption")
+        self.assertIsNone(inbox["claim"])
+        self.assertEqual(inbox["receipts"], {})
+        self.assertFalse((self.state / "alerts/wake.json").exists(), "no prompt without an active main runtime")
         self.tell_exit = 0
         self.finish(CHECKED, check=True)
         self.assertIn("w1:p9", self.closed)
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(len(self.tells), 2, "only the successful delivery is marked as delivered")
         self.assertEqual(len(self.alerts), 1, "successful retry does not send another failure alert")
+        self.assertEqual(json.loads(inbox_path.read_text()), inbox,
+                         "report retry must not duplicate, claim or consume the main alert")
 
     def test_slack_not_posted_report_selects_auto(self):
         for word in ("Slack", "슬랙"):

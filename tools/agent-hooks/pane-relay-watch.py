@@ -7,6 +7,8 @@ An alert acknowledges neither delivery nor permission to resend a payload.
 """
 import fcntl
 import glob
+import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -14,6 +16,8 @@ import stat
 import subprocess
 import tempfile
 import time
+import uuid
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 
@@ -23,11 +27,54 @@ def notify(env, title, body):
     override = child.get("HERDR_ERROR_NOTIFY")
     command = [override] if override else ["/usr/bin/python3", "-I", os.path.join(HERE, "herdr-error-notify.py")]
     try:
+        if not override and child.get("PANE_TELL_ALERT_EVENT_ID"):
+            event = {"id": child["PANE_TELL_ALERT_EVENT_ID"], "title": title, "body": body,
+                     "created_at": child["PANE_TELL_ALERT_CREATED_AT"]}
+            # Import keeps a stable ID even if this process dies before saving
+            # its own deduplication state. workers-watch drains this queue.
+            return subprocess.run([*command, "--import"], input=json.dumps([event]), text=True,
+                                  env=child, timeout=15, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL).returncode == 0
         return subprocess.run([*command, title, body], env=child, timeout=15,
                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
+
+
+def helper(name):
+    spec = importlib.util.spec_from_file_location(name.replace("-", "_"), os.path.join(HERE, name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def enqueue_main(env, event_id, title, body):
+    try:
+        created = datetime.fromisoformat(env["PANE_TELL_ALERT_CREATED_AT"]).timestamp()
+        helper("main-alert-inbox").enqueue(env, event_id, title, body, now=created)
+        return True  # An identical event already stored is also durable.
+    except (OSError, ValueError, KeyError, RuntimeError):
+        return False
+
+
+def wake_main(env):
+    try:
+        events = helper("main-alert-inbox").pending(env)
+        return helper("main-alert-wake").tick(env, [item["event_id"] for item in events])
+    except (OSError, ValueError, KeyError, RuntimeError):
+        return False
+
+
+def recover_batches(env):
+    if not os.path.isdir(os.path.join(state_root(env), "batch")):
+        return
+    try:
+        subprocess.run(["/bin/bash", os.path.join(HERE, "pane-tell"), "--recover-batch"],
+                       env={**os.environ, **env}, timeout=5, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # Originals stay available to the next tick and metadata alert.
 
 
 def seconds(env, name, default):
@@ -65,11 +112,62 @@ def failed(env, receiver, report, now=None):
 
 def tick(env, now):
     """Called by workers-watch before any herdr query, even when herdr is down."""
+    try:
+        recover_batches(env)
+        return scan(env, now)
+    finally:
+        # A vanished source is not an acknowledgement of the main inbox.
+        wake_main(env)
+
+
+def save_metadata(path, value):
+    descriptor, temporary = tempfile.mkstemp(prefix=".watch-new.", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(descriptor, "w") as output:
+            json.dump(value, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        directory = os.open(os.path.dirname(path), os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def read_metadata(path):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return {}
+    with os.fdopen(descriptor) as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 4 * 1024 * 1024:
+            raise ValueError("unsafe relay alert outbox")
+        value = json.load(source)
+    return value
+
+
+def pending_metadata(path):
+    value = read_metadata(path)
+    if not isinstance(value, dict) or any(
+            not isinstance(key, str) or not isinstance(event, dict)
+            or any(not isinstance(event.get(field), str) for field in ("title", "body", "created", "payload"))
+            or any(not isinstance(event.get(field), bool) for field in ("main", "terminal"))
+            for key, event in value.items()):
+        raise ValueError("invalid relay alert outbox")
+    return value
+
+
+def scan(env, now):
     root = state_root(env)
     if not os.path.isdir(root):
         return []
     limit = max(seconds(env, "PANE_TELL_ALERT", 600), seconds(env, "PANE_TELL_BATCH", 120) + 60)
-    patterns = ("waiting/*", "undelivered/*", "batch/*/open/[0-9]*", "batch/*/sending.*/[0-9]*",
+    patterns = ("waiting/*", "undelivered/*", "batch/*/open/[0-9]*", "batch/*/sending.*/[0-9]*", "batch/*/claimed/[0-9]*",
                 "batch/*/.joined.*", "batch/*/.new.*", "failed-reports/report.*")
     candidates = {}
     for pattern in patterns:
@@ -82,7 +180,11 @@ def tick(env, now):
             if stat.S_ISREG(info.st_mode) and info.st_size and (failed_report or now - info.st_mtime >= limit):
                 candidates[path] = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
     # Independent launchd ticks may overlap. Never hold up delivery on this lock.
-    with open(os.path.join(root, ".watch.lock"), "a") as lock:
+    descriptor = os.open(os.path.join(root, ".watch.lock"), os.O_CREAT | os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "a") as lock:
+        info = os.fstat(lock.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            return []
         os.fchmod(lock.fileno(), 0o600)
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -90,17 +192,18 @@ def tick(env, now):
             return []
         path = os.path.join(root, ".watch-alerts.json")
         try:
-            with open(path) as source:
-                previous = json.load(source)
+            previous = read_metadata(path)
             if not isinstance(previous, dict):
                 previous = {}
         except (OSError, ValueError):
             previous = {}
+        outbox_path = os.path.join(root, ".watch-pending.json")
+        try:
+            outbox = pending_metadata(outbox_path)
+        except (OSError, ValueError):
+            return []  # Preserve damaged metadata for inspection; never overwrite it.
         accepted, alerts = {}, []
         for payload, identity in candidates.items():
-            if previous.get(payload) == identity:
-                accepted[payload] = identity
-                continue
             # It may have drained since scanning. Never read or modify its text.
             try:
                 current = os.stat(payload, follow_symlinks=False)
@@ -112,21 +215,37 @@ def tick(env, now):
             if os.path.dirname(payload) == os.path.join(root, "failed-reports"):
                 title, body = "세션 보고를 전달하지 못했습니다", f"전달 실패 기록: {payload}"
                 try:
-                    with open(payload) as source:
-                        failure = json.load(source)
+                    failure = read_metadata(payload)
                     if isinstance(failure, dict) and all(isinstance(failure.get(key), str) for key in ("receiver", "report")):
                         body += f". 수신처: {failure['receiver']}. 보관한 보고: {failure['report']}"
                 except (OSError, ValueError):
                     pass  # damaged failure metadata still needs an alert
-            if notify(env, title, body):
+            body = body[:700]  # Bound metadata before both transports.
+            digest = hashlib.sha256(json.dumps([payload, identity], sort_keys=True).encode()).digest()
+            event_id = str(uuid.UUID(bytes=digest[:16], version=4))
+            created = datetime.fromtimestamp(identity[3] / 1e9, timezone.utc).isoformat()
+            terminal_done = previous.get(payload) == identity
+            if terminal_done:
                 accepted[payload] = identity
-                alerts.append(payload)
-        descriptor, temporary = tempfile.mkstemp(prefix=".watch-alerts.", dir=root)
-        try:
-            with os.fdopen(descriptor, "w") as output:
-                json.dump(accepted, output)
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+            outbox.setdefault(event_id, {"title": title, "body": body, "created": created,
+                                       "payload": payload, "identity": identity,
+                                       "main": False, "terminal": terminal_done})
+        # Persist both transports before attempting either one. The source may
+        # drain immediately afterwards, but failed imports still have a retry.
+        save_metadata(outbox_path, outbox)
+        for event_id, event in list(outbox.items()):
+            alert_env = {**env, "PANE_TELL_ALERT_EVENT_ID": event_id,
+                         "PANE_TELL_ALERT_CREATED_AT": event["created"]}
+            if not event["main"]:
+                event["main"] = enqueue_main(alert_env, event_id, event["title"], event["body"])
+            if not event["terminal"]:
+                event["terminal"] = notify(alert_env, event["title"], event["body"])
+                if event["terminal"]:
+                    alerts.append(event["payload"])
+            if event["terminal"] and candidates.get(event["payload"]) == event.get("identity"):
+                accepted[event["payload"]] = event["identity"]
+            if event["main"] and event["terminal"]:
+                del outbox[event_id]
+            save_metadata(outbox_path, outbox)
+        save_metadata(path, accepted)
         return alerts

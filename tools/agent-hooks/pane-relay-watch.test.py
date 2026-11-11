@@ -2,6 +2,7 @@
 """Exercise stalled queues without contacting a real pane; --selftest runs all cases."""
 import fcntl
 import importlib.util
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -55,7 +56,7 @@ class QueueWatchTest(unittest.TestCase):
         self.assertNotIn("PRIVATE", self.alert.call_args.args[-1])
 
     def test_all_batch_stages_are_watched(self):
-        for stage in ("open/123.1", "sending.1.2/124.1", ".joined.abc", ".new.def"):
+        for stage in ("open/123.1", "sending.1.2/124.1", "claimed/125.1", ".joined.abc", ".new.def"):
             with self.subTest(stage=stage):
                 path = self.payload("batch/term_test/" + stage)
                 watch.tick(self.env, 1000)
@@ -101,6 +102,15 @@ class QueueWatchTest(unittest.TestCase):
     def test_real_notify_nonzero_and_timeout_are_failures(self):
         with mock.patch.object(watch.subprocess, "run", return_value=mock.Mock(returncode=3)):
             self.assertFalse(NOTIFY({"HERDR_ERROR_NOTIFY": "/fake"}, "title", "body"))
+
+    def test_default_terminal_import_deduplicates_the_main_event_id(self):
+        env = {**self.env, "HERDR_ERROR_NOTIFY": "", "PANE_TELL_ALERT_EVENT_ID": "b7855e17-9dc5-42b7-a6a7-b4d419efde80",
+               "PANE_TELL_ALERT_CREATED_AT": "2026-11-11T09:00:00+00:00"}
+        self.assertTrue(NOTIFY(env, "synthetic", "metadata only"))
+        self.assertTrue(NOTIFY(env, "synthetic", "metadata only"))
+        state = json.loads((Path(self.tmp.name) / "herdr-error-notify/state.json").read_text())
+        self.assertEqual(len(state["pending"]), 1)
+        self.assertEqual(state["pending"][0]["id"], env["PANE_TELL_ALERT_EVENT_ID"])
         with mock.patch.object(watch.subprocess, "run", side_effect=watch.subprocess.TimeoutExpired("fake", 15)):
             self.assertFalse(NOTIFY({"HERDR_ERROR_NOTIFY": "/fake"}, "title", "body"))
 
@@ -145,6 +155,123 @@ class QueueWatchTest(unittest.TestCase):
         alert.assert_called_once()
         self.assertIn("default/w1:p1", alert.call_args.args[-1])
         self.assertIn("/private/report.md", alert.call_args.args[-1])
+
+    def test_main_alert_survives_terminal_failure_and_deduplicates_ids(self):
+        path = self.payload("waiting/old")
+        self.alert.side_effect = [False, True]
+        with mock.patch.object(watch, "enqueue_main", return_value=True) as main, \
+                mock.patch.object(watch, "wake_main"):
+            watch.tick(self.env, 1000)
+            watch.tick(self.env, 1100)
+            watch.tick(self.env, 1200)
+        self.assertEqual(main.call_count, 2)  # No repeated import while terminal retry is pending.
+        ids = [call.args[1] for call in main.call_args_list]
+        self.assertEqual(len(set(ids)), 1)
+        self.assertIn(str(path), main.call_args.args[-1])
+        self.assertNotIn("PRIVATE", main.call_args.args[-1])
+        self.assertEqual(self.alert.call_count, 2)
+
+    def test_main_enqueue_failure_does_not_suppress_terminal_retry(self):
+        self.payload("waiting/old")
+        with mock.patch.object(watch, "enqueue_main", return_value=False) as main, \
+                mock.patch.object(watch, "wake_main"):
+            watch.tick(self.env, 1000)
+            watch.tick(self.env, 1100)
+        self.assertEqual(main.call_count, 2)
+        self.alert.assert_called_once()
+
+    def test_new_identity_has_new_id_and_terminal_uses_same_id_as_main(self):
+        path = self.payload("waiting/old")
+        with mock.patch.object(watch, "enqueue_main", return_value=True) as main, \
+                mock.patch.object(watch, "wake_main"):
+            watch.tick(self.env, 1000)
+            first = main.call_args.args[1]
+            self.assertEqual(self.alert.call_args.args[0]["PANE_TELL_ALERT_EVENT_ID"], first)
+            path.write_text("different synthetic message")
+            os.utime(path, (300, 300))
+            watch.tick(self.env, 1200)
+            self.assertNotEqual(first, main.call_args.args[1])
+
+    def test_periodic_recovery_runs_before_stall_alert_threshold(self):
+        self.payload("batch/term_test/open/123.1", age=121)
+        with mock.patch.object(watch, "recover_batches") as recover, \
+                mock.patch.object(watch, "wake_main"):
+            watch.tick(self.env, 1000)
+        recover.assert_called_once_with(self.env)
+        self.alert.assert_not_called()
+
+    def test_gone_source_keeps_retrying_pending_main_inbox(self):
+        self.root.mkdir()
+        with mock.patch.object(watch, "wake_main") as wake:
+            watch.tick(self.env, 1000)
+            watch.tick(self.env, 1100)
+        self.assertEqual(wake.call_count, 2)
+
+    def test_failed_main_import_retries_after_original_disappears(self):
+        source = self.payload("waiting/old")
+        inbox = load("relay_inbox_locked", "main-alert-inbox.py")
+        with mock.patch.object(watch, "enqueue_main", return_value=False), \
+                mock.patch.object(watch, "wake_main"):
+            watch.tick(self.env, 1000)
+        source.unlink()
+        with mock.patch.object(watch, "wake_main"):
+            watch.tick(self.env, 1100)
+        events = inbox.pending(self.env)
+        self.assertEqual(len(events), 1)
+        self.assertNotIn("PRIVATE", events[0]["body"])
+        self.assertEqual(self.alert.call_count, 1)
+
+    def test_failed_terminal_import_retries_after_original_disappears(self):
+        source = self.payload("waiting/old")
+        self.alert.side_effect = [False, True]
+        with mock.patch.object(watch, "wake_main"):
+            watch.tick(self.env, 1000)
+            source.unlink()
+            watch.tick(self.env, 1100)
+            watch.tick(self.env, 1200)
+        self.assertEqual(self.alert.call_count, 2)
+
+    def test_unsafe_outbox_is_preserved_without_transport(self):
+        self.payload("waiting/old")
+        target = self.root / ".watch-pending.json"
+        os.mkfifo(target)
+        with mock.patch.object(watch, "wake_main"):
+            self.assertEqual(watch.tick(self.env, 1000), [])
+        self.assertTrue(target.is_fifo())
+        self.alert.assert_not_called()
+
+    def test_special_watch_metadata_does_not_block(self):
+        self.payload("waiting/old")
+        lock = self.root / ".watch.lock"
+        os.mkfifo(lock)
+        self.assertEqual(watch.scan(self.env, 1000), [])
+        lock.unlink()
+        os.mkfifo(self.root / ".watch-alerts.json")
+        watch.scan(self.env, 1000)
+        self.alert.assert_called_once()
+
+    def test_real_inbox_survives_main_absence_restart_and_explicit_receipt(self):
+        source = self.payload("waiting/old")
+        inbox = load("relay_inbox_integration", "main-alert-inbox.py")
+        self.alert.return_value = False
+        with mock.patch.object(watch, "wake_main"):
+            watch.tick(self.env, 1000)
+        event = inbox.pending(self.env)[0]
+        self.assertIsNone(inbox.drain(self.env, "term_MAIN", "session1", "UserPromptSubmit", now=1000))
+        root = Path(self.tmp.name) / "orchestrator"
+        (root / "main").write_text("term_MAIN\n")
+        first = inbox.drain(self.env, "term_MAIN", "session1", "UserPromptSubmit", now=1001)
+        self.assertIn(event["event_id"], first["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(len(inbox.pending(self.env)), 1)
+        inbox.drain(self.env, "term_MAIN", "session2", "SessionStart", now=1002)
+        state = json.loads((root / "alerts/state.json").read_text())
+        claim = state["claim"]
+        self.assertEqual(claim["session_id"], "session2")
+        inbox.ack(self.env, "term_MAIN", "session2", claim["token"], claim["event_ids"], now=1003)
+        with mock.patch.object(watch, "wake_main"):
+            watch.tick(self.env, 1004)
+        self.assertEqual(inbox.pending(self.env), [])
+        self.assertTrue(source.exists())  # Receipt does not deliver or delete the original.
 
 
 if __name__ == "__main__":
