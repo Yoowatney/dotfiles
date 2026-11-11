@@ -84,10 +84,9 @@ assert_eq 1 "$(jq '[.hooks.UserPromptSubmit[] | select(any(.hooks[]; .command | 
 assert_eq 1 "$(jq '[.hooks.UserPromptSubmit[] | select(any(.hooks[]; .command == "notify-superset"))] | length' "$hooks_json")" "existing prompt hook is preserved"
 assert_eq 1 "$(jq '[.hooks.Stop[] | select(any(.hooks[]; .command | contains("stop-notification.sh")))] | length' "$hooks_json")" "existing Stop hook is preserved"
 
-first_hash="$(md5 -q "$hooks_json")"
+cp "$hooks_json" "$SANDBOX/hooks-before.json"
 run_installer
-second_hash="$(md5 -q "$hooks_json")"
-assert_eq "$first_hash" "$second_hash" "second install leaves JSON unchanged"
+cmp -s "$SANDBOX/hooks-before.json" "$hooks_json" || fail "second install leaves JSON unchanged"
 assert_eq 4 "$(find "$SANDBOX/home" -name '*.pre-agent-hooks' -type f | wc -l | tr -d ' ')" "second install creates no extra backups"
 
 # hooks.json runs these two names: through them, a pane on the workers server stays silent.
