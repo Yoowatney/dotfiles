@@ -26,6 +26,9 @@ class InstallTest(unittest.TestCase):
             self.assertEqual(sum('codex-memory.py' in h['command'] for h in entries), 1)
             self.assertIn('safety-guard', [h['command'] for h in entries])
             self.assertEqual(data['hooks']['PreToolUse'][0]['hooks'][0]['command'], 'permission-guard')
+            # Hook trust IDs include the group and entry index. Keep guard IDs.
+            self.assertIn('codex-memory.py', data['hooks']['SessionStart'][0]['hooks'][0]['command'])
+            self.assertEqual(data['hooks']['SessionStart'][0]['hooks'][1]['command'], 'safety-guard')
             for event in ['SessionStart', 'Stop']:
                 commands = [h['command'] for g in data['hooks'][event] for h in g['hooks']]
                 self.assertEqual(sum('task-ledger.py hook ' + event in c for c in commands), 1)
