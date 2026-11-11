@@ -446,6 +446,30 @@ def notify(env, msg) -> bool:
         return False
 
 
+def startup_closed(env, old, now) -> bool:
+    """A fresh pane-spawn receipt confirms intentional cleanup after failed check startup.
+
+    Match the check token and a close since the last observation: herdr can reuse pane ids after restart.
+    Missing or invalid receipts leave the ordinary lost-pane warning intact.
+    """
+    seen = old.get("seen")
+    token = atc.CHECK_TOKEN.search(old.get("name") or "")
+    if not token or not isinstance(seen, (int, float)) or not old.get("pane"):
+        return False
+    folder = os.path.join(herdr_peers.state_dir(env), "automatic-checks")
+    for path in glob.glob(os.path.join(folder, token[1] + ".json.start.*.json")):
+        try:
+            with open(path, encoding="utf-8") as stream:
+                if not seen <= os.fstat(stream.fileno()).st_mtime <= now:
+                    continue
+                receipt = json.load(stream)
+            if isinstance(receipt, dict) and receipt.get("status") == "closed" and receipt.get("address") == "workers/" + old["pane"]:
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
 def tick(env, now: float) -> list:
     """One round; returns the alerts someone took."""
     try:
@@ -617,7 +641,7 @@ def tick(env, now: float) -> list:
                 continue
             lost_text = (f"자동 칸 {old.get('name') or term}(workers/{old.get('pane') or '?'})이 보고 없이 사라졌습니다. 보드 항목이 In Progress로 남았을 수 있으니 보고 이어 갈 일은 새 칸에 맡기세요. {UNSENT}"
                          if old.get("job") else f"밑 칸 {old.get('name') or term}(workers/{old.get('pane') or '?'})이 보고 없이 사라졌습니다. {UNSENT}")
-            if reported_since(old.get("floor", 0), term, old.get("session")):
+            if reported_since(old.get("floor", 0), term, old.get("session")) or startup_closed(env, old, now):
                 continue
             moved = (old.get("pane"), old.get("name") or term, old.get("agent_name") or "", old.get("session") or "") if old.get("remote") else None
             if not (keep_trial(env, old, term, now) if trial(old.get("name")) else tell(lost_text, old.get("opener", ""), old.get("home", False), moved)):
@@ -648,6 +672,15 @@ def selftest():
         def script(path, body):
             write(path, "#!/bin/bash\n" + body)
             os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
+
+        cleanup_env = {"HOME": d, "XDG_STATE_HOME": f"{d}/state"}
+        cleanup_path = f"{d}/state/orchestrator/automatic-checks/1111111111111111.json.start.1.json"
+        write(cleanup_path, json.dumps({"status": "closed", "address": "workers/w1:pCleanup"}))
+        os.utime(cleanup_path, (101, 101))
+        for name in ("ordinary worker", "check [ac-2222222222222222]"):
+            assert not startup_closed(cleanup_env, {"pane": "w1:pCleanup", "seen": 100, "name": name}, 102), \
+                "a fresh receipt for another check must not hide a lost worker after pane-id reuse"
+        os.remove(cleanup_path)
 
         W, DEF = f"{d}/sessions/workers/herdr.sock", f"{d}/herdr.sock"
         script(f"{d}/herdr", f'''case "$HERDR_SOCKET_PATH" in */sessions/workers/*) s=workers ;; *) s=default ;; esac
@@ -779,6 +812,25 @@ esac
         panes_on_workers(label("w1:p5", "🟢 🫡 보고함")); agents(agent("w1:p5", "term_5", "idle", seq=2)); tick(9200)
         touch_reported("term_5", 9230); panes_on_workers(); agents()
         assert tick(9260) == [] and "term_5" not in watch(), "a pane that reported before it went is no news"
+        # pane-spawn records a successful close after failed check startup. It is intentional cleanup, not lost work.
+        receipt = f"{d}/state/orchestrator/automatic-checks/1111111111111111.json.start.1.json"
+        for number, (status, address, stamp, expected) in enumerate([
+                ("closed", "workers/w1:pCleanup", 9271, 0),
+                ("closed", "workers/w1:pCleanup", 9200, 1),  # an old receipt must not cover a reused pane id
+                ("closed", "workers/w1:pCleanup", 9273, 1),  # a future receipt cannot confirm this disappearance
+                ("closed", "default/w1:pCleanup", 9271, 1),
+                ("started", "workers/w1:pCleanup", 9271, 1),
+                (None, None, 9271, 1)]):
+            panes_on_workers(label("w1:pCleanup", "🟢 🫡 시작 확인 [ac-1111111111111111]"))
+            agents(agent("w1:pCleanup", "term_Cleanup", "working", seq=number))
+            tick(9270)
+            write(receipt, json.dumps({"status": status, "address": address}) if status else "{broken")
+            os.utime(receipt, (stamp, stamp))
+            panes_on_workers(); agents()
+            lost = [text for text in tick(9272) if "보고 없이 사라졌" in text]
+            assert len(lost) == expected, ("startup cleanup must suppress only a fresh confirmed close", status, address, stamp, lost)
+            assert "term_Cleanup" not in watch(), "a confirmed cleanup or delivered warning retires the old watch record"
+        os.remove(receipt)
         panes_on_workers(label("w1:p3", "🟢 🫡 재시도")); agents(agent("w1:p3", "term_3", "working", seq=1)); tick(9300)
         panes_on_workers(); agents()
         assert tick(9360, TELL_EXIT="1", NOTIFY_EXIT="1") == [] and len(tick(9420)) == 1, "an alert nobody took is sent again next minute"
