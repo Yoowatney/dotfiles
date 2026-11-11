@@ -130,6 +130,10 @@ has "--env CLAUDE_STARTUP_ROLE=worker" "Claude work panes keep their startup pro
 hasnt "CLAUDE_STARTUP_ARTIFACT" "a Claude pane starts without the Artifact tool unless it asks (api#1065)"
 
 has "agent prompt w1:new 할 일입니다" "instruction delivered"
+has 'first response line must be `끝날 예상: HH:MM KST`' "workers estimate their own completion at startup"
+has 'pane-tell default/w7:p3' "the startup estimate goes to the resolved caller"
+has 'PANE_TELL_BATCH=0 pane-tell' "the initial estimate does not wait for idle relay batching"
+has 'upper bounds, never reasons to wait' "an assigned deadline cannot delay completed work"
 has "For investigations and comparisons" "investigations get a default outcome contract"
 has "original question" "the user's question survives delegation"
 has "추천:" "the investigator must recommend an option"
@@ -264,6 +268,8 @@ hasnt "tab create" "--same-tab opens no tab"
 
 # Agent arguments pass through, and Codex works without a session id until its first prompt.
 SESSIONLESS=1 ps --kind codex "조사" "지시" -- -m gpt-5 >/dev/null
+has 'first response line must be `끝날 예상: HH:MM KST`' "Codex estimates at startup too"
+has 'pane-tell default/w7:p3' "Codex relays to its caller too"
 has "Before reporting that the user should check something, first determine whether ego Lite or an API can inspect it; if available, check it yourself." "Codex receives the same self-verification instruction"
 # 2026-11-06: once Codex sees a newer release than it runs, its TUI opens on an update prompt that nobody here answers, so
 # every Codex pane failed to start until 0.167.0 was installed (mise installs a release a day after it comes out).
@@ -501,6 +507,7 @@ hasnt "확인 칸입니다" "a pane that does the job is no check pane"
 
 # 요유 2026-11-05 (api#1002): a fresh pane checks a pane's report for the main pane. Its agent name says so; a rename cannot change that.
 out=$(ps --check "api#1 로그인" "npm test를 돌려 보세요")
+hasnt 'first response line must be `끝날 예상: HH:MM KST`' "checks retain their command-and-result first line"
 has "[workers] tab create --workspace " "a check pane opens with the other workers"
 has "[workers] pane rename w1:new 🟢 🫡 확인 api#1 로그인" "its name says it is a check pane"
 has "[workers] agent start spawn-65f21913323dc21-chk" "its agent name tells auto-tab-close, and still records who opened it"
@@ -876,6 +883,7 @@ out=$(CALLER_LABEL=$LEAD MUNICE_AMBIENT=1 ps "리뷰" "지시"); stays "an ambie
 out=$(CALLER_LABEL=$LEAD run_on "$SANDBOX/sessions/resume/herdr.sock" "리뷰" "지시"); stays "another named server" "$out"
 has "[resume] pane split" "it opens on its own server"
 out=$(CALLER_LABEL=$LEAD run_on "$SANDBOX/sessions/workers/herdr.sock" "리뷰" "지시"); [ "$out" = "w1:new" ] || fail "from workers, a bare id: $out"
+has 'pane-tell workers/w7:p3' "an estimate addresses a lead on workers without changing servers"
 has "[workers] pane split --pane w7:p3" "a lead on workers opens beside itself"
 
 # workers cannot take it: an ordinary lead opens in its own tab as before and says so, with no workers socket left behind.
