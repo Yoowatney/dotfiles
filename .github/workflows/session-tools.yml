@@ -14,6 +14,8 @@ on:
       - 'shell/zsh/codex-fn.test.sh'
       - 'shell/zsh/zshrc'
       - 'tools/agent-hooks/codex-startup*'
+      - 'tools/agent-hooks/handoff*'
+      - 'tools/agent-hooks/install-handoff*'
       - 'tools/agent-hooks/codex-memory*'
       - 'tools/agent-hooks/install-codex-startup*'
       - 'tools/agent-hooks/task-ledger*'
@@ -40,6 +42,8 @@ on:
       - 'shell/zsh/codex-fn.test.sh'
       - 'shell/zsh/zshrc'
       - 'tools/agent-hooks/codex-startup*'
+      - 'tools/agent-hooks/handoff*'
+      - 'tools/agent-hooks/install-handoff*'
       - 'tools/agent-hooks/codex-memory*'
       - 'tools/agent-hooks/install-codex-startup*'
       - 'tools/agent-hooks/task-ledger*'
@@ -86,6 +90,9 @@ jobs:
       - run: python3 -m unittest discover -s tools/agent-hooks -p test_startup_estimate.py
       - run: bash shell/zsh/codex-fn.test.sh
       - run: python3 tools/agent-hooks/codex-startup.test.py
+      - run: bash tools/agent-hooks/handoff.test.sh
+      - run: python3 tools/agent-hooks/handoff-state.test.py
+      - run: python3 tools/agent-hooks/install-handoff.test.py
       - run: python3 tools/agent-hooks/codex-memory.test.py
       - run: python3 tools/agent-hooks/install-codex-startup.test.py
       - run: python3 tools/agent-hooks/task-ledger.test.py

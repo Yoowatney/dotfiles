@@ -158,6 +158,21 @@ def codex_transcript(sid):
     return ""
 
 
+def interactive_codex_transcript(path, sid):
+    # SessionStart's `source=startup` describes the hook event, not the client.
+    # Exec and native subagents can inherit the same pane/thread environment.
+    # Only the matching TUI rollout establishes an interactive pane session.
+    try:
+        with Path(path).open() as stream:
+            first = json.loads(stream.readline())
+        meta = first.get("payload") if isinstance(first, dict) else None
+        return (isinstance(first, dict) and first.get("type") == "session_meta" and isinstance(meta, dict)
+                and meta.get("id") == sid and meta.get("source") == "cli"
+                and meta.get("originator") == "codex-tui")
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def codex_session(payload):
     sid = payload.get("session_id")
     transcript = payload.get("transcript_path")
@@ -167,6 +182,8 @@ def codex_session(payload):
         return ""
     if not isinstance(transcript, str) or not transcript:
         transcript = codex_transcript(sid)
+    if not transcript or not interactive_codex_transcript(transcript, sid):
+        return ""
     record = Path(str(pending()) + ".codex-session")
     try:
         previous = json.loads(record.read_text())
@@ -177,6 +194,9 @@ def codex_session(payload):
     if result:
         return result
     if previous.get("session_id") == sid or not previous.get("transcript_path"):
+        return ""
+    # Do not replay an exec transcript left by older hook versions.
+    if not interactive_codex_transcript(previous["transcript_path"], previous.get("session_id")):
         return ""
     path = Path(previous["transcript_path"])
     try:
