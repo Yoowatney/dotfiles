@@ -15,7 +15,7 @@ command -v jq >/dev/null 2>&1 || exit 0
 event=UserPromptSubmit
 [ "${1:-}" != session ] || event=SessionStart
 emit() {
-    jq -n --arg ctx "$1" --arg event "$event" '{hookSpecificOutput: {hookEventName: $event, additionalContext: $ctx}}' 2>/dev/null
+    printf '%s' "$1" | jq -Rs --arg event "$event" '{hookSpecificOutput: {hookEventName: $event, additionalContext: .}}' 2>/dev/null
     exit 0
 }
 correction= machine=
@@ -35,9 +35,10 @@ label=$(printf '%s' "$pane" | jq -r '.result.pane.label // empty' 2>/dev/null)
 term=$(printf '%s' "$pane" | jq -r '.result.pane.terminal_id | select(type == "string") // empty' 2>/dev/null)
 main=$(printf '%s' "$pane" | jq -r '.main_terminal | select(type == "string") // empty' 2>/dev/null)
 session=$(printf '%s' "$input" | jq -r '.session_id | select(type == "string") // empty' 2>/dev/null)
-inbox=
+inbox= priority=
 pane_session=$(printf '%s' "$pane" | jq -r '.result.pane.agent_session.value | select(type == "string") // empty' 2>/dev/null)
 if [ -n "$term" ] && [ -n "$session" ] && [ "$session" = "$pane_session" ] && [ "$term" = "$main" ]; then
+    priority=$(python3 -I "$(dirname "$0")/main-user-relay.py" drain --terminal "$term" --session "$session" --hook-event "$event" 2>/dev/null) || priority=
     if offered=$(python3 -I "$(dirname "$0")/main-alert-inbox.py" drain --terminal "$term" --session "$session" --hook-event "$event" 2>/dev/null); then
         inbox=$(printf '%s' "$offered" | jq -r --arg event "$event" 'select(.hookSpecificOutput.hookEventName == $event) | .hookSpecificOutput.additionalContext | select(type == "string")' 2>/dev/null)
     fi
@@ -50,7 +51,10 @@ if [ "${1:-}" = session ]; then
         dir=${dir:-$PWD}
         bash "$(dirname "$0")/pane-label" "$PLACEHOLDER ${dir##*/}"
     fi
-    [ -z "$inbox" ] || emit "$inbox"
+    context="${priority}${priority:+
+
+}${inbox}"
+    [ -z "$context" ] || emit "$context"
     exit 0
 fi
 
@@ -110,4 +114,6 @@ if [ -n "$session" ] && [ -s "$note" ]; then
     rm -f "$note"
 fi
 
-emit "$msg${correction:+ $correction}${inbox:+ $inbox}"
+emit "${priority}${priority:+
+
+}$msg${correction:+ $correction}${inbox:+ $inbox}"
