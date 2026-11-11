@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Alert outside pane-tell when a caller or a detached queue cannot deliver.
 
-Queued payloads are inspected only through file metadata. Caller failures keep
-separate metadata containing the receiver and saved report path, never its text.
-An alert acknowledges neither delivery nor permission to resend a payload.
+Operational alerts expose file metadata only. The priority relay classifier
+checks current user Slack relays separately so the initial backlog cannot bury
+them; their original text is offered by that helper, never this alert outbox.
+Caller failures keep receiver/report-path metadata, never the report text. An
+alert acknowledges neither delivery nor permission to resend a payload.
 """
 import fcntl
 import glob
@@ -184,20 +186,25 @@ def valid_identity(value):
     return isinstance(value, list) and len(value) == 4 and all(type(n) is int and n >= 0 for n in value)
 
 
-def baseline_metadata(path, inventory, previous, outbox, now):
+def baseline_metadata(env, path, inventory, previous, outbox, now):
     """Freeze an owned metadata-only inventory, including young queued files."""
     baseline = read_metadata(path)
     if not baseline:
         # An existing empty/corrupt manifest is not permission to reinitialize.
         if os.path.lexists(path):
             raise ValueError("empty relay alert baseline")
+        # User Slack relays use the independent priority hook context path.
+        # They remain current work, even on a fresh watcher installation.
+        classifier = helper("main-user-relay")
+        current = {tuple(identity) for payload, identity in inventory.items()
+                   if classifier.is_user_relay(env, payload, identity)}
         entries = {}
         for collection in (previous, inventory):
             for payload, identity in collection.items():
-                if isinstance(payload, str) and valid_identity(identity):
+                if isinstance(payload, str) and valid_identity(identity) and tuple(identity) not in current:
                     entries[event_identifier(payload, identity)] = {"payload": payload, "identity": identity}
         for event_id, event in outbox.items():
-            if not event.get("fresh", False):
+            if not event.get("fresh", False) and tuple(event["identity"]) not in current:
                 entries.setdefault(event_id, {"payload": event["payload"], "identity": event.get("identity")})
         baseline = {"version": 1, "created_at": now, "summary_id": "relay-backlog-" + uuid.uuid4().hex,
                     "entries": entries}
@@ -284,7 +291,7 @@ def scan(env, now):
             return []  # Preserve damaged metadata for inspection; never overwrite it.
         baseline_path = os.path.join(root, ".watch-baseline.json")
         try:
-            baseline = baseline_metadata(baseline_path, inventory, previous, outbox, now)
+            baseline = baseline_metadata(env, baseline_path, inventory, previous, outbox, now)
         except ValueError:
             return []  # Refuse reinitialization of an unsafe or damaged manifest.
         baseline_applied = summarize_baseline(env, baseline, baseline_path)

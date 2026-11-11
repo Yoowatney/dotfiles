@@ -323,7 +323,8 @@ class BaselineTest(unittest.TestCase):
     def test_failed_summary_survives_missing_original_and_restart(self):
         path = self.payload("waiting/old")
         inbox = watch.helper("main-alert-inbox")
-        with mock.patch.object(watch, "helper", return_value=inbox), \
+        real_helper = watch.helper
+        with mock.patch.object(watch, "helper", side_effect=lambda name: inbox if name == "main-alert-inbox" else real_helper(name)), \
                 mock.patch.object(inbox, "summarize", side_effect=OSError("synthetic full disk")):
             watch.scan(self.env, 1000)
         manifest = (self.root / ".watch-baseline.json").read_bytes()
@@ -470,6 +471,57 @@ class BaselineTest(unittest.TestCase):
         self.assertEqual(watch.scan(self.env, 1001), [])
         self.assertTrue(manifest.is_fifo())
         self.alert.assert_not_called()
+
+    def test_current_user_relay_is_not_hidden_in_initial_backlog(self):
+        current = self.payload("waiting/current_user", 601)
+        historical = self.payload("waiting/historical", 601)
+        identity = watch.file_identity(current.stat())
+        # Legacy terminal state/outbox must not pull a current user relay back
+        # into the historical inventory after read-only classification.
+        watch.save_metadata(str(self.root / ".watch-alerts.json"), {str(current): identity})
+        event_id = watch.event_identifier(str(current), identity)
+        watch.save_metadata(str(self.root / ".watch-pending.json"), {
+            event_id: {"title": "Legacy current relay", "body": "Current archive: " + str(current),
+                       "created": "1970-01-01T00:00:01+00:00", "payload": str(current), "identity": identity,
+                       "main": False, "terminal": True}})
+        real_helper = watch.helper
+        classifier = mock.Mock()
+        classifier.is_user_relay.side_effect = lambda env, path, identity: path == str(current)
+        with mock.patch.object(watch, "helper", side_effect=lambda name: classifier if name == "main-user-relay" else real_helper(name)):
+            watch.scan(self.env, 1000)
+        manifest = json.loads((self.root / ".watch-baseline.json").read_text())
+        paths = {entry["payload"] for entry in manifest["entries"].values()}
+        self.assertNotIn(str(current), paths)
+        self.assertIn(str(historical), paths)
+        events = self.pending()
+        self.assertEqual(len(events), 2)
+        self.assertEqual(sum(str(current) in event["body"] for event in events), 1)
+
+    def test_real_user_classifier_preserves_young_relay_without_main_registration(self):
+        current = self.payload("waiting/current_user", 1)
+        original = ("[pane-tell: 'Synthetic sender' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, "
+                    "되돌리기 어려운 일은 요유에게 확인하세요] [Slack #synthetic 요유] "
+                    "Synthetic complete user request\n" + "complete original\n" * 400)
+        current.write_text(original)
+        os.utime(current, (999, 999))
+        receivers = self.root / "receivers"
+        receivers.mkdir()
+        (receivers / current.name).write_text("term_MAIN\ndefault\n")
+        historical = self.payload("waiting/historical", 601)
+        watch.scan(self.env, 1000)
+        manifest = json.loads((self.root / ".watch-baseline.json").read_text())
+        self.assertEqual({entry["payload"] for entry in manifest["entries"].values()}, {str(historical)})
+        self.assertNotIn("complete original", json.dumps(manifest))
+        self.assertEqual(len(self.pending()), 1)
+        priority = watch.helper("main-user-relay")
+        self.assertIsNone(priority.drain(self.env, "term_MAIN", "session1", "Stop", now=1000))
+        registration = Path(self.tmp.name) / "orchestrator/main"
+        registration.write_text("term_MAIN\n")
+        context = priority.drain(self.env, "term_MAIN", "session1", "Stop", now=1001)
+        self.assertIn(original, context)
+        current.unlink()  # Delivery removes the original; no later reoffer.
+        self.assertIsNone(priority.drain(self.env, "term_MAIN", "session2", "Stop", now=1100))
+        self.assertEqual(len(self.pending()), 1)
 
 
 if __name__ == "__main__":
