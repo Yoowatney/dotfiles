@@ -104,7 +104,7 @@ def transcript(path):
                 text, success = "", None
         if codex and row.get("type") == "response_item" and payload.get("role") == "user":
             text, success = "", None
-        if codex and row.get("type") == "response_item" and payload.get("role") == "assistant" and payload.get("phase") == "final":
+        if codex and row.get("type") == "response_item" and payload.get("role") == "assistant" and payload.get("phase") in ("final", "final_answer"):
             text = "\n".join(c.get("text", "") for c in payload.get("content", []) if c.get("type") == "output_text")
             if text and 0 <= dt.datetime.now(dt.timezone.utc).timestamp() - epoch(row.get("timestamp")) <= 600:
                 success = {"at": row["timestamp"], "provider": meta.get("payload", {}).get("model_provider", "unknown"),

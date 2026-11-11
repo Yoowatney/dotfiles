@@ -70,13 +70,13 @@ class RecoveryTests(unittest.TestCase):
     def defer(self, text="Codex 사용량이 없어 교차 리뷰를 미룹니다. https://example.org/issues/1"):
         self.hook(last_assistant_message=text)
 
-    def success(self, age=0, error=False, final=True, drain=True, write_only=False):
+    def success(self, age=0, error=False, final=True, drain=True, write_only=False, phase="final"):
         stamp = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=age)).isoformat()
         rows = [
             {"type": "session_meta", "payload": {"id": "session", "model_provider": "openai"}},
             {"timestamp": stamp, "type": "event_msg", "payload": {"type": "task_started"}},
             {"timestamp": stamp, "type": "response_item", "payload": {
-                "type": "message", "role": "assistant", "phase": "final" if final else "commentary",
+                "type": "message", "role": "assistant", "phase": phase if final else "commentary",
                 "content": [{"type": "output_text", "text": "Checked the requested files."}]}},
         ]
         if error:
@@ -92,6 +92,17 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(item["status"], "pending")
         self.assertIn("https://example.org/issues/1", item["links"])
         self.assertIsNone(item.get("notified_at"))
+
+    def test_current_codex_final_answer_phase_proves_recovery(self):
+        # Codex 0.167.0 writes response_item messages with final_answer, as
+        # observed in an actual waiting session before this observer was installed.
+        self.main_pane()
+        self.defer()
+        self.success(phase="final_answer")
+        item = self.state()["items"][0]
+        self.assertIsNotNone(item.get("queued_at"))
+        self.assertEqual(item["recovery_evidence"]["session_id"], "session")
+        self.assertIn("Codex 실제 답변 성공", (self.root / "relay.log").read_text())
 
     def test_missing_or_malformed_transcript_does_not_hide_payload_deferral(self):
         for malformed in (False, True):
