@@ -72,7 +72,9 @@ start || exit 1
 out=$(watch alive); rc=$?; echo "$out"; [ "$rc" = 0 ] || exit "$rc"
 check "case 1: the watch stopped the runaway from its top (pid $bomb)" '[[ $out == *"끔 "* && $out == *"맨 위 pid $bomb:"* ]]'
 check "case 1: none of its processes is left" 'settled'
-check "case 1: the count is back near $base ($(users))" '[ "$(users)" -le $((base + 40)) ]'
+# Only the owned group is a stable cleanup assertion on a shared host.
+# Other pre-push tests and live sessions can change the user's total count.
+echo "case 1 host count: $(users) (initial $base; diagnostic only)"
 pkill -KILL -g "$bomb" 2>/dev/null
 wait 2>/dev/null
 
@@ -84,7 +86,7 @@ echo "after killing the top alone: $(left) processes left in its group, user pro
 out=$(watch orphan); rc=$?; echo "$out"; [ "$rc" = 0 ] || exit "$rc"
 check "case 2: the watch found the group whose top is gone ($bomb)" '[[ $out == *"끔 "* && $out == *"프로세스 그룹 $bomb("* ]]'
 check "case 2: none of its processes is left" 'settled'
-check "case 2: the count is back near $base ($(users))" '[ "$(users)" -le $((base + 40)) ]'
+echo "case 2 host count: $(users) (initial $base; diagnostic only)"
 
 log=$T/state/fork-watch/kills.log
 check "two lines in the log" '[ "$(grep -c " 끔 " "$log" 2>/dev/null)" = 2 ]'
