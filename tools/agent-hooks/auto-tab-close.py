@@ -72,6 +72,9 @@ _spec.loader.exec_module(share)  # reuse its 요유 몫 reader, code and quote s
 _spec = importlib.util.spec_from_file_location("herdr_peers", os.path.join(HERE, "herdr_peers.py"))
 herdr_peers = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(herdr_peers)  # the default and workers servers, and pane addresses across them
+_spec = importlib.util.spec_from_file_location("relay_watch", os.path.join(HERE, "pane-relay-watch.py"))
+relay_watch = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(relay_watch)
 
 SESSION = re.compile(r"세션[ \t]*\**[ \t]*[:：][ \t]*\**([^·\n]*)")
 LEFT = re.compile(r"남은[ \t]*것[ \t]*\**[ \t]*[:：]")
@@ -674,10 +677,7 @@ def finish(reply: str, env):
                 return send(f"바로 전달하는 칸의 보고입니다(확인 자동 연결 실패). {error}\n{short_report(reply, None)}\n전체 보고: {path} ({now:%H:%M:%S} 항목)")
         if needs_yoyoo:
             message = f"{share.JOB_NOTE}:\n{short_report(reply)}\n칸: {me.get('label') or ''}\n전체 보고: {path} ({now:%H:%M:%S} 항목)"
-            try:
-                return subprocess.run([pt, lead, message], env=dict(env), timeout=10, **quiet).returncode == 0
-            except subprocess.TimeoutExpired:
-                return False
+            return send(message)
         head = "칸의 마지막 보고입니다(칸을 닫기 전에 보냅니다)" if close else "칸의 보고입니다(칸은 열어 둡니다)"
         who, note = "이", share.RELAY_NOTE
         if herdr_peers.delegates_checks(env, to.get("terminal_id")):  # a check pane's report ends the round: no check of a check
@@ -693,16 +693,16 @@ def finish(reply: str, env):
         stand_in = ""
         if opener(name) and to.get("terminal_id") != opener(name):
             stand_in = "이 칸을 연 리드에게 보낼 수 없어 대신 보냅니다. " + (f"{herdr_peers.HOME_NOTE} " if herdr_peers.home_pane(name) else "")
-        try:  # share.RELAYED knows the head: the lead's next report has to show its check
-            # 10 s, as the watch gives it: a slow send killed here would still type, then the main pane would get the same report
-            return subprocess.run([pt, lead, f"{who} {head}. {stand_in}{note}:\n{body}"], env=dict(env), timeout=10, **quiet).returncode == 0
-        except subprocess.TimeoutExpired:
-            return False
+        # share.RELAYED knows the head: the lead's next report has to show its check.
+        return send(f"{who} {head}. {stand_in}{note}:\n{body}")
 
+    attempted_lead = lead
     sent = bool(lead) and tell(lead, to)
     if lead and not sent and workers and to.get("terminal_id") != main:  # hidden: no tab of 요유's shows this pane stop, so the main pane hears it
         lead, to = main_pane(env)
         sent = bool(lead) and tell(lead, to)
+    if attempted_lead and not sent:
+        relay_watch.failed(env, lead or attempted_lead, path)
     if (needs_yoyoo or (lead and herdr_peers.delegates_checks(env, to.get("terminal_id")))) and not sent:
         close = False
     # A small reuse window for main-owned company work. workers-watch still reaps reported, unheld panes after 15 idle
@@ -936,6 +936,7 @@ esac''')
     fake = script("pane-label", f'echo "reported=$PANE_CLOSE_REPORTED pane=$HERDR_PANE_ID $@" >> {sandbox}/calls')
     fake_tell = script("pane-tell", f'echo "tell $1" >> {sandbox}/calls\n[ "$1" = "${{TELL_REFUSE:-}}" ] && exit 2\necho "$2" > {sandbox}/told\nsleep ${{TELL_SLEEP:-0}}\nexit ${{TELL_EXIT:-0}}')
     fake_spawn = script("pane-spawn", 'echo "simulated check start failure" >&2\nexit 1')
+    fake_notify = script("error-notify", f'printf "%s\\n" "$2" >> {sandbox}/relay-alerts')
 
     me = {"pane_id": "w1:p2", "tab_id": "w1:t1", "workspace_id": "w1", "label": "🟢 일", "cwd": "/w",
           "terminal_id": "term_2", "agent_session": {"value": "sid-2"}, "agent_status": "idle"}
@@ -968,6 +969,7 @@ esac''')
                                            "PANE_REPORT_DIR": reports, "AUTO_TAB_CLOSE_PANE_LABEL": fake,
                                            "AUTO_TAB_CLOSE_PANE_TELL": fake_tell, "AUTO_TAB_CLOSE_SETTLE": "0",
                                            "AUTO_TAB_CLOSE_PANE_SPAWN": fake_spawn,
+                                           "HERDR_ERROR_NOTIFY": fake_notify,
                                            "AUTO_TAB_CLOSE_POLL": "0.02", **env},
                            timeout=10)
         for f in pending():  # its step drops the file only as its last act, so a step without one has ended
@@ -1041,7 +1043,10 @@ esac''')
         "share-guard knows the message auto-tab-close sends"
     os.unlink(lead_log)
     assert full in saved(), "kept even when a 👑 hears it"
+    assert not os.path.exists(f"{sandbox}/relay-alerts"), "successful delivery needs no error alert"
     assert run(reported, {**pane2, "TELL_EXIT": "3"}) == (0, "", "tell w1:p1\n" + closed), "a 👑 that cannot hear holds nothing"
+    alert = open(f"{sandbox}/relay-alerts").read()
+    assert reports in alert and full not in alert, "a failed relay alerts outside pane-tell with the saved path, not report contents"
     herdr_says({"name": "spawned"}, [other_space, other_tab, me])
     assert run(reported, pane2) == (0, "", "tell w1:p7\n" + closed), "no 👑 in the tab: the only one in the workspace"
     herdr_says({"name": "spawned"}, [third_tab, other_tab, me])

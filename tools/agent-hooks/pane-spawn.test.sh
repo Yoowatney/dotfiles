@@ -499,6 +499,20 @@ hasnt 'notion-token.default_tools_approval_mode' "a server that is off gets no a
 hasnt 'mcp_servers."' "no quoted server name"
 has "slack_get_thread_replies" "the instruction names the Slack read tools"
 hasnt "gh-read" "with the network on, gh reads GitHub itself"
+# Large config output must be read concurrently, including through the installed
+# launcher symlink and Apple's Bash 3.2. Percent signs remain prompt data.
+python3 -I -c 'print("\n".join(f"[mcp_servers.large_{i}]\ncommand = \"x\"" for i in range(80)))' >> "$SANDBOX/home/.codex/config.toml"
+large_prompt=$(python3 -I -c 'print("prompt-%s-" * 2048)')
+ln -s "$SUBJECT" "$SANDBOX/pane-spawn-link"
+real_subject=$SUBJECT; SUBJECT=$SANDBOX/pane-spawn-link
+PANE_SPAWN_TEST_SHELL=/bin/bash ps --check "Large input" "$large_prompt" >/dev/null
+has '-c mcp_servers.large_79.enabled=false' "large MCP config disables even its last server"
+python3 -I -c 'import pathlib,sys; assert "agent prompt w1:new " + sys.argv[2] in pathlib.Path(sys.argv[1]).read_text(), "large prompt was truncated"' "$SANDBOX/log" "$large_prompt"
+cmp "$RULES" "$(dirname "$real_subject")/pane-spawn-check.rules" || fail "installed launcher writes the complete external rule template"
+python3 -I -c 'print("#" + "x" * 16384 + "\nnot toml [")' > "$SANDBOX/home/.codex/config.toml"
+if PANE_SPAWN_TEST_SHELL=/bin/bash ps --check "Bad large config" "$large_prompt" 2>"$SANDBOX/err" >/dev/null; then fail "large invalid config must stop check startup"; fi
+hasnt "agent start" "large invalid config opens no agent"
+SUBJECT=$real_subject
 for bad in 'not toml [' '[mcp_servers."a.b"]'; do
   echo "$bad" > "$SANDBOX/home/.codex/config.toml"
   if ps --check "로그인" "돌려 보세요" 2>"$SANDBOX/err" >/dev/null; then fail "a server it cannot turn off must stop a Codex check pane ($bad)"; fi

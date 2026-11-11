@@ -272,37 +272,10 @@ if [ -n "$check" ]; then
     # The shared PreToolUse hooks run here as in a work pane. An allow rule added later to ~/.codex/rules applies here too.
     target=$cwd cwd=$state/pane-spawn/check
     mkdir -p "$cwd/.codex/rules" || die "cannot make $cwd"
-    rules=$(mktemp "$cwd/.codex/rules/.check.XXXXXX") && cat > "$rules" <<EOF && mv -f "$rules" "$cwd/.codex/rules/check.rules" || die "cannot write $cwd/.codex/rules/check.rules"
-# Written by pane-spawn for its Codex check panes at each start; a change here is lost.
-host_executable(name="ps", paths=["/bin/ps"])
-prefix_rule(pattern=["ps"], decision="allow")
-host_executable(name="pgrep", paths=["/usr/bin/pgrep"])
-prefix_rule(pattern=["pgrep"], decision="allow")
-host_executable(name="launchctl", paths=["/bin/launchctl"])
-prefix_rule(pattern=["launchctl", ["list", "print"]], decision="allow")
-prefix_rule(pattern=["gh", "pr", ["merge", "comment", "review", "close", "reopen", "edit", "create", "ready", "lock"]], decision="forbidden")
-prefix_rule(pattern=["gh", "issue", ["comment", "close", "reopen", "edit", "create", "delete", "transfer", "lock", "pin"]], decision="forbidden")
-prefix_rule(pattern=["ego-browser"], decision="forbidden")
-EOF
-    mcp=$(python3 -I - "${CODEX_HOME:-$HOME/.codex}/config.toml" <<'EOF'
-import json, os, re, sys, tomllib
-read_tools = {"slack": ["slack_list_channels", "slack_get_channel_history", "slack_get_thread_replies", "slack_get_users", "slack_get_user_profile"],
-              "munice": ["ask_code", "ask_data"]}
-servers = tomllib.load(open(sys.argv[1], "rb")).get("mcp_servers", {}) if os.path.exists(sys.argv[1]) else {}
-for name in servers:
-    # Codex splits a -c path at every dot and keeps quotes as part of the name, so `mcp_servers."x"` is a new, broken server.
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
-        sys.exit(f"pane-spawn: -c cannot name the MCP server {name!r}")
-    keep = read_tools.get(name)
-    if not keep:
-        print("-c", f"mcp_servers.{name}.enabled=false", sep="\n")
-        continue
-    # Codex asks before a tool its server does not mark read-only, and under --ask-for-approval never that is a refusal:
-    # the Slack reads failed so (2026-11-05). Only read tools are left, so they run without asking.
-    print("-c", f"mcp_servers.{name}.enabled_tools={json.dumps(keep)}", "-c", f'mcp_servers.{name}.default_tools_approval_mode="approve"', sep="\n")
-EOF
-    ) || die "cannot turn off every MCP server in Codex's config, so a Codex check pane could write through one; open it with --kind claude"
-    off=(); while IFS= read -r l; do [ -z "$l" ] || off+=("$l"); done <<<"$mcp"
+    helper_dir=$(dirname "$(readlink -f "$0")")
+    rules=$(mktemp "$cwd/.codex/rules/.check.XXXXXX") && cat "$helper_dir/pane-spawn-check.rules" > "$rules" && mv -f "$rules" "$cwd/.codex/rules/check.rules" || die "cannot write $cwd/.codex/rules/check.rules"
+    mcp=$(python3 -I "$helper_dir/pane-spawn-mcp.py" "${CODEX_HOME:-$HOME/.codex}/config.toml") || die "cannot turn off every MCP server in Codex's config, so a Codex check pane could write through one; open it with --kind claude"
+    off=(); while IFS= read -r l; do [ -z "$l" ] || off+=("$l"); done < <(printf '%s\n' "$mcp")
     # Codex's TUI serves MCP tools of its own outside the sandbox (create_worktree runs git in a trusted repo), unless a configured
     # server holds their name: codex_worktrees, or codex_tui with a daemon. Then it starts without them. No feature turns them
     # off, and a server with no command stops Codex from starting (Codex 0.166, 2026-11-05).
@@ -322,7 +295,7 @@ if [ -z "$opener" ] && [ "term_$term" = "$(cat "$mainfile" 2>/dev/null)" ]; then
   [ -z "$same" ] || die "the main pane does no work, so it never adds a pane to its own tab"
   if [ -z "$check" ] && [ "$asked" = claude ]; then
     [[ "$why" == *[![:space:]]* ]] || die "the main pane opens a Claude pane only with --why \"<one line>\", the reason Codex cannot do the job. Any other pane: --kind auto (Codex regardless of weekly usage)."
-    case "$(tr '[:upper:]' '[:lower:]' <<<"$why")" in
+    case "$(printf '%s\n' "$why" | tr '[:upper:]' '[:lower:]')" in
       *slack* | *슬랙*) die "Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요" ;;
       # ponytail: words, so a reason that names gcloud to say why Codex failed is refused too; it says what failed instead.
       *gcp* | *gcloud* | *bigquery* | *bq*) die "GCP 명령도 Codex 칸이 합니다(요유 2026-11-07): --kind auto로 여세요. 요유 계정 단계는 메인 칸에서 합니다. Codex로 안 되는 다른 이유가 있으면 그것을 --why에 한 줄로 쓰세요" ;;
@@ -388,7 +361,7 @@ if [ -n "$sock" ]; then
     export HERDR_SOCKET_PATH=$sock
     call=(perl -e 'alarm shift; exec @ARGV' "${PANE_SPAWN_WORKERS_LIMIT:-10}" "$H") # herdr's CLI waits on a stuck server for ever
     spaces=$("${call[@]}" workspace list) || exit 0 # no answer is not no workspace: creating one on a slow server would make a second
-    w=$(jq -r '[.result.workspaces[] | select(.label == "workers")][0].workspace_id // empty' <<<"$spaces")
+    w=$(printf '%s\n' "$spaces" | jq -r '[.result.workspaces[] | select(.label == "workers")][0].workspace_id // empty')
     [ -n "$w" ] || w=$("${call[@]}" workspace create --label workers --no-focus --cwd "$HOME" | jq -r '.result.workspace.workspace_id // empty')
     [ -n "$w" ] || exit 0
     if [ -n "$main$opener" ]; then open_pane "" "$w" "$name"; exit 0; fi
