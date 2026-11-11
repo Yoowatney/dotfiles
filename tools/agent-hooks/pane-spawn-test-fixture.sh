@@ -82,6 +82,18 @@ echo "[\$s] pane-label \$*" >> "$SANDBOX/log"
 EOF
 chmod +x "$SANDBOX/pane-label"
 
+# A UTC host must still put the actual KST calendar date in every prompt.
+cat > "$SANDBOX/date" <<'EOF'
+#!/bin/bash
+if [ "$*" = '+%Y-%m-%d %H:%M:%S KST' ]; then
+  [ "${TZ:-}" = Asia/Seoul ] || exit 97
+  echo '2026-11-12 01:09:00 KST'
+else
+  exec /bin/date "$@"
+fi
+EOF
+chmod +x "$SANDBOX/date"
+
 run_on() { local sock=$1; shift; rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits" "$SANDBOX/prompted"; env -u HERDR_SOCKET_PATH -u XDG_STATE_HOME ${sock:+HERDR_SOCKET_PATH="$sock"} HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" CLAUDE_CONFIG_DIR="$SANDBOX/home/.claude" PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_START_POLL=0.01 PANE_SPAWN_READY_SETTLE=0 PANE_SPAWN_RETRY_WAIT=0 "${PANE_SPAWN_TEST_SHELL:-bash}" "$SUBJECT" "$@"; }
 ps() { run_on "" "$@"; }
 log() { cat "$SANDBOX/log" 2>/dev/null || true; }

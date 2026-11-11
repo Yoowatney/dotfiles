@@ -990,6 +990,14 @@ export PANE_TELL_SOURCE_PANE=${me:-unknown}
 export PANE_TELL_SOURCE_SERVER=$(srv "$here")
 source_session=$(printf '%s\n' "$mine" | awk -F'\t' -v me="$me" '$1 == me {print $3}')
 export PANE_TELL_SOURCE_SESSION=${source_session:-unknown}
+# Ask the sender once before its startup ETA becomes a promise in the main pane.
+# This runs before batching or durable queue registration, never after delivery.
+if [[ $2 == *'끝날 예상:'*KST* ]] && [ "$(srv "${there:-$here}")" = default ]; then
+  python3 -I "${DRAFT_HELPER%/*}/pane-tell-estimate.py" "$terminal" "$2"
+  estimate_status=$?
+  [ "$estimate_status" != 10 ] || exit 0
+  [ "$estimate_status" = 0 ] || exit "$estimate_status"
+fi
 msg="[pane-tell: '${from:-자동 작업}' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] $2"
 sender=$(printf '%s\n' "$mine" | awk -F'\t' -v me="$me" '$1 == me {print $7}')
 # A pane on another server is named with its server: a caller reusing a bare id would type into a different pane on its own.
