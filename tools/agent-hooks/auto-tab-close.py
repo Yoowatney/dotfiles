@@ -78,6 +78,7 @@ _spec.loader.exec_module(relay_watch)
 
 SESSION = re.compile(r"세션[ \t]*\**[ \t]*[:：][ \t]*\**([^·\n]*)")
 LEFT = re.compile(r"남은[ \t]*것[ \t]*\**[ \t]*[:：]")
+ARCHIVE_ONLY = "[이전 응답 보존: 전달·종료 판단에 사용하지 않음]"
 
 
 def plain(text: str) -> str:
@@ -335,10 +336,11 @@ def save(reply: str, me: dict, pane: str, env, now=None) -> str:
     os.makedirs(folder, exist_ok=True)
     now = now or datetime.datetime.now()
     session = (me.get("agent_session") or {}).get("value", "")
+    identity = f", 에이전트 {me['agent_name']}" if me.get("agent_name") else ""
     path = os.path.join(folder, f"{now:%Y-%m-%d}.md")
     with open(path, "a", encoding="utf-8") as f:
         f.write(f"\n## {now:%H:%M:%S} {herdr_peers.address(env, pane)} {me.get('label') or ''}\n\n"
-                f"세션 {session}, 폴더 {me.get('cwd') or ''}\n\n{reply.strip()}\n")
+                f"세션 {session}, 폴더 {me.get('cwd') or ''}{identity}\n\n{reply.strip()}\n")
     return path
 
 
@@ -640,6 +642,7 @@ def finish(reply: str, env):
     close = ((should_close(reply) or (needs_yoyoo and not session_value(reply).startswith("닫으면")))
              and bool(me) and agents is not None and hidden is not None
              and not held(me.get("label") or "", me.get("terminal_id"), agents + hidden))
+    me = dict(me, agent_name=name)  # add report identity only after checking whether pane metadata was available
     now = datetime.datetime.now()
     path = save(reply, me, pane, env, now)
     # workers-move reads a handoff note itself and closes the pane (api#1049). A report the pane finished before it read the ask
@@ -715,7 +718,7 @@ def finish(reply: str, env):
     # pane that closes reported on the board, and --sweep closes it with no job env for pane-label to see (Codex review)
     # By its session too: a herdr restart brings a pane back on its session under a new terminal (workers/w1:p6G, 2026-11-05).
     # A pane workers-move opened on 집맥 has its lead on the 회사맥: the day file is its delivery, which `workers-move bridge` carries.
-    if me.get("terminal_id") and ((sent and (workers or to.get("terminal_id") == main)) or (close and dispatch_job(env, name))
+    if me.get("terminal_id") and ((sent and herdr_peers.server_key(env) in ("", "default", "workers")) or (close and dispatch_job(env, name))
                                   or herdr_peers.remote_pane(name)):
         for key in filter(None, (me["terminal_id"], (me.get("agent_session") or {}).get("value"))):
             try:
@@ -742,18 +745,37 @@ def defer(reply, env):
     if not env.get("HERDR_PANE_ID") or env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
         return
     path = pending_file(env)
+    try:
+        with open(path, encoding="utf-8") as f:
+            previous = json.load(f).get("reply", "")
+    except (OSError, ValueError, AttributeError):
+        previous = ""
+
+    def keep_superseded():
+        # A monitor's short follow-up must not erase the detailed report before after_turn can save it (api#1012).
+        # Archive only: the latest Stop still owns routing and closing. Replace/withdraw its token before saving so a
+        # failed archive can never leave the old close decision active.
+        if isinstance(previous, str) and LEFT.search(plain(previous)) and len(previous) > len(reply or ""):
+            me = here(env)
+            save(f"{ARCHIVE_ONLY}\n\n{previous}", me, me.get("pane_id") or env["HERDR_PANE_ID"], env)
+
     if reply is None:
         if os.path.exists(path):
             os.unlink(path)
+        keep_superseded()
         return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     token = str(time.time_ns())
     with open(f"{path}.{token}", "w", encoding="utf-8") as f:
         json.dump({"token": token, "reply": reply}, f, ensure_ascii=False)
     os.replace(f"{path}.{token}", path)  # the step of an earlier Stop may be reading it
-    # Own session, as `pane-label --close`: it outlives this hook and the pane it closes.
-    subprocess.Popen([sys.executable, "-I", os.path.realpath(__file__), "--after-turn", token], env=dict(env), start_new_session=True,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        keep_superseded()
+    finally:
+        # Archive failure must not strand the latest token without its delivery process.
+        # Own session, as `pane-label --close`: it outlives this hook and the pane it closes.
+        subprocess.Popen([sys.executable, "-I", os.path.realpath(__file__), "--after-turn", token], env=dict(env), start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def held_reply(token: str, env) -> str | None:
@@ -1124,12 +1146,12 @@ esac''')
     herdr_says({"name": "spawned"}, [crown, me])
     assert taken() == "tell w1:p1\n", "the rewrite left work for 요유: nothing closes, and only the rewrite goes up"
     text = saved()
-    assert keep[0] in text and full not in text, f"the last version alone: {text!r}"
+    assert keep[0] in text and full in text and ARCHIVE_ONLY in text, f"the longer report is archived, only the rewrite sent: {text!r}"
     herdr_says({"name": "spawned"}, [crown, busy])
     stop(json.dumps({"last_assistant_message": full}), slow)
     stop(json.dumps({"last_assistant_message": keep[3]}), slow)
     herdr_says({"name": "spawned"}, [crown, me])
-    assert taken() == "" and saved() == "", "the rewrite is no report: it withdraws the first"
+    assert taken() == "" and full in saved(), "the rewrite withdraws delivery, while preserving the detailed report"
     # api#1033: the same, with the next Stop landing while the step waits on herdr's answer, every run. Before the fix the step
     # sent the reply it had read before asking herdr, and this assert failed 2-3 times in 16 parallel runs.
     herdr_says({"name": "spawned"}, [crown, busy])
@@ -1478,7 +1500,7 @@ esac''')
     assert short_report('`ls -l`, `wc -l`로 "hello" 한 줄을 봤습니다.\n남은 것: 세션: 닫음') == \
         '`ls -l`, `wc -l`로 "hello" 한 줄을 봤습니다.\n남은 것: 세션: 닫음', "the first line keeps its code and quotes"
     assert short_report("```\n코드\n```\n> 인용\n끝났습니다.\n남은 것: 세션: 닫음") == "끝났습니다.\n남은 것: 세션: 닫음", "a fence or a quote is still no first line"
-    # Only the workers server's panes mark the watch's reported file; a pane on any other named server is not the main pane's.
+    # The default and workers servers mark the watch's reported file; other named servers are left alone.
     os.unlink(f"{sandbox}/.local/state/orchestrator/reported/term_2")
     herdr_says({"name": "spawned"}, [crown, me])
     assert run(reported, {"HERDR_PANE_ID": "w1:p2", "HERDR_SOCKET_PATH": f"{sandbox}/sessions/other/herdr.sock"}) == \

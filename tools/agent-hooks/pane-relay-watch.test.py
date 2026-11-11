@@ -118,7 +118,8 @@ class QueueWatchTest(unittest.TestCase):
         path = self.payload("waiting/old")
         with mock.patch.object(workers.herdr_peers, "all_panes", return_value=None), \
                 mock.patch.object(workers.atc.relay_watch, "notify", return_value=True) as alert:
-            self.assertEqual(workers.tick(self.env, 1000), [])
+            with self.assertRaises(workers.WatchReadError):
+                workers.tick(self.env, 1000)
         alert.assert_called_once()
         self.assertIn(str(path), alert.call_args.args[-1])
 

@@ -15,21 +15,24 @@ fail() {
 # the session id empty as Codex does until its first prompt, FAIL_WAIT=<n> fails the first n waits for work.
 # NOT_READY=1 never reports readiness; FAIL_PROMPT=1 refuses prompt delivery.
 # Each line starts with the server the call went to, read from HERDR_SOCKET_PATH: [default] or [workers].
+# Use macOS Bash for fixtures called hundreds of times. The real launcher still
+# uses the requested Bash, including explicit coverage of both Bash versions.
+# Fixed JSON needs no generator process; dynamic strings still go through jq.
 cat > "$SANDBOX/herdr" <<EOF
-#!/usr/bin/env bash
+#!/bin/bash
 case "\$HERDR_SOCKET_PATH" in */sessions/*) s=\${HERDR_SOCKET_PATH%/herdr.sock}; s=\${s##*/} ;; *) s=default ;; esac
 echo "[\$s] \$*" >> "$SANDBOX/log"
 [ "\$s" != workers ] || [ -z "\${STUCK_WORKERS:-}" ] || exec /bin/sleep 30 # herdr's CLI waits on a stuck server for ever
 case "\$1 \$2" in
   "session list") cat "$SANDBOX/sessions.json" ;;
   "workspace list") cat "$SANDBOX/\$s-workspaces.json" 2>/dev/null || echo '{"result":{"workspaces":[]}}' ;;
-  "workspace create") [ -z "\${FAIL_WORKSPACE:-}" ] && jq -n '{result: {workspace: {workspace_id: "w2"}}}' ;;
+  "workspace create") [ -z "\${FAIL_WORKSPACE:-}" ] && printf '%s\n' '{"result":{"workspace":{"workspace_id":"w2"}}}' ;;
   "pane get") jq -n --arg label "\${CALLER_LABEL:-}" '{result: {pane: {pane_id: "w7:p3", tab_id: "w7:t1", workspace_id: "w7", terminal_id: "term_65f21913323dc21", label: \$label}}}' ;; # moved: env says w1:p1
   "agent list") cat "$SANDBOX/\$s-agents.json" 2>/dev/null || echo '{"result":{"agents":[]}}' ;;
   "tab rename") ;;
-  "tab create") { [ -z "\${FAIL_WORKERS_TAB:-}" ] || [ "\$s" != workers ]; } && jq -n '{result: {root_pane: {pane_id: "w1:new"}, tab: {tab_id: "w1:t9"}}}' ;;
+  "tab create") { [ -z "\${FAIL_WORKERS_TAB:-}" ] || [ "\$s" != workers ]; } && printf '%s\n' '{"result":{"root_pane":{"pane_id":"w1:new"},"tab":{"tab_id":"w1:t9"}}}' ;;
   "pane layout") [ -z "\${FAIL_LAYOUT:-}" ] && cat "$SANDBOX/layout.json" ;;
-  "pane split") [ -z "\${FAIL_SPLIT:-}" ] && jq -n '{result: {pane: {pane_id: "w1:new"}}}' ;;
+  "pane split") [ -z "\${FAIL_SPLIT:-}" ] && printf '%s\n' '{"result":{"pane":{"pane_id":"w1:new"}}}' ;;
   "pane rename"|"pane close") ;;
   "agent prompt") [ -z "\${FAIL_PROMPT:-}" ] ;;
   "agent read") printf '%s\n' "\${SCREEN:-}" ;;
@@ -42,15 +45,16 @@ case "\$1 \$2" in
     [ -z "\${BLOCKED_START:-}" ] || { echo '{"error":{"code":"agent_not_ready","message":"agent x is blocked during startup and is not ready for prompts"}}'; exit 1; }
     [ "\$n" -ge "\${FAIL_START:-0}" ] ;;
   "agent get")
-    if [ -n "\${NOT_READY:-}" ]; then jq -n '{result: {agent: {interactive_ready: false}}}'
-    elif [ -n "\${SESSIONLESS:-}" ]; then jq -n '{result: {agent: {interactive_ready: true}}}'
+    if [ -n "\${NOT_READY:-}" ]; then printf '%s\n' '{"result":{"agent":{"interactive_ready":false}}}'
+    elif [ -n "\${SESSIONLESS:-}" ]; then printf '%s\n' '{"result":{"agent":{"interactive_ready":true}}}'
+    elif [ -z "\${CALLER_AGENT:-}" ]; then printf '%s\n' '{"result":{"agent":{"name":"","interactive_ready":true,"agent_session":{"value":"sid"}}}}'
     else jq -n --arg n "\${CALLER_AGENT:-}" '{result: {agent: {name: \$n, interactive_ready: true, agent_session: {value: "sid"}}}}'; fi ;;
   *) exit 2 ;;
 esac
 EOF
 chmod +x "$SANDBOX/herdr"
 cat > "$SANDBOX/pane-label" <<EOF
-#!/usr/bin/env bash
+#!/bin/bash
 case "\$HERDR_SOCKET_PATH" in */sessions/*) s=\${HERDR_SOCKET_PATH%/herdr.sock}; s=\${s##*/} ;; *) s=default ;; esac
 echo "[\$s] pane-label \$*" >> "$SANDBOX/log"
 EOF
