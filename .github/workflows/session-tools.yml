@@ -47,6 +47,7 @@ jobs:
           brew install bash
           echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
       - run: bash tools/agent-hooks/pane-tell.test.sh
+      - run: python3 tools/agent-hooks/pane-tell-order.test.py --selftest
       - run: bash tools/agent-hooks/pane-spawn.test.sh
       - run: bash shell/zsh/codex-fn.test.sh
       - run: python3 tools/agent-hooks/codex-startup.test.py

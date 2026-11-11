@@ -379,7 +379,32 @@ main_panes() { # the main pane w1:pM in state $1, an ordinary pane w1:p3 in the 
     {pane_id: "w1:p9", label: "🟢 와우포인트 정리", agent_session: {value: "s9"}, cwd: "/w", tab_id: "w1:t1", agent: "claude", terminal_id: "term_p9"}]}}' > "$SANDBOX/panes"
   rm -f "$SANDBOX/log"
 }
-batched() { local i; for i in $(seq 1 200); do [ ! -d "$SANDBOX/state/pane-tell/batch/term_pM/open" ] && ! processes_running "--flush $SANDBOX/" && return; sleep 0.05; done; echo "FAIL a batch never went"; fails=1; }
+# Hold only the fixture's timer launch until all messages for a case are added.
+# The real --flush still sleeps PANE_TELL_BATCH and performs delivery itself.
+# Two CLI startups need not fit inside a one-second hold on a busy machine.
+mkdir -p "$SANDBOX/batch-bin"
+cat > "$SANDBOX/batch-bin/nohup" <<'EOF'
+#!/bin/bash
+case " $* " in *" --flush "*)
+  while [ -f "$PANE_TELL_TIMER_GATE" ]; do sleep .01; done ;;
+esac
+exec /usr/bin/nohup "$@"
+EOF
+chmod +x "$SANDBOX/batch-bin/nohup"
+batch_path=$PATH
+export PATH="$SANDBOX/batch-bin:$PATH" PANE_TELL_TIMER_GATE="$SANDBOX/hold-batch"
+touch "$PANE_TELL_TIMER_GATE"
+batched() {
+  local i
+  rm -f "$PANE_TELL_TIMER_GATE"
+  for i in $(seq 1 200); do
+    if [ ! -d "$SANDBOX/state/pane-tell/batch/term_pM/open" ] && ! processes_running "--flush $SANDBOX/"; then
+      touch "$PANE_TELL_TIMER_GATE"; return
+    fi
+    sleep 0.05
+  done
+  echo "FAIL a batch never went"; fails=1
+}
 prompts() { cat "$SANDBOX/log" 2>/dev/null | grep -c '^w1:pM|'; }
 held() { sed 's/: held.*//' <<<"$1"; }
 HELD="queued for w1:pM (👑 메인 오케스트레이터)"
@@ -387,7 +412,8 @@ export PANE_TELL_BATCH=1
 main_panes idle
 out1=$(pt "메인 오케" "첫 글"); out2=$(pt "메인 오케" "둘째 글")
 check "resting main pane: both held, nothing typed yet" "$(held "$out1")|$(held "$out2")|$(prompts)" "$HELD|$HELD|0"
-batched
+hold_start=$SECONDS; batched
+check "the released timer still observes the one-second hold" "$(( SECONDS - hold_start >= 1 ))" 1
 check "after the hold: one prompt, each message with its own mark, in order" \
   "$(prompts)|$(grep -c "\[pane-tell: '와우포인트 정리'" "$SANDBOX/log")|$(head -1 "$SANDBOX/log" | grep -c "^w1:pM|\[pane-tell: '")|$(tr '\n' ' ' < "$SANDBOX/log" | grep -c '첫 글  \[pane-tell.*둘째 글')" \
   "1|2|1|1"
@@ -412,7 +438,7 @@ export PANE_TELL_BATCH=1; touch "$SANDBOX/state/pane-tell/batch-off"; main_panes
 check "so does the batch-off file, for every sender" "${out%% (*}|$(prompts)" "told w1:pM|1"
 rm -f "$SANDBOX/state/pane-tell/batch-off"
 # Main draft recovery also applies when a held batch is delivered.
-main_panes idle; pt "메인 오케" "찬 칸" >/dev/null; claude_screen "치던 글" > "$SANDBOX/screen-w1:pM"; sleep 1.5
+main_panes idle; pt "메인 오케" "찬 칸" >/dev/null; claude_screen "치던 글" > "$SANDBOX/screen-w1:pM"
 batched; settled
 check "a main draft when the hold ends is archived and relayed" "$(prompts)|$(grep -c '찬 칸' "$SANDBOX/log")|$(grep -c '입력창 초안 보관 안내' "$SANDBOX/log")" "1|1|1"
 check "the main draft archive contains the words" "$(grep -l '치던 글' "$SANDBOX/state/pane-tell/drafts/"*.json | wc -l | tr -d ' ')" 1
@@ -466,6 +492,9 @@ for receiver in claude codex; do
 done
 claude_screen > "$SANDBOX/screen"
 rm -f "$SANDBOX/state/orchestrator/main"; unset PANE_TELL_BATCH
+rm -f "$PANE_TELL_TIMER_GATE"
+export PATH=$batch_path
+unset PANE_TELL_TIMER_GATE batch_path
 
 # Shell-mode recovery is restricted to the unattended workers server and a lone bang.
 sessions_up
