@@ -1,10 +1,11 @@
-"""Recovery contracts with temporary state and mocked process boundaries only."""
+"""Recovery contracts with temporary state and mocked process boundaries only. Run with --selftest."""
 import importlib.machinery
 import importlib.util
 import json
 from pathlib import Path
 import tempfile
 import unittest
+import sys
 from unittest.mock import patch
 
 
@@ -229,6 +230,180 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(state["queue"]), 1)
         self.assertEqual(state["offsets"][day], len(text.encode()))
 
+    def bridge_read(self, agents, text, tracking=None):
+        """Keep the real report reader/state writes, replacing only remote inventory and main delivery."""
+        day = move.datetime.date.today().isoformat() + ".md"
+        if not move.load(self.env, "moves.json", {}):
+            move.save(self.env, "moves.json", {"job": {"step": "moved", "remote": "workers/w1:p2",
+                      "remote_session": "sid-old", "remote_name": "spawn-M-r1", "start": [day[:-3], 0]}})
+        if tracking is not None:
+            move.save(self.env, "bridge.json", {"tracking": tracking})
+        got = {"panes": [a["pane_id"] for a in agents], "agents": agents,
+               "chunks": {day: {"text": text, "bytes": len(text.encode())}}}
+        with tempfile.TemporaryFile() as lock, patch.object(move, "locked", return_value=lock), \
+             patch.object(move, "remote", return_value=got), patch.object(move, "running", return_value=False), \
+             patch.object(move, "main_pane", return_value=("", {})):
+            move.bridge(self.env)
+        return move.load(self.env, "bridge.json", {})
+
+    def test_actual_atc_writer_routes_completed_new_session_without_inventory(self):
+        # Dropping the producer's stable name, or requiring live inventory for a new SID, loses this report.
+        pane = dict(self.pane, agent_session={"value": "sid-new"})
+        agent = dict(pane, name="spawn-M-r1")
+        def inventory(env, *args):
+            return {"agents": [agent]} if args == ("agent", "list") else {"panes": [pane]}
+        with patch.object(auto, "here", return_value=pane), patch.object(auto, "herdr", side_effect=inventory), \
+             patch.object(auto, "hidden_agents", return_value=[]), patch.object(auto, "should_close", return_value=False), \
+             patch.object(auto.herdr_peers, "main_terminal", return_value=""):
+            auto.finish("new-session final report", self.env)
+        text = next((self.root / "reports").glob("*.md")).read_text()
+        state = self.bridge_read([], text)
+        self.assertEqual([q["key"] for q in state["queue"]], ["job"])
+        self.assertIn("new-session final report", state["queue"][0]["text"])
+        self.assertIn("sid-new", state["tracking"]["job"]["sessions"])
+
+    def test_atc_missing_pane_metadata_does_not_close_when_adding_identity(self):
+        def inventory(env, *args):
+            return {"agents": [self.agent]} if args == ("agent", "list") else {"panes": [self.pane]}
+        with patch.object(auto, "here", return_value={}), patch.object(auto, "herdr", side_effect=inventory), \
+             patch.object(auto, "hidden_agents", return_value=[]), patch.object(auto, "lead_pane", return_value=("", {})), \
+             patch.object(auto.herdr_peers, "main_terminal", return_value=""), patch.object(auto.subprocess, "run") as run:
+            auto.finish(DONE, self.env)
+        run.assert_not_called()
+
+    def test_inventory_identity_conflict_does_not_replace_stable_name(self):
+        sources = {"job": {"remote": "workers/w1:p2", "remote_name": "spawn-M-r1", "remote_session": "sid-old"}}
+        tracking = {}
+        move.bridge_targets(sources, {"agents": [{"pane_id": "w9:p8", "name": "unrelated", "agent_session": {"value": "sid-old"}}]}, tracking)
+        self.assertEqual(tracking["job"]["name"], "spawn-M-r1")
+        self.assertEqual(sources["job"]["remote"], "workers/w1:p2")
+
+    def test_unknown_legacy_sid_is_retained_then_retried_without_duplicate_queue(self):
+        # Advancing offsets without retaining unknown SID records, or replaying one twice, breaks recovery.
+        text = "\n## 11:00:00 workers/w1:p2 worker\n\n세션 sid-new, 폴더 /tmp/example\n\nlegacy final report\n"
+        state = self.bridge_read([], text)
+        self.assertEqual(state["queue"], [])
+        self.assertEqual(len(state.get("unresolved", [])), 1)
+        self.assertEqual(state["offsets"][move.datetime.date.today().isoformat() + ".md"], len(text.encode()))
+        agents = [{"pane_id": "w9:p8", "name": "spawn-M-r1", "agent_session": {"value": "sid-new"}}]
+        state = self.bridge_read(agents, "")
+        self.assertEqual([q["key"] for q in state["queue"]], ["job"])
+        self.assertEqual(state["unresolved"], [])
+        state = self.bridge_read(agents, "")
+        self.assertEqual(len(state["queue"]), 1)
+        self.assertEqual(Path(move.path(self.env, "bridge.json")).stat().st_mode & 0o777, 0o600)
+
+    def test_unresolved_is_reevaluated_after_job_is_done(self):
+        text = "\n## 11:00:00 workers/w1:p2 worker\n\n세션 sid-new, 폴더 /tmp/example\n\nlate legacy report\n"
+        state = self.bridge_read([], text)
+        state["done"] = ["job"]
+        state["offsets"] = {}  # recover offsets from the saved source even when no job remains active
+        move.save(self.env, "bridge.json", state)
+        agents = [{"pane_id": "w9:p8", "name": "spawn-M-r1", "agent_session": {"value": "sid-new"}}]
+        state = self.bridge_read(agents, "")
+        self.assertEqual([q["key"] for q in state["queue"]], ["job"])
+        self.assertEqual(state["unresolved"], [])
+        self.assertIn(move.datetime.date.today().isoformat() + ".md", state["offsets"])
+        self.assertEqual(len(self.bridge_read(agents, "")["queue"]), 1)
+
+    def test_queued_report_without_active_job_retries_delivery(self):
+        state = self.bridge_read([], "\n## 11:00:00 workers/w1:p2 worker\n\n세션 sid-old, 폴더 /tmp/example\n\nreport\n")
+        state["done"] = ["job"]
+        move.save(self.env, "bridge.json", state)
+        with tempfile.TemporaryFile() as lock, patch.object(move, "locked", return_value=lock), \
+             patch.object(move, "remote") as remote, patch.object(move, "main_pane", return_value=("main", {})), \
+             patch.object(move, "deliver", return_value=True) as deliver:
+            move.bridge(self.env)
+        deliver.assert_called_once()
+        remote.assert_not_called()
+        self.assertEqual(move.load(self.env, "bridge.json", {})["queue"], [])
+
+    def test_named_foreign_report_is_skipped_but_identity_conflict_is_retained(self):
+        text = "\n## 11:00:00 workers/w1:p2 foreign\n\n세션 sid-foreign, 폴더 /tmp/example, 에이전트 unrelated\n\nforeign\n"
+        text += "\n## 11:00:01 workers/w1:p2 conflict\n\n세션 sid-old, 폴더 /tmp/example, 에이전트 unrelated\n\nconflict\n"
+        state = self.bridge_read([], text)
+        self.assertEqual(state["queue"], [])
+        self.assertEqual(len(state["unresolved"]), 1)
+        self.assertIn("conflict", state["unresolved"][0]["text"])
+
+    def test_sessionless_old_alias_is_quarantined_after_reused_occupant_closed(self):
+        # An absent current occupant is not evidence that a historical address still belongs to this task.
+        agents = [{"pane_id": "w9:p8", "name": "spawn-M-r1", "agent_session": {"value": "sid-old"}}]
+        tracking = {"job": {"address": "workers/w9:p8", "name": "spawn-M-r1", "sessions": ["sid-old"],
+                            "aliases": ["workers/w1:p2"]}}
+        text = "\n## 11:00:00 workers/w1:p2 unrelated\n\n[workers-watch] unrelated synthetic alert\n"
+        state = self.bridge_read(agents, text, tracking)
+        self.assertEqual(state["queue"], [])
+        self.assertEqual(len(state.get("unresolved", [])), 1)
+        state = self.bridge_read(agents, "")
+        self.assertEqual(state["queue"], [])
+        self.assertEqual(len(state["unresolved"]), 1)
+
+    def test_actual_watch_writer_routes_alert_after_new_remote_session_closed(self):
+        # Writing only an address/label makes a closed restarted session's watch alert unidentifiable.
+        agent = dict(pane_id="w9:p8", terminal_id="term_R", name="spawn-M-r1", agent_status="blocked",
+                     state_change_seq=2, agent_session={"value": "sid-new"})
+        pane = dict(agent, label="🟢 moved task")
+        def inventory(env, *args, socket=""):
+            return {"agents": [agent]} if args == ("agent", "list") else {"panes": [pane]}
+        with patch.object(watch.herdr_peers, "all_panes", return_value={}), \
+             patch.object(watch.herdr_peers, "main_terminal", return_value="term_M"), \
+             patch.object(watch.herdr_peers, "socket_of", return_value="/sessions/workers/herdr.sock"), \
+             patch.object(watch.herdr_peers, "herdr", side_effect=inventory), \
+             patch.object(watch, "cleanup_default"), patch.object(watch, "refresh_main"), \
+             patch.object(watch.atc.relay_watch, "tick"):
+            watch.tick(self.env, 1000)
+            watch.tick(self.env, 1061)
+        text = next((self.root / "reports").glob("*.md")).read_text()
+        state = self.bridge_read([], text)
+        self.assertEqual([q["key"] for q in state["queue"]], ["job"])
+        self.assertIn("[workers-watch]", state["queue"][0]["text"])
+        rec = dict(key="job", remote="workers/w9:p8", label="worker")
+        with patch.object(move, "tell", return_value=True) as tell, patch.object(move, "fast_forward") as fast_forward:
+            self.assertTrue(move.deliver(self.env, rec, state["queue"][0], ("main", {}), {}))
+        self.assertIn("집맥 칸 알림입니다", tell.call_args.args[2])
+        self.assertNotIn("에이전트", tell.call_args.args[2])
+        fast_forward.assert_not_called()
+
+    def test_unidentified_other_report_does_not_block_known_report(self):
+        # Unknown records must not stall the whole chunk or deliver a legacy same-address stranger.
+        text = "\n## 11:00:00 workers/w8:p8 stranger\n\n세션 sid-other, 폴더 /tmp/example\n\nunknown\n"
+        text += "\n## 11:00:01 workers/w1:p2 worker\n\n세션 sid-old, 폴더 /tmp/example\n\nknown\n"
+        state = self.bridge_read([], text)
+        self.assertEqual([q["key"] for q in state["queue"]], ["job"])
+        self.assertIn("known", state["queue"][0]["text"])
+        self.assertEqual(len(state.get("unresolved", [])), 1)
+
+    def watch_lost_report(self, vanished):
+        agent = dict(pane_id="w9:p8", terminal_id="term_R", name="spawn-M-r1", agent_status="working",
+                     state_change_seq=2, agent_session={"value": "sid-new"})
+        agents, panes = [agent], [dict(agent, label="🟢 🫡 moved task")]
+        def inventory(env, *args, socket=""):
+            return {"agents": agents} if args == ("agent", "list") else {"panes": panes}
+        with patch.object(watch.herdr_peers, "all_panes", return_value={}), \
+             patch.object(watch.herdr_peers, "main_terminal", return_value="term_M"), \
+             patch.object(watch.herdr_peers, "socket_of", return_value="/sessions/workers/herdr.sock"), \
+             patch.object(watch.herdr_peers, "herdr", side_effect=inventory), \
+             patch.object(watch, "cleanup_default"), patch.object(watch, "refresh_main"), \
+             patch.object(watch.atc.relay_watch, "tick"):
+            watch.tick(self.env, 1000)
+            agents.clear()
+            if vanished:
+                panes.clear()
+            with patch.object(watch, "day_entry", return_value=False):
+                watch.tick(self.env, 1061)  # a failed writer must retain identity for the next retry too
+            watch.tick(self.env, 1121)
+        text = next((self.root / "reports").glob("*.md")).read_text()
+        state = self.bridge_read([], text)
+        self.assertEqual([q["key"] for q in state["queue"]], ["job"])
+        self.assertIn("sid-new", state["tracking"]["job"]["sessions"])
+
+    def test_actual_watch_ended_writer_preserves_identity_after_retry(self):
+        self.watch_lost_report(vanished=False)
+
+    def test_actual_watch_disappeared_writer_preserves_identity_after_retry(self):
+        self.watch_lost_report(vanished=True)
+
     def test_dirty_worktree_is_kept_then_committed_wip_pushes_before_move(self):
         import subprocess
         origin, repo, work = (self.root / n for n in ("origin.git", "repo", "work"))
@@ -262,4 +437,4 @@ class RecoveryTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(argv=[sys.argv[0]] if "--selftest" in sys.argv else None)

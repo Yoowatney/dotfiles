@@ -34,7 +34,8 @@ panes (auto-tab-close's reports, workers-watch's `[workers-watch]` alerts) are c
 order, a report through auto-tab-close's route_main_report, so a finished one gets its check pane as any other. Before that the
 회사맥 folder is fast-forwarded to the branch, since the check runs here; if it cannot be, the report goes straight through with
 the reason. What did not go stays queued for the next minute. A move ends once its 집맥 pane has been gone for a minute and
-nothing of it waits.
+nothing of it waits. Stable agent names and report sessions authenticate entries; historical pane addresses alone never do.
+Unidentified workers entries stay in bridge.json (mode 0600) for later identity lookup, including after a move is done.
 
 Test env: WORKERS_MOVE_SSH (a command in place of ssh and its options), WORKERS_MOVE_REMOTE (ssh target), WORKERS_MOVE_TELL
 (a pane-tell), WORKERS_MOVE_WAIT (seconds to wait for notes, 900), WORKERS_MOVE_POLL (5), WORKERS_MOVE_FG=1 (go runs in front).
@@ -75,6 +76,7 @@ MARK = "[인계 메모]"
 SYNCED = ("~/.dotfiles", "~/work/munice", "~/work/munice/munice-claude")  # 집맥 pulls these every 3 minutes (sync-home step 4)
 ENTRY = re.compile(r"^## (\d\d:\d\d:\d\d) (\S+)(?: (.*))?$", re.M)  # auto-tab-close.py's `## HH:MM:SS <address> <label>`
 SESSION_LINE = re.compile(r"^세션 (\S*), 폴더 .*\n+")
+REPORT_AGENT = re.compile(r"^세션 \S*, 폴더 [^\n]*, 에이전트 (\S+)\n+")
 ASK = ("[퇴근 인계] 요유가 퇴근해서 회사맥이 곧 잠듭니다. 지금 하던 도구 호출이 끝나면 새 단계를 시작하지 말고 다음만 하세요. "
        "1) 바뀐 파일이 있으면 이 일의 브랜치에 WIP 커밋을 만드세요. 기본 브랜치(main 등)에는 커밋하지 말고, 이 일과 상관없는 파일은 넣지 마세요. "
        "push는 이 칸을 넘기는 스크립트가 합니다. "
@@ -319,7 +321,8 @@ def load(env, name, default):
 def save(env, name, data):
     os.makedirs(state_root(env), exist_ok=True)
     tmp = path(env, name) + f".{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
+        os.fchmod(f.fileno(), 0o600)  # a leftover temp file from an older writer may have broader permissions
         json.dump(data, f, ensure_ascii=False, indent=1)
     os.replace(tmp, path(env, name))
 
@@ -722,10 +725,10 @@ def deliver(env, rec, item, main, ffs) -> bool:
     def send(message):
         return tell(env, addr, f"{message}\n{hint}")
 
-    if item["text"].startswith("[workers-watch]"):
-        return send(f"집맥 칸 알림입니다. {item['text'][len('[workers-watch]'):].strip()}\n{where}\n전체: {file} ({at})")
     m = SESSION_LINE.match(item["text"])
     reply = item["text"][m.end():] if m else item["text"]
+    if reply.startswith("[workers-watch]"):
+        return send(f"집맥 칸 알림입니다. {reply[len('[workers-watch]'):].strip()}\n{where}\n전체: {file} ({at})")
     if rec["key"] not in ffs:
         ffs[rec["key"]] = fast_forward(rec)
     if ffs[rec["key"]]:
@@ -765,11 +768,9 @@ def bridge_targets(active, got, tracking):
         def session(a):
             return (a.get("agent_session") or {}).get("value")
         def matches(a):
-            return (bool(tracked.get("name")) and a.get("name") == tracked["name"]) or session(a) in tracked["sessions"]
+            return a.get("name") == tracked["name"] if tracked.get("name") else session(a) in tracked["sessions"]
         known = bool(tracked.get("name") or tracked["sessions"])
         row = next((a for a in agents if matches(a)), None)
-        if row is None and not known:
-            row = next((a for a in agents if a.get("pane_id") == tracked["address"].split("/", 1)[-1]), None)
         if row:
             tracked["aliases"] = list(dict.fromkeys([*tracked["aliases"], tracked["address"]]))
             tracked["address"] = "workers/" + row["pane_id"]
@@ -786,6 +787,21 @@ def bridge_targets(active, got, tracking):
     return by_addr, by_session
 
 
+def report_target(item, tracking):
+    """A historical address cannot authenticate a report after pane reuse. Names/SIDs can."""
+    sid = SESSION_LINE.match(item["text"])
+    named = REPORT_AGENT.match(item["text"])
+    sessions = {k for k, t in tracking.items() if sid and sid[1] and sid[1] in t["sessions"]}
+    names = {k for k, t in tracking.items() if named and t.get("name") == named[1]}
+    matches = names if named else sessions
+    if len(matches) != 1 or (named and sessions and sessions != names):
+        return None
+    key = next(iter(matches))
+    if sid and sid[1] and sid[1] not in tracking[key]["sessions"]:
+        tracking[key]["sessions"].append(sid[1])
+    return key
+
+
 def bridge(env) -> int:
     lock = locked(env, "bridge.lock")
     if not lock:
@@ -793,12 +809,14 @@ def bridge(env) -> int:
     moves = load(env, "moves.json", {})
     b = load(env, "bridge.json", {})
     offsets, queue, done, gone = (b.setdefault(k, d) for k, d in (("offsets", {}), ("queue", []), ("done", []), ("gone", {})))
-    active = {k: dict(r, key=k) for k, r in moves.items() if r.get("step") in ("opened", "moved") and r.get("remote") and k not in done}
-    if not active and not queue:
+    sources = {k: dict(r, key=k) for k, r in moves.items() if r.get("step") in ("opened", "moved") and r.get("remote")}
+    active = {k: r for k, r in sources.items() if k not in done}
+    if not active and not queue and not b.get("unresolved"):
         return 0
-    if active:
+    got = None
+    if active or b.get("unresolved"):
         today = datetime.date.today()
-        for r in active.values():
+        for r in sources.values():
             day0, size0 = r.get("start") or [today.isoformat(), 0]
             offsets.setdefault(f"{day0}.md", size0)
             d = datetime.date.fromisoformat(day0)
@@ -806,7 +824,6 @@ def bridge(env) -> int:
                 offsets.setdefault(f"{d.isoformat()}.md", 0)
         wanted = {f"{(today - datetime.timedelta(days=n)).isoformat()}.md" for n in range(8)}
         os.makedirs(report_dir(env), exist_ok=True)
-        got = None
         # A pane being opened on 집맥 has no address saved yet: what it writes now would be read past and lost (Codex review)
         if not (running(env) and any(r.get("step") == "opening" for r in moves.values())):
             got = remote(env, "bridge", timeout=60, files={f: o for f, o in offsets.items() if f in wanted})
@@ -815,25 +832,35 @@ def bridge(env) -> int:
             if got and got.get("agents") is None:
                 got = None  # a restarted agent may have a new session: retry every chunk after identity lookup recovers
         if got:
-            by_addr, by_session = bridge_targets(active, got, b.setdefault("tracking", {}))
+            tracking = b.setdefault("tracking", {})
+            bridge_targets(sources, got, tracking)
+            pending = b.setdefault("unresolved", [])
+            known_names = {t.get("name") for t in tracking.values()} - {None, ""}
+            known_sessions = {sid for t in tracking.values() for sid in t["sessions"]}
             for name, chunk in sorted((got.get("chunks") or {}).items()):
                 day = name[:-3]
-                with open(os.path.join(report_dir(env), name), "a", encoding="utf-8") as copy:
-                    for at, addr, label, body in split_entries(chunk["text"]):
-                        if SESSION_LINE.sub("", body, count=1).startswith(atc.ARCHIVE_ONLY):
-                            continue  # superseded detail is kept locally, never routed as a fresh report
-                        sid = SESSION_LINE.match(body)
-                        key = by_session.get(sid[1]) if sid else None
-                        if not key:
-                            candidate = by_addr.get(addr)
-                            # A session-bearing report cannot borrow another known session's address. Legacy moves
-                            # without session metadata still use addresses until their first live inventory is read.
-                            if candidate and (not sid or not b["tracking"][candidate]["sessions"]):
-                                key = candidate
-                        if key:
-                            copy.write(f"\n## {at} 집맥:{addr} {label}\n\n{body}\n")
-                            queue.append({"key": key, "day": day, "time": at, "text": body})
+                for index, (at, addr, label, body) in enumerate(split_entries(chunk["text"])):
+                    if SESSION_LINE.sub("", body, count=1).startswith(atc.ARCHIVE_ONLY):
+                        continue  # superseded detail is kept locally, never routed as a fresh report
+                    sid, named = SESSION_LINE.match(body), REPORT_AGENT.match(body)
+                    known_sid = bool(sid and sid[1] in known_sessions)
+                    if named and named[1] not in known_names and not known_sid:
+                        continue  # a different named task; conflicts with a known SID still need quarantine
+                    if not addr.startswith("workers/") and not named and not known_sid:
+                        continue  # default/personal server reports cannot belong to a moved workers task
+                    pending.append({"day": day, "time": at, "address": addr, "label": label, "text": body,
+                                    "source": [name, offsets.get(name, 0), index]})
                 offsets[name] = offsets.get(name, 0) + chunk["bytes"]
+            unresolved = []
+            for item in pending:
+                key = report_target(item, tracking)
+                if not key or key not in sources:
+                    unresolved.append(item)
+                    continue
+                with open(os.path.join(report_dir(env), item["day"] + ".md"), "a", encoding="utf-8") as copy:
+                    copy.write(f"\n## {item['time']} 집맥:{item['address']} {item['label']}\n\n{item['text']}\n")
+                queue.append(dict(item, key=key))
+            b["unresolved"] = unresolved
             panes = got.get("panes")
             for k, r in active.items():
                 if panes is None or got.get("agents") is None or r["remote"].split("/", 1)[-1] in panes:
@@ -1072,7 +1099,8 @@ if text.startswith("[퇴근 인계]") and addr in memos:
         with open(f"{d}/local.json", "w") as f:
             json.dump(local, f)
         with open(f"{d}/remote.json", "w") as f:
-            json.dump({"default": {"panes": [], "agents": []}, "workers": {"panes": [{"pane_id": "w9:pR1"}], "agents": []}}, f)
+            json.dump({"default": {"panes": [], "agents": []}, "workers": {"panes": [{"pane_id": "w9:pR1"}],
+                       "agents": [agent("w9:pR1", "spawn-MAIN-r1", "sR")]}}, f)
         os.makedirs(f"{home}/.claude/projects/x")
         for sid in ("sA", "sB", "sC"):
             with open(f"{home}/.claude/projects/x/{sid}.jsonl", "w") as f:
@@ -1223,6 +1251,9 @@ while True:
         lday = f"{state}/pane-reports/{time.strftime('%Y-%m-%d')}.md"
 
         def remote_entry(at, addr, body, fresh=False):
+            if body.startswith("[workers-watch]"):
+                sid, name = {"workers/w9:pR1": ("sR", "spawn-MAIN-r1"), "workers/w9:pR3": ("sRX", "spawn-MAIN-r3")}[addr]
+                body = f"세션 {sid}, 폴더 , 에이전트 {name}\n\n{body}"
             with open(rday, "a", encoding="utf-8") as f:
                 f.write(f"\n## {at} {addr} 🟢 🫡 일 A (집맥)\n\n{body}\n")
             os.utime(rday, None if fresh else (time.time() - 60,) * 2)
@@ -1257,7 +1288,8 @@ while True:
         calls = len(lines("ssh.log"))
         assert bridge(env) == 0 and len(lines("ssh.log")) == calls and len(told()) == n
         hold.close()
-        moves["term_X"].update(step="opened", remote="workers/w9:pR3", start=[time.strftime("%Y-%m-%d"), 0])
+        moves["term_X"].update(step="opened", remote="workers/w9:pR3", remote_name="spawn-MAIN-r3", remote_session="sRX",
+                               start=[time.strftime("%Y-%m-%d"), 0])
         save(env, "moves.json", moves)
         with open(f"{d}/remote.json", "w") as f:
             json.dump({"workers": {"panes": [{"pane_id": "w9:pR1"}, {"pane_id": "w9:pR3"}], "agents": []}}, f)

@@ -336,10 +336,11 @@ def save(reply: str, me: dict, pane: str, env, now=None) -> str:
     os.makedirs(folder, exist_ok=True)
     now = now or datetime.datetime.now()
     session = (me.get("agent_session") or {}).get("value", "")
+    identity = f", 에이전트 {me['agent_name']}" if me.get("agent_name") else ""
     path = os.path.join(folder, f"{now:%Y-%m-%d}.md")
     with open(path, "a", encoding="utf-8") as f:
         f.write(f"\n## {now:%H:%M:%S} {herdr_peers.address(env, pane)} {me.get('label') or ''}\n\n"
-                f"세션 {session}, 폴더 {me.get('cwd') or ''}\n\n{reply.strip()}\n")
+                f"세션 {session}, 폴더 {me.get('cwd') or ''}{identity}\n\n{reply.strip()}\n")
     return path
 
 
@@ -641,6 +642,7 @@ def finish(reply: str, env):
     close = ((should_close(reply) or (needs_yoyoo and not session_value(reply).startswith("닫으면")))
              and bool(me) and agents is not None and hidden is not None
              and not held(me.get("label") or "", me.get("terminal_id"), agents + hidden))
+    me = dict(me, agent_name=name)  # add report identity only after checking whether pane metadata was available
     now = datetime.datetime.now()
     path = save(reply, me, pane, env, now)
     # workers-move reads a handoff note itself and closes the pane (api#1049). A report the pane finished before it read the ask
