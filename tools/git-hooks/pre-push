@@ -11,7 +11,7 @@
 # hook; a determined caller gets past any local check, and only a server-side check would stop one.
 set -uo pipefail
 
-export PRE_PUSH_LIMIT=${PRE_PUSH_LIMIT:-300}   # seconds per test: a stuck test must end as a failure, not hold the push
+export PRE_PUSH_LIMIT=${PRE_PUSH_LIMIT:-900}   # seconds per test: a stuck test must end as a failure, not hold the push. 300 was too short: pane-spawn alone takes 5-8 min when a dozen agent sessions load the host
 JOBS=6   # one after another takes over 2 minutes, and an agent's Bash call gives up at 2 minutes
 
 T=$(mktemp -d) || exit 1
