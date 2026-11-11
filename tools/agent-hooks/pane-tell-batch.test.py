@@ -379,6 +379,7 @@ exec /usr/bin/nohup "$@"
             text = (self.state / "log").read_text()
             self.assertRegex(text, r"owner-exit 101.second .*status=-9 signal=SIGKILL sender=unknown")
             self.assertRegex(text, r"supervisor-signal 101.second .*signal=SIGTERM actor=\d+")
+            self.assertIn("reason=delivery-cleanup action=attempt", text)
             self.assertFalse(self.timer_alive(descendant), "delivery descendant survived owner death")
         finally:
             (self.root / "spawn-descendant").unlink()
