@@ -836,6 +836,7 @@ def bridge(env) -> int:
             bridge_targets(sources, got, tracking)
             pending = b.setdefault("unresolved", [])
             known_names = {t.get("name") for t in tracking.values()} - {None, ""}
+            all_sources_named = all(tracking[k].get("name") for k in sources)
             known_sessions = {sid for t in tracking.values() for sid in t["sessions"]}
             for name, chunk in sorted((got.get("chunks") or {}).items()):
                 day = name[:-3]
@@ -844,7 +845,7 @@ def bridge(env) -> int:
                         continue  # superseded detail is kept locally, never routed as a fresh report
                     sid, named = SESSION_LINE.match(body), REPORT_AGENT.match(body)
                     known_sid = bool(sid and sid[1] in known_sessions)
-                    if named and named[1] not in known_names and not known_sid:
+                    if all_sources_named and named and named[1] not in known_names and not known_sid:
                         continue  # a different named task; conflicts with a known SID still need quarantine
                     if not addr.startswith("workers/") and not named and not known_sid:
                         continue  # default/personal server reports cannot belong to a moved workers task

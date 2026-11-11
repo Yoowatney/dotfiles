@@ -326,6 +326,16 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(state["unresolved"]), 1)
         self.assertIn("conflict", state["unresolved"][0]["text"])
 
+    def test_named_report_is_retained_when_legacy_source_has_no_stable_name(self):
+        day = move.datetime.date.today().isoformat()
+        move.save(self.env, "moves.json", {"job": {"step": "moved", "remote": "workers/w1:p2", "start": [day, 0]}})
+        text = "\n## 11:00:00 workers/w1:p2 worker\n\n세션 sid-new, 폴더 /tmp/example, 에이전트 spawn-M-r1\n\nunconfirmed\n"
+        state = self.bridge_read([], text)
+        self.assertEqual(state["queue"], [])
+        self.assertEqual(len(state["unresolved"]), 1)
+        state = self.bridge_read([], "")
+        self.assertEqual(len(state["unresolved"]), 1)
+
     def test_sessionless_old_alias_is_quarantined_after_reused_occupant_closed(self):
         # An absent current occupant is not evidence that a historical address still belongs to this task.
         agents = [{"pane_id": "w9:p8", "name": "spawn-M-r1", "agent_session": {"value": "sid-old"}}]
