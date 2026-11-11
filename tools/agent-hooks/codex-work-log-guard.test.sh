@@ -44,6 +44,7 @@ setup_fixture() {
 #!/usr/bin/env bash
 echo call >> "$HOME/claude-calls"
 prompt="$2"
+printf '%s\n' "$prompt" > "$HOME/recovery-prompt"
 turn_file="$(printf '%s\n' "$prompt" | sed -n 's/^Turn capture file: //p' | head -1)"
 if [[ -n "$turn_file" && -f "$turn_file" ]]; then
     stat -f %z "$turn_file" > "$HOME/captured-size"
@@ -61,7 +62,7 @@ run_guard() {
     LLM_WIKI_TODAY="2026-09-15" \
     CLAUDE_BIN="$SANDBOX/home/fake-claude" \
     CLAUDE_TIMEOUT=5 \
-    "$GUARD" "$mode"
+    "${GUARD_TEST_SHELL:-bash}" "$GUARD" "$mode"
 }
 
 begin_payload() {
@@ -145,6 +146,35 @@ rm "$SANDBOX/home/transcript.jsonl"
 valid_entry > "$SANDBOX/home/model-result"
 stop_payload | run_guard finish
 assert_contains "$worklog" "## Recovered entry" "last assistant message recovers when transcript is absent"
+
+setup_fixture
+ln -s "$GUARD" "$SANDBOX/guard-link"
+real_guard=$GUARD; GUARD=$SANDBOX/guard-link
+GUARD_TEST_SHELL=/bin/bash
+begin_payload | run_guard begin
+valid_entry > "$SANDBOX/home/model-result"
+large_message=$(python3 -I -c 'print("completed-%s-" * 2048)')
+stop_payload | jq --arg message "$large_message" '.last_assistant_message=$message' | run_guard finish
+assert_contains "$worklog" "## Recovered entry" "large hook JSON recovers through installed link"
+assert_contains "$SANDBOX/home/recovery-prompt" "Focus on why and the decision" "external prompt template is complete"
+[[ "$(stat -f %z "$SANDBOX/home/recovery-prompt")" -gt 512 ]] || fail "recovery prompt exercises more than 512 bytes"
+GUARD=$real_guard
+unset GUARD_TEST_SHELL
+
+setup_fixture
+python3 -I -c 'print("{" + "x" * 16384)' | run_guard begin
+[[ ! -d "$SANDBOX/home/state/codex-turns" ]] || fail "large malformed hook JSON creates no turn state"
+
+setup_fixture
+cp "$GUARD" "$SANDBOX/guard-without-template"
+real_guard=$GUARD; GUARD=$SANDBOX/guard-without-template
+begin_payload | run_guard begin
+printf 'completed work\n' >> "$SANDBOX/home/transcript.jsonl"
+valid_entry > "$SANDBOX/home/model-result"
+stop_payload | run_guard finish 2>/dev/null
+[[ ! -f "$SANDBOX/home/claude-calls" ]] || fail "missing prompt template must not invoke recovery model"
+assert_contains "$SANDBOX/home/state/ingest.log" "cannot read recovery prompt template" "missing template leaves a diagnostic"
+GUARD=$real_guard
 
 setup_fixture
 begin_payload | run_guard begin

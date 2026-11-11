@@ -337,6 +337,10 @@ def notify(env, msg) -> bool:
 
 def tick(env, now: float) -> list:
     """One round; returns the alerts someone took."""
+    try:
+        atc.relay_watch.tick(env, now)
+    except (OSError, ValueError):
+        pass  # queue alerts must not stop the existing pane watch
     where = herdr_peers.all_panes(env)
     if where is None:  # no way to know who is there, so no alert and no record changes
         return []

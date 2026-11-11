@@ -137,7 +137,7 @@ tell() { # pane, kind, message, receiver's terminal, its session, sender's termi
 auto_reason() { # tab id, session id
   local tabs t first
   tabs=$("$H" tab list 2>/dev/null) || { echo "could not be checked: herdr tab list failed"; return; }
-  case "$(jq -r --arg t "$1" '.result.tabs[] | select(.tab_id == $t) | .label // ""' <<<"$tabs")" in
+  case "$(printf '%s\n' "$tabs" | jq -r --arg t "$1" '.result.tabs[] | select(.tab_id == $t) | .label // ""')" in
     "자동 "*) echo "is in an auto-dispatch tab; comment on its board item instead"; return ;;
     "알아서 "*) echo "is in a Slack ambient tab; it takes rounds only from the ambient poll"; return ;;
   esac
@@ -177,9 +177,9 @@ warn() { # what happened, sender's terminal, sender's socket when on another ser
     [ -z "${3:-}" ] || export HERDR_SOCKET_PATH=$3
     row=$("$H" pane list 2>/dev/null | jq -r --arg t "$2" '.result.panes[] | select(.terminal_id == $t)
       | [.pane_id, (.agent // ""), (.tab_id // ""), (.agent_session.value // "")] | @tsv')
-    [ -n "$row" ] && [ -z "$(auto_reason "$(cut -f3 <<<"$row")" "$(cut -f4 <<<"$row")")" ] || exit 0
+    [ -n "$row" ] && [ -z "$(auto_reason "$(printf '%s\n' "$row" | cut -f3)" "$(printf '%s\n' "$row" | cut -f4)")" ] || exit 0
     # One try, never queued: a note about a stuck message must not get stuck itself, and the notification has already gone out.
-    send "$(cut -f1 <<<"$row")" "$(cut -f2 <<<"$row")" "[pane-tell: 자동 안내입니다. 요유가 직접 친 글이 아닙니다] $1"
+    send "$(printf '%s\n' "$row" | cut -f1)" "$(printf '%s\n' "$row" | cut -f2)" "[pane-tell: 자동 안내입니다. 요유가 직접 친 글이 아닙니다] $1"
   )
 }
 
@@ -189,9 +189,9 @@ deliver() { # message file, receiver's terminal (a moved pane gets a new pane id
   while (( SECONDS - t0 < ${PANE_TELL_WAIT:-86400} )); do
     sleep "${PANE_TELL_POLL:-5}"
     list=$("$H" pane list 2>/dev/null) || continue # herdr restarting is not the receiver gone
-    row=$(jq -r --arg t "$2" '.result.panes[] | select(.terminal_id == $t)
-      | [.pane_id, (.agent // ""), (.agent_session.value // ""), (.label // "이름 없는 칸")] | @tsv' <<<"$list") || continue
-    pane=$(cut -f1 <<<"$row"); kind=$(cut -f2 <<<"$row"); sid=$(cut -f3 <<<"$row"); label=$(cut -f4 <<<"$row")
+    row=$(printf '%s\n' "$list" | jq -r --arg t "$2" '.result.panes[] | select(.terminal_id == $t)
+      | [.pane_id, (.agent // ""), (.agent_session.value // ""), (.label // "이름 없는 칸")] | @tsv') || continue
+    pane=$(printf '%s\n' "$row" | cut -f1); kind=$(printf '%s\n' "$row" | cut -f2); sid=$(printf '%s\n' "$row" | cut -f3); label=$(printf '%s\n' "$row" | cut -f4)
     [ -n "$kind" ] && { [ -z "$3" ] || [ "$sid" = "$3" ]; } || break
     if send "$pane" "$kind" "$(cat "$1")"; then
       rm -f "$1"
@@ -252,8 +252,8 @@ if [ "${1:-}" = --raw ]; then
   # no mark, so the receiver reads it as 요유's own typing: an unlock word never goes this way (api#1026)
   case "$3" in *"prod 허용"* | *"staging 허용"*) die "--raw never types prod 허용 or staging 허용: send it without --raw, marked" ;; esac
   row=$("$H" pane get "$2" 2>/dev/null | jq -r '.result.pane | [(.pane_id // ""), (.agent // ""), (.terminal_id // ""), (.agent_session.value // "")] | @tsv')
-  [ -n "$(cut -f1 <<<"$row")" ] || { echo "pane-tell: no pane \"$2\"" >&2; exit 3; }
-  tell "$(cut -f1 <<<"$row")" "$(cut -f2 <<<"$row")" "$3" "$(cut -f3 <<<"$row")" "$(cut -f4 <<<"$row")" ""
+  [ -n "$(printf '%s\n' "$row" | cut -f1)" ] || { echo "pane-tell: no pane \"$2\"" >&2; exit 3; }
+  tell "$(printf '%s\n' "$row" | cut -f1)" "$(printf '%s\n' "$row" | cut -f2)" "$3" "$(printf '%s\n' "$row" | cut -f3)" "$(printf '%s\n' "$row" | cut -f4)" ""
   exit 0
 fi
 pane_rows() {
@@ -303,21 +303,21 @@ fi
 [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ] || die 'usage: pane-tell --list | pane-tell <pane id|name text> "<message>"'
 
 if [[ "$target" =~ ^w[0-9A-Za-z]+:p[0-9A-Za-z]+$ ]]; then # herdr counts on past 9: wA:p7
-  hits=$(awk -F'\t' -v t="$target" '$1 == t' <<<"$panes")
+  hits=$(printf '%s\n' "$panes" | awk -F'\t' -v t="$target" '$1 == t')
 else
-  hits=$(awk -F'\t' -v t="$1" 'index(tolower($2), tolower(t))' <<<"$panes")
+  hits=$(printf '%s\n' "$panes" | awk -F'\t' -v t="$1" 'index(tolower($2), tolower(t))')
   # The other server only when this one has none: a name that found a pane here finds the same one now.
   [ -n "$hits" ] || hits=$(other_panes | awk -F'\t' -v t="$1" 'index(tolower($2), tolower(t))')
 fi
 [ -n "$hits" ] || { echo "pane-tell: no pane matches \"$1\" (see pane-tell --list)" >&2; exit 3; }
-if [ "$(wc -l <<<"$hits" | tr -d ' ')" -gt 1 ]; then
+if [ "$(printf '%s\n' "$hits" | wc -l | tr -d ' ')" -gt 1 ]; then
   echo "pane-tell: more than one pane matches \"$1\"; ask 요유 which, then use its id:" >&2
-  cut -f1,2 <<<"$hits" >&2
+  printf '%s\n' "$hits" | cut -f1,2 >&2
   exit 2
 fi
 # cut, not `IFS=$'\t' read`: read merges the tabs around an empty session id and shifts every later field
-pane=$(cut -f1 <<<"$hits"); name=$(cut -f2 <<<"$hits"); sid=$(cut -f3 <<<"$hits"); tab=$(cut -f5 <<<"$hits")
-kind=$(cut -f6 <<<"$hits"); terminal=$(cut -f7 <<<"$hits")
+pane=$(printf '%s\n' "$hits" | cut -f1); name=$(printf '%s\n' "$hits" | cut -f2); sid=$(printf '%s\n' "$hits" | cut -f3); tab=$(printf '%s\n' "$hits" | cut -f5)
+kind=$(printf '%s\n' "$hits" | cut -f6); terminal=$(printf '%s\n' "$hits" | cut -f7)
 if [[ $pane == */* ]]; then # found on another server: every call from here on is about the receiver
   there=$(socket_of "${pane%%/*}"); pane=${pane#*/}
   [ -n "$there" ] || { echo "pane-tell: the server of \"$1\" has just stopped" >&2; exit 3; }
@@ -328,9 +328,9 @@ fi
 why=$(auto_reason "$tab" "$sid")
 [ -z "$why" ] || die "$pane ($name) $why"
 case "$kind" in claude | codex) ;; *) die "$pane ($name) runs no Claude or Codex, so its input box cannot be read" ;; esac
-from=$(awk -F'\t' -v me="$me" '$1 == me {print $2}' <<<"$mine")
+from=$(printf '%s\n' "$mine" | awk -F'\t' -v me="$me" '$1 == me {print $2}')
 msg="[pane-tell: '${from:-자동 작업}' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] $2"
-sender=$(awk -F'\t' -v me="$me" '$1 == me {print $7}' <<<"$mine")
+sender=$(printf '%s\n' "$mine" | awk -F'\t' -v me="$me" '$1 == me {print $7}')
 # A pane on another server is named with its server: a caller reusing a bare id would type into a different pane on its own.
 shown=$pane; [ -z "$there" ] || shown=$(srv "$there")/$pane
 batch_target=

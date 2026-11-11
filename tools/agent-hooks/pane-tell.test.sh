@@ -60,7 +60,7 @@ claude_screen() { printf '%s\n\xe2\x9d\xaf\xc2\xa0%s\n%s\n  footer\n' "$RULE" "$
 claude_screen > "$SANDBOX/screen"
 claude_screen > "$SANDBOX/empty-claude"
 export PANE_TELL_POLL=0.05 PANE_TELL_SETTLE=0
-pt() { rm -f "$SANDBOX/log" "$SANDBOX/log-srv" "$SANDBOX/alerts-srv" "$SANDBOX/reads"; env HOME="$SANDBOX/home" XDG_STATE_HOME="$SANDBOX/state" HERDR_PANE_ID=w1:p9 HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "$@"; }
+pt() { rm -f "$SANDBOX/log" "$SANDBOX/log-srv" "$SANDBOX/alerts-srv" "$SANDBOX/reads"; env HOME="$SANDBOX/home" XDG_STATE_HOME="$SANDBOX/state" HERDR_PANE_ID=w1:p9 HERDR_BIN_PATH="$SANDBOX/herdr" "${PANE_TELL_TEST_SHELL:-bash}" "$SUBJECT" "$@"; }
 # pt from pane w1:p2 of the workers server
 ptw() { rm -f "$SANDBOX/log" "$SANDBOX/log-srv" "$SANDBOX/alerts-srv" "$SANDBOX/reads"; env HOME="$SANDBOX/home" XDG_STATE_HOME="$SANDBOX/state" HERDR_PANE_ID=w1:p2 HERDR_SOCKET_PATH="$SANDBOX/sessions/workers/herdr.sock" HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "$@"; }
 # pt from a launchd job: no pane, no server named
@@ -70,6 +70,21 @@ sent() { cut -d'|' -f1 "$SANDBOX/log" 2>/dev/null | tr '\n' ' '; }
 # it warns the sender, and those pane reads would land on the next check's counter ("typed between the two reads" failed 5 of 6).
 settled() { local i; for i in $(seq 1 100); do [ -z "$(ls "$SANDBOX/state/pane-tell/waiting" 2>/dev/null)" ] && ! pgrep -f "$SANDBOX/state/pane-tell/waiting/" >/dev/null && return; sleep 0.05; done; echo "FAIL a delivery never finished"; fails=1; }
 box() { printf '%b' "$2" | HERDR_BIN_PATH=/nonexistent bash "$SUBJECT" --box-empty "$1"; echo $?; }
+
+# A real installation links the launcher from a different directory. Exercise
+# large JSON rows and prompt arguments through that link on Apple's Bash 3.2.
+large_text=$(python3 -I -c 'print("large-%s-" * 2048)')
+panes "w1:p1|$large_text|s1" "w1:p9|sender|s9"
+ln -s "$SUBJECT" "$SANDBOX/pane-tell-link"
+real_subject=$SUBJECT; SUBJECT=$SANDBOX/pane-tell-link
+PANE_TELL_TEST_SHELL=/bin/bash
+pt w1:p1 "$large_text" >/dev/null
+check "large pane JSON and prompt deliver through installed link" "$?|$(sent)" "0|w1:p1 "
+check "large prompt remains byte-for-byte intact" "$(cut -d'|' -f2- "$SANDBOX/log")" "[pane-tell: 'sender' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] $large_text"
+pt nowhere "$large_text" >/dev/null 2>&1
+check "large pane JSON still rejects an absent recipient" "$?|$(sent)" "3|"
+SUBJECT=$real_subject
+unset PANE_TELL_TEST_SHELL
 
 panes "w1:p1|🟢 회고 KPI 표|s1" "w1:p2|🔴 #1-marketing 자동화 조사|s2" "w1:p3|🟢 api#7 시험|s3" "w1:p4|🟢 api#70 다른|s4" "w1:p9|🟢 와우포인트 정리|s9"
 check "list shows names without the mark" "$(pt --list | cut -f2 | tr '\n' ',')" "회고 KPI 표,#1-marketing 자동화 조사,api#7 시험,api#70 다른,와우포인트 정리,"
