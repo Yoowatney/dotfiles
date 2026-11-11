@@ -29,6 +29,10 @@ ho() { local pane="$1"; shift; env XDG_STATE_HOME="$SANDBOX/state" HERDR_PANE_ID
 # The kick runs detached, so give it a moment to land.
 prompts() { local i; for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$SANDBOX/prompts" ] && break; sleep 0.2; done; cut -d'|' -f1 "$SANDBOX/prompts" 2>/dev/null | tr '\n' ' '; }
 dir="$SANDBOX/state/agent-handoff"
+# These free-form save/load cases exercise the unchanged main-session contract.
+# Ordinary validation and legacy reads are covered separately in handoff-state.test.py.
+mkdir -p "$SANDBOX/state/orchestrator"
+echo t1 > "$SANDBOX/state/orchestrator/main"
 
 printf '보드 api#1 이어서\n' | ho w1:p1 save >/dev/null
 check "save writes the pane's file" "$(cat "$dir/w1:p1.md")" "보드 api#1 이어서"

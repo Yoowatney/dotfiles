@@ -698,6 +698,7 @@ main() {
     install_tmux
     create_symlinks
     setup_claude
+    python3 "$DOTFILES/tools/agent-hooks/install-handoff.py"
     restore_app_settings
     configure_macos_defaults
     install_mise_tools

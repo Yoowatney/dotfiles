@@ -74,6 +74,11 @@ else
     msg="herdr pane label: no label yet (the pane shows \"$PLACEHOLDER\" or the session's first-topic title). Name it for the current task before other work: pane-label \"<issue> <2-4 words>\" (e.g. pane-label \"api#736 Dependabot 정리\")."
 fi
 
+# Prompt hooks also reach sessions that were open before the handoff update.
+if [ -z "$term" ] || [ "$term" != "$(cat "$mainfile" 2>/dev/null)" ]; then
+    msg="$msg Before saving an ordinary-session handoff, read ~/.dotfiles/tools/agent-hooks/handoff-format.md; handoff save validates its required fields. Both Claude and Codex load saved handoffs."
+fi
+
 # Every turn re-reads the whole session, so a long one eats the 5-hour and 7-day limits; a new task
 # belongs in a cleared session (요유 2026-10-17). Size = the last assistant message's usage.
 transcript=$(jq -r '.transcript_path // empty' <<<"$input" 2>/dev/null)
@@ -81,7 +86,7 @@ if [ -n "$transcript" ] && [ -r "$transcript" ]; then
     tokens=$(tail -n 200 "$transcript" | jq -R -r 'fromjson? | select(.type == "assistant") | .message.usage // empty
         | (.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0)' 2>/dev/null | tail -n 1)
     if [ "${tokens:-0}" -gt 300000 ] 2>/dev/null; then
-        msg="$msg Context is about $((tokens / 1000))k tokens. If this message starts a different task, first leave what the next session needs (board comment, work-log or memory), then pipe a short handoff prompt (Korean, absolute paths, board link) into \`handoff save\` and suggest in one line that 요유 run /clear here: the next session in this pane loads it, so 요유 pastes nothing (Codex does not load it yet: pbcopy the prompt and show it instead)."
+        msg="$msg Context is about $((tokens / 1000))k tokens. If this message starts a different task, first leave what the next session needs (board comment, work-log or memory), then save a handoff following ~/.dotfiles/tools/agent-hooks/handoff-format.md with \`handoff save\`. Claude and Codex both load it in the next session in this pane."
     fi
 fi
 

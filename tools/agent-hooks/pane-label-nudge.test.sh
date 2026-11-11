@@ -145,13 +145,13 @@ usage_line() { echo "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tok
 T="$SANDBOX/long.jsonl"
 { echo '{"type":"user","message":{"content":"hi"}}'; usage_line 340000; echo 'not json'; } > "$T"
 ctx=$(run_with_transcript "$T")
-[[ "$ctx" == *"/clear"* ]] || fail "long session should suggest /clear: $ctx"
+[[ "$ctx" == *"handoff-format.md"* ]] || fail "long session should name the handoff format: $ctx"
 [[ "$ctx" == *"341k"* ]] || fail "long session should say its size: $ctx"
 # A /clear suggestion saves the handoff for the next session, which loads it itself (요유 2026-10-21);
 # the clipboard round trip made 요유 the bottleneck.
 [[ "$ctx" == *"handoff save"* ]] || fail "long session should ask for handoff save: $ctx"
-# Codex has no load hook (its hook trust prompt is 요유's call), so Codex keeps the clipboard.
-[[ "$ctx" == *"Codex"*"pbcopy"* ]] || fail "Codex should keep the pbcopy handoff: $ctx"
+[[ "$ctx" == *"Claude and Codex both load"* ]] || fail "both tools should load the handoff: $ctx"
+[[ "$ctx" != *"pbcopy"* ]] || fail "Codex must not require clipboard handoffs: $ctx"
 { usage_line 600000; usage_line 40000; } > "$SANDBOX/compacted.jsonl"
 ctx=$(run_with_transcript "$SANDBOX/compacted.jsonl")
 [[ "$ctx" != *"/clear"* ]] || fail "only the last message counts: $ctx"

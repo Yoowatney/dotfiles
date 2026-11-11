@@ -5,8 +5,9 @@
 #   handoff session       Claude SessionStart hook (every source): remember this pane's transcript in <pane>.md.transcript.
 #                         On /clear: load, or with nothing saved, point the new session at the transcript /clear ended.
 #   handoff load          print the pending handoff once, set it aside, and start the first turn.
-#                         Not wired into Codex: its hooks.json entry needs 요유 to trust it first.
+#   handoff session codex Codex SessionStart hook; explicit saves load on startup too.
 # One pending handoff per herdr pane; a newer save replaces it. The last loaded one stays as <pane>.md.loaded.
+HERE=$(python3 -I -c 'import os,sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "$0")
 dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-handoff"
 # A named herdr server gets its own folder, so the same pane id on two servers never shares a handoff.
 # Same session-name rule as herdr_peers.server_key.
@@ -19,7 +20,7 @@ typed="Any text before the [handoff: marker in that message is 요유's own, typ
 # so type the first prompt into this pane once the session is up (요유 approved 10/21). Detached: the hook returns first.
 # Through pane-tell, so it waits for an empty box instead of merging with what 요유 began typing after /clear.
 kick() {
-  nohup bash -c 'sleep "$1"; "$2" --raw "$3" "$4"' _ "${HANDOFF_KICK_DELAY:-3}" "$(dirname "$0")/pane-tell" "$HERDR_PANE_ID" \
+  nohup bash -c 'sleep "$1"; "$2" --raw "$3" "$4"' _ "${HANDOFF_KICK_DELAY:-3}" "$HERE/pane-tell" "$HERDR_PANE_ID" \
     "[handoff: /clear 뒤 자동으로 보낸 글입니다. 요유가 직접 친 글이 아닙니다] $1 되돌리기 어려운 일은 요유에게 확인하세요." >/dev/null 2>&1 &
 }
 case "${1:-}" in
@@ -28,25 +29,13 @@ case "${1:-}" in
       cat "${2:-/dev/stdin}" | pbcopy && echo "handoff: not in herdr, copied to the clipboard instead"
       exit
     fi
-    mkdir -p "$dir" && cat "${2:-/dev/stdin}" > "$f" &&
-      echo "handoff: saved for the next session in $HERDR_PANE_ID; 요유 only types /clear"
+    python3 "$HERE/handoff-state.py" save ${2:+"$2"}
     ;;
   load)
     [ -n "${HERDR_PANE_ID:-}" ] && [ -f "$f" ] || exit 0
-    # ponytail: fixed one-day expiry; a handoff nobody picked up by then belongs to work that moved on
-    if [ -n "$(find "$f" -mmin +1440)" ]; then rm -f "$f"; exit 0; fi
-    head="The previous session in this pane saved this handoff at $(stat -f '%Sm' -t '%m-%d %H:%M' "$f") before /clear. Unless 요유's first message asks for something else, continue from it. $typed"
-    # The JSON shape both Claude and Codex read as SessionStart context. No systemMessage: Claude draws it only
-    # with the first turn, so it cannot fill the wait (measured 10/21).
-    # A long handoff is task data, not a rule file. Keep it complete and require a
-    # read before continuing. This defers the text until Read; it does not remove
-    # it from subsequent requests. Short notes retain the original behavior.
-    jq -n --arg head "$head" --arg path "$f.loaded" --rawfile memo "$f" '
-      {hookSpecificOutput: {hookEventName: "SessionStart", additionalContext:
-        ($head + "\n\n" + (if ($memo | length) > 2000
-          then "The complete handoff is saved at " + $path + ". Read it in full before continuing."
-          else $memo end))}}' &&
-      mv "$f" "$f.loaded" || exit
+    out=$(python3 "$HERE/handoff-state.py" load) || exit $?
+    [ -n "$out" ] || exit 0
+    printf '%s\n' "$out"
     kick "세션 시작 때 받은 인수인계대로 이어서 진행하세요."
     ;;
   session)
@@ -54,14 +43,19 @@ case "${1:-}" in
     # the old session sees /clear coming, so the fallback cannot depend on it.
     in=$(cat)
     [ -n "${HERDR_PANE_ID:-}" ] || exit 0
+    if [ "${2:-}" = codex ]; then
+      out=$(printf '%s' "$in" | python3 "$HERE/handoff-state.py" session-codex) || exit $?
+      if [ -n "$out" ]; then printf '%s\n' "$out"; kick "세션 시작 때 받은 인수인계나 직전 기록을 확인하고 이어서 진행하세요."; fi
+      exit 0
+    fi
     # A `claude -p` run from a Bash call inherits the pane id but is not the pane's session: it runs as sdk-cli (probed 10/23).
     [ "${CLAUDE_CODE_ENTRYPOINT:-cli}" = cli ] || exit 0
     mkdir -p "$dir" || exit
     prev=$(cat "$f.transcript" 2>/dev/null)
     jq -r '.transcript_path // empty' <<<"$in" > "$f.transcript"
-    [ "$(jq -r '.source // empty' <<<"$in")" = clear ] || exit 0
     out=$(bash "$0" load)
     if [ -n "$out" ]; then printf '%s\n' "$out"; exit; fi
+    [ "$(jq -r '.source // empty' <<<"$in")" = clear ] || exit 0
     [ -f "$prev" ] || exit 0
     # ponytail: only the last 2000 lines; the transcript path is there for anything older
     last=$(tail -n 2000 "$prev" | jq -rs '
@@ -70,7 +64,7 @@ case "${1:-}" in
       | [.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text] as $a
       | "요유의 마지막 메시지:\n\(($u[-1] // "(없음)")[0:600])\n\n유요의 마지막 답:\n\(($a[-1] // "(없음)")[0:1500])"
         + ([$a[] | scan("남은 것:[^\n]*")] | last | if . then "\n\n마지막 남은 것 줄:\n\(.)" else "" end)') || exit 0
-    head="The previous session in this pane ended with /clear without saving a handoff. Its full transcript is $prev; read its end with jq if you need more than the excerpt below. Unless 요유's first message asks for something else, pick up where it left off: the 유요 몫 in its last 남은 것 line. $typed"
+    head="필수 항목 미확인. 이전 검증을 그대로 사용할 수 없음. The previous session in this pane ended with /clear without saving a handoff. Its full transcript is $prev; read its end with jq if you need more than the excerpt below. Unless 요유's first message asks for something else, pick up where it left off: the 유요 몫 in its last 남은 것 line. $typed"
     jq -n --arg ctx "$head"$'\n\n'"$last" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}' || exit
     # 요유 only types /clear, saved or not (10/23).
     kick "세션 시작 때 받은 직전 세션 기록을 보고, 유요 몫으로 남은 일을 이어서 진행하세요. 남은 일이 없으면 이어받은 내용만 짧게 알리세요."
