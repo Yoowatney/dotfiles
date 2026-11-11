@@ -2,6 +2,7 @@
 set -euo pipefail
 export STOP_GUARD_ROOT="${STOP_GUARD_ROOT:-$(cd "$(dirname "$0")" && pwd)}"
 python3 - <<'PY'
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(os.environ['STOP_GUARD_ROOT'])
 
@@ -91,15 +93,20 @@ class StopGuardTests(unittest.TestCase):
         ingest.write_text('#!/bin/bash\necho call >> "$HOME/calls"\n')
         ingest.chmod(0o755)
         herdr = self.home / 'herdr'
-        herdr.write_text('''#!/usr/bin/env python3
-import json, os, sys
-args = sys.argv[1:]
-if args[:2] == ['pane', 'get']:
-    print(json.dumps({'result': {'pane': {'pane_id': 'resolved', 'terminal_id': 'fixture-terminal'}}}))
-elif args[:2] == ['agent', 'get']:
-    print(json.dumps({'result': {'agent': {'name': os.environ.get('FIXTURE_AGENT_NAME', '')}}}))
-else:
-    print('{}')
+        # Routing replies are constants; avoid Python startup within the real
+        # two-second herdr deadline while keeping the native process reader.
+        herdr.write_text('''#!/bin/bash
+case "${1:-} ${2:-}" in
+    'pane get')
+        printf '%s\\n' '{"result":{"pane":{"pane_id":"resolved","terminal_id":"fixture-terminal"}}}' ;;
+    'agent get')
+        case "${FIXTURE_AGENT_NAME:-}" in
+            spawn-parent-fixture) printf '%s\\n' '{"result":{"agent":{"name":"spawn-parent-fixture"}}}' ;;
+            '') printf '%s\\n' '{"result":{"agent":{"name":""}}}' ;;
+            *) exit 2 ;;
+        esac ;;
+    *) printf '%s\\n' '{}' ;;
+esac
 ''')
         herdr.chmod(0o755)
         self.env = {k: v for k, v in os.environ.items()
@@ -128,6 +135,39 @@ else:
 
     def test_worker_nested_claude_skips_ingest(self):
         self.assertEqual(self.run_case(nested=True, child='claude', claude_stop=True), 0)
+
+    def test_native_herdr_fixture_preserves_routing_replies(self):
+        herdr = str(self.home / 'herdr')
+        cases = [
+            (['pane', 'get', 'stale'], 'spawn-parent-fixture',
+             {'result': {'pane': {'pane_id': 'resolved', 'terminal_id': 'fixture-terminal'}}}),
+            (['agent', 'get', 'resolved'], 'spawn-parent-fixture',
+             {'result': {'agent': {'name': 'spawn-parent-fixture'}}}),
+            (['agent', 'get', 'resolved'], '', {'result': {'agent': {'name': ''}}}),
+            (['session', 'list'], 'spawn-parent-fixture', {}),
+        ]
+        for args, name, expected in cases:
+            with self.subTest(args=args, name=name):
+                reply = subprocess.run([herdr, *args], env={**self.env, 'FIXTURE_AGENT_NAME': name},
+                                       capture_output=True, text=True, timeout=2)
+                self.assertEqual(reply.returncode, 0, reply.stderr)
+                self.assertEqual(reply.stderr, '')
+                self.assertEqual(json.loads(reply.stdout), expected)
+
+    def test_herdr_timeout_preserves_normal_stop(self):
+        def load(name, filename):
+            spec = importlib.util.spec_from_file_location(name, ROOT / filename)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+        peers = load('stop_fixture_peers', 'herdr_peers.py')
+        guard = load('stop_fixture_guard', 'stop-model-guard.py')
+        with mock.patch.object(peers.subprocess, 'run',
+                               side_effect=subprocess.TimeoutExpired('fixture-herdr', 2)) as call:
+            self.assertFalse(guard.worker(peers, self.env))
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(call.call_args.kwargs['timeout'], 2)
 
     def test_claude_worker_nested_codex_skips(self):
         self.assertEqual(self.run_case(nested=True, parent='claude'), 0)

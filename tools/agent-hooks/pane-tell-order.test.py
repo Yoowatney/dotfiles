@@ -144,15 +144,21 @@ esac
         while not self.workers_complete() and time.monotonic() < end:
             (self.root / "busy").unlink(missing_ok=True)
             time.sleep(.02)
+        child_timed_out = False
         for child in self.children:
             if child.poll() is None:
-                child.wait(timeout=9)
+                try:
+                    child.wait(timeout=9)
+                except subprocess.TimeoutExpired:
+                    # Keep collecting later children and retain this HOME even
+                    # if the detached workers have acknowledged completion.
+                    child_timed_out = True
         self.capture("after-cleanup")
-        if not self.workers_complete():
+        if child_timed_out or not self.workers_complete():
             # Keep evidence and HOME intact if a worker has not acknowledged
             # completion; deleting them would create a fixture-owned orphan.
             self.tmp._finalizer.detach()
-            self.fail("fixture workers did not finish; HOME retained at " + str(self.root))
+            self.fail("fixture workers or children did not finish; HOME retained at " + str(self.root))
         self.tmp.cleanup()
 
     def workers_complete(self):
