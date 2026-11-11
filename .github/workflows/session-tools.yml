@@ -9,6 +9,7 @@ on:
       - 'tools/agent-hooks/pane-label-nudge*'
       - 'tools/agent-hooks/yoyoo-share-guard.py'
       - 'tools/agent-hooks/herdr_peers.py'
+      - 'tools/agent-hooks/workers-watch.py'
       - 'tools/agent-hooks/pane-spawn*'
       - 'shell/zsh/codex-fn.test.sh'
       - 'shell/zsh/zshrc'
@@ -33,6 +34,7 @@ on:
       - 'tools/agent-hooks/pane-label-nudge*'
       - 'tools/agent-hooks/yoyoo-share-guard.py'
       - 'tools/agent-hooks/herdr_peers.py'
+      - 'tools/agent-hooks/workers-watch.py'
       - 'tools/agent-hooks/pane-spawn*'
       - 'shell/zsh/codex-fn.test.sh'
       - 'shell/zsh/zshrc'
@@ -66,6 +68,7 @@ jobs:
           for test in tools/agent-hooks/pane-tell.test.sh tools/agent-hooks/pane-tell-*.test.sh; do
             bash "$test"
           done
+      - run: python3 tools/agent-hooks/workers-watch.py --selftest
       - run: python3 tools/agent-hooks/pane-tell-order.test.py --selftest
       - run: bash tools/agent-hooks/pane-relay-watch.test.sh
       - run: bash tools/agent-hooks/main-alert-inbox.test.sh
