@@ -91,6 +91,15 @@ check "a stuck test does not hold the push" "$([ $((SECONDS - start)) -lt 10 ] &
 has "a stuck test: named" "$out" "tools/hang.test.sh"
 
 fresh
+put tools/hang.test.sh "(sleep 3; touch '$T/orphan-ran') & wait"; ci orphan
+out=$(PRE_PUSH_LIMIT=1 git -C "$W" push origin main 2>&1 </dev/null); rc=$?
+check "a test with a child times out as a failure" "$([ "$rc" != 0 ] && echo refused)" refused
+has "a test with a child: named" "$out" "tools/hang.test.sh"
+has "a test with a child: timed out" "$out" "stopped after 1s"
+sleep 3
+check "a timed-out test cannot leave a child running" "$([ -e "$T/orphan-ran" ] && echo orphan || echo stopped)" stopped
+
+fresh
 put README "no tests here"; ci empty
 push origin main
 check "no tests found is a failure, not a pass" "$([ "$rc" != 0 ] && echo refused)" refused
