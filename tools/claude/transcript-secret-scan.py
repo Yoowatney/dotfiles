@@ -229,13 +229,22 @@ def report(result, nfiles, dry):
             kinds[kind] = kinds.get(kind, 0) + n
         r = next((r for r in ROOTS if p.startswith(os.path.expanduser(r))), "?")
         roots[r] = roots.get(r, 0) + 1
-    lines = ["[세션 기록 비밀값 검사] 비밀값 모양 %d곳을 %s (파일 %d개 중 %d개)" % (
-        total, "찾았습니다(가리지 않음)" if dry else "가렸습니다", nfiles, len(result))]
+    action = "요유 할 일: 실제 사용 중인 비밀값으로 확인되면 재발급 여부를 정해 주세요."
+    lines = ["[세션 기록 비밀값 검사] 비밀값 모양 %d곳을 %s. %s" % (
+        total, "찾았습니다(가리지 않음)" if dry else "가렸습니다", action)]
+    lines.append("검사 대상: 회사맥에 저장된 세션 기록과 입력 기록, 보관본·위키용 사본·세션 보고서입니다 "
+                 "(파일 %d개 중 %d개에서 발견)." % (nfiles, len(result)))
+    if not dry:
+        lines.append("가린 것: 기록 속 문자열 본문을 같은 길이의 `*`로 덮었습니다. "
+                     "원래 설정 파일을 바꾸거나 서비스 토큰을 폐기하거나 재발급하지 않았습니다.")
+    lines.append("건수는 값이 나타난 위치 수입니다. 중복·예시·시험용 문자열이나 암호문도 포함될 수 있어 "
+                 "새 토큰 수나 새 유출 건수를 뜻하지 않습니다.")
+    lines.append("이 검사는 실제 사용 중인 값인지, 전에 가린 값인지 확인하지 않습니다.")
     lines += ["- %s: %d곳" % (k, n) for k, n in sorted(kinds.items(), key=lambda x: -x[1])]
     lines.append("위치:")
     lines += ["- `%s`: 파일 %d개" % (r, n) for r, n in sorted(roots.items(), key=lambda x: -x[1])]
-    lines.append("값과 파일 이름은 이 글에 없습니다(회사맥 `~/Library/Logs/transcript-secret-scan.log`). "
-                 "새로 나온 토큰이면 재발급할지 요유가 정합니다.")
+    lines.append("값과 파일 이름은 이 글에 없습니다. 가린 위치와 건수는 회사맥 "
+                 "`~/Library/Logs/transcript-secret-scan.log`에 남깁니다.")
     return "\n".join(lines)
 
 
