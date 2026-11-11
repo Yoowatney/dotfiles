@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from typing import NamedTuple
 import uuid
 
@@ -162,8 +163,12 @@ class Store:
         if not self.path.exists():
             return {"pending": [], "sent": []}
         state = json.loads(self.path.read_text())
-        if not isinstance(state, dict) or set(state) != {"pending", "sent"}:
+        if not isinstance(state, dict) or set(state) not in ({"pending", "sent"}, {"pending", "sent", "delay_written"}):
             raise ValueError("invalid queue state; refusing to overwrite")
+        cooldowns = state.get("delay_written", {})
+        if not isinstance(cooldowns, dict) or any(not isinstance(key, str) or
+                not isinstance(value, (int, float)) for key, value in cooldowns.items()):
+            raise ValueError("invalid delay notification timestamps")
         state["pending"] = [validate_event(item) for item in state["pending"]]
         state["sent"] = [valid_id(item) for item in state["sent"]]
         return state
@@ -239,18 +244,50 @@ class Store:
         delivered = 0
         with self.locked():
             state = self.read()
+            cooldowns = state.setdefault("delay_written", {})
             for event in list(state["pending"]):
+                if event not in state["pending"]:
+                    continue
+                # Legacy detached pane-tell processes also enter this gateway.
+                # Group only delay warnings; actual failures stay immediate.
+                key = delay_recipient(event)
+                now = time.time()
+                if key is not None and now - cooldowns.get(key, now - 600) < 600:
+                    continue
+                group = ([item for item in state["pending"] if delay_recipient(item) == key]
+                         if key is not None else [event])
+                notice = dict(event)
+                if len(group) > 1:
+                    notice["body"] += f" (전달 지연 {len(group)}건 묶음)"
                 try:
-                    send_to_client(event, inventory)
+                    send_to_client(notice, inventory)
                 except (OSError, subprocess.SubprocessError) as exc:
                     self.log("pending " + event["id"] + ": " + str(exc))
                     break
-                state["pending"].remove(event)
-                state["sent"].append(event["id"])
+                for item in group:
+                    state["pending"].remove(item)
+                    state["sent"].append(item["id"])
+                if key is not None:
+                    cooldowns[key] = now
                 self.save(state)
-                self.log("written " + event["id"])
+                self.log("written " + event["id"] + f" events={len(group)} title=" + event["title"])
                 delivered += 1
         return delivered
+
+
+def delay_recipient(event):
+    """Use the receiver label from old and new pane-tell delay warnings.
+
+    Status/role marks may change while a receiver is blocked. Keep the original
+    events pending during cooldown; the next drain sends one counted notice.
+    """
+    # The inventory watcher deliberately exposes only file metadata, without
+    # a receiver. Its same-kind desktop warnings share one global cooldown.
+    if event["title"] == "세션 사이의 글 전달이 지연됐습니다":
+        return "relay-watch:inventory"
+    if event["title"] == "칸 전달 대기" and " 칸 입력창" in event["body"]:
+        return re.sub(r"^[🟢🔴👑🫡\s]+", "", event["body"].split(" 칸 입력창", 1)[0])
+    return None
 
 
 def main():

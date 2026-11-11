@@ -18,11 +18,54 @@ import termios
 import time
 import unittest
 import uuid
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("herdr-error-notify.py")
 
 
 class ErrorNotifyTests(unittest.TestCase):
+    def test_delay_notices_are_grouped_across_process_restarts_without_losing_events(self):
+        master, client = self.terminal()
+        body = "🔴 👑 Receiver 칸 입력창이 비어 있지 않아 글이 들어가지 못합니다."
+        with patch("time.time", return_value=1000):
+            self.store.enqueue("칸 전달 대기", body)
+            self.assertEqual(self.store.drain(lambda: [client]), 1)
+        self.read(master)
+        events = [self.store.enqueue("칸 전달 대기", body.replace("🔴", "🟢")) for _ in range(4)]
+        reopened = self.mod.Store(Path(self.tmp.name))
+        with patch("time.time", return_value=1599):
+            self.assertEqual(reopened.drain(lambda: [client]), 0)
+        self.assertEqual(self.read(master), b"")
+        self.assertEqual(reopened.export(), events)
+        with patch("time.time", return_value=1600):
+            self.assertEqual(reopened.drain(lambda: [client]), 1)
+        output = self.read(master)
+        self.assertEqual(output.count(b"\x1b]9;"), 1)
+        self.assertIn("4건".encode(), output)
+        self.assertEqual(reopened.export(), [])
+        self.assertTrue({event["id"] for event in events}.issubset(set(reopened.read()["sent"])))
+
+    def test_other_recipients_and_actual_delivery_failures_remain_immediate(self):
+        master, client = self.terminal()
+        for name in ("Receiver A", "Receiver B"):
+            self.store.enqueue("칸 전달 대기", name + " 칸 입력창이 비어 있지 않습니다.")
+        self.store.enqueue("칸 전달 대기", "전달하지 못해 파일로 남겼습니다: retained-message")
+        self.assertEqual(self.store.drain(lambda: [client]), 3)
+        self.assertEqual(self.read(master).count(b"\x1b]9;"), 3)
+
+    def test_relay_watch_delay_inventory_is_one_notice_not_one_per_file(self):
+        master, client = self.terminal()
+        events = [self.store.enqueue("세션 사이의 글 전달이 지연됐습니다",
+                                   f"전달 대기가 기준 시간을 넘었습니다. 보관 파일: queue-{i}")
+                  for i in range(4)]
+        self.assertEqual(self.store.drain(lambda: [client]), 1)
+        output = self.read(master)
+        self.assertEqual(output.count(b"\x1b]9;"), 1)
+        self.assertIn("4건".encode(), output)
+        self.store.enqueue("세션 사이의 글 전달이 지연됐습니다", "새 지연 파일")
+        self.assertEqual(self.store.drain(lambda: [client]), 0)
+        self.assertEqual(len(self.store.export()), 1)
+
     def setUp(self):
         self.assertTrue(SCRIPT.is_file(), "the durable error gateway is missing")
         spec = importlib.util.spec_from_file_location("error_notify", SCRIPT)
