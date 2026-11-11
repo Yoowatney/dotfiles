@@ -42,6 +42,11 @@
 # /clear meanwhile hands it to the next one.
 H=${HERDR_BIN_PATH:-herdr}
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}/pane-tell
+# Preserve the launching context before switching to the receiver server.
+export PANE_TELL_SOURCE_PANE=${PANE_TELL_SOURCE_PANE:-${HERDR_PANE_ID:-unknown}}
+export PANE_TELL_SOURCE_SERVER=${PANE_TELL_SOURCE_SERVER:-${HERDR_SESSION:-default}}
+export PANE_TELL_SOURCE_SESSION=${PANE_TELL_SOURCE_SESSION:-unknown}
+export PANE_TELL_SOURCE_PARENT=${PANE_TELL_SOURCE_PARENT:-$PPID}
 unset ORDERED_TERMINAL
 DRAFT_HELPER=$(python3 -I -c 'import os,sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])), "main-input-draft.py"))' "$0")
 PEERS="default workers"
@@ -120,7 +125,22 @@ register_receiver() ( # waiting payload, terminal: metadata contains no message 
   route=$(mktemp "$STATE/delivery-routes/.new.XXXXXX") || return
   printf '%s\n%s\n%s\n' "${3:-}" "${4:-}" "${5:-}" > "$route" &&
     mv "$route" "$STATE/delivery-routes/$(basename "$1")" &&
-    printf '%s\n%s\n' "$2" "${HERDR_SOCKET_PATH:-default}" > "$STATE/receivers/$(basename "$1")"
+    printf '%s\n%s\n' "$2" "${HERDR_SOCKET_PATH:-default}" > "$STATE/receivers/$(basename "$1")" || return
+  python3 -I -c '
+import json, os, sys, tempfile
+directory = sys.argv[1] + "/delivery-origins"
+os.makedirs(directory, exist_ok=True)
+fd, pending = tempfile.mkstemp(prefix=".new.", dir=directory)
+try:
+    with os.fdopen(fd, "w") as stream:
+        json.dump({key: os.environ.get("PANE_TELL_SOURCE_" + key.upper(), "unknown")
+                   for key in ("pane", "server", "session", "parent")}, stream)
+        stream.flush(); os.fsync(stream.fileno())
+    try: os.link(pending, directory + "/" + os.path.basename(sys.argv[2]))
+    except FileExistsError: pass # A retry preserves the original sender.
+finally:
+    os.unlink(pending)
+' "$STATE" "$1"
 )
 receiver_server() {
   case "$1" in */sessions/workers/herdr.sock) echo workers ;; *) echo default ;; esac
@@ -457,10 +477,26 @@ batch_flush() { # dir, terminal: under the canonical ordering lock
 }
 batch_deliver() { # payload, terminal, optional original routing: one owner for every queue worker
   python3 -I -c '
-import fcntl, os, signal, subprocess, sys, time
+import fcntl, json, os, signal, stat, subprocess, sys, time
 payload, terminal, script, state, *route = sys.argv[1:]
+context = {key: os.environ.get("PANE_TELL_SOURCE_" + key.upper(), "unknown")
+           for key in ("pane", "server", "session", "parent")}
+try:
+    fd = os.open(state + "/delivery-origins/" + os.path.basename(payload), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as stream:
+        info = os.fstat(stream.fileno())
+        if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid():
+            saved = json.loads(stream.read(4096))
+            context = {key: str(saved.get(key, "unknown")) for key in context}
+except (OSError, ValueError, TypeError, AttributeError):
+    pass # Legacy queues have no durable sender context.
+supervisor = os.getpid()
+launch_parent = os.getppid()
 def event(kind, fields):
     line = time.strftime("%F %T") + " " + kind + " " + os.path.basename(payload) + " " + fields
+    line += " observed_epoch=" + str(time.time()) + " launch_parent=" + str(launch_parent)
+    line += "".join(" source_" + key + "=" + json.dumps(value, ensure_ascii=True)
+                    for key, value in context.items())
     try:
         with open(state + "/log", "a") as log:
             log.write(line + "\n")
@@ -475,7 +511,7 @@ def owner_exit(pid, status):
     # waitpid identifies the child and termination signal, not its sender.
     event("owner-exit", "pid=" + str(pid) + " status=" + str(status)
           + " signal=" + sig + " sender=unknown observed_by=" + str(os.getpid())
-          + " observed_epoch=" + str(time.time()))
+          + " parent=" + str(supervisor))
 def stop_delivery(child):
     # This is our private session, never the caller or another delivery.
     # Keep the direct child unreaped until all signals have been sent so its
@@ -552,12 +588,13 @@ with open(state + "/batch-locks/" + os.path.basename(payload), "a") as lock:
                   + " sid=" + str(os.getsid(0)))
             with os.fdopen(reader) as stream:
                 status = int(stream.read())
-            event("worker-exit", "status=" + str(status) + " waiting=" + str(os.path.isfile(payload)))
+            event("worker-exit", "status=" + str(status) + " waiting=" + str(os.path.isfile(payload))
+                  + " pid=" + str(os.getpid()) + " parent=" + str(supervisor))
             os._exit(exitcode(status))
         os.close(reader)
         event("supervisor-start", "pid=" + str(os.getpid()) + " owner=" + str(owner)
               + " delivery=" + str(child.pid) + " pgid=" + str(os.getpgrp())
-              + " sid=" + str(os.getsid(0)))
+              + " sid=" + str(os.getsid(0)) + " parent=" + str(launch_parent))
         while True:
             ended, result = os.waitpid(owner, os.WNOHANG)
             if ended:
@@ -565,7 +602,9 @@ with open(state + "/batch-locks/" + os.path.basename(payload), "a") as lock:
                 owner_exit(owner, status)
                 delivery_status = stop_delivery(child)
                 event("worker-exit", "status=" + str(delivery_status)
-                      + " waiting=" + str(os.path.isfile(payload)) + " observed_by=" + str(os.getpid()))
+                      + " waiting=" + str(os.path.isfile(payload)) + " observed_by=" + str(os.getpid())
+                      + " pid=" + str(child.pid) + " parent=" + str(supervisor)
+                      + " signal=" + (signal.Signals(-delivery_status).name if delivery_status < 0 else "none"))
                 os.close(writer)
                 sys.exit(exitcode(status) or 1)
             status = delivery_status(child.pid)
@@ -575,7 +614,7 @@ with open(state + "/batch-locks/" + os.path.basename(payload), "a") as lock:
                 event("delivery-exit", "pid=" + str(child.pid) + " status=" + str(status)
                       + " signal=" + (signal.Signals(-status).name if status < 0 else "none")
                       + " sender=unknown observed_by=" + str(os.getpid())
-                      + " observed_epoch=" + str(time.time()))
+                      + " parent=" + str(supervisor))
                 try:
                     os.write(writer, str(status).encode())
                 except BrokenPipeError:
@@ -947,6 +986,10 @@ why=$(auto_reason "$tab" "$sid")
 [ -z "$why" ] || die "$pane ($name) $why"
 case "$kind" in claude | codex) ;; *) die "$pane ($name) runs no Claude or Codex, so its input box cannot be read" ;; esac
 from=$(printf '%s\n' "$mine" | awk -F'\t' -v me="$me" '$1 == me {print $2}')
+export PANE_TELL_SOURCE_PANE=${me:-unknown}
+export PANE_TELL_SOURCE_SERVER=$(srv "$here")
+source_session=$(printf '%s\n' "$mine" | awk -F'\t' -v me="$me" '$1 == me {print $3}')
+export PANE_TELL_SOURCE_SESSION=${source_session:-unknown}
 msg="[pane-tell: '${from:-자동 작업}' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] $2"
 sender=$(printf '%s\n' "$mine" | awk -F'\t' -v me="$me" '$1 == me {print $7}')
 # A pane on another server is named with its server: a caller reusing a bare id would type into a different pane on its own.

@@ -348,7 +348,9 @@ exec /usr/bin/nohup "$@"
         first, second = self.private_ordered_pair()
         (self.root / "spawn-descendant").touch()
         worker = subprocess.Popen(["/bin/bash", str(self.subject), "--deliver", str(second),
-                                   "term_M", "sM", "", ""], env=self.env,
+                                   "term_M", "sM", "", ""], env=dict(self.env,
+                                   HERDR_PANE_ID="w9:p7", HERDR_SESSION="workers",
+                                   PANE_TELL_SOURCE_SESSION="source-session"),
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                   start_new_session=True)
         try:
@@ -378,6 +380,16 @@ exec /usr/bin/nohup "$@"
             self.assertEqual((self.state / "order/dependencies" / second.name).read_text(), str(first) + "\n")
             text = (self.state / "log").read_text()
             self.assertRegex(text, r"owner-exit 101.second .*status=-9 signal=SIGKILL sender=unknown")
+            owner_line = next(line for line in text.splitlines() if "owner-exit 101.second" in line)
+            self.assertIn('source_pane="w9:p7"', owner_line)
+            self.assertIn('source_server="workers"', owner_line)
+            self.assertIn('source_session="source-session"', owner_line)
+            self.assertRegex(owner_line, r"parent=\d+")
+            self.assertRegex(owner_line, r"observed_epoch=\d+\.\d+")
+            delivery_line = next(line for line in text.splitlines()
+                                 if "worker-exit 101.second" in line and "observed_by=" in line)
+            self.assertIn("pid=" + str(delivery), delivery_line)
+            self.assertRegex(delivery_line, r"signal=(SIGTERM|SIGKILL)")
             self.assertRegex(text, r"supervisor-signal 101.second .*signal=SIGTERM actor=\d+")
             self.assertIn("reason=delivery-cleanup action=attempt", text)
             self.assertFalse(self.timer_alive(descendant), "delivery descendant survived owner death")
@@ -427,6 +439,33 @@ exec /usr/bin/nohup "$@"
             failure.unlink()
             self.assertEqual(self.call("--recover-batch").returncode, 0)
             self.wait_prompt([b"first", b"second"])
+
+    def test_general_recovery_retains_original_sender_context(self):
+        first, second = self.private_ordered_pair()
+        try:
+            command = ['source "$FIXTURE/functions"; register_receiver "$1" term_M sM "" ""',
+                       "fixture", str(first)]
+            result = subprocess.run(["/bin/bash", "-c", *command], env=dict(self.env,
+                PANE_TELL_SOURCE_PANE="w9:p8", PANE_TELL_SOURCE_SERVER="workers",
+                PANE_TELL_SOURCE_SESSION="original-session", PANE_TELL_SOURCE_PARENT="123"),
+                capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            origin = self.state / "delivery-origins" / first.name
+            self.assertTrue(origin.exists(), "queue did not retain sender context")
+            self.assertEqual(json.loads(origin.read_text())["session"], "original-session")
+        finally:
+            self.assertEqual(self.call("--recover-batch").returncode, 0)
+            self.wait_prompt([b"first", b"second"])
+        end = time.monotonic() + 3
+        while time.monotonic() < end:
+            lines = (self.state / "log").read_text().splitlines()
+            line = next((line for line in lines if "delivery-exit 100.first" in line), "")
+            if line: break
+            time.sleep(.01)
+        self.assertTrue(line, "delivery exit was not recorded")
+        self.assertIn('source_pane="w9:p8"', line)
+        self.assertIn('source_session="original-session"', line)
+        self.assertIn('source_parent="123"', line)
 
     def test_general_recovery_keeps_original_session_binding(self):
         for name in ("waiting", "receivers", "delivery-routes", "undelivered", "order/dependencies"):
