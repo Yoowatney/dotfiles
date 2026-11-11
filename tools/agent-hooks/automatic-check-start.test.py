@@ -21,7 +21,7 @@ class Startup(unittest.TestCase):
         self.launcher = self.root / "launcher"
         self.context = {}
 
-    def run_start(self, source, timeout=2):
+    def run_start(self, source, timeout=12):
         self.launcher.write_text("#!/bin/bash\n" + source)
         self.launcher.chmod(0o700)
         return M.start([str(self.launcher)], dict(os.environ, TEST_ROOT=str(self.root)),
@@ -58,6 +58,16 @@ sleep 10 & wait
 
     def test_uncertain_open_is_not_duplicated(self):
         address, error = self.run_start('''
+echo '{"status":"creating"}' > "$PANE_SPAWN_CHECK_RECEIPT"
+exit 1
+''')
+        self.assertFalse(address)
+        self.assertIn("cleanup unconfirmed", error)
+        self.assertEqual(len(self.context["start_attempts"]), 1)
+
+    def test_uncertain_open_after_slow_startup_is_not_duplicated(self):
+        address, error = self.run_start('''
+sleep 2.2
 echo '{"status":"creating"}' > "$PANE_SPAWN_CHECK_RECEIPT"
 exit 1
 ''')

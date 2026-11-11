@@ -24,7 +24,7 @@ class BatchRecovery(unittest.TestCase):
                     if not k.startswith(("HERDR", "CODEX", "CLAUDE", "MUNICE", "PANE_TELL"))}
         self.env.update(HOME=str(self.root / "home"), XDG_STATE_HOME=str(self.root / "state"),
                         HERDR_BIN_PATH=str(self.root / "herdr"), FIXTURE=str(self.root),
-                        PANE_TELL_POLL=".01", PANE_TELL_WAIT="5")
+                        PANE_TELL_POLL=".01", PANE_TELL_WAIT="30")
         source = Path(os.environ.get("PANE_TELL_TEST_SUBJECT", Path(__file__).with_name("pane-tell"))).read_text()
         marker = 'if [ "${1:-}" = --ordered ]; then'
         prefix, dispatch = source.split(marker)
@@ -36,6 +36,14 @@ class BatchRecovery(unittest.TestCase):
 mkdir -p "$FIXTURE/started" "$FIXTURE/finished"
 : > "$FIXTURE/started/$$"
 trap ': > "$FIXTURE/finished/$$"' EXIT
+if [ "${1:-}" = fixture-slow-start ]; then
+  /bin/sleep 7.2
+  exit 0
+fi
+if [ "${1:-}" = --recover-batch ] && [ -n "${FIXTURE_RECOVERY_START_DELAY:-}" ] && [ ! -f "$FIXTURE/recovery-started" ]; then
+  : > "$FIXTURE/recovery-started"
+  /bin/sleep "$FIXTURE_RECOVERY_START_DELAY"
+fi
 if [ "${1:-}" = --deliver ] && [ -f "$FIXTURE/fail-start" ]; then
   echo 'fixture recovery startup failure' >&2
   exit 73
@@ -99,11 +107,11 @@ exec /usr/bin/nohup "$@"
 
     def timer_alive(self, pid):
         result = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "stat="],
-                                capture_output=True, text=True, timeout=2)
+                                capture_output=True, text=True, timeout=12)
         return result.returncode == 0 and result.stdout.strip() and not result.stdout.strip().startswith("Z")
 
     def tearDown(self):
-        end = time.monotonic() + 7
+        end = time.monotonic() + 30
         while time.monotonic() < end:
             started = list((self.root / "started").glob("*"))
             scheduled = []
@@ -129,14 +137,19 @@ exec /usr/bin/nohup "$@"
             self.fail("private workers have not exited; retained " + str(self.root))
         self.tmp.cleanup()
 
+    # Bound the complete fixture flow; event/ACK assertions prove success.
+    # Production batching and delivery deadlines remain unchanged.
     def call(self, *args, **env):
         return subprocess.run(["/bin/bash", str(self.subject), *args], env=dict(self.env, **env),
-                              capture_output=True, text=True, timeout=7)
+                              capture_output=True, text=True, timeout=30)
 
     def open(self, message="first"):
         result = self.call("fixture-open", message)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("held up to 120s", result.stdout)
+
+    def test_slow_fixture_startup_is_not_a_delivery_failure(self):
+        self.assertEqual(self.call("fixture-slow-start").returncode, 0)
 
     def due(self):
         path = self.batch / "open/.meta"
@@ -149,7 +162,7 @@ exec /usr/bin/nohup "$@"
         return path.read_bytes().split(b"\0")[:-1] if path.exists() else []
 
     def wait_prompt(self, expected):
-        end = time.monotonic() + 7
+        end = time.monotonic() + 30
         while self.prompts() != expected and time.monotonic() < end:
             time.sleep(.01)
         self.assertEqual(self.prompts(), expected)
@@ -174,7 +187,7 @@ exec /usr/bin/nohup "$@"
         commands = [["/bin/bash", str(self.subject), "--recover-batch"] for _ in range(4)]
         children = [subprocess.Popen(c, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for c in commands]
         for child in children:
-            _, err = child.communicate(timeout=7)
+            _, err = child.communicate(timeout=30)
             self.assertEqual(child.returncode, 0, err)
         self.wait_prompt([b"first"])
         result = self.call("--recover-batch")
@@ -185,12 +198,13 @@ exec /usr/bin/nohup "$@"
         # Run the actual detached 120-second --flush scheduler, rather than
         # the default fixture's nohup exit73. Only this private group is killed.
         (self.root / "bin/nohup").write_text("#!/bin/bash\nexec /usr/bin/nohup \"$@\"\n")
+        self.env["FIXTURE_RECOVERY_START_DELAY"] = "5.2"
         timer = None
         checkpoints = {}
 
         def owned_timer(pid):
             result = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "command="],
-                                    capture_output=True, text=True, timeout=2)
+                                    capture_output=True, text=True, timeout=12)
             return (result.returncode == 0 and str(self.subject) in result.stdout
                     and "--flush" in result.stdout and str(self.batch) in result.stdout
                     and os.getpgid(pid) == pid)
@@ -204,7 +218,7 @@ exec /usr/bin/nohup "$@"
 
         try:
             self.open("synthetic killed scheduler")
-            end = time.monotonic() + 7
+            end = time.monotonic() + 30
             while time.monotonic() < end:
                 events = (self.batch / "events").read_text()
                 scheduled = re.findall(r"^\d+ \d+ scheduled (\d+)$", events, re.M)
@@ -212,7 +226,7 @@ exec /usr/bin/nohup "$@"
                     timer = int(scheduled[0])
                     if f" {timer} flush-start " in events and owned_timer(timer):
                         group = subprocess.run(["/bin/ps", "-g", str(timer), "-o", "command="],
-                                               capture_output=True, text=True, timeout=2)
+                                               capture_output=True, text=True, timeout=12)
                         if "sleep 120" in group.stdout:
                             checkpoints["started_at"] = time.time()
                             break
@@ -223,13 +237,13 @@ exec /usr/bin/nohup "$@"
             self.assertEqual(json.loads((self.batch / "open/.meta").read_text())["due"]
                              - json.loads((self.batch / "open/.meta").read_text())["opened"], 120)
             kill_timer()
-            end = time.monotonic() + 7
+            end = time.monotonic() + 30
             while self.timer_alive(timer) and time.monotonic() < end:
                 time.sleep(.01)
             self.assertFalse(self.timer_alive(timer))
             while time.monotonic() < end:
                 group = subprocess.run(["/bin/ps", "-g", str(timer), "-o", "stat="],
-                                       capture_output=True, text=True, timeout=2)
+                                       capture_output=True, text=True, timeout=12)
                 if not any(row.strip() and not row.strip().startswith("Z")
                            for row in group.stdout.splitlines()):
                     break
@@ -252,14 +266,25 @@ exec /usr/bin/nohup "$@"
             # Resolve the real recovery subprocess to our shell/fake-herdr
             # fixture. Wake is outside this test's claim and never sees a pane.
             (self.root / "pane-tell").symlink_to(self.subject)
+            real_run = subprocess.run
+
+            def run_fixture(command, **kwargs):
+                if command == ["/bin/bash", str(self.root / "pane-tell"), "--recover-batch"]:
+                    # Keep the real recovery/ACK path. The production watcher's
+                    # five seconds are checked separately from fixture startup.
+                    self.assertEqual(kwargs["timeout"], 5)
+                    kwargs["timeout"] = 30
+                return real_run(command, **kwargs)
+
             with mock.patch.object(watcher, "HERE", str(self.root)), \
-                    mock.patch.object(watcher, "wake_main", return_value=False):
+                    mock.patch.object(watcher, "wake_main", return_value=False), \
+                    mock.patch.object(watcher.subprocess, "run", side_effect=run_fixture):
                 watcher.tick(self.env, time.time())
                 self.wait_prompt([b"synthetic killed scheduler"])
                 checkpoints["prompt_at"] = time.time()
                 # Delivery ACK removes queue/receiver/dependency state. Wait
                 # for that actual acknowledgement, then retry the watcher.
-                end = time.monotonic() + 7
+                end = time.monotonic() + 30
                 while time.monotonic() < end:
                     if (not list((self.state / "waiting").glob("*"))
                             and not list((self.state / "receivers").glob("*"))
@@ -280,6 +305,19 @@ exec /usr/bin/nohup "$@"
                 live_group_members=0, queue_cleanup_ack=True), sort_keys=True), flush=True)
         finally:
             kill_timer()
+
+    def test_watcher_recovery_deadline_stays_five_seconds(self):
+        source = Path(__file__).with_name("pane-relay-watch.py")
+        spec = importlib.util.spec_from_file_location("watch_recovery_deadline", source)
+        watcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(watcher)
+        (self.state / "batch").mkdir(parents=True)
+        with mock.patch.object(watcher.subprocess, "run", side_effect=
+                               subprocess.TimeoutExpired("private recovery", 5)) as run:
+            watcher.recover_batches(self.env)
+        self.assertEqual(run.call_args.args[0],
+                         ["/bin/bash", str(source.parent / "pane-tell"), "--recover-batch"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 5)
 
     def test_not_due_is_retained(self):
         self.open()
@@ -320,12 +358,13 @@ exec /usr/bin/nohup "$@"
             (receivers / name).write_text("term_M\ndefault\n")
         (dependencies / "100.first").write_text("")
         (dependencies / "101.second").write_text(str(waiting / "100.first") + "\n")
-        self.assertEqual(self.call("--recover-batch", SEND_RETURN_DELAY=".1").returncode, 0)
+        # The second delivery must outlive the first delivery's delayed ACK.
+        self.assertEqual(self.call("--recover-batch", SEND_RETURN_DELAY="7.2").returncode, 0)
         self.wait_prompt([b"first", b"second"])
         # A prompt is visible before send returns and delivery removes its
         # durable queue files. Check the acknowledgement, not that earlier event.
         directories = (waiting, receivers, dependencies)
-        end = time.monotonic() + 7
+        end = time.monotonic() + 30
         while any(list(path.iterdir()) for path in directories) and time.monotonic() < end:
             time.sleep(.01)
         for path in directories:
@@ -354,7 +393,7 @@ exec /usr/bin/nohup "$@"
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                   start_new_session=True)
         try:
-            end = time.monotonic() + 3
+            end = time.monotonic() + 12
             match = None
             while time.monotonic() < end:
                 log = self.state / "log"
@@ -366,7 +405,7 @@ exec /usr/bin/nohup "$@"
             self.assertIsNotNone(match, text)
             owner = int(match[1])
             self.assertEqual(os.getpgid(owner), worker.pid)
-            end = time.monotonic() + 2
+            end = time.monotonic() + 12
             while not (self.root / "descendant").exists() and time.monotonic() < end:
                 time.sleep(.01)
             descendant = int((self.root / "descendant").read_text())
@@ -374,7 +413,7 @@ exec /usr/bin/nohup "$@"
             self.assertEqual(os.getpgid(descendant), delivery)
             self.assertEqual(self.prompts(), [])
             os.kill(owner, signal.SIGKILL)
-            self.assertNotEqual(worker.wait(timeout=3), 0)
+            self.assertNotEqual(worker.wait(timeout=12), 0)
             self.assertEqual(second.read_text(), "second")
             self.assertTrue((self.state / "receivers" / second.name).exists())
             self.assertEqual((self.state / "order/dependencies" / second.name).read_text(), str(first) + "\n")
@@ -411,10 +450,10 @@ exec /usr/bin/nohup "$@"
                     pass
             if worker.poll() is None:
                 try:
-                    worker.wait(timeout=3)
+                    worker.wait(timeout=12)
                 except subprocess.TimeoutExpired:
                     worker.terminate()
-                    worker.wait(timeout=3)
+                    worker.wait(timeout=12)
             # Exercise the existing scan; never discard or reorder payloads,
             # even when an assertion above fails on the pre-fix implementation.
             self.assertEqual(self.call("--recover-batch").returncode, 0)
@@ -427,7 +466,7 @@ exec /usr/bin/nohup "$@"
         try:
             self.assertEqual(self.call("--recover-batch").returncode, 0)
             errors = self.state / "worker-errors.log"
-            end = time.monotonic() + 2
+            end = time.monotonic() + 12
             while time.monotonic() < end:
                 if errors.exists() and "fixture recovery startup failure" in errors.read_text():
                     break
@@ -448,7 +487,7 @@ exec /usr/bin/nohup "$@"
             result = subprocess.run(["/bin/bash", "-c", *command], env=dict(self.env,
                 PANE_TELL_SOURCE_PANE="w9:p8", PANE_TELL_SOURCE_SERVER="workers",
                 PANE_TELL_SOURCE_SESSION="original-session", PANE_TELL_SOURCE_PARENT="123"),
-                capture_output=True, text=True, timeout=5)
+                capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
             origin = self.state / "delivery-origins" / first.name
             self.assertTrue(origin.exists(), "queue did not retain sender context")
@@ -456,7 +495,7 @@ exec /usr/bin/nohup "$@"
         finally:
             self.assertEqual(self.call("--recover-batch").returncode, 0)
             self.wait_prompt([b"first", b"second"])
-        end = time.monotonic() + 3
+        end = time.monotonic() + 12
         while time.monotonic() < end:
             lines = (self.state / "log").read_text().splitlines()
             line = next((line for line in lines if "delivery-exit 100.first" in line), "")
@@ -477,7 +516,7 @@ exec /usr/bin/nohup "$@"
         (self.state / "delivery-routes" / payload.name).write_text("old-session\n\n\n")
         (self.state / "order/dependencies" / payload.name).write_text("")
         self.assertEqual(self.call("--recover-batch").returncode, 0)
-        end = time.monotonic() + 7
+        end = time.monotonic() + 30
         while payload.exists() and time.monotonic() < end:
             time.sleep(.01)
         self.assertTrue((self.state / "undelivered" / payload.name).exists())
@@ -596,14 +635,14 @@ exec /bin/sleep "$@"
         child = subprocess.Popen(["/bin/bash", str(self.subject), "--flush", str(self.batch), "term_M"],
                                  env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
-            end = time.monotonic() + 7
+            end = time.monotonic() + 30
             while not (self.root / "sleep-entered").exists() and time.monotonic() < end:
                 time.sleep(.01)
             self.assertEqual((self.root / "sleep-entered").read_text(), "120")
             self.assertEqual(self.prompts(), [])
         finally:
             (self.root / "release-sleep").touch()
-            _, err = child.communicate(timeout=7)
+            _, err = child.communicate(timeout=30)
         self.assertEqual(child.returncode, 0, err)
         self.assertEqual(self.prompts(), [b"first"])
 
