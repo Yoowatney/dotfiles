@@ -10,6 +10,7 @@ on:
       - 'tools/agent-hooks/codex-memory*'
       - 'tools/agent-hooks/install-codex-startup*'
       - 'tools/agent-hooks/task-ledger*'
+      - 'tools/agent-hooks/codex-deferred*'
       - 'tools/agent-hooks/auto-tab-close.py'
       - 'tools/agent-hooks/test_auto_check_relay.py'
       - 'scripts/claude-online*'
@@ -27,6 +28,7 @@ on:
       - 'tools/agent-hooks/codex-memory*'
       - 'tools/agent-hooks/install-codex-startup*'
       - 'tools/agent-hooks/task-ledger*'
+      - 'tools/agent-hooks/codex-deferred*'
       - 'tools/agent-hooks/auto-tab-close.py'
       - 'tools/agent-hooks/test_auto_check_relay.py'
       - 'scripts/claude-online*'
@@ -54,6 +56,7 @@ jobs:
       - run: python3 tools/agent-hooks/codex-memory.test.py
       - run: python3 tools/agent-hooks/install-codex-startup.test.py
       - run: python3 tools/agent-hooks/task-ledger.test.py
+      - run: bash tools/agent-hooks/codex-deferred.test.sh
       - run: python3 -m unittest discover -s tools/agent-hooks -p test_auto_check_relay.py
       - run: bash scripts/claude-online.test.sh
       - run: python3 -m unittest discover -s tools/claude/hooks -p test_slack_wording.py
