@@ -51,11 +51,70 @@ fi
 # The pane's own shell runs the agent, so an alias or function applies: `claude` gets its permission flag, `codex` --no-daemon.
 # Closing the pane ends the agent and the timer. It resolves its own id at the end: a move changes it.
 agent=$(printf '%q ' "$kind" "$@")
-close="$H pane close \"\$($H pane get \"\$HERDR_PANE_ID\" | jq -r .result.pane.pane_id)\""
-run="( sleep ${PANE_TEMP_TTL:-3600}; $close ) & $agent; $close"
+umask 077
+launch=$(mktemp -d "${TMPDIR:-/tmp}/pane-temp-launch.XXXXXX") || exit 1
+# Bracketed terminal paste can truncate a long command. Source a private file in
+# the interactive shell so aliases/functions still apply and argv never crosses
+# the terminal input buffer. The marker acknowledges execution, not pane.run.
+printf -v close '%q pane close "$(%q pane get "$HERDR_PANE_ID" | jq -r .result.pane.pane_id)"' "$H" "$H"
+{
+  printf 'if mkdir %q 2>/dev/null; then\n' "$launch/claimed"
+  printf '{\n'
+  printf '( sleep %q; %s ) &\n' "${PANE_TEMP_TTL:-3600}" "$close"
+  printf 'touch %q\n' "$launch/started"
+  printf '%s\n' "$agent"
+  printf 'printf "%%s\\n" "$?" >&3\n'
+  printf '%s\n' "$close"
+  printf '} 3> %q\n' "$launch/status"
+  printf 'fi\n'
+} >"$launch/run"
+printf -v run '. %q' "$launch/run"
 for try in 1 2 3; do # a pane opened a moment ago may not be at its shell prompt yet; none of the closing runs until this does
   "$H" pane run "$pane" "$run" >/dev/null && break
-  [ "$try" != 3 ] || { "$H" pane close "$pane" >/dev/null 2>&1; echo "pane-temp: $kind did not start" >&2; exit 1; }
+  [ ! -e "$launch/started" ] || break # an ambiguous API error must not launch a second process
+  [ "$try" != 3 ] || { "$H" pane close "$pane" >/dev/null 2>&1; rm -rf "$launch"; echo "pane-temp: $kind did not start" >&2; exit 1; }
   sleep "${PANE_TEMP_RETRY_WAIT:-3}"
 done
+for _ in $(seq 1 "${PANE_TEMP_START_POLLS:-300}"); do
+  [ ! -e "$launch/started" ] || break
+  sleep "${PANE_TEMP_POLL:-0.1}"
+done
+if [ ! -e "$launch/started" ]; then
+  "$H" pane close "$pane" >/dev/null 2>&1
+  rm -rf "$launch"
+  echo "pane-temp: the shell did not execute the launch command" >&2
+  exit 1
+fi
+sleep "${PANE_TEMP_SETTLE:-1}"
+confirmed= problem= status=
+# A shell acknowledgement precedes the CLI process. Wait for a detected agent or
+# its exit status; otherwise a slow wrapper can hide a later argument rejection.
+for _ in $(seq 1 "${PANE_TEMP_AGENT_POLLS:-100}"); do
+  screen=$("$H" agent read "$pane" --source visible 2>/dev/null)
+  if printf '%s\n' "$screen" | grep -Eiq 'hook(s)? need(s)? review|review (new|changed|untrusted) hooks|do you trust|trust (the contents|this (directory|folder|workspace))'; then
+    problem='the agent is waiting for startup trust or hook review'; break
+  fi
+  status=$(cat "$launch/status" 2>/dev/null)
+  [ -z "$status" ] || break
+  if "$H" pane get "$pane" 2>/dev/null | jq -e --arg kind "$kind" '.result.pane | .agent == $kind and (.agent_status == "idle" or .agent_status == "working" or .agent_status == "done")' >/dev/null; then
+    confirmed=1; break
+  fi
+  sleep "${PANE_TEMP_AGENT_POLL:-0.1}"
+done
+rm -rf "$launch" # the sourced block is parsed and fd 3 still records a later exit
+if [ -n "$problem" ]; then
+  "$H" pane close "$pane" >/dev/null 2>&1
+  echo "pane-temp: $problem" >&2
+  exit 1
+fi
+if [ -n "$status" ] && [ "$status" != 0 ]; then
+  "$H" pane close "$pane" >/dev/null 2>&1
+  echo "pane-temp: $kind exited during startup (status $status)" >&2
+  exit 1
+fi
+if [ -z "$confirmed$status" ]; then
+  "$H" pane close "$pane" >/dev/null 2>&1
+  echo "pane-temp: agent startup was not confirmed" >&2
+  exit 1
+fi
 echo "$pane"

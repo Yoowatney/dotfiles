@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SUBJECT="$(cd "$(dirname "$0")" && pwd)/pane-temp"
+SUBJECT=${PANE_TEMP_SUBJECT:-$SUBJECT}
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -20,15 +21,18 @@ case "\$1 \$2" in
     else jq -n '{result: {pane: {pane_id: "w7:p3", workspace_id: "w7", terminal_id: "term_me"}}}'; fi ;;
   "tab create") jq -n '{result: {root_pane: {pane_id: "w1:new"}, tab: {tab_id: "w1:t9"}}}' ;;
   "pane rename"|"pane close") ;;
+  "agent read") printf '%s\n' "\${SCREEN:-}" ;;
   "pane run")
     [ -z "\${FAIL_RUN:-}" ] || exit 1
-    HERDR_PANE_ID=w1:p1 bash -c "\$4" >/dev/null 2>&1 ;;
+    HERDR_PANE_ID=w1:p1 bash -c "\$4" >/dev/null 2>&1 &
+    [ -z "\${REPLAY_RUN:-}" ] || { HERDR_PANE_ID=w1:p1 bash -c "\$4" >/dev/null 2>&1 & }
+    ;;
   *) exit 2 ;;
 esac
 EOF
 chmod +x "$SANDBOX/herdr"
 # Stand-ins for the agents: one exits at once with its arguments logged, one outlives the time limit.
-printf '#!/bin/sh\necho "claude-started $*" >> "%s/log"\n' "$SANDBOX" > "$SANDBOX/claude"
+printf '#!/bin/sh\nprintf "%%s" "$1" > "%s/first-arg"\necho "claude-started $*" >> "%s/log"\nsleep "${AGENT_DELAY:-0}"\nexit "${AGENT_EXIT:-0}"\n' "$SANDBOX" "$SANDBOX" > "$SANDBOX/claude"
 printf '#!/bin/sh\nsleep 3\necho codex-done >> "%s/log"\n' "$SANDBOX" > "$SANDBOX/codex"
 chmod +x "$SANDBOX/claude" "$SANDBOX/codex"
 
@@ -44,6 +48,8 @@ has "pane rename w1:new 🟢 임시 손세션" "the pane carries the label the g
 has "claude-started --model a b" "the agent gets its arguments"
 has "pane close w7:p3" "an agent that exits closes its pane, by its current id after a move"
 hasnt "agent start" "no herdr name: that is the point of this pane"
+launch_file=$(awk '/^pane run / { print $5; exit }' "$SANDBOX/log")
+[ ! -e "$launch_file" ] || fail "private arguments are removed by the opener before it returns"
 [ "$(cat "$SANDBOX/state/term_new")" = term_me ] || fail "the opener is on record for yoyoo-share-guard"
 sleep 1 # the time limit of the run above
 
@@ -56,10 +62,21 @@ case "\$1 \$2" in
 esac
 EOF
 chmod +x "$SANDBOX/echo-herdr"
-env HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/echo-herdr" PANE_TEMP_DIR="$SANDBOX/state" bash "$SUBJECT" "셸" >/dev/null
+if env HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/echo-herdr" PANE_TEMP_DIR="$SANDBOX/state" PANE_TEMP_START_POLLS=2 PANE_TEMP_POLL=0.01 bash "$SUBJECT" "셸" >/dev/null 2>&1; then fail "accepted text without execution must fail"; fi
 case "$(cat "$SANDBOX/typed")" in
   *"exec @ARGV"* | perl*) fail "the agent must start through the pane's shell, so its alias or function applies: $(cat "$SANDBOX/typed")" ;;
 esac
+[ "$(wc -c < "$SANDBOX/typed")" -lt 256 ] || fail "only a short source command reaches the pane"
+if pt env AGENT_EXIT=42 bash "$SUBJECT" "종료" >/dev/null 2>&1; then fail "an immediate failed agent exit must fail"; fi
+if pt env AGENT_DELAY=0.3 AGENT_EXIT=42 PANE_TEMP_SETTLE=0.01 bash "$SUBJECT" "늦은 종료" >/dev/null 2>&1; then fail "shell execution alone must not establish agent startup"; fi
+if pt env AGENT_DELAY=3 AGENT_EXIT=42 PANE_TEMP_SETTLE=0.01 PANE_TEMP_AGENT_POLLS=1 PANE_TEMP_AGENT_POLL=0 bash "$SUBJECT" "확인 안 된 시작" >/dev/null 2>"$SANDBOX/timeout.err"; then fail "an unconfirmed agent must time out"; fi
+grep -q 'startup was not confirmed' "$SANDBOX/timeout.err" || fail "a startup timeout reports its reason"
+if SCREEN='hook needs review' pt bash "$SUBJECT" "시작 차단" >/dev/null 2>&1; then fail "a visible startup review must fail"; fi
+pt env REPLAY_RUN=1 PANE_TEMP_TTL=1 bash "$SUBJECT" "중복 실행" >/dev/null
+[ "$(grep -c '^claude-started' "$SANDBOX/log")" = 1 ] || fail "an ambiguous repeated source must start the agent once"
+long=$(printf '%12000s' '' | tr ' ' x)
+pt env PANE_TEMP_TTL=1 bash "$SUBJECT" "긴 인자" -- "$long" >/dev/null
+[ "$(cat "$SANDBOX/first-arg")" = "$long" ] || fail "a long argument reaches the process intact"
 
 pt env PANE_TEMP_TTL=1 bash "$SUBJECT" --kind codex "대기" >/dev/null
 first=$(grep -E '^(pane close|codex-done)' "$SANDBOX/log" | head -1)

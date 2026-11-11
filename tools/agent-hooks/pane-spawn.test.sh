@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SUBJECT="$(cd "$(dirname "$0")" && pwd)/pane-spawn"
+SUBJECT="${PANE_SPAWN_SUBJECT:-$(cd "$(dirname "$0")" && pwd)/pane-spawn}"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/pane-spawn.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -31,20 +31,26 @@ case "\$1 \$2" in
   "pane layout") [ -z "\${FAIL_LAYOUT:-}" ] && cat "$SANDBOX/layout.json" ;;
   "pane split") [ -z "\${FAIL_SPLIT:-}" ] && jq -n '{result: {pane: {pane_id: "w1:new"}}}' ;;
   "pane rename"|"pane close") ;;
-  "agent prompt") [ -z "\${FAIL_PROMPT:-}" ] ;;
-  "agent read") printf '%s\n' "\${SCREEN:-}" ;;
+  "agent prompt") touch "$SANDBOX/prompted"; [ -z "\${FAIL_PROMPT:-}" ] ;;
+  "agent read") [ -z "\${LATE_DIALOG:-}" ] || [ -e "$SANDBOX/ready-seen" ] || exit 0; printf '%s\n' "\${SCREEN:-}" ;;
   "agent wait")
     n=\$(cat "$SANDBOX/waits" 2>/dev/null || echo 0); echo \$((n + 1)) > "$SANDBOX/waits"
-    [ "\$n" -ge "\${FAIL_WAIT:-0}" ] ;;
+    [ "\$n" -ge "\${FAIL_WAIT:-0}" ] || exit 1
+    jq -n --arg s "\${WAIT_STATUS:-working}" --arg padding "\${WAIT_PADDING:-}" '{result:{agent:{agent_status:\$s}},padding:\$padding}' ;;
   "agent start")
     [[ "\$3" =~ ^[a-z][a-z0-9_-]{0,31}\$ ]] || { echo invalid_agent_name; exit 1; } # herdr's rule
     n=\$(cat "$SANDBOX/starts" 2>/dev/null || echo 0); echo \$((n + 1)) > "$SANDBOX/starts"
+    [ -z "\${HANG_START:-}" ] || exec /bin/sleep 30
+    [ "\$n" -ge "\${BUSY_START:-0}" ] || { echo '{"error":{"code":"agent_pane_busy"}}'; exit 1; }
     [ -z "\${BLOCKED_START:-}" ] || { echo '{"error":{"code":"agent_not_ready","message":"agent x is blocked during startup and is not ready for prompts"}}'; exit 1; }
+    [ -z "\${EXIT_START:-}" ] || { echo '{"error":{"code":"agent_start_failed","message":"agent process exited before becoming interactive"}}'; exit 1; }
+    [ -z "\${PARTIAL_START:-}" ] || { echo '{"error":{"code":"agent_wait_timeout"}}'; exit 1; }
     [ "\$n" -ge "\${FAIL_START:-0}" ] ;;
   "agent get")
+    [ "\$3" != w1:new ] || touch "$SANDBOX/ready-seen"
     if [ -n "\${NOT_READY:-}" ]; then jq -n '{result: {agent: {interactive_ready: false}}}'
     elif [ -n "\${SESSIONLESS:-}" ]; then jq -n '{result: {agent: {interactive_ready: true}}}'
-    else jq -n --arg n "\${CALLER_AGENT:-}" '{result: {agent: {name: \$n, interactive_ready: true, agent_session: {value: "sid"}}}}'; fi ;;
+    else jq -n --arg n "\${PARTIAL_START:+registered}\${CALLER_AGENT:-}" '{result: {agent: {name: \$n, interactive_ready: true, agent_session: {value: "sid"}}}}'; fi ;;
   *) exit 2 ;;
 esac
 EOF
@@ -56,7 +62,7 @@ echo "[\$s] pane-label \$*" >> "$SANDBOX/log"
 EOF
 chmod +x "$SANDBOX/pane-label"
 
-run_on() { local sock=$1; shift; rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits"; env -u HERDR_SOCKET_PATH -u XDG_STATE_HOME ${sock:+HERDR_SOCKET_PATH="$sock"} HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" CLAUDE_CONFIG_DIR="$SANDBOX/home/.claude" PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_RETRY_WAIT=0 "${PANE_SPAWN_TEST_SHELL:-bash}" "$SUBJECT" "$@"; }
+run_on() { local sock=$1; shift; rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits" "$SANDBOX/prompted"; env -u HERDR_SOCKET_PATH -u XDG_STATE_HOME ${sock:+HERDR_SOCKET_PATH="$sock"} HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" CLAUDE_CONFIG_DIR="$SANDBOX/home/.claude" PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_START_POLL=0.01 PANE_SPAWN_READY_SETTLE=0 PANE_SPAWN_RETRY_WAIT=0 "${PANE_SPAWN_TEST_SHELL:-bash}" "$SUBJECT" "$@"; }
 ps() { run_on "" "$@"; }
 log() { cat "$SANDBOX/log" 2>/dev/null || true; }
 has() { grep -qF -- "$1" "$SANDBOX/log" || fail "$2: no [$1] in: $(log)"; }
@@ -70,6 +76,31 @@ echo codex-only > "$SANDBOX/home/.local/state/agent-quota/policy"
 # The caller's tab as herdr reports it, one "<pane id> <x> <y> <height>" per pane.
 layout() { printf '%s\n' "$@" | jq -Rn '{result: {layout: {panes: [inputs | split(" ") | {pane_id: .[0], rect: {x: (.[1] | tonumber), y: (.[2] | tonumber), height: (.[3] | tonumber)}}]}}}' > "$SANDBOX/layout.json"; }
 layout "w7:p3 0 0 46"
+
+# Startup screens can look ready to herdr while still consuming the first Enter.
+for dialog in 'hook needs review' 'Do you trust the contents of this directory?' 'error: the argument --sandbox cannot be used multiple times'; do
+  if SCREEN="$dialog" ps --kind codex "startup" "instruction" >"$SANDBOX/out" 2>"$SANDBOX/err"; then fail "startup blocker must fail: $dialog"; fi
+  hasnt "agent prompt" "a startup blocker must never receive the instruction"
+  has "pane close w1:new" "an unprompted blocked pane is removed"
+done
+rm -f "$SANDBOX/ready-seen"
+if LATE_DIALOG=1 SCREEN='Do you trust the contents of this directory?' ps --kind codex "late dialog" "instruction" >/dev/null 2>&1; then fail "a dialog appearing after readiness must fail"; fi
+hasnt "agent prompt" "recheck the screen after readiness"
+if EXIT_START=1 ps --kind codex "exit" "instruction" >/dev/null 2>&1; then fail "immediate process exit must fail"; fi
+[ "$(cat "$SANDBOX/starts")" = 1 ] || fail "never restart an exited CLI"
+if PARTIAL_START=1 ps --kind codex "partial" "instruction" >/dev/null 2>&1; then fail "partial startup must fail"; fi
+[ "$(cat "$SANDBOX/starts")" = 1 ] || fail "never reuse a name after a registered start"
+if WAIT_STATUS=blocked ps --kind codex "blocked" "instruction" >/dev/null 2>&1; then fail "a blocker after delivery does not prove work"; fi
+hasnt "pane close" "keep an ambiguously delivered instruction instead of terminating work"
+BUSY_START=4 ps --kind codex "busy" "instruction" >/dev/null
+[ "$(cat "$SANDBOX/starts")" = 5 ] || fail "wait for shell initialization beyond the old three retries"
+if HANG_START=1 SCREEN='hook needs review' ps --kind codex "hanging" "instruction" >/dev/null 2>&1; then fail "detect a dialog while agent start is still waiting"; fi
+hasnt "agent prompt" "an in-progress startup dialog must not receive a prompt"
+SCREEN="$(printf '%20000s' x)" ps --kind codex "large screen" "instruction" >/dev/null
+has "agent prompt" "a large non-dialog screen must not stall the launcher"
+WAIT_PADDING="$(printf '%20000s' x)" ps --kind codex "large wait response" "instruction" >/dev/null
+
+[ -z "${PANE_SPAWN_STARTUP_ONLY:-}" ] || { echo "pane-spawn startup regressions ok"; exit 0; }
 
 # Default: the caller's tab, split to its right; the caller is marked 👑, the new pane 🫡 before its agent starts.
 out=$(ps --cwd /work "api#1 설계" "할 일입니다")
@@ -475,6 +506,7 @@ has "보고 첫 줄에" "its first line is what the main pane reads"
 # folder is the one more place it writes: gcloud rewrites its login files on every call. The checked folder stays read-only.
 SANDBOXED="--sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=true"
 has "--kind codex --pane w1:new --timeout 120000 -- $SANDBOXED" "a check pane is a sandboxed Codex with the network"
+[ "$(grep 'agent start' "$SANDBOX/log" | grep -o -- '--sandbox' | wc -l | tr -d ' ')" = 1 ] || fail "a check gets exactly one sandbox option"
 has "-c sandbox_workspace_write.writable_roots=[\"$SANDBOX/home/.config/gcloud\"]" "gcloud's folder is the one writable root it adds"
 hasnt "network_access=false" "the network is not shut"
 hasnt "danger-full-access" "a check pane keeps its sandbox"
@@ -502,6 +534,11 @@ has '-c mcp_servers.codex_worktrees={command="/usr/bin/false",enabled=false}' "C
 has '-c mcp_servers.codex_tui={command="/usr/bin/false",enabled=false}' "and its task tools, served under this name with a daemon"
 hasnt "mcp_servers.slack" "a config with no MCP server turns none of its own off"
 hasnt "worktrees.enabled" "no server that Codex cannot start"
+for override in --sandbox=read-only --ask-for-approval=never --full-auto --yolo; do
+  if ps --check "policy override" "instruction" -- "$override" >/dev/null 2>&1; then fail "a check cannot override its policy: $override"; fi
+  hasnt "agent start" "conflicting check options fail before starting"
+  hasnt "tab create" "conflicting check options open no pane"
+done
 mkdir -p "$SANDBOX/home/.codex"
 printf '%s\n' '[mcp_servers.slack]' 'command = "npx"' '[mcp_servers."notion-token"]' 'command = "x"' \
   '[mcp_servers.munice]' 'url = "https://x"' '[mcp_servers.brand_new]' 'command = "x"' > "$SANDBOX/home/.codex/config.toml"
@@ -705,7 +742,7 @@ for reason in gcp GCP "gcloud로 배포 상태 확인" "bq 조회" "BigQuery 집
   for kind_args in default claude; do
     opts=(); [ "$kind_args" != claude ] || opts=(--kind claude)
     rc=0
-    ps "${opts[@]}" --why "$reason" "GCP 확인" "지시" >"$SANDBOX/out" 2>"$SANDBOX/err" || rc=$?
+    ps ${opts[@]+"${opts[@]}"} --why "$reason" "GCP 확인" "지시" >"$SANDBOX/out" 2>"$SANDBOX/err" || rc=$?
     [ "$rc" = 2 ] || fail "the main pane rejects --why [$reason] ($kind_args): expected exit 2, got $rc"
     grep -qF -- "GCP 명령도 Codex 칸이 합니다" "$SANDBOX/err" || fail "GCP refusal says Codex runs it: $(cat "$SANDBOX/err")"
     grep -qF -- "--kind auto" "$SANDBOX/err" || fail "GCP refusal points to --kind auto: $(cat "$SANDBOX/err")"
@@ -718,7 +755,7 @@ for reason in slack "Slack에 답글" "슬랙에 답글" "SLACK에 답글"; do
   for kind_args in default claude; do
     opts=(); [ "$kind_args" != claude ] || opts=(--kind claude)
     rc=0
-    ps "${opts[@]}" --why "$reason" "Slack 답글" "지시" >"$SANDBOX/out" 2>"$SANDBOX/err" || rc=$?
+    ps ${opts[@]+"${opts[@]}"} --why "$reason" "Slack 답글" "지시" >"$SANDBOX/out" 2>"$SANDBOX/err" || rc=$?
     [ "$rc" = 2 ] || fail "the main pane rejects --why [$reason] ($kind_args): expected exit 2, got $rc"
     grep -qF -- "Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요" "$SANDBOX/err" || fail "Slack refusal explains who posts: $(cat "$SANDBOX/err")"
     hasnt "tab create" "a Slack reason opens no pane"

@@ -190,6 +190,11 @@ case "$kind" in
         -a* | --ask-for-approval | --ask-for-approval=*) own_approval=1 ;;
       esac
     done
+    # A check owns its sandbox policy. Refuse overrides before opening a terminal rather than
+    # passing duplicate flags (or letting --yolo remove the check's write boundary).
+    if [ -n "$check" ] && [ -n "$own_sandbox$own_approval" ]; then
+      die "--check owns its sandbox and approval policy; omit forwarded sandbox/approval options"
+    fi
     set -- -c check_for_update_on_startup=false "$@"
     if [ -z "$check" ]; then
       [ -n "$own_approval" ] || set -- --ask-for-approval never "$@"
@@ -386,16 +391,55 @@ fi
 pane-label --sync-tabs
 
 give_up() { "$H" pane close "$pane" >/dev/null 2>&1; echo "pane-spawn: $1" >&2; exit 1; }
+hook_review_problem() {
+  echo "codex hooks need review; no instruction was delivered and this blocked pane was closed. Do not trust hooks from an already-open review screen: it can save stale hashes. After hook installation finishes, open a fresh Codex session and review current changed hooks from your own reviewed commits. Alternatively, use official hooks/list and version-checked config/batchWrite to register only reviewed current hashes. If trust was already registered during installation, do not press t again. If hooks change during review, close and reopen before approval. Then retry this job with --job-id $job_id"
+}
 refuse_hook_review() {
   [ "$kind" = codex ] || return 0
   # An already-open review screen can overwrite current trust with stale hashes.
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in *"hooks need review"*|*"hook needs review"*)
-    give_up "codex hooks need review; no instruction was delivered and this blocked pane was closed. Do not trust hooks from an already-open review screen: it can save stale hashes. After hook installation finishes, open a fresh Codex session and review current changed hooks from your own reviewed commits. Alternatively, use official hooks/list and version-checked config/batchWrite to register only reviewed current hashes. If trust was already registered during installation, do not press t again. If hooks change during review, close and reopen before approval. Then retry this job with --job-id $job_id" ;;
+    give_up "$(hook_review_problem)" ;;
   esac
 }
+# Herdr's ready flag can precede Codex's startup dialogs. Never send Enter to those
+# dialogs: it can approve directory trust or hook changes while discarding the job.
+startup_problem() {
+  screen=$("$H" agent read "$pane" --source visible 2>/dev/null)
+  # Pipe large screens: Bash 5.3 on macOS can stall writing a here-string before grep starts.
+  if printf '%s\n' "$screen" | grep -Eiq 'hook(s)? need(s)? review|review (new|changed|untrusted) hooks'; then
+    hook_review_problem; return 0
+  fi
+  if printf '%s\n' "$screen" | grep -Eiq 'do you trust|trust (the contents|this (directory|folder|workspace))|untrusted (git|directory|folder)'; then
+    echo "directory trust requires review; the instruction was not sent"; return 0
+  fi
+  if printf '%s\n' "$screen" | grep -Eiq 'error:.*(argument|unexpected|invalid)|cannot be used multiple times|command not found|agent process exited'; then
+    echo "the agent exited or rejected its launch arguments; the instruction was not sent"; return 0
+  fi
+  return 1
+}
 agent="spawn-$term-${check:+chk}${opener:+r}$home$RANDOM" # herdr allows 32 characters; terminal ids run about 15
-for try in 1 2 3; do # a pane opened a moment ago may not be at its shell prompt yet
-  out=$("$H" agent start "$agent" --kind "$kind" --pane "$pane" --timeout 120000 ${1+--} "$@" 2>&1) && break
+start_agent() {
+  local output pid rc problem
+  output=$(mktemp "${TMPDIR:-/tmp}/pane-spawn-start.XXXXXX") || return 1
+  "$H" agent start "$agent" --kind "$kind" --pane "$pane" --timeout 120000 ${1+--} "$@" >"$output" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if problem=$(startup_problem); then
+      kill "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      rm -f "$output"
+      echo "$problem"
+      return 1
+    fi
+    sleep "${PANE_SPAWN_START_POLL:-1}"
+  done
+  wait "$pid"; rc=$?
+  cat "$output"
+  rm -f "$output"
+  return "$rc"
+}
+for try in $(seq 1 15); do # direnv and shell startup can hold the foreground process group for more than nine seconds
+  out=$(start_agent "$@") && break
   # An agent held by a dialog keeps its name, so a retry would only fail on that name and hide this. The message quotes the
   # dialog: a guess at which one it was (a trust question) sent the 2026-11-06 hunt the wrong way, and it was the update prompt.
   case "$out" in *"blocked during startup"*)
@@ -403,10 +447,20 @@ for try in 1 2 3; do # a pane opened a moment ago may not be at its shell prompt
     refuse_hook_review "$screen"
     give_up "$kind waits at a dialog as it starts, which nobody here answers. It shows: ${screen:0:400}. If it asks whether to trust $cwd, start $kind there by hand once and answer it; else open the pane with --kind claude. herdr: $out" ;;
   esac
-  [ "$try" != 3 ] || give_up "$kind did not start: $out"
+  problem=$(startup_problem) && give_up "$problem"
+  case "$out" in *agent_start_failed* | *invalid_agent_argument* | *agent_name_taken*) give_up "$kind did not start: $out" ;; esac
+  # A transport error can arrive after the server registered the name. Retrying it
+  # masks the first failure with agent_name_taken and can interrupt a live start.
+  registered=$("$H" agent get "$pane" 2>/dev/null | jq -r '.result.agent.name // empty')
+  [ -z "$registered" ] || give_up "$kind start was not confirmed (registered as $registered): $out"
+  case "$out" in
+    *agent_pane_busy*) [ "$try" != 15 ] || give_up "$kind shell stayed busy: $out" ;;
+    *) [ "$try" -lt 3 ] || give_up "$kind did not start: $out" ;;
+  esac
   sleep "${PANE_SPAWN_RETRY_WAIT:-3}"
 done
 for startup_poll in $(seq 1 60); do # `agent start` can return while a wrapper still runs in the pane (dispatch/run.sh)
+  problem=$(startup_problem) && give_up "$problem"
   "$H" agent get "$pane" 2>/dev/null | jq -e "$ready" >/dev/null && break
   [ "$startup_poll" != 60 ] || give_up "$kind never became ready"
   sleep "${PANE_SPAWN_POLL:-2}"
@@ -420,12 +474,19 @@ fi
 # Codex can report ready before its input box takes text, and `agent prompt` still succeeds: on 2026-11-01 an instruction
 # vanished and the pane sat idle while its lead waited. So delivery counts only once the agent shows work. A miss is reported,
 # not resent or closed: the wait can also fail with the instruction accepted, and a resend would run the job twice.
+sleep "${PANE_SPAWN_READY_SETTLE:-1}"
+problem=$(startup_problem) && give_up "$problem"
+"$H" agent get "$pane" 2>/dev/null | jq -e "$ready" >/dev/null || give_up "$kind stopped being ready before instruction delivery"
+problem=$(startup_problem) && give_up "$problem"
 "$H" agent prompt "$pane" "$prompt" >/dev/null || give_up "the instruction was not delivered"
 session_id=$("$H" agent get "$pane" 2>/dev/null | jq -r '.result.agent.agent_session.value // empty')
 record_task run ${session_id:+--session-id "$session_id"}
-if ! "$H" agent wait "$pane" --until working --until blocked --until done --timeout "${PANE_SPAWN_START_WAIT:-30000}" >/dev/null 2>&1; then
+delivery=$("$H" agent wait "$pane" --until working --until blocked --until done --timeout "${PANE_SPAWN_START_WAIT:-30000}" 2>/dev/null)
+delivered=$?
+status=$(printf '%s\n' "$delivery" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+if [ "$delivered" != 0 ] || { [ "$status" != working ] && [ "$status" != done ]; }; then
   echo "$addr$pane"
-  echo "pane-spawn: $addr$pane shows no work; if its input box is empty, send the instruction again with pane-tell" >&2
+  echo "pane-spawn: $addr$pane shows no confirmed work (${status:-unknown}); inspect it with herdr agent read before using pane-tell." >&2
   exit 1
 fi
 echo "$addr$pane"
