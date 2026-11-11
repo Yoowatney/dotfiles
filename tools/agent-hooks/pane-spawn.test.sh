@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Fixture ancestry must not come from the agent session running this test.
+unset HERDR_TASK_ID CODEX_THREAD_ID
 
 SUBJECT="${PANE_SPAWN_SUBJECT:-$(cd "$(dirname "$0")" && pwd)/pane-spawn}"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/pane-spawn.XXXXXX")"

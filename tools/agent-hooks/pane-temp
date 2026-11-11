@@ -52,7 +52,11 @@ fi
 # Closing the pane ends the agent and the timer. It resolves its own id at the end: a move changes it.
 agent=$(printf '%q ' "$kind" "$@")
 umask 077
-launch=$(mktemp -d "${TMPDIR:-/tmp}/pane-temp-launch.XXXXXX") || exit 1
+launch=$(mktemp -d "${TMPDIR:-/tmp}/pane-temp-launch.XXXXXX") || {
+  "$H" pane close "$pane" >/dev/null 2>&1
+  echo "pane-temp: cannot create the private launch directory" >&2
+  exit 1
+}
 # Bracketed terminal paste can truncate a long command. Source a private file in
 # the interactive shell so aliases/functions still apply and argv never crosses
 # the terminal input buffer. The marker acknowledges execution, not pane.run.

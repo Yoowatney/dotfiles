@@ -87,6 +87,12 @@ pt env FAIL_RUN=1 bash "$SUBJECT" "실패" >/dev/null 2>&1 || code=$?
 [ "$code" = 1 ] || fail "a pane the agent never reached must not count as opened: exit $code"
 has "pane close w1:new" "and it must not stay behind empty"
 
+code=0
+pt env TMPDIR="$SANDBOX/missing" bash "$SUBJECT" "Launch failure" >/dev/null 2>&1 || code=$?
+[ "$code" = 1 ] || fail "a failed launch directory creation exits 1: $code"
+has "pane close w1:new" "a launch directory failure must remove the empty pane"
+hasnt "pane run" "a launch directory failure must not type a command"
+
 for bad in "--kind gemini 이름" "--env" "" "이름 --kind codex"; do
     code=0
     # shellcheck disable=SC2086
