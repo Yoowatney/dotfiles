@@ -75,6 +75,9 @@ class StartupGuardTest(unittest.TestCase):
             ('open -- /Applications/Paseo.app', 'deny'),
             ('env -i HOME=/tmp/test open --env HERDR_PANE_ID=test -- /Applications/Paseo.app', 'deny'),
             ('env -i HOME=/tmp/test open -- /Applications/Paseo.app --env HERDR_PANE_ID=test', None),
+            ('env -i HOME=/tmp/test open --env --args -a Paseo --env HERDR_PANE_ID=test', 'deny'),
+            ('env -i HOME=/tmp/test open --env -- -a Paseo', 'deny'),
+            ('env -i HOME=/tmp/test open --env=--args -a Paseo', 'deny'),
         ]
         for command, expected in cases:
             with self.subTest(command=command):

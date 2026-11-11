@@ -96,7 +96,11 @@ def unsafe(command, inherited_clean=False, depth=0):
         is_app = binary == 'Paseo'
         if binary == 'open':
             options_ended = False
+            skip_env_value = False
             for i, arg in enumerate(args):
+                if skip_env_value:
+                    skip_env_value = False
+                    continue
                 if arg == '--args' and not options_ended:
                     break
                 if arg == '--':
@@ -105,6 +109,8 @@ def unsafe(command, inherited_clean=False, depth=0):
                 app = None
                 if not options_ended:
                     if arg == '--env':
+                        # Its required operand is data, even when it looks like an option.
+                        skip_env_value = True
                         if i + 1 >= len(args) or not allowed_assignment(args[i + 1]):
                             clean = False
                     elif arg.startswith('--env='):
