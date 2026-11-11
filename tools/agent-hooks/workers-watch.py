@@ -37,7 +37,10 @@ a report touched after it belongs to this stop, since the watch sees a new state
 lost_at (first tick that found no opener), alerted, net (this stop ended on a sleep or network error), wakes and woke (how many
 wakes since the last stop that was no error, and when the last went; both outlive a state).
 By design, two stops inside one tick interval look like one: a report for the first also covers the second.
-An alert nobody took marks nothing, so the next minute sends it again. Fails open: any error exits 0 quietly.
+An alert nobody took marks nothing, so the next minute sends it again. Fails open: any error exits 0 quietly. Tick failures
+leave classified entries in watch-errors.log and a consecutive count in watch-errors.json; after three failures the main
+pane is told once, with failed delivery retried. No arbitrary exception text is persisted. Named completed panes on default
+use default-cleanup.json for the same 15-minute close retry, including on 집맥; ordinary unnamed panes are excluded.
 
 It also restarts the main pane through `main-refresh --now` once its conversation (the last response's usage in its transcript)
 passes MAIN_REFRESH_AT tokens, after an hour since a restart anyone made (past MAIN_REFRESH_FULL at once), and only
@@ -164,7 +167,7 @@ def wake(env, sock, rec, pane, address, job, now) -> None:
             f.write(f"{time.strftime('%F %T', time.localtime(now))} {address} wake {n + 1}\n")
 
 
-def pending_messages(env, terminal: str) -> bool:
+def pending_messages(env, terminal: str, sock=None) -> bool:
     """Never discard a queued relay while cleaning up an unattended pane.
 
     Legacy senders have no receiver record: hold cleanup conservatively until those messages drain.
@@ -184,7 +187,12 @@ def pending_messages(env, terminal: str) -> bool:
                 continue
             if len(receiver) != 2:
                 return True
-            if receiver[0] == terminal and receiver[1].endswith("/sessions/workers/herdr.sock"):
+            if sock:
+                default = herdr_peers.server_key({"HERDR_SOCKET_PATH": sock}) in ("", "default")
+                same_server = receiver[1] == sock or (receiver[1] == "default" and default)
+            else:
+                same_server = receiver[1].endswith("/sessions/workers/herdr.sock")
+            if receiver[0] == terminal and same_server:
                 return True
         # Include batches being joined or waiting to enter the regular delivery queue.
         batch = os.path.join(root, "batch", terminal)
@@ -203,15 +211,117 @@ def settle(env, sock, a, rec, pane, reported: bool, terminal: str) -> None:
     close is tried every minute until the pane goes.
     ponytail: after a restart the floor is 0, so any report its session ever sent counts as this stop's."""
     session = (a.get("agent_session") or {}).get("value") or ""
-    if not reported or not session or pending_messages(env, terminal):
+    if not reported or not session or pending_messages(env, terminal, sock):
         return
     if "closes" not in rec:
         try:
             rec["closes"] = atc.should_close(atc.last_reply(session, env.get("HOME") or ""))
         except Exception:  # unreadable now: read again next minute (Codex review)
             return
-    if rec["closes"] and not pending_messages(env, terminal):
+    if rec["closes"] and not pending_messages(env, terminal, sock):
         herdr_peers.herdr(env, "pane", "close", pane, socket=sock)  # {} when it failed: tried again next minute
+
+
+def reported_since(env, floor, *keys) -> bool:
+    for key in filter(None, keys):
+        try:
+            if os.path.getmtime(os.path.join(herdr_peers.state_dir(env), "reported", key)) >= floor:
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def cleanup_default(env, now):
+    """Retry completed named panes on default too, on either host. Never alert or wake personal panes here."""
+    sock = herdr_peers.socket_of(env, "default")
+    if sock is None:
+        raise WatchReadError()
+    if not sock:
+        return
+    agents = herdr_peers.herdr(env, "agent", "list", socket=sock).get("agents")
+    panes = herdr_peers.herdr(env, "pane", "list", socket=sock).get("panes")
+    other = herdr_peers.socket_of(env, "workers")
+    children = [] if other == "" else herdr_peers.herdr(env, "agent", "list", socket=other).get("agents") if other else None
+    if agents is None or panes is None or children is None:
+        raise WatchReadError()
+    path = os.path.join(herdr_peers.state_dir(env), "default-cleanup.json")
+    try:
+        with open(path) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    by_pane = {p.get("pane_id"): p for p in panes}
+    records = {}
+    for a in agents:
+        if not a.get("name"):
+            continue  # a session the user started by hand never closes here
+        pane = a.get("pane_id")
+        p = by_pane.get(pane, {})
+        term = p.get("terminal_id") or a.get("terminal_id")
+        if not term:
+            continue
+        session = (a.get("agent_session") or {}).get("value") or ""
+        old = state.get(term) or {}
+        identity = [a.get("state_change_seq"), kind(a.get("agent_status")), session]
+        rec = old if old.get("identity") == identity else {"identity": identity, "since": now, "floor": old.get("seen", 0)}
+        rec["seen"] = now
+        records[term] = rec
+        label = p.get("label") or ""
+        held = "🔴" in label or "👑" in label or atc.held(label, term, agents + children) or term == herdr_peers.main_terminal(env)
+        if kind(a.get("agent_status")) == "ready" and now - rec["since"] >= STOPPED and not held:
+            settle(env, sock, a, rec, pane, reported_since(env, rec["floor"], term, session), term)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w") as f:
+        json.dump(records, f)
+    os.replace(path + ".tmp", path)
+
+
+class WatchReadError(RuntimeError):
+    """An unavailable inventory is not an empty inventory."""
+
+
+def run_tick(env, now):
+    """Stay fail-open while leaving diagnostics without arbitrary exception text or transcript contents."""
+    path = os.path.join(herdr_peers.state_dir(env), "watch-errors.json")
+    try:
+        with open(path) as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        record = {}
+    if not isinstance(record, dict):
+        record = {}
+    try:
+        tick(env, now)
+    except Exception as error:
+        record.update(consecutive=record.get("consecutive", 0) + 1, timestamp=now,
+                      category="inventory" if isinstance(error, WatchReadError) else "io" if isinstance(error, OSError) else "unexpected",
+                      exception=type(error).__name__)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path[:-5] + ".log", "a") as f:
+                f.write(json.dumps({k: v for k, v in record.items() if k != "alerted"}) + "\n")
+            if record["consecutive"] >= 3 and not record.get("alerted"):
+                where = herdr_peers.all_panes(env) or {}
+                main = where.get(herdr_peers.main_terminal(env))
+                if main:
+                    pt = env.get("WORKERS_WATCH_PANE_TELL") or os.path.join(HERE, "pane-tell")
+                    msg = f"[workers-watch] 감시가 {record['consecutive']}회 연속 실패했습니다. 분류: {record['category']}. 기록: {path[:-5]}.log"
+                    record["alerted"] = subprocess.run([pt, main[0], msg], env={**os.environ, **env}, timeout=10,
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        except Exception:  # diagnostics must not replace the original failure or block the hook
+            pass
+    else:
+        record = {"consecutive": 0, "timestamp": now}
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".tmp", "w") as f:
+            json.dump(record, f)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass  # an unwritable state volume still must not break launchd
 
 
 def trial(name) -> bool:
@@ -339,7 +449,12 @@ def tick(env, now: float) -> list:
     """One round; returns the alerts someone took."""
     where = herdr_peers.all_panes(env)
     if where is None:  # no way to know who is there, so no alert and no record changes
-        return []
+        raise WatchReadError()
+    cleanup_error = None
+    try:
+        cleanup_default(env, now)
+    except Exception as error:
+        cleanup_error = error  # independent servers keep their alerts and retries; run_tick still records this failure
     main = herdr_peers.main_terminal(env)
     try:
         refresh_main(env, now, where, main)
@@ -391,7 +506,7 @@ def tick(env, now: float) -> list:
 
     sock = herdr_peers.socket_of(env, "workers")
     if sock is None:  # a list we could not read is no news
-        return []
+        raise WatchReadError()
     if not sock:
         if (main in where or any(k != "_down" for k in state)) and not state.get("_down") and tell(DOWN):
             state["_down"] = True
@@ -400,7 +515,7 @@ def tick(env, now: float) -> list:
         agents = herdr_peers.herdr(env, "agent", "list", socket=sock).get("agents")
         panes = herdr_peers.herdr(env, "pane", "list", socket=sock).get("panes")
         if agents is None or panes is None:  # a list we could not read is no news, and keeps every record as it is
-            return []
+            raise WatchReadError()
         by_pane = {p.get("pane_id"): p for p in panes}
         records = {}
         for a in agents:
@@ -504,6 +619,8 @@ def tick(env, now: float) -> list:
     with open(path + ".tmp", "w") as f:
         json.dump(state, f, ensure_ascii=False)
     os.replace(path + ".tmp", path)
+    if cleanup_error:
+        raise cleanup_error
     return told
 
 
@@ -589,7 +706,10 @@ esac
             for log in ("told", "notified", "closed"):
                 if os.path.exists(f"{d}/{log}"):
                     os.remove(f"{d}/{log}")
-            sent = once({**env, **extra}, now)
+            try:
+                sent = once({**env, **extra}, now)
+            except WatchReadError:
+                sent = []  # main's run_tick records this failure; an unreadable inventory still sends no pane alert
             got = open(f"{d}/told").read().splitlines() if os.path.exists(f"{d}/told") else []
             last_wakes[:] = [line for line in got if WAKE in line]  # a wake goes to the pane itself and is no alert
             got = [line for line in got if WAKE not in line]
@@ -1195,7 +1315,7 @@ def main():
     except OSError:
         pass
     try:
-        tick(os.environ, float(os.environ.get("WORKERS_WATCH_NOW") or time.time()))
+        run_tick(os.environ, float(os.environ.get("WORKERS_WATCH_NOW") or time.time()))
     except Exception:
         pass
     # What moved panes said on 집맥 reaches the main pane here; with no open move it returns at once. Detached, never killed at a

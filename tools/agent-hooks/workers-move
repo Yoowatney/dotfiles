@@ -242,7 +242,13 @@ if op == "open":
                    a["prompt"].replace("{memo}", memo), timeout=600)
     addr = next((l for l in o.splitlines() if l.startswith("workers/")), "")
     if addr:  # exit 1 with an address: it shows no work yet, and the instruction was typed
-        out({"ok": True, "address": addr, "kind": "claude", "memo": memo, "start": [day, size], "warn": e.strip()[-300:] if rc else ""})
+        _, listed, _ = run(H, "--session", "workers", "agent", "list", timeout=10)
+        try:
+            agent = next((row for row in json.loads(listed)["result"]["agents"] if row.get("pane_id") == addr.split("/", 1)[-1]), {})
+        except (ValueError, KeyError, TypeError):
+            agent = {}
+        out({"ok": True, "address": addr, "kind": "claude", "memo": memo, "start": [day, size],
+             "session": (agent.get("agent_session") or {}).get("value"), "name": agent.get("name"), "warn": e.strip()[-300:] if rc else ""})
     out({"ok": False, "unknown": rc == 124, "why": (e or o).strip()[:700]})  # pane-spawn names what the screen shows first
 if op == "bridge":
     import re
@@ -252,6 +258,11 @@ if op == "bridge":
         panes = [p.get("pane_id") for p in json.loads(o)["result"]["panes"]] if rc == 0 else None
     except (ValueError, KeyError, TypeError):
         panes = None
+    rc, o, _ = run(H, "--session", "workers", "agent", "list", timeout=10)
+    try:
+        agents = json.loads(o)["result"]["agents"] if rc == 0 else None
+    except (ValueError, KeyError, TypeError):
+        agents = None
     chunks, held = {}, False
     for name, off in a["files"].items():
         path = os.path.join(reports, name)
@@ -267,7 +278,7 @@ if op == "bridge":
             cut = data[:heads[-1]] if heads and heads[-1] > 0 else b""
             held, data = held or len(cut) < len(data), cut
         chunks[name] = {"bytes": len(data), "text": data.decode("utf-8", "replace")}
-    out({"panes": panes, "chunks": chunks, "held": held})
+    out({"panes": panes, "agents": agents, "chunks": chunks, "held": held})
 if op == "tell":
     rc, o, e = run("pane-tell", "workers/" + a["pane"], a["text"], timeout=30)
     out({"ok": rc == 0, "why": (e or o).strip()[-300:]})
@@ -554,7 +565,7 @@ def move_one(env, moves, rec, memo, agents_now) -> None:
     if not o.get("ok"):
         return settle(env, moves, rec, "kept", f"집맥 칸을 열지 못했습니다: {o.get('why')}")
     rec.update(step="opened", remote=o["address"], remote_kind=o.get("kind"), memo=o.get("memo"), warn=o.get("warn") or "",
-               start=o.get("start"), opened_at=time.time())
+               remote_session=o.get("session"), remote_name=o.get("name"), start=o.get("start"), opened_at=time.time())
     save(env, "moves.json", moves)
     close_local(env, moves, rec)
 
@@ -744,6 +755,37 @@ def placed(moves) -> set:
     return {k for k, r in moves.items() if r.get("step") in ("opening", "opened", "moved")}
 
 
+def bridge_targets(active, got, tracking):
+    """Pane addresses change on restart/move. Keep stable agent identities and every observed report session."""
+    by_addr, by_session = {}, {}
+    agents = got.get("agents") or []
+    for key, rec in active.items():
+        tracked = tracking.setdefault(key, {"address": rec["remote"], "name": rec.get("remote_name"),
+                                            "sessions": [rec["remote_session"]] if rec.get("remote_session") else [], "aliases": []})
+        def session(a):
+            return (a.get("agent_session") or {}).get("value")
+        def matches(a):
+            return (bool(tracked.get("name")) and a.get("name") == tracked["name"]) or session(a) in tracked["sessions"]
+        known = bool(tracked.get("name") or tracked["sessions"])
+        row = next((a for a in agents if matches(a)), None)
+        if row is None and not known:
+            row = next((a for a in agents if a.get("pane_id") == tracked["address"].split("/", 1)[-1]), None)
+        if row:
+            tracked["aliases"] = list(dict.fromkeys([*tracked["aliases"], tracked["address"]]))
+            tracked["address"] = "workers/" + row["pane_id"]
+            tracked["name"] = row.get("name") or tracked.get("name")
+            if session(row) and session(row) not in tracked["sessions"]:
+                tracked["sessions"].append(session(row))
+        rec["remote"] = tracked["address"]
+        for addr in [*tracked["aliases"], tracked["address"]]:
+            occupant = next((a for a in agents if a.get("pane_id") == addr.split("/", 1)[-1]), None)
+            if occupant is None or not known or matches(occupant):
+                by_addr[addr] = key
+        for sid in tracked["sessions"]:
+            by_session[sid] = key
+    return by_addr, by_session
+
+
 def bridge(env) -> int:
     lock = locked(env, "bridge.lock")
     if not lock:
@@ -770,19 +812,31 @@ def bridge(env) -> int:
             got = remote(env, "bridge", timeout=60, files={f: o for f, o in offsets.items() if f in wanted})
             if got and placed(load(env, "moves.json", {})) != placed(moves):
                 got = None  # a move went on during the read: read again next minute
+            if got and got.get("agents") is None:
+                got = None  # a restarted agent may have a new session: retry every chunk after identity lookup recovers
         if got:
-            by_addr = {r["remote"]: k for k, r in active.items()}
+            by_addr, by_session = bridge_targets(active, got, b.setdefault("tracking", {}))
             for name, chunk in sorted((got.get("chunks") or {}).items()):
                 day = name[:-3]
                 with open(os.path.join(report_dir(env), name), "a", encoding="utf-8") as copy:
                     for at, addr, label, body in split_entries(chunk["text"]):
-                        if addr in by_addr:
+                        if SESSION_LINE.sub("", body, count=1).startswith(atc.ARCHIVE_ONLY):
+                            continue  # superseded detail is kept locally, never routed as a fresh report
+                        sid = SESSION_LINE.match(body)
+                        key = by_session.get(sid[1]) if sid else None
+                        if not key:
+                            candidate = by_addr.get(addr)
+                            # A session-bearing report cannot borrow another known session's address. Legacy moves
+                            # without session metadata still use addresses until their first live inventory is read.
+                            if candidate and (not sid or not b["tracking"][candidate]["sessions"]):
+                                key = candidate
+                        if key:
                             copy.write(f"\n## {at} 집맥:{addr} {label}\n\n{body}\n")
-                            queue.append({"key": by_addr[addr], "day": day, "time": at, "text": body})
+                            queue.append({"key": key, "day": day, "time": at, "text": body})
                 offsets[name] = offsets.get(name, 0) + chunk["bytes"]
             panes = got.get("panes")
             for k, r in active.items():
-                if panes is None or r["remote"].split("/", 1)[-1] in panes:
+                if panes is None or got.get("agents") is None or r["remote"].split("/", 1)[-1] in panes:
                     gone.pop(k, None)
                 else:
                     gone.setdefault(k, time.time())
