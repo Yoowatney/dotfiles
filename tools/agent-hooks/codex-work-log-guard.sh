@@ -37,27 +37,12 @@ build_recovery_prompt() {
     local project="$3"
     local today="$4"
 
-    cat <<EOF
-Review one Codex turn and decide whether it needs a daily work-log entry.
-
-Turn capture file: $turn_file
-Existing daily work-log: $worklog
-Project: $project
-Date: $today
-
-Return exactly NO_WORK when the turn only contains typo, lint, or formatting fixes; package version bumps only; a one-line config change; research or exploration with no conclusion or action; anything about the RAG study in ~/work/rag-lab, which is study, not work; or ordinary conversation with no completed non-trivial work.
-
-Otherwise return exactly one Korean Markdown entry and no code fence or commentary:
-## [Brief title]
-
-- **프로젝트:** $project
-- **상황:** [problem or trigger]
-- **판단:** [decision and rationale]
-- **결과:** [outcome or current status]
-- **PR/참고:** [link or 없음]
-
-Focus on why and the decision, not file-level changes. Read the turn capture and existing work-log before deciding. Do not duplicate an entry already present in the existing work-log.
-EOF
+    local template format
+    template="$(dirname "$(readlink -f "$0")")/codex-work-log-recovery.txt"
+    format="$(cat "$template")" || return 1
+    # The format is a versioned local template; payload values stay arguments.
+    # shellcheck disable=SC2059
+    printf "$format\n" "$turn_file" "$worklog" "$project" "$today" "$project"
 }
 
 payload="$(cat)"
@@ -178,7 +163,10 @@ case "$MODE" in
             printf '\nLast assistant message:\n%s\n' "$last_message" >> "$turn_file"
         fi
 
-        prompt="$(build_recovery_prompt "$turn_file" "$worklog" "$project" "$today")"
+        prompt="$(build_recovery_prompt "$turn_file" "$worklog" "$project" "$today")" || {
+            log_guard "cannot read recovery prompt template"
+            exit 0
+        }
         if "$TIMEOUT_BIN" "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" \
             --permission-mode bypassPermissions --no-session-persistence \
             < /dev/null > "$result_file" 2>> "$LOG_FILE"; then

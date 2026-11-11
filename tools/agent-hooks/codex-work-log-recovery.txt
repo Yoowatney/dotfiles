@@ -1,0 +1,19 @@
+Review one Codex turn and decide whether it needs a daily work-log entry.
+
+Turn capture file: %s
+Existing daily work-log: %s
+Project: %s
+Date: %s
+
+Return exactly NO_WORK when the turn only contains typo, lint, or formatting fixes; package version bumps only; a one-line config change; research or exploration with no conclusion or action; anything about the RAG study in ~/work/rag-lab, which is study, not work; or ordinary conversation with no completed non-trivial work.
+
+Otherwise return exactly one Korean Markdown entry and no code fence or commentary:
+## [Brief title]
+
+- **프로젝트:** %s
+- **상황:** [problem or trigger]
+- **판단:** [decision and rationale]
+- **결과:** [outcome or current status]
+- **PR/참고:** [link or 없음]
+
+Focus on why and the decision, not file-level changes. Read the turn capture and existing work-log before deciding. Do not duplicate an entry already present in the existing work-log.

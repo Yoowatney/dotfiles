@@ -570,7 +570,11 @@ def selftest() -> None:
                 f.write(f'#!/bin/sh\nprintf "%s|%s\\n" "$1" "$2" >> {d}/{name}.out\n')
             os.chmod(os.path.join(d, name), 0o755)
         e = {"XDG_STATE_HOME": d, "FORK_WATCH_PANE_TELL": os.path.join(d, "pt"), "FORK_WATCH_NOTIFY": os.path.join(d, "nt")}
-        read = lambda path: open(path).read() if os.path.exists(path) else ""
+        def read(path):
+            if not os.path.exists(path):
+                return ""
+            with open(path) as f:
+                return f.read()
         stamp = lambda t: time.strftime("%F %T", time.localtime(t))
         table, stopped = base + panes3 + flat, []
         try:
@@ -600,18 +604,54 @@ def selftest() -> None:
         finally:
             g["list_procs"], g["stop_group"], herdr_peers.all_panes, os.getpid = saved
 
-    # the kernel table: every row matches ps, and this process is in it
-    rows = list_procs()
-    mine = {p.pid: p for p in rows}
-    assert os.getpid() in mine and mine[os.getpid()].ppid == os.getppid()
-    out = subprocess.run(["/bin/ps", "-U", str(os.getuid()), "-o", "pid=,ppid=,pgid=,tpgid="], capture_output=True, text=True).stdout
-    seen = 0
-    for line in out.splitlines():
-        pid, ppid, pgid, tpgid = map(int, line.split())
-        if pid in mine:
-            seen += 1
-            assert (mine[pid].ppid, mine[pid].pgid, mine[pid].tpgid) == (ppid, pgid, tpgid), (pid, mine[pid], line)
-    assert seen > 10, seen
+    # Kernel and ps reads are not atomic: other processes can change parents,
+    # groups or terminal foreground groups between them. Check the field offsets
+    # against owned, waiting children with known values, with and without a tty.
+    import pty
+    children, terminals = [], []
+    try:
+        for tty in (False, True):
+            stdin = subprocess.PIPE
+            if tty:
+                master, slave = pty.openpty()
+                terminals.extend((master, slave))
+                stdin = slave
+            child = subprocess.Popen(
+                [sys.executable, "-I", "-c",
+                 'import os,sys,fcntl,termios; '
+                 'os.isatty(0) and fcntl.ioctl(0,termios.TIOCSCTTY,0); '
+                 'print("ready",flush=True); sys.stdin.readline()'],
+                stdin=stdin, stdout=subprocess.PIPE, text=True, start_new_session=True,
+            )
+            children.append((child, tty))
+            assert child.stdout.readline().strip() == "ready", child.poll()
+        mine = {p.pid: p for p in list_procs()}
+        assert mine[os.getpid()].ppid == os.getppid()
+        out = subprocess.run(
+            ["/bin/ps", "-p", ",".join(str(c.pid) for c, _ in children), "-o", "pid=,ppid=,pgid=,tpgid="],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        observed = {row[0]: tuple(row[1:]) for row in (list(map(int, line.split())) for line in out.splitlines())}
+        assert set(observed) == {c.pid for c, _ in children}, observed
+        for child, tty in children:
+            p = mine[child.pid]
+            expected = (os.getpid(), child.pid, child.pid if tty else 0)
+            assert (p.ppid, p.pgid, p.tpgid) == expected, (p, expected)
+            assert observed[child.pid] == expected, (observed, expected)
+    finally:
+        for child, _ in children:
+            if child.poll() is None:
+                child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+            if child.stdin:
+                child.stdin.close()
+            child.stdout.close()
+        for fd in terminals:
+            os.close(fd)
     assert argv_of(os.getpid())[-1] == "--selftest", argv_of(os.getpid())
 
     # stop_group() on real processes: a shell that ignores TERM, in its own session, and its two children all end

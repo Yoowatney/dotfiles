@@ -42,6 +42,8 @@
 # Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
 H=${HERDR_BIN_PATH:-herdr}
 USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
+  --task-type code|research|media|office|full: worker startup catalog; unknown tasks retain full context.
+  --job-id ID: keep the original job id for a check or reassignment; otherwise a new id is generated.
   --kind auto: choose a normal worker from fresh subscription quota and weekly pace; unknown/paid usage is excluded.
     If neither runner qualifies, no pane opens. Set the agent-quota policy to codex-only for the previous routing.
     A lookup exceeding six seconds warns once and retains Codex. Forwarded arguments and ambient-runner retain Codex.
@@ -61,7 +63,7 @@ die() { echo "pane-spawn: $*" >&2; exit 2; }
 # starts that way made an ordinary pane unreachable (요유 2026-11-05), so no tab it names starts that way.
 tab_name() { case "$1" in "자동 "* | "알아서 "*) echo "일 $1" ;; *) echo "$1" ;; esac; }
 
-same= new_tab= check= opus= artifact= skills= kind= why= opener= cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
+same= new_tab= check= opus= artifact= skills= kind= why= opener= task_type= job_id= cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
 while [ $# -gt 0 ]; do
   case "$1" in
     --same-tab) same=1; shift ;;
@@ -71,9 +73,9 @@ while [ $# -gt 0 ]; do
     --artifact) artifact=1; shift ;;
     --skills) skills=1; shift ;;
     -h | --help) echo "$USAGE"; exit 0 ;;
-    --kind | --cwd | --why | --opener)
+    --kind | --cwd | --why | --opener | --task-type | --job-id)
       [ $# -ge 2 ] || die "$USAGE"
-      case "$1" in --kind) kind=$2 ;; --cwd) cwd=$2 ;; --why) why=$2 ;; --opener) opener=${2#term_}; [[ "$opener" =~ ^[0-9A-Za-z]+$ ]] || die "$USAGE" ;; esac
+      case "$1" in --kind) kind=$2 ;; --cwd) cwd=$2 ;; --why) why=$2 ;; --opener) opener=${2#term_}; [[ "$opener" =~ ^[0-9A-Za-z]+$ ]] || die "$USAGE" ;; --task-type) task_type=$2 ;; --job-id) job_id=$2 ;; esac
       shift 2 ;;
     --*) die "$USAGE" ;;
     *) break ;;
@@ -87,10 +89,40 @@ asked=${kind:-claude} # what the caller chose, before auto resolves to Codex
 [ "$kind" != auto ] || kind=codex
 kind=${kind:-claude}
 name=$1 prompt=$2
+case "$task_type" in
+  '') case "$name $prompt" in
+    *영상*|*애니메이션*|*hyperframes*) task_type=media ;;
+    *스프레드시트*|*xlsx*|*docx*|*슬라이드*) task_type=office ;;
+    *조사*|*research*|*검색*) task_type=research ;;
+    *구현*|*코드*|*시험*|*테스트*|*버그*|*test*|*implement*|*fix*) task_type=code ;;
+    *) task_type=full ;;
+    esac ;;
+  code|research|media|office|full) ;;
+  *) die "--task-type must be code, research, media, office or full" ;;
+esac
+[[ -z "$job_id" || "$job_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || die "invalid --job-id"
+job_id=${job_id:-job-$(date -u +%Y%m%dT%H%M%S)-$$-$RANDOM}
+# Installed PATH entries are symlinks; all sibling helpers belong to the source.
+helper_dir=$(dirname "$(readlink -f "$0")")
+ledger="$helper_dir/task-ledger.py"
+parent_job=${HERDR_TASK_ID:-}
+# Codex's shell environment allowlist omits worker metadata, but it always
+# supplies CODEX_THREAD_ID. Recover the association without widening that list.
+if [ -z "$parent_job" ] && [ -n "${CODEX_THREAD_ID:-}" ] && [ -f "$ledger" ]; then
+  parent_job=$(python3 "$ledger" job-for-session "$CODEX_THREAD_ID" 2>/dev/null) || parent_job=
+fi
+record_task() {
+  [ ! -f "$ledger" ] || python3 "$ledger" record "$@" --job-id "$job_id" >/dev/null 2>&1 || echo 'pane-spawn: task ledger unavailable; launch continues' >&2
+}
+if [ "$job_id" != "$parent_job" ]; then
+  record_task request --event-id "request:$job_id" ${parent_job:+--parent-job-id "$parent_job"}
+fi
 # 요유 talks only to the lead (2026-11-01), so a new pane hears it here and not from each lead's memory.
 prompt+=$'\n\n이 칸은 리드 밑 칸입니다. 요유는 이 칸을 보지 않으니 요유에게 직접 묻거나 `prod 허용`, `staging 허용`, `/clear`를 부탁하지 마세요. 질문, 결정 요청, 보고는 답을 `남은 것:` 줄로 끝내면 이 칸을 연 리드에게 갑니다. 보고는 리드가 읽으니 요유에게 쓰는 형식(설명 페이지, `무엇을:`/`왜:`, `원인:`/`조치:`/`재발 방지:`)은 쓰지 말고, 리드가 확인할 결과와 근거를 편하게 적으세요.'
 prompt+=' Before reporting that the user should check something, first determine whether ego Lite or an API can inspect it; if available, check it yourself.'
 prompt+=$'\n\nFor investigations and comparisons, preserve the original question and the improvement the user is considering; current settings alone do not answer whether that improvement is possible. Include concrete 추천: and 다음 행동: lines before the final 남은 것: line: your recommended option, why, and the next action you will take. For material unknowns, execute available read-only checks within the authorized scope before reporting. If blocked, state the attempted check, the blocker, alternative evidence, and the next authorized step. Do not invent certainty or treat this instruction as permission for production changes, external messages, data writes, settings, or billing. For implementation-only or routine status tasks, report the requested outcome without inventing recommendations. In check panes, assess this contract rather than doing follow-up implementation.'
+prompt+=$'\nBefore the final 남은 것: line, include TASK_RESULT: pass|fail|unknown for your execution outcome (not independent verification). A check session uses TASK_CHECK: pass|fail|unknown instead. Preserve uncertainty; no marker is recorded as unknown.'
+prompt+=" Task accounting ID: $job_id. Reuse it for a check or reassignment."
 shift 2
 [ "${1:-}" != -- ] || shift
 auto_claude=
@@ -99,7 +131,7 @@ if [ "$asked" = auto ] && [ -z "$check" ]; then
   pinned=$opus
   [ $# -eq 0 ] || pinned=1
   [ "$(head -1 "$HOME/.config/munice/host-role" 2>/dev/null)" != ambient-runner ] || pinned=1
-  quota_dir=$(dirname "$(readlink -f "$0")")
+  quota_dir=$helper_dir
   quota_policy_file=$state/agent-quota/policy
   [ -e "$quota_policy_file" ] || quota_policy_file=$quota_dir/agent-quota-policy
   quota_policy=$(cat "$quota_policy_file" 2>/dev/null)
@@ -190,6 +222,16 @@ esac
 # runaway in a pane stops at 5000 while sessions opened by hand and launchd jobs keep 3000 to stop it with. The cap counts the
 # whole user, so near 5000 every pane opened here stops forking, not only the runaway one. Panes already open keep 8000.
 env_args+=(--env PANE_SPAWN_NPROC=5000)
+env_args+=(--env "HERDR_TASK_ID=$job_id")
+if [ -n "$check" ]; then
+  env_args+=(--env HERDR_TASK_ROLE=check --env HERDR_CODEX_STARTUP_ROLE=check)
+else
+  env_args+=(--env HERDR_TASK_ROLE=worker)
+  [ "$kind" != codex ] || env_args+=(--env HERDR_CODEX_STARTUP_ROLE=worker --env "HERDR_CODEX_TASK_TYPE=$task_type")
+  if [ "$kind" = codex ] && [ -f "$helper_dir/codex-startup.py" ]; then
+    env_args+=(--env "HERDR_CODEX_STARTUP_HELPER=$helper_dir/codex-startup.py")
+  fi
+fi
 [ -n "$opener" ] || [ -n "${HERDR_PANE_ID:-}" ] || die "run this inside a herdr pane"
 command -v jq >/dev/null 2>&1 || die "jq not found"
 
@@ -201,7 +243,7 @@ else
 fi
 export HERDR_PANE_ID=$me
 delegates=
-if [ -z "$opener" ] && python3 -I "$(dirname "$(readlink -f "$0")")/herdr_peers.py" --delegates-checks "term_$term"; then delegates=1; fi
+if [ -z "$opener" ] && python3 -I "$helper_dir/herdr_peers.py" --delegates-checks "term_$term"; then delegates=1; fi
 if [ -n "$check" ]; then
   [ -n "$delegates" ] || die "--check is for the main pane; any other lead checks a pane's result itself (직접 확인: run the test or command, or look at the changed behavior or data)"
   name="확인 $name"
@@ -232,37 +274,9 @@ if [ -n "$check" ]; then
     # The shared PreToolUse hooks run here as in a work pane. An allow rule added later to ~/.codex/rules applies here too.
     target=$cwd cwd=$state/pane-spawn/check
     mkdir -p "$cwd/.codex/rules" || die "cannot make $cwd"
-    rules=$(mktemp "$cwd/.codex/rules/.check.XXXXXX") && cat > "$rules" <<EOF && mv -f "$rules" "$cwd/.codex/rules/check.rules" || die "cannot write $cwd/.codex/rules/check.rules"
-# Written by pane-spawn for its Codex check panes at each start; a change here is lost.
-host_executable(name="ps", paths=["/bin/ps"])
-prefix_rule(pattern=["ps"], decision="allow")
-host_executable(name="pgrep", paths=["/usr/bin/pgrep"])
-prefix_rule(pattern=["pgrep"], decision="allow")
-host_executable(name="launchctl", paths=["/bin/launchctl"])
-prefix_rule(pattern=["launchctl", ["list", "print"]], decision="allow")
-prefix_rule(pattern=["gh", "pr", ["merge", "comment", "review", "close", "reopen", "edit", "create", "ready", "lock"]], decision="forbidden")
-prefix_rule(pattern=["gh", "issue", ["comment", "close", "reopen", "edit", "create", "delete", "transfer", "lock", "pin"]], decision="forbidden")
-prefix_rule(pattern=["ego-browser"], decision="forbidden")
-EOF
-    mcp=$(python3 -I - "${CODEX_HOME:-$HOME/.codex}/config.toml" <<'EOF'
-import json, os, re, sys, tomllib
-read_tools = {"slack": ["slack_list_channels", "slack_get_channel_history", "slack_get_thread_replies", "slack_get_users", "slack_get_user_profile"],
-              "munice": ["ask_code", "ask_data"]}
-servers = tomllib.load(open(sys.argv[1], "rb")).get("mcp_servers", {}) if os.path.exists(sys.argv[1]) else {}
-for name in servers:
-    # Codex splits a -c path at every dot and keeps quotes as part of the name, so `mcp_servers."x"` is a new, broken server.
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
-        sys.exit(f"pane-spawn: -c cannot name the MCP server {name!r}")
-    keep = read_tools.get(name)
-    if not keep:
-        print("-c", f"mcp_servers.{name}.enabled=false", sep="\n")
-        continue
-    # Codex asks before a tool its server does not mark read-only, and under --ask-for-approval never that is a refusal:
-    # the Slack reads failed so (2026-11-05). Only read tools are left, so they run without asking.
-    print("-c", f"mcp_servers.{name}.enabled_tools={json.dumps(keep)}", "-c", f'mcp_servers.{name}.default_tools_approval_mode="approve"', sep="\n")
-EOF
-    ) || die "cannot turn off every MCP server in Codex's config, so a Codex check pane could write through one; open it with --kind claude"
-    off=(); while IFS= read -r l; do [ -z "$l" ] || off+=("$l"); done <<<"$mcp"
+    rules=$(mktemp "$cwd/.codex/rules/.check.XXXXXX") && cat "$helper_dir/pane-spawn-check.rules" > "$rules" && mv -f "$rules" "$cwd/.codex/rules/check.rules" || die "cannot write $cwd/.codex/rules/check.rules"
+    mcp=$(python3 -I "$helper_dir/pane-spawn-mcp.py" "${CODEX_HOME:-$HOME/.codex}/config.toml") || die "cannot turn off every MCP server in Codex's config, so a Codex check pane could write through one; open it with --kind claude"
+    off=(); while IFS= read -r l; do [ -z "$l" ] || off+=("$l"); done < <(printf '%s\n' "$mcp")
     # Codex's TUI serves MCP tools of its own outside the sandbox (create_worktree runs git in a trusted repo), unless a configured
     # server holds their name: codex_worktrees, or codex_tui with a daemon. Then it starts without them. No feature turns them
     # off, and a server with no command stops Codex from starting (Codex 0.166, 2026-11-05).
@@ -282,7 +296,7 @@ if [ -z "$opener" ] && [ "term_$term" = "$(cat "$mainfile" 2>/dev/null)" ]; then
   [ -z "$same" ] || die "the main pane does no work, so it never adds a pane to its own tab"
   if [ -z "$check" ] && [ "$asked" = claude ]; then
     [[ "$why" == *[![:space:]]* ]] || die "the main pane opens a Claude pane only with --why \"<one line>\", the reason Codex cannot do the job. Any other pane: --kind auto (Codex regardless of weekly usage)."
-    case "$(tr '[:upper:]' '[:lower:]' <<<"$why")" in
+    case "$(printf '%s\n' "$why" | tr '[:upper:]' '[:lower:]')" in
       *slack* | *슬랙*) die "Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요" ;;
       # ponytail: words, so a reason that names gcloud to say why Codex failed is refused too; it says what failed instead.
       *gcp* | *gcloud* | *bigquery* | *bq*) die "GCP 명령도 Codex 칸이 합니다(요유 2026-11-07): --kind auto로 여세요. 요유 계정 단계는 메인 칸에서 합니다. Codex로 안 되는 다른 이유가 있으면 그것을 --why에 한 줄로 쓰세요" ;;
@@ -348,7 +362,7 @@ if [ -n "$sock" ]; then
     export HERDR_SOCKET_PATH=$sock
     call=(perl -e 'alarm shift; exec @ARGV' "${PANE_SPAWN_WORKERS_LIMIT:-10}" "$H") # herdr's CLI waits on a stuck server for ever
     spaces=$("${call[@]}" workspace list) || exit 0 # no answer is not no workspace: creating one on a slow server would make a second
-    w=$(jq -r '[.result.workspaces[] | select(.label == "workers")][0].workspace_id // empty' <<<"$spaces")
+    w=$(printf '%s\n' "$spaces" | jq -r '[.result.workspaces[] | select(.label == "workers")][0].workspace_id // empty')
     [ -n "$w" ] || w=$("${call[@]}" workspace create --label workers --no-focus --cwd "$HOME" | jq -r '.result.workspace.workspace_id // empty')
     [ -n "$w" ] || exit 0
     if [ -n "$main$opener" ]; then open_pane "" "$w" "$name"; exit 0; fi
@@ -372,6 +386,13 @@ fi
 pane-label --sync-tabs
 
 give_up() { "$H" pane close "$pane" >/dev/null 2>&1; echo "pane-spawn: $1" >&2; exit 1; }
+refuse_hook_review() {
+  [ "$kind" = codex ] || return 0
+  # An already-open review screen can overwrite current trust with stale hashes.
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in *"hooks need review"*|*"hook needs review"*)
+    give_up "codex hooks need review; no instruction was delivered and this blocked pane was closed. Do not trust hooks from an already-open review screen: it can save stale hashes. After hook installation finishes, open a fresh Codex session and review current changed hooks from your own reviewed commits. Alternatively, use official hooks/list and version-checked config/batchWrite to register only reviewed current hashes. If trust was already registered during installation, do not press t again. If hooks change during review, close and reopen before approval. Then retry this job with --job-id $job_id" ;;
+  esac
+}
 agent="spawn-$term-${check:+chk}${opener:+r}$home$RANDOM" # herdr allows 32 characters; terminal ids run about 15
 for try in 1 2 3; do # a pane opened a moment ago may not be at its shell prompt yet
   out=$("$H" agent start "$agent" --kind "$kind" --pane "$pane" --timeout 120000 ${1+--} "$@" 2>&1) && break
@@ -379,20 +400,29 @@ for try in 1 2 3; do # a pane opened a moment ago may not be at its shell prompt
   # dialog: a guess at which one it was (a trust question) sent the 2026-11-06 hunt the wrong way, and it was the update prompt.
   case "$out" in *"blocked during startup"*)
     screen=$("$H" agent read "$pane" --source visible 2>/dev/null | tr -s ' \n' '  ')
+    refuse_hook_review "$screen"
     give_up "$kind waits at a dialog as it starts, which nobody here answers. It shows: ${screen:0:400}. If it asks whether to trust $cwd, start $kind there by hand once and answer it; else open the pane with --kind claude. herdr: $out" ;;
   esac
   [ "$try" != 3 ] || give_up "$kind did not start: $out"
   sleep "${PANE_SPAWN_RETRY_WAIT:-3}"
 done
-for _ in $(seq 1 60); do # `agent start` can return while a wrapper still runs in the pane (dispatch/run.sh)
+for startup_poll in $(seq 1 60); do # `agent start` can return while a wrapper still runs in the pane (dispatch/run.sh)
   "$H" agent get "$pane" 2>/dev/null | jq -e "$ready" >/dev/null && break
-  [ "$_" != 60 ] || give_up "$kind never became ready"
+  [ "$startup_poll" != 60 ] || give_up "$kind never became ready"
   sleep "${PANE_SPAWN_POLL:-2}"
 done
+# Herdr can report interactive_ready while Codex's hook-review modal owns the
+# input box. Do not consume the instruction there, auto-trust hooks, or switch
+# runners. Both startup paths use the same recovery instructions.
+if [ "$kind" = codex ]; then
+  refuse_hook_review "$("$H" agent read "$pane" --source visible 2>/dev/null)"
+fi
 # Codex can report ready before its input box takes text, and `agent prompt` still succeeds: on 2026-11-01 an instruction
 # vanished and the pane sat idle while its lead waited. So delivery counts only once the agent shows work. A miss is reported,
 # not resent or closed: the wait can also fail with the instruction accepted, and a resend would run the job twice.
 "$H" agent prompt "$pane" "$prompt" >/dev/null || give_up "the instruction was not delivered"
+session_id=$("$H" agent get "$pane" 2>/dev/null | jq -r '.result.agent.agent_session.value // empty')
+record_task run ${session_id:+--session-id "$session_id"}
 if ! "$H" agent wait "$pane" --until working --until blocked --until done --timeout "${PANE_SPAWN_START_WAIT:-30000}" >/dev/null 2>&1; then
   echo "$addr$pane"
   echo "pane-spawn: $addr$pane shows no work; if its input box is empty, send the instruction again with pane-tell" >&2

@@ -43,4 +43,13 @@ out=$(run resume)
 [[ $out == "STDIN=OPEN ARGS=resume" ]] || fail "a non-exec subcommand should keep stdin: $out"
 out=$(HERDR=1 run exec "say ok")
 [[ $out == "STDIN=NULL ARGS=--no-daemon exec say ok" ]] || fail "herdr should add --no-daemon first: $out"
+# Startup flags are expanded after entering the shell, below the terminal line limit.
+cat > "$SANDBOX/startup.py" <<'EOF'
+import os, sys
+os.execv(sys.argv[1], [sys.argv[1], '-c', 'skills.config=[{path="demo",enabled=false}]', *sys.argv[2:]])
+EOF
+out=$(HERDR_CODEX_STARTUP_ROLE=worker HERDR_CODEX_STARTUP_HELPER="$SANDBOX/startup.py" HERDR=1 run exec "say ok")
+[[ $out == 'STDIN=NULL ARGS=-c skills.config=[{path="demo",enabled=false}] --no-daemon exec say ok' ]] || fail "worker expands startup flags after launch: $out"
+out=$(HERDR_CODEX_STARTUP_ROLE=check HERDR_CODEX_STARTUP_HELPER="$SANDBOX/startup.py" HERDR=1 run exec "say ok")
+[[ $out == 'STDIN=NULL ARGS=--no-daemon exec say ok' ]] || fail "check skips worker startup flags: $out"
 echo "ok"

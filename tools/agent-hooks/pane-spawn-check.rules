@@ -1,0 +1,10 @@
+# Written by pane-spawn for its Codex check panes at each start; a change here is lost.
+host_executable(name="ps", paths=["/bin/ps"])
+prefix_rule(pattern=["ps"], decision="allow")
+host_executable(name="pgrep", paths=["/usr/bin/pgrep"])
+prefix_rule(pattern=["pgrep"], decision="allow")
+host_executable(name="launchctl", paths=["/bin/launchctl"])
+prefix_rule(pattern=["launchctl", ["list", "print"]], decision="allow")
+prefix_rule(pattern=["gh", "pr", ["merge", "comment", "review", "close", "reopen", "edit", "create", "ready", "lock"]], decision="forbidden")
+prefix_rule(pattern=["gh", "issue", ["comment", "close", "reopen", "edit", "create", "delete", "transfer", "lock", "pin"]], decision="forbidden")
+prefix_rule(pattern=["ego-browser"], decision="forbidden")

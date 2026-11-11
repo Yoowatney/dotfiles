@@ -18,6 +18,14 @@ CHECKED = "pytest를 다시 실행해 12개 통과를 봤습니다. PASS\n남은
 
 
 class RelayTests(unittest.TestCase):
+    def test_accounting_id_follows_worker_to_check_without_changing_receiver(self):
+        self.setUp_accounting_id = 'job-test-123'
+        self.env['HERDR_TASK_ID'] = self.setUp_accounting_id
+        self.finish()
+        args, env = self.spawns[0]
+        self.assertEqual(args[args.index('--job-id') + 1], self.setUp_accounting_id)
+        self.assertEqual(env['HERDR_PANE_ID'], self.main['pane_id'])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -30,13 +38,14 @@ class RelayTests(unittest.TestCase):
                            tab_id="w1:t1", workspace_id="w1", agent_session={"value": "sid-W"})
         self.checker = None
         self.names = {"w1:p2": "spawn-M-1"}
-        self.tells, self.spawns, self.closed = [], [], []
+        self.tells, self.spawns, self.closed, self.alerts = [], [], [], []
         self.spawn_error = None
         self.tell_exit = 0
         self.env = dict(HOME=str(self.root), XDG_STATE_HOME=str(self.root / "state"),
                         HERDR_PANE_ID="w1:p2", HERDR_SOCKET_PATH="/sessions/workers/herdr.sock",
                         PANE_REPORT_DIR=str(self.root / "reports"), AUTO_TAB_CLOSE_PANE_SPAWN="/fake/pane-spawn",
-                        AUTO_TAB_CLOSE_PANE_TELL="/fake/pane-tell", AUTO_TAB_CLOSE_PANE_LABEL="/fake/pane-label")
+                        AUTO_TAB_CLOSE_PANE_TELL="/fake/pane-tell", AUTO_TAB_CLOSE_PANE_LABEL="/fake/pane-label",
+                        HERDR_ERROR_NOTIFY="/fake/herdr-error-notify")
         for target, value in (("herdr", self.herdr), ("subprocess.run", self.call_process),
                               ("herdr_peers.all_panes", self.all_panes), ("herdr_peers.socket_of", self.socket_of)):
             if "." in target:
@@ -81,6 +90,9 @@ class RelayTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, self.tell_exit)
         if args[0].endswith("pane-label"):
             self.closed.append(kwargs["env"]["HERDR_PANE_ID"])
+            return subprocess.CompletedProcess(args, 0)
+        if args[0] == "/fake/herdr-error-notify":
+            self.alerts.append(args[1:])
             return subprocess.CompletedProcess(args, 0)
         raise AssertionError(args)
 
@@ -301,11 +313,26 @@ class RelayTests(unittest.TestCase):
         self.tell_exit = 1
         self.finish(CHECKED, check=True)
         self.assertNotIn("w1:p9", self.closed)
+        self.assertEqual(len(self.alerts), 1, "failed delivery alerts outside pane-tell")
+        title, body = self.alerts[0]
+        self.assertEqual(title, "세션 보고를 전달하지 못했습니다")
+        self.assertIn("default/w5:p3", body)
+        self.assertIn(str(self.root / "reports"), body)
+        for line in CHECKED.splitlines():
+            self.assertNotIn(line, body, "alerts contain metadata, not report text")
+        failures = list((self.root / "state/pane-tell/failed-reports").glob("report.*"))
+        self.assertEqual(len(failures), 1)
+        metadata = json.loads(failures[0].read_text())
+        self.assertEqual(metadata["receiver"], "default/w5:p3")
+        self.assertTrue(Path(metadata["report"]).is_file())
+        self.assertIn(metadata["report"], body)
+        self.assertIn(CHECKED, Path(metadata["report"]).read_text())
         self.tell_exit = 0
         self.finish(CHECKED, check=True)
         self.assertIn("w1:p9", self.closed)
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(len(self.tells), 2, "only the successful delivery is marked as delivered")
+        self.assertEqual(len(self.alerts), 1, "successful retry does not send another failure alert")
 
     def test_slack_not_posted_report_selects_auto(self):
         for word in ("Slack", "슬랙"):

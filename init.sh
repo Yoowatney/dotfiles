@@ -699,6 +699,7 @@ main() {
     create_symlinks
     setup_claude
     python3 "$DOTFILES/tools/agent-hooks/install-handoff.py"
+    python3 "$DOTFILES/tools/agent-hooks/install-codex-startup.py"
     restore_app_settings
     configure_macos_defaults
     install_mise_tools

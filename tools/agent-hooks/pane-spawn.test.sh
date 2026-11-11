@@ -7,6 +7,7 @@ trap 'rm -rf "$SANDBOX"' EXIT
 
 fail() {
     echo "FAIL: $*" >&2
+    [ ! -f "$SANDBOX/err" ] || cat "$SANDBOX/err" >&2
     exit 1
 }
 
@@ -55,7 +56,7 @@ echo "[\$s] pane-label \$*" >> "$SANDBOX/log"
 EOF
 chmod +x "$SANDBOX/pane-label"
 
-run_on() { local sock=$1; shift; rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits"; env -u HERDR_SOCKET_PATH -u XDG_STATE_HOME ${sock:+HERDR_SOCKET_PATH="$sock"} HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" CLAUDE_CONFIG_DIR="$SANDBOX/home/.claude" PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_RETRY_WAIT=0 bash "$SUBJECT" "$@"; }
+run_on() { local sock=$1; shift; rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits"; env -u HERDR_SOCKET_PATH -u XDG_STATE_HOME ${sock:+HERDR_SOCKET_PATH="$sock"} HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" CLAUDE_CONFIG_DIR="$SANDBOX/home/.claude" PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_RETRY_WAIT=0 "${PANE_SPAWN_TEST_SHELL:-bash}" "$SUBJECT" "$@"; }
 ps() { run_on "" "$@"; }
 log() { cat "$SANDBOX/log" 2>/dev/null || true; }
 has() { grep -qF -- "$1" "$SANDBOX/log" || fail "$2: no [$1] in: $(log)"; }
@@ -97,6 +98,26 @@ before "agent get w1:new" "agent prompt"
 before "agent prompt" "agent wait w1:new --until working --until blocked --until done"
 [[ "$out" == *"w1:new"* ]] || fail "prints the new pane: $out"
 
+# Codex may report interactive readiness while its hook-review modal owns input.
+# Never send an instruction into that modal or silently trust the changed hooks.
+for readiness_shell in "$(command -v bash)" /bin/bash; do
+ for blocked_start in '' 1; do
+  rc=0
+  PANE_SPAWN_TEST_SHELL="$readiness_shell" BLOCKED_START="$blocked_start" SESSIONLESS=1 SCREEN='7 hooks need review' ps --kind codex --job-id hook-review-job "hook review" "Run tests" 2>"$SANDBOX/err" >/dev/null || rc=$?
+  [ "$rc" = 1 ] || fail "hook review ($readiness_shell): expected failure, got $rc"
+  hasnt "agent prompt" "a hook-review modal receives no instruction"
+  has "pane close w1:new" "the undelivered test pane is closed"
+  hasnt "--kind claude" "hook review does not switch runners"
+  grep -q 'hooks need review' "$SANDBOX/err" || fail "reports the hook review blocker"
+  hasnt "send-keys" "hook recovery never approves a possibly stale review screen"
+  grep -q 'already-open review screen' "$SANDBOX/err" || fail "warns against trusting stale hook inventory"
+  grep -q 'After hook installation finishes, open a fresh Codex session' "$SANDBOX/err" || fail "recovery reads current hooks after installation"
+  grep -q 'If trust was already registered during installation, do not press t again' "$SANDBOX/err" || fail "installation trust does not require another approval"
+  grep -q -- '--job-id hook-review-job' "$SANDBOX/err" || fail "recovery preserves the failed job id"
+  if grep -q -- '--kind claude' "$SANDBOX/err"; then fail "hook review recovery must not suggest switching runners"; fi
+ done
+done
+
 # api#1065: --artifact keeps the Artifact tool in a Claude pane (the profile turns it off otherwise); Codex has no such tool.
 ps --artifact "발행" "지시" >/dev/null
 has "--env CLAUDE_STARTUP_ARTIFACT=1" "--artifact keeps the Artifact tool in a Claude pane, through clear"
@@ -114,6 +135,42 @@ has "--env CLAUDE_STARTUP_SKILLS=1" "--skills keeps the cut skills in a Claude p
 has "--env CLAUDE_STARTUP_ROLE=worker" "--skills keeps the rest of the worker profile"
 SESSIONLESS=1 ps --skills --kind codex "조사" "지시" >/dev/null
 hasnt "CLAUDE_STARTUP_SKILLS" "Codex panes are unaffected by --skills"
+
+# Typed workers receive context metadata, without changing runner or permissions.
+SESSIONLESS=1 ps --kind codex --task-type code --job-id test-job "test" "Run tests" >/dev/null
+has "--env HERDR_CODEX_STARTUP_ROLE=worker" "only workers opt into the startup profile"
+has "--env HERDR_CODEX_TASK_TYPE=code" "the requested task type survives clear"
+has "--env HERDR_TASK_ID=test-job" "request and execution share a job id"
+mkdir -p "$SANDBOX/home/.codex" "$SANDBOX/home/.agents/skills/hyperframes"
+printf 'Safety\n<!-- pane:skip -->\nMain only\n<!-- /pane:skip -->\n' > "$SANDBOX/home/.codex/AGENTS.md"
+printf 'demo\n' > "$SANDBOX/home/.agents/skills/hyperframes/SKILL.md"
+SESSIONLESS=1 ps --kind codex --task-type code "test" "Run tests" >/dev/null
+hasnt "--env CODEX_HOME=" "startup trimming keeps canonical credentials and state"
+has '--env HERDR_CODEX_STARTUP_HELPER=' "the runner expands exclusions after entering the shell"
+hasnt 'skills.config=[' "large skill flags must not pass through terminal input"
+# The installed command is a symlink, often reached through another PATH link.
+# Startup metadata and accounting must use helpers beside the resolved script.
+real_subject=$(readlink -f "$SUBJECT")
+mkdir -p "$SANDBOX/bin" "$SANDBOX/links"
+ln -s "$real_subject" "$SANDBOX/links/pane-spawn"
+ln -s ../links/pane-spawn "$SANDBOX/bin/pane-spawn"
+SUBJECT="$SANDBOX/bin/pane-spawn"
+SESSIONLESS=1 ps --kind auto --task-type code --job-id symlink-job "test" "Run tests" >/dev/null
+has "--env HERDR_CODEX_STARTUP_HELPER=$(dirname "$real_subject")/codex-startup.py" "installed symlinks retain the startup helper"
+python3 - "$SANDBOX/home/.local/state/agent-task-ledger/events.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert {'request', 'run'} <= {e['kind'] for e in rows if e['job_id'] == 'symlink-job'}, 'installed symlinks must record request and run together'
+PY
+SUBJECT=$real_subject
+rm -rf "$SANDBOX/home/.codex" "$SANDBOX/home/.agents"
+python3 "$(dirname "$SUBJECT")/task-ledger.py" --state-dir "$SANDBOX/home/.local/state/agent-task-ledger" record run --job-id parent-job --session-id parent-session
+CODEX_THREAD_ID=parent-session SESSIONLESS=1 ps --kind codex --job-id child-job "test" "Run tests" >/dev/null
+python3 - "$SANDBOX/home/.local/state/agent-task-ledger/events.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert any(e['kind'] == 'request' and e['job_id'] == 'child-job' and e.get('parent_job_id') == 'parent-job' for e in rows), 'shell environment filtering must not lose the parent job'
+PY
 
 # 요유 2026-11-01: a job has one lead. A pane under a lead that opens a review pane stays under it, and that pane reports to it.
 CALLER_LABEL="🟢 🫡 구현" ps --same-tab "리뷰" "봐 줘" >/dev/null
@@ -275,7 +332,7 @@ grep -q "pane-tell" "$SANDBOX/err" || fail "says what to do: $(cat "$SANDBOX/err
 # Bad usage.
 if ps "이름만" 2>/dev/null; then fail "missing instruction must exit non-zero"; fi
 if ps --kind gemini "이름" "지시" 2>/dev/null; then fail "unknown kind must exit non-zero"; fi
-if env -u HERDR_PANE_ID HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "이름" "지시" 2>/dev/null; then fail "outside herdr must exit non-zero"; fi
+if env -u HERDR_PANE_ID -u XDG_STATE_HOME HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "이름" "지시" 2>/dev/null; then fail "outside herdr must exit non-zero"; fi
 
 # The main pane does no work itself: what it opens goes to the workers server, and its address names that server.
 is_main() { mkdir -p "$SANDBOX/home/.local/state/orchestrator"; echo term_65f21913323dc21 > "$SANDBOX/home/.local/state/orchestrator/main"; }
@@ -465,6 +522,20 @@ hasnt 'notion-token.default_tools_approval_mode' "a server that is off gets no a
 hasnt 'mcp_servers."' "no quoted server name"
 has "slack_get_thread_replies" "the instruction names the Slack read tools"
 hasnt "gh-read" "with the network on, gh reads GitHub itself"
+# Large config output must be read concurrently, including through the installed
+# launcher symlink and Apple's Bash 3.2. Percent signs remain prompt data.
+python3 -I -c 'print("\n".join(f"[mcp_servers.large_{i}]\ncommand = \"x\"" for i in range(80)))' >> "$SANDBOX/home/.codex/config.toml"
+large_prompt=$(python3 -I -c 'print("prompt-%s-" * 2048)')
+ln -s "$SUBJECT" "$SANDBOX/pane-spawn-link"
+real_subject=$SUBJECT; SUBJECT=$SANDBOX/pane-spawn-link
+PANE_SPAWN_TEST_SHELL=/bin/bash ps --check "Large input" "$large_prompt" >/dev/null
+has '-c mcp_servers.large_79.enabled=false' "large MCP config disables even its last server"
+python3 -I -c 'import pathlib,sys; assert "agent prompt w1:new " + sys.argv[2] in pathlib.Path(sys.argv[1]).read_text(), "large prompt was truncated"' "$SANDBOX/log" "$large_prompt"
+cmp "$RULES" "$(dirname "$real_subject")/pane-spawn-check.rules" || fail "installed launcher writes the complete external rule template"
+python3 -I -c 'print("#" + "x" * 16384 + "\nnot toml [")' > "$SANDBOX/home/.codex/config.toml"
+if PANE_SPAWN_TEST_SHELL=/bin/bash ps --check "Bad large config" "$large_prompt" 2>"$SANDBOX/err" >/dev/null; then fail "large invalid config must stop check startup"; fi
+hasnt "agent start" "large invalid config opens no agent"
+SUBJECT=$real_subject
 for bad in 'not toml [' '[mcp_servers."a.b"]'; do
   echo "$bad" > "$SANDBOX/home/.codex/config.toml"
   if ps --check "로그인" "돌려 보세요" 2>"$SANDBOX/err" >/dev/null; then fail "a server it cannot turn off must stop a Codex check pane ($bad)"; fi
@@ -585,13 +656,16 @@ BLOCKED_START=1 SCREEN='You have hit your usage limit' ps --check "막힘" "지�
 [ "$rc" = 1 ] || fail "an unstructured dialog must fail, got $rc"
 hasnt "--kind claude" "dialog text alone cannot prove a current quota block"
 grep -qF 'You have hit your usage limit' "$SANDBOX/err" || fail "reports the actual dialog"
-rc=0
-NOT_READY=1 ps --kind auto "준비 실패" "지시" 2>"$SANDBOX/err" >/dev/null || rc=$?
-[ "$rc" = 1 ] || fail "readiness timeout: expected exit 1, got $rc"
-hasnt "--kind claude" "readiness timeout does not select Claude"
-has "pane close w1:new" "a pane that never became ready is removed"
-hasnt "agent prompt" "an unready pane gets no job"
-grep -q 'codex never became ready' "$SANDBOX/err" || fail "reports readiness timeout"
+# Keep macOS Bash coverage even when the test driver finds Homebrew Bash on PATH.
+for readiness_shell in "$(command -v bash)" /bin/bash; do
+  rc=0
+  PANE_SPAWN_TEST_SHELL="$readiness_shell" NOT_READY=1 ps --kind auto "준비 실패" "지시" 2>"$SANDBOX/err" >/dev/null || rc=$?
+  [ "$rc" = 1 ] || fail "readiness timeout ($readiness_shell): expected exit 1, got $rc"
+  hasnt "--kind claude" "readiness timeout does not select Claude"
+  has "pane close w1:new" "a pane that never became ready is removed"
+  hasnt "agent prompt" "an unready pane gets no job"
+  grep -q 'codex never became ready' "$SANDBOX/err" || fail "reports readiness timeout"
+done
 rc=0
 FAIL_PROMPT=1 ps --kind auto "전달 실패" "지시" 2>"$SANDBOX/err" >/dev/null || rc=$?
 [ "$rc" = 1 ] || fail "prompt failure: expected exit 1, got $rc"
