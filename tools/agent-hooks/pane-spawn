@@ -429,6 +429,15 @@ for startup_poll in $(seq 1 60); do # `agent start` can return while a wrapper s
   [ "$startup_poll" != 60 ] || give_up "$kind never became ready"
   sleep "${PANE_SPAWN_POLL:-2}"
 done
+# Herdr can report interactive_ready while Codex's hook-review modal owns the
+# input box. Do not consume the instruction there, auto-trust hooks, or switch
+# runners. A human must review the changed declarations once before retrying.
+if [ "$kind" = codex ]; then
+  screen=$("$H" agent read "$pane" --source visible 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  case "$screen" in *"hooks need review"*|*"hook needs review"*)
+    give_up "codex hooks need review; no instruction was delivered. Review the changed hooks with /hooks in a manually opened Codex session, then retry this job with --job-id $job_id" ;;
+  esac
+fi
 # Codex can report ready before its input box takes text, and `agent prompt` still succeeds: on 2026-11-01 an instruction
 # vanished and the pane sat idle while its lead waited. So delivery counts only once the agent shows work. A miss is reported,
 # not resent or closed: the wait can also fail with the instruction accepted, and a resend would run the job twice.

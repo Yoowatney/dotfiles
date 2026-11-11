@@ -98,6 +98,18 @@ before "agent get w1:new" "agent prompt"
 before "agent prompt" "agent wait w1:new --until working --until blocked --until done"
 [[ "$out" == *"w1:new"* ]] || fail "prints the new pane: $out"
 
+# Codex may report interactive readiness while its hook-review modal owns input.
+# Never send an instruction into that modal or silently trust the changed hooks.
+for readiness_shell in "$(command -v bash)" /bin/bash; do
+  rc=0
+  PANE_SPAWN_TEST_SHELL="$readiness_shell" SESSIONLESS=1 SCREEN='7 hooks need review' ps --kind codex "hook review" "Run tests" 2>"$SANDBOX/err" >/dev/null || rc=$?
+  [ "$rc" = 1 ] || fail "hook review ($readiness_shell): expected failure, got $rc"
+  hasnt "agent prompt" "a hook-review modal receives no instruction"
+  has "pane close w1:new" "the undelivered test pane is closed"
+  hasnt "--kind claude" "hook review does not switch runners"
+  grep -q 'hooks need review' "$SANDBOX/err" || fail "reports the hook review blocker"
+done
+
 # api#1065: --artifact keeps the Artifact tool in a Claude pane (the profile turns it off otherwise); Codex has no such tool.
 ps --artifact "발행" "지시" >/dev/null
 has "--env CLAUDE_STARTUP_ARTIFACT=1" "--artifact keeps the Artifact tool in a Claude pane, through clear"
