@@ -55,7 +55,7 @@ echo "[\$s] pane-label \$*" >> "$SANDBOX/log"
 EOF
 chmod +x "$SANDBOX/pane-label"
 
-run_on() { local sock=$1; shift; rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits"; env -u HERDR_SOCKET_PATH -u XDG_STATE_HOME ${sock:+HERDR_SOCKET_PATH="$sock"} HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" CLAUDE_CONFIG_DIR="$SANDBOX/home/.claude" PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_RETRY_WAIT=0 bash "$SUBJECT" "$@"; }
+run_on() { local sock=$1; shift; rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits"; env -u HERDR_SOCKET_PATH -u XDG_STATE_HOME ${sock:+HERDR_SOCKET_PATH="$sock"} HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" CLAUDE_CONFIG_DIR="$SANDBOX/home/.claude" PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_RETRY_WAIT=0 "${PANE_SPAWN_TEST_SHELL:-bash}" "$SUBJECT" "$@"; }
 ps() { run_on "" "$@"; }
 log() { cat "$SANDBOX/log" 2>/dev/null || true; }
 has() { grep -qF -- "$1" "$SANDBOX/log" || fail "$2: no [$1] in: $(log)"; }
@@ -585,13 +585,16 @@ BLOCKED_START=1 SCREEN='You have hit your usage limit' ps --check "막힘" "지�
 [ "$rc" = 1 ] || fail "an unstructured dialog must fail, got $rc"
 hasnt "--kind claude" "dialog text alone cannot prove a current quota block"
 grep -qF 'You have hit your usage limit' "$SANDBOX/err" || fail "reports the actual dialog"
-rc=0
-NOT_READY=1 ps --kind auto "준비 실패" "지시" 2>"$SANDBOX/err" >/dev/null || rc=$?
-[ "$rc" = 1 ] || fail "readiness timeout: expected exit 1, got $rc"
-hasnt "--kind claude" "readiness timeout does not select Claude"
-has "pane close w1:new" "a pane that never became ready is removed"
-hasnt "agent prompt" "an unready pane gets no job"
-grep -q 'codex never became ready' "$SANDBOX/err" || fail "reports readiness timeout"
+# Keep macOS Bash coverage even when the test driver finds Homebrew Bash on PATH.
+for readiness_shell in "$(command -v bash)" /bin/bash; do
+  rc=0
+  PANE_SPAWN_TEST_SHELL="$readiness_shell" NOT_READY=1 ps --kind auto "준비 실패" "지시" 2>"$SANDBOX/err" >/dev/null || rc=$?
+  [ "$rc" = 1 ] || fail "readiness timeout ($readiness_shell): expected exit 1, got $rc"
+  hasnt "--kind claude" "readiness timeout does not select Claude"
+  has "pane close w1:new" "a pane that never became ready is removed"
+  hasnt "agent prompt" "an unready pane gets no job"
+  grep -q 'codex never became ready' "$SANDBOX/err" || fail "reports readiness timeout"
+done
 rc=0
 FAIL_PROMPT=1 ps --kind auto "전달 실패" "지시" 2>"$SANDBOX/err" >/dev/null || rc=$?
 [ "$rc" = 1 ] || fail "prompt failure: expected exit 1, got $rc"

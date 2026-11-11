@@ -384,9 +384,9 @@ for try in 1 2 3; do # a pane opened a moment ago may not be at its shell prompt
   [ "$try" != 3 ] || give_up "$kind did not start: $out"
   sleep "${PANE_SPAWN_RETRY_WAIT:-3}"
 done
-for _ in $(seq 1 60); do # `agent start` can return while a wrapper still runs in the pane (dispatch/run.sh)
+for startup_poll in $(seq 1 60); do # `agent start` can return while a wrapper still runs in the pane (dispatch/run.sh)
   "$H" agent get "$pane" 2>/dev/null | jq -e "$ready" >/dev/null && break
-  [ "$_" != 60 ] || give_up "$kind never became ready"
+  [ "$startup_poll" != 60 ] || give_up "$kind never became ready"
   sleep "${PANE_SPAWN_POLL:-2}"
 done
 # Codex can report ready before its input box takes text, and `agent prompt` still succeeds: on 2026-11-01 an instruction
