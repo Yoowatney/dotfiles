@@ -178,6 +178,25 @@ class HandoffTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, "")
 
+    def test_codex_without_transcript_path_loads_saved_note_and_resolves_session_meta(self):
+        self.assertEqual(self.runho("save", self.memo()).returncode, 0)
+        self.env["CODEX_HOME"] = str(self.root / "codex")
+        log = self.root / "codex/sessions/2026/11/11/rollout-test-session-one.jsonl"
+        log.parent.mkdir(parents=True)
+        log.write_text(json.dumps(dict(type="session_meta", payload=dict(id="session-one"))) + "\n")
+        r = subprocess.run(["bash", str(HERE / "handoff"), "session", "codex"],
+            input=json.dumps(dict(session_id="session-one")), env=self.env, text=True, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Continue example", r.stdout)
+        record = json.loads(Path(str(self.file) + ".codex-session").read_text())
+        self.assertEqual(record["transcript_path"], str(log))
+        # A missing rollout must not prevent an explicit memo from loading either.
+        self.assertEqual(self.runho("save", self.memo()).returncode, 0)
+        r = subprocess.run(["bash", str(HERE / "handoff"), "session", "codex"],
+            input=json.dumps(dict(session_id="session-two")), env=self.env, text=True, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Continue example", r.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

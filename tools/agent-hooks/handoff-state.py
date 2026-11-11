@@ -143,6 +143,21 @@ def context(text):
     return json.dumps(dict(hookSpecificOutput=dict(hookEventName="SessionStart", additionalContext=text)), ensure_ascii=False)
 
 
+def codex_transcript(sid):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", sid):
+        return ""
+    home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    for path in (home / "sessions").glob("**/*" + sid + ".jsonl"):
+        try:
+            with path.open() as stream:
+                first = json.loads(stream.readline())
+            if first.get("type") == "session_meta" and first.get("payload", {}).get("id") == sid:
+                return str(path)
+        except (OSError, ValueError, AttributeError):
+            continue
+    return ""
+
+
 def codex_session(payload):
     sid = payload.get("session_id")
     transcript = payload.get("transcript_path")
@@ -151,7 +166,7 @@ def codex_session(payload):
     if not isinstance(sid, str) or not sid or (inherited and inherited != sid):
         return ""
     if not isinstance(transcript, str) or not transcript:
-        return ""
+        transcript = codex_transcript(sid)
     record = Path(str(pending()) + ".codex-session")
     try:
         previous = json.loads(record.read_text())
