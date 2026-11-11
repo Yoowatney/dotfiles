@@ -44,6 +44,7 @@ batch_event() {
 send() {
   printf '%s\\0' "$3" >> "$FIXTURE/prompts"
   printf '%s\\n' "${HERDR_SOCKET_PATH:-default}" >> "$FIXTURE/sockets"
+  [ -z "${SEND_RETURN_DELAY:-}" ] || /bin/sleep "$SEND_RETURN_DELAY"
 }
 definition=$(declare -f register_receiver); eval "real_$definition"
 register_receiver() {
@@ -311,9 +312,16 @@ exec /usr/bin/nohup "$@"
             (receivers / name).write_text("term_M\ndefault\n")
         (dependencies / "100.first").write_text("")
         (dependencies / "101.second").write_text(str(waiting / "100.first") + "\n")
-        self.assertEqual(self.call("--recover-batch").returncode, 0)
+        self.assertEqual(self.call("--recover-batch", SEND_RETURN_DELAY=".1").returncode, 0)
         self.wait_prompt([b"first", b"second"])
-        self.assertEqual(list(waiting.iterdir()), [])
+        # A prompt is visible before send returns and delivery removes its
+        # durable queue files. Check the acknowledgement, not that earlier event.
+        directories = (waiting, receivers, dependencies)
+        end = time.monotonic() + 7
+        while any(list(path.iterdir()) for path in directories) and time.monotonic() < end:
+            time.sleep(.01)
+        for path in directories:
+            self.assertEqual(list(path.iterdir()), [], str(path))
 
     def test_general_recovery_keeps_original_session_binding(self):
         for name in ("waiting", "receivers", "delivery-routes", "undelivered", "order/dependencies"):
