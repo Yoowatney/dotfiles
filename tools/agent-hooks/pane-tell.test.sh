@@ -22,13 +22,16 @@ case "\$1 \$2" in
   "tab list") t="$SANDBOX/tabs"; [ "\$s" != workers ] || t="$SANDBOX/workers-tabs"; cat "\$t" 2>/dev/null || echo '{"result":{"tabs":[]}}' ;;
   "pane get") jq -n --arg i "\$(cat "$SANDBOX/new-id" 2>/dev/null)" --argjson o "\$(cat "$SANDBOX/scrolled" 2>/dev/null || echo 0)" \
     --arg p "\$3" --slurpfile all "\$f" \
-    '{result: {pane: ((\$all[0].result.panes | map(select(.pane_id == \$p)) | .[0] // {}) + {scroll: {offset_from_bottom: \$o}} + (if \$i == "" then {} else {pane_id: \$i} end))}}' ;;
+    '{result: {pane: ({agent_status: "working"} + (\$all[0].result.panes | map(select(.pane_id == \$p)) | .[0] // {}) + {scroll: {offset_from_bottom: \$o}} + (if \$i == "" then {} else {pane_id: \$i} end))}}' ;;
   "pane read") n=\$((\$(cat "$SANDBOX/reads" 2>/dev/null || echo 0) + 1)); echo "\$n" > "$SANDBOX/reads"; echo "\$s" >> "$SANDBOX/read-srv"
-    if [ -f "$SANDBOX/screen-\$3" ]; then cat "$SANDBOX/screen-\$3"
+    if [[ " \$* " == *" --source recent "* ]] && [ -f "$SANDBOX/screen-recent" ]; then cat "$SANDBOX/screen-recent"
+    elif [ -f "$SANDBOX/screen-\$3" ]; then cat "$SANDBOX/screen-\$3"
     elif [ -f "$SANDBOX/screen.\$n" ]; then cat "$SANDBOX/screen.\$n"; else cat "$SANDBOX/screen"; fi ;;
   "agent prompt") [ ! -f "$SANDBOX/refuse" ] || exit 1; printf '%s|%s\n' "\$3" "\$4" >> "$SANDBOX/log"; echo "\$s" >> "$SANDBOX/log-srv" ;;
   "agent send-keys") printf '%s|%s|%s\n' "\$s" "\$3" "\${*:4}" >> "$SANDBOX/keys"
-    cp "$SANDBOX/empty-codex" "$SANDBOX/screen" ;;
+    target="$SANDBOX/screen"; [ ! -f "$SANDBOX/screen-\$3" ] || target="$SANDBOX/screen-\$3"
+    if grep -q '❯' "\$target"; then cp "$SANDBOX/empty-claude" "\$target"
+    else cp "$SANDBOX/empty-codex" "\$target"; fi ;;
   "notification show") echo legacy >> "$SANDBOX/legacy-alerts"; exit 98 ;;
   *) exit 2 ;;
 esac
@@ -55,6 +58,7 @@ sessions_up() { # [stopped]: workers is listed but not running
 RULE=$(printf '─%.0s' $(seq 1 40))
 claude_screen() { printf '%s\n\xe2\x9d\xaf\xc2\xa0%s\n%s\n  footer\n' "$RULE" "${1:-}" "$RULE"; } # ❯ and a no-break space
 claude_screen > "$SANDBOX/screen"
+claude_screen > "$SANDBOX/empty-claude"
 export PANE_TELL_POLL=0.05 PANE_TELL_SETTLE=0
 pt() { rm -f "$SANDBOX/log" "$SANDBOX/log-srv" "$SANDBOX/alerts-srv" "$SANDBOX/reads"; env HOME="$SANDBOX/home" XDG_STATE_HOME="$SANDBOX/state" HERDR_PANE_ID=w1:p9 HERDR_BIN_PATH="$SANDBOX/herdr" bash "$SUBJECT" "$@"; }
 # pt from pane w1:p2 of the workers server
@@ -149,6 +153,7 @@ check "codex: dim text below the prompt line counts" "$(box codex "$C$OFF$BG $OF
 check "codex: status text under the box is not typed" "$(box codex "$C$OFF$BG $OFF$DIM${BG}x$OFF\n$BG  $OFF\n  status\n")" 0
 check "codex: an old prompt above the box is not the box" "$(box codex "\033[2m$C ${OFF}지난 글\n$C$OFF$BG $OFF$DIM${BG}x$OFF\n$BG  $OFF\n")" 0
 check "codex: only old prompts on the screen, no box" "$(box codex "\033[2m$C ${OFF}지난 글\n  status\n")" 1
+check "codex: a continuation prompt mark cannot hide earlier text" "$(box codex "$C$OFF$BG earlier$OFF\n$BG  › $OFF\n$BG  $OFF\n")" 1
 check "an agent whose box cannot be read" "$(box gemini "$R$P\n$R")" 1
 
 # Delivery: 요유's half-typed text decides when, never the sender.
@@ -174,6 +179,10 @@ rm -f "$SANDBOX/scrolled"; settled
 touch "$SANDBOX/refuse"
 out=$(pt "리드" "보고"); check "herdr refuses (a dialog is open): queued" "${out%%: *}" "queued for w1:p1 (👑 리드)"
 rm -f "$SANDBOX/refuse"; settled; check "herdr refuses: goes later" "$(sent)" "w1:p1 "
+claude_screen > "$SANDBOX/screen-recent"; echo 'confirmation dialog' > "$SANDBOX/screen"
+out=$(pt "리드" "보고")
+check "an old empty editor in scrollback cannot bypass the visible dialog" "${out%%: *}|$(sent)|$(cat "$SANDBOX/keys" 2>/dev/null)" "queued for w1:p1 (👑 리드)||"
+rm -f "$SANDBOX/screen-recent"; claude_screen > "$SANDBOX/screen"; settled
 claude_screen "야" > "$SANDBOX/screen"; pt "리드" "보고" >/dev/null
 panes "w1:p9|🟢 일|s9"; settled
 check "receiver closed: nothing sent, the message stays in a file" "$(sent)|$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')" "|1"
@@ -375,11 +384,12 @@ check "PANE_TELL_BATCH=0 turns it off" "${out%% (*}|$(prompts)" "told w1:pM|1"
 export PANE_TELL_BATCH=1; touch "$SANDBOX/state/pane-tell/batch-off"; main_panes idle; out=$(pt "메인 오케" "x")
 check "so does the batch-off file, for every sender" "${out%% (*}|$(prompts)" "told w1:pM|1"
 rm -f "$SANDBOX/state/pane-tell/batch-off"
-# Failure flows: the box is full when the hold ends; the process that would send a batch is gone.
+# Main draft recovery also applies when a held batch is delivered.
 main_panes idle; pt "메인 오케" "찬 칸" >/dev/null; claude_screen "치던 글" > "$SANDBOX/screen-w1:pM"; sleep 1.5
-check "a full box when the hold ends: it waits" "$(prompts)" 0
-rm -f "$SANDBOX/screen-w1:pM"; batched; settled
-check "and goes once the box is empty" "$(prompts)|$(grep -c '찬 칸' "$SANDBOX/log")" "1|1"
+batched; settled
+check "a main draft when the hold ends is archived and relayed" "$(prompts)|$(grep -c '찬 칸' "$SANDBOX/log")|$(grep -c '입력창 초안 보관 안내' "$SANDBOX/log")" "1|1|1"
+check "the main draft archive contains the words" "$(grep -l '치던 글' "$SANDBOX/state/pane-tell/drafts/"*.json | wc -l | tr -d ' ')" 1
+rm -f "$SANDBOX/screen-w1:pM"
 main_panes idle; b="$SANDBOX/state/pane-tell/batch/term_pM/open"; mkdir -p "$b"; echo 1 > "$b/.t"; printf '%s' "[pane-tell: 'x' …] 묵은 글" > "$b/0000000001.000000.1"
 out=$(pt "메인 오케" "새 글"); batched
 check "a batch nobody sent (the Mac restarted) goes at once, with the next message" "${out%% (*}|$(prompts)|$(tr '\n' ' ' < "$SANDBOX/log" | grep -c '묵은 글  \[pane-tell.*새 글')" "told w1:pM|1|1"

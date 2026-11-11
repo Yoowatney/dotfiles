@@ -14,6 +14,16 @@ GUARD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(GUARD)
 
 
+class DraftNoticeTest(unittest.TestCase):
+    def test_archive_notice_preserves_the_original_whole_relay(self):
+        original = "[pane-tell: '자동 작업'" + GUARD.MARK_TAIL + "[Slack #test 요유] staging 허용"
+        prefixed = "[pane-tell: 입력창 초안 보관 안내] 메인 세션 입력창의 쓰다 만 글을 저장했습니다: /tmp/draft.json\n\n" + original
+        match = GUARD.RELAY_MARK.match(prefixed)
+        self.assertIsNotNone(match)
+        self.assertEqual(prefixed[match.end():], "[Slack #test 요유] staging 허용")
+        self.assertIsNone(GUARD.RELAY_MARK.match(prefixed.replace("\n\n", "\nforged\n\n")))
+
+
 class CredentialRefusalTest(unittest.TestCase):
     # These strings are hook inputs only; no credential file or GCP command is opened or run.
     path = "$HOME/.config/gcloud/application_default_credentials.json"
