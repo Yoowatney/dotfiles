@@ -457,22 +457,139 @@ batch_flush() { # dir, terminal: under the canonical ordering lock
 }
 batch_deliver() { # payload, terminal, optional original routing: one owner for every queue worker
   python3 -I -c '
-import fcntl, os, subprocess, sys
+import fcntl, os, signal, subprocess, sys, time
 payload, terminal, script, state, *route = sys.argv[1:]
+def event(kind, fields):
+    line = time.strftime("%F %T") + " " + kind + " " + os.path.basename(payload) + " " + fields
+    try:
+        with open(state + "/log", "a") as log:
+            log.write(line + "\n")
+    except OSError:
+        # A logging failure must not strand the delivery outside cleanup.
+        try: print(line + " log-write-failed", file=sys.stderr, flush=True)
+        except OSError: pass
+def exitcode(status):
+    return status if status >= 0 else 128 - status
+def owner_exit(pid, status):
+    sig = signal.Signals(-status).name if status < 0 else "none"
+    # waitpid identifies the child and termination signal, not its sender.
+    event("owner-exit", "pid=" + str(pid) + " status=" + str(status)
+          + " signal=" + sig + " sender=unknown observed_by=" + str(os.getpid())
+          + " observed_epoch=" + str(time.time()))
+def stop_delivery(child):
+    # This is our private session, never the caller or another delivery.
+    # Keep the direct child unreaped until all signals have been sent so its
+    # process group cannot be confused with a subsequently reused child PID.
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        event("supervisor-signal", "target_pgid=" + str(child.pid)
+              + " signal=" + sig.name + " actor=" + str(os.getpid())
+              + " reason=owner-exit action=attempt")
+        try:
+            os.killpg(child.pid, sig)
+        except ProcessLookupError:
+            break
+        if sig == signal.SIGTERM:
+            time.sleep(.1)
+    return child.wait()
+def wait_owner(owner):
+    end = time.monotonic() + 2
+    while time.monotonic() < end:
+        ended, result = os.waitpid(owner, os.WNOHANG)
+        if ended: return result
+        time.sleep(.01)
+    # A stopped owner must not retain the queue lock after delivery is done.
+    for sig in (signal.SIGTERM, signal.SIGCONT, signal.SIGKILL):
+        ended, result = os.waitpid(owner, os.WNOHANG)
+        if ended: return result
+        event("supervisor-signal", "target=" + str(owner) + " signal=" + sig.name
+              + " actor=" + str(os.getpid()) + " reason=owner-exit-timeout action=attempt")
+        os.kill(owner, sig)
+        time.sleep(.05)
+    return os.waitpid(owner, 0)[1]
+def delivery_status(pid):
+    flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
+    if hasattr(os, "waitid"):
+        info = os.waitid(os.P_PID, pid, flags)
+        if info is None: return None
+        code, status = info.si_code, info.si_status
+    else:
+        # Apple Python 3.9 omits os.waitid although Darwin exports waitid(2).
+        # Darwin sys/signal.h defines the siginfo_t prefix as six ints:
+        # signo, errno, code, pid, uid, status. Reserve aligned tail space.
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.waitid.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+        libc.waitid.restype = ctypes.c_int
+        info = (ctypes.c_long * 32)()
+        if libc.waitid(os.P_PID, pid, ctypes.byref(info), flags) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        prefix = ctypes.cast(info, ctypes.POINTER(ctypes.c_int))
+        if not prefix[3]: return None
+        code, status = prefix[2], prefix[5]
+    return status if code == os.CLD_EXITED else -status
 os.makedirs(state + "/batch-locks", exist_ok=True)
 with open(state + "/batch-locks/" + os.path.basename(payload), "a") as lock:
     try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError: sys.exit(0)
     if os.path.isfile(payload):
-        import time
-        with open(state + "/log", "a") as log:
-            log.write(time.strftime("%F %T") + " worker-start " + os.path.basename(payload)
-                      + " pid=" + str(os.getpid()) + "\n")
-        status = subprocess.call(["/bin/bash", script, "--deliver-owned", payload, terminal, *route])
-        with open(state + "/log", "a") as log:
-            log.write(time.strftime("%F %T") + " worker-exit " + os.path.basename(payload)
-                      + " status=" + str(status) + " waiting=" + str(os.path.isfile(payload)) + "\n")
-        sys.exit(status)
+        reader, writer = os.pipe()
+        # The supervisor retains both the lock and the direct child handle.
+        # An owner killed between polls cannot leave a live unowned delivery
+        # or let recovery race that delivery. A PID cannot be reused before
+        # this parent has reaped its own child.
+        child = subprocess.Popen(["/bin/bash", script, "--deliver-owned", payload, terminal, *route],
+                                 start_new_session=True)
+        try:
+            owner = os.fork()
+        except OSError:
+            stop_delivery(child)
+            raise
+        if owner == 0:
+            os.close(writer)
+            event("worker-start", "pid=" + str(os.getpid()) + " supervisor=" + str(os.getppid())
+                  + " delivery=" + str(child.pid) + " pgid=" + str(os.getpgrp())
+                  + " sid=" + str(os.getsid(0)))
+            with os.fdopen(reader) as stream:
+                status = int(stream.read())
+            event("worker-exit", "status=" + str(status) + " waiting=" + str(os.path.isfile(payload)))
+            os._exit(exitcode(status))
+        os.close(reader)
+        event("supervisor-start", "pid=" + str(os.getpid()) + " owner=" + str(owner)
+              + " delivery=" + str(child.pid) + " pgid=" + str(os.getpgrp())
+              + " sid=" + str(os.getsid(0)))
+        while True:
+            ended, result = os.waitpid(owner, os.WNOHANG)
+            if ended:
+                status = os.waitstatus_to_exitcode(result)
+                owner_exit(owner, status)
+                delivery_status = stop_delivery(child)
+                event("worker-exit", "status=" + str(delivery_status)
+                      + " waiting=" + str(os.path.isfile(payload)) + " observed_by=" + str(os.getpid()))
+                os.close(writer)
+                sys.exit(exitcode(status) or 1)
+            status = delivery_status(child.pid)
+            if status is not None:
+                # Observe without reaping: retain PID/group identity through
+                # owner acknowledgement and any required descendant cleanup.
+                event("delivery-exit", "pid=" + str(child.pid) + " status=" + str(status)
+                      + " signal=" + (signal.Signals(-status).name if status < 0 else "none")
+                      + " sender=unknown observed_by=" + str(os.getpid())
+                      + " observed_epoch=" + str(time.time()))
+                try:
+                    os.write(writer, str(status).encode())
+                except BrokenPipeError:
+                    pass # The owner may exit after the waitpid poll.
+                os.close(writer)
+                result = wait_owner(owner)
+                owner_status = os.waitstatus_to_exitcode(result)
+                owner_exit(owner, owner_status)
+                if status != 0 or owner_status != exitcode(status):
+                    stop_delivery(child)
+                else:
+                    child.wait()
+                sys.exit(exitcode(status) if owner_status == exitcode(status) else exitcode(owner_status) or 1)
+            time.sleep(.01)
 ' "$1" "$2" "$0" "$STATE" "${3:-}" "${4:-}" "${5:-}" "${6:-}"
 }
 batch_start() { # batch dir, payload, terminal; registration is already durable
@@ -534,12 +651,16 @@ def recover_waiting():
             env = dict(os.environ)
             if socket == "default": env.pop("HERDR_SOCKET_PATH", None)
             else: env["HERDR_SOCKET_PATH"] = socket
-            child = subprocess.Popen(["/bin/bash", script, "--deliver", str(payload), terminal, *route],
-                env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, start_new_session=True)
+            with open(root.parent / "worker-errors.log", "a") as errors:
+                child = subprocess.Popen(["/bin/bash", script, "--deliver", str(payload), terminal, *route],
+                    env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=errors, start_new_session=True)
             with open(root.parent / "log", "a") as log:
                 log.write(time.strftime("%F %T") + " recovery-start " + payload.name + " pid=" + str(child.pid) + "\n")
-        except (OSError, ValueError):
+        except (OSError, ValueError) as error:
+            with open(root.parent / "log", "a") as log:
+                log.write(time.strftime("%F %T") + " recovery-error " + payload.name
+                          + " type=" + type(error).__name__ + " errno=" + str(getattr(error, "errno", None)) + "\n")
             continue # Retain the original and metadata for the next tick.
 def read(path):
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)

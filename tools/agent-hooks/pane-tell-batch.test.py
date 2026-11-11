@@ -5,6 +5,7 @@ import importlib.util
 import os
 import re
 import signal
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -35,6 +36,13 @@ class BatchRecovery(unittest.TestCase):
 mkdir -p "$FIXTURE/started" "$FIXTURE/finished"
 : > "$FIXTURE/started/$$"
 trap ': > "$FIXTURE/finished/$$"' EXIT
+if [ "${1:-}" = --deliver ] && [ -f "$FIXTURE/fail-start" ]; then
+  echo 'fixture recovery startup failure' >&2
+  exit 73
+fi
+if [ "${1:-}" = --deliver-owned ] && [ -f "$FIXTURE/spawn-descendant" ]; then
+  /bin/bash -c 'trap "" TERM; echo "$$" > "$FIXTURE/descendant"; exec /bin/sleep 300' &
+fi
 source "$FIXTURE/functions"
 definition=$(declare -f batch_event); eval "real_$definition"
 batch_event() {
@@ -322,6 +330,102 @@ exec /usr/bin/nohup "$@"
             time.sleep(.01)
         for path in directories:
             self.assertEqual(list(path.iterdir()), [], str(path))
+
+    def private_ordered_pair(self):
+        for directory in ("waiting", "receivers", "delivery-routes", "order/dependencies"):
+            (self.state / directory).mkdir(parents=True, exist_ok=True)
+        first, second = [self.state / "waiting" / name for name in ("100.first", "101.second")]
+        for payload, text in ((first, "first"), (second, "second")):
+            payload.write_text(text)
+            os.utime(payload, (1, 1))
+            (self.state / "receivers" / payload.name).write_text("term_M\ndefault\n")
+            (self.state / "delivery-routes" / payload.name).write_text("sM\n\n\n")
+            (self.state / "order/dependencies" / payload.name).write_text(
+                str(first) + "\n" if payload == second else "")
+        return first, second
+
+    def test_owner_sigkill_is_observed_and_originals_recover_in_order(self):
+        first, second = self.private_ordered_pair()
+        (self.root / "spawn-descendant").touch()
+        worker = subprocess.Popen(["/bin/bash", str(self.subject), "--deliver", str(second),
+                                   "term_M", "sM", "", ""], env=self.env,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  start_new_session=True)
+        try:
+            end = time.monotonic() + 3
+            match = None
+            while time.monotonic() < end:
+                log = self.state / "log"
+                text = log.read_text() if log.exists() else ""
+                match = re.search(r"worker-start 101.second pid=(\d+)", text)
+                if match:
+                    break
+                time.sleep(.01)
+            self.assertIsNotNone(match, text)
+            owner = int(match[1])
+            self.assertEqual(os.getpgid(owner), worker.pid)
+            end = time.monotonic() + 2
+            while not (self.root / "descendant").exists() and time.monotonic() < end:
+                time.sleep(.01)
+            descendant = int((self.root / "descendant").read_text())
+            delivery = int(re.search(r"worker-start 101.second .*delivery=(\d+)", text)[1])
+            self.assertEqual(os.getpgid(descendant), delivery)
+            self.assertEqual(self.prompts(), [])
+            os.kill(owner, signal.SIGKILL)
+            self.assertNotEqual(worker.wait(timeout=3), 0)
+            self.assertEqual(second.read_text(), "second")
+            self.assertTrue((self.state / "receivers" / second.name).exists())
+            self.assertEqual((self.state / "order/dependencies" / second.name).read_text(), str(first) + "\n")
+            text = (self.state / "log").read_text()
+            self.assertRegex(text, r"owner-exit 101.second .*status=-9 signal=SIGKILL sender=unknown")
+            self.assertRegex(text, r"supervisor-signal 101.second .*signal=SIGTERM actor=\d+")
+            self.assertFalse(self.timer_alive(descendant), "delivery descendant survived owner death")
+        finally:
+            (self.root / "spawn-descendant").unlink()
+            # Assertion failures must also clean the private delivery group.
+            rows = subprocess.check_output(["/bin/ps", "-axo", "pid=,command="], text=True)
+            for row in rows.splitlines():
+                fields = row.strip().split(None, 1)
+                if len(fields) != 2: continue
+                try:
+                    args = shlex.split(fields[1])
+                    pid = int(fields[0])
+                    if (args[1:4] == [str(self.subject), "--deliver-owned", str(second)]
+                            and os.getpgid(pid) == pid):
+                        os.killpg(pid, signal.SIGKILL)
+                        self.killed_timers.add(str(pid))
+                except (ValueError, ProcessLookupError):
+                    pass
+            if worker.poll() is None:
+                try:
+                    worker.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    worker.terminate()
+                    worker.wait(timeout=3)
+            # Exercise the existing scan; never discard or reorder payloads,
+            # even when an assertion above fails on the pre-fix implementation.
+            self.assertEqual(self.call("--recover-batch").returncode, 0)
+            self.wait_prompt([b"first", b"second"])
+
+    def test_general_recovery_preserves_worker_startup_stderr(self):
+        self.private_ordered_pair()
+        failure = self.root / "fail-start"
+        failure.touch()
+        try:
+            self.assertEqual(self.call("--recover-batch").returncode, 0)
+            errors = self.state / "worker-errors.log"
+            end = time.monotonic() + 2
+            while time.monotonic() < end:
+                if errors.exists() and "fixture recovery startup failure" in errors.read_text():
+                    break
+                time.sleep(.01)
+            self.assertTrue(errors.exists(), "recovery discarded worker stderr")
+            self.assertIn("fixture recovery startup failure", errors.read_text())
+            self.assertEqual(len(list((self.state / "waiting").iterdir())), 2)
+        finally:
+            failure.unlink()
+            self.assertEqual(self.call("--recover-batch").returncode, 0)
+            self.wait_prompt([b"first", b"second"])
 
     def test_general_recovery_keeps_original_session_binding(self):
         for name in ("waiting", "receivers", "delivery-routes", "undelivered", "order/dependencies"):
