@@ -100,6 +100,7 @@ regression_shell_rollback() {
   echo codex-only > "$SANDBOX/home/.local/state/agent-quota/policy"
   mkdir -p "$SANDBOX/rollback"
   cp "$SUBJECT" "$SANDBOX/rollback/pane-spawn"
+  cp "$(dirname "$SUBJECT")/pane-spawn-request.py" "$SANDBOX/rollback/pane-spawn-request.py"
   cp "$(dirname "$SUBJECT")/agent-quota" "$SANDBOX/rollback/agent-quota"
   [ "$failure" != syntax ] || printf 'not valid python !!!\n' > "$SANDBOX/rollback/agent-quota"
   SUBJECT="$SANDBOX/rollback/pane-spawn"
