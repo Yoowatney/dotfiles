@@ -7,8 +7,9 @@ SANDBOX="$(mktemp -d)"
 TEST_TERM="term_M_$$"
 trap 'rm -rf "$SANDBOX"' EXIT
 fails=0
-check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected [$3] got [$2]"; fails=1; fi; }
-fail() { echo "FAIL $1"; fails=1; }
+failed_checks=()
+check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else fail "$1: expected [$3] got [$2]"; fi; }
+fail() { echo "FAIL $1"; failed_checks+=("$1"); fails=1; }
 
 mkdir -p "$SANDBOX/state/orchestrator" "$SANDBOX/state/agent-handoff" "$SANDBOX/bin"
 # Fake herdr: every call is logged; `pane get` answers the pane in $SANDBOX/panes with the status in $SANDBOX/status.
@@ -409,8 +410,8 @@ touch -t 202001010000 "$S/orchestrator/refresh.lock"; now MAIN_REFRESH_HOUR=09
 check "a stale lock: goes ahead" "$(cleared)" 1
 [ ! -d "$S/orchestrator/refresh.lock" ] || fail "a run removes its lock"
 # Queued main relays now survive the session change, so they do not delay clear.
-rm_stamp; ( exec -a "pane-tell --deliver msg $TEST_TERM sid-main term_x " sleep 5 ) & pend=$!
-now MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.5; kill "$pend" 2>/dev/null; wait "$pend" 2>/dev/null
+rm_stamp; ( exec -a "pane-tell --deliver msg $TEST_TERM sid-main term_x " sleep 30 ) & pend=$!
+now QUERY_START_DELAY=0.6 MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=12; kill "$pend" 2>/dev/null; wait "$pend" 2>/dev/null
 check "a message waiting for the main pane does not delay /clear" "$(cleared)" "1"
 # A message that lands during the last input checks is still caught: the transcript is read last.
 rm_stamp; now BOX_TURN=1 QUERY_START_DELAY=5.2 MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=30
@@ -494,4 +495,5 @@ check "the default helper receives the genuine error title and body" \
 check "default pane-tell is also resolved beside the real script" "$(grep -c 'handoff save' "$SANDBOX/told")" 1
 
 [ "$fails" = 0 ] && echo "all ok"
+if [ "$fails" != 0 ]; then printf 'FAIL SUMMARY: %s\n' "${failed_checks[@]}"; fi
 exit "$fails"
