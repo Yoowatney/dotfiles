@@ -318,9 +318,25 @@ if [ -n "$restart" ]; then
   shell_back() {
     "$H" pane get "$id" 2>/dev/null | jq -e '.result.pane | .pane_id != null and .agent == null and .agent_status == "unknown"' >/dev/null
   }
+  # Background tasks make /exit ask first (the main pane, 11/13). The handoff request listed each with its restart
+  # command, so take the default "Exit and stop tasks": moved to the background, their end would reach no session.
+  # Only with the cursor on that line; three presses at most, then the wait below times out.
+  presses=0
+  exited() {
+    shell_back && return 0
+    local screen
+    screen=$("$H" pane read "$id" --source visible 2>/dev/null)
+    if [ "$presses" -lt 3 ] && [[ "$screen" == *"Background work is running"* && "$screen" == *"❯ 1. Exit and stop tasks"* ]]; then
+      presses=$((presses + 1))
+      # Braces: bash 3.2 reads the Korean bytes after a bare $presses as part of the name.
+      log "백그라운드 작업 확인 창에서 Exit and stop tasks를 고름 (${presses}번째)"
+      "$H" agent send-keys "$id" enter >/dev/null 2>&1
+    fi
+    return 1
+  }
   # A slow exit may still come: keep the handoff for the next start, but drop the hold, since an old session that
   # stays would otherwise wait for relays forever (its session id never changes).
-  wait_for "$deadline" shell_back || { rm -f "$gate"; skip --error "/exit 뒤 claude가 끝나지 않아 다시 켜지 못함(인계는 남겨 둠)"; }
+  wait_for "$deadline" exited || { rm -f "$gate"; skip --error "/exit 뒤 claude가 끝나지 않아 다시 켜지 못함(인계는 남겨 둠)"; }
   # The pane's own shell runs it, so the claude alias (claude-online) picks this pane's profile by its terminal id.
   # A start that fails within a minute (a broken profile) retries with the full one; a later exit never does.
   # Not `herdr agent start`: it names the agent, and a named pane counts as one an agent opened (pane-label --close).
