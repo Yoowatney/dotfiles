@@ -40,9 +40,17 @@ case "\$1 \$2" in
   "agent prompt") [ ! -f "$SANDBOX/prompt-fails" ] || exit 1
     [ "\$4" != /clear ] || echo sid-refreshed > "$SANDBOX/cur-sid"
     # /exit returns before the process ends (EXIT_DELAY); exit-ignored: it never does.
-    if [ "\$4" = /exit ] && [ ! -f "$SANDBOX/exit-ignored" ]; then
+    # bg-dialog: background tasks make Claude ask first, with the cursor on the line in that file.
+    if [ "\$4" = /exit ] && [ -f "$SANDBOX/bg-dialog" ]; then
+      printf '   Background work is running\n   The following will stop when you exit:\n%s\n' "\$(cat "$SANDBOX/bg-dialog")" > "$SANDBOX/screen"
+    elif [ "\$4" = /exit ] && [ ! -f "$SANDBOX/exit-ignored" ]; then
       ( sleep "\${EXIT_DELAY:-0}"; : > "$SANDBOX/agent"; echo unknown > "$SANDBOX/status"; : > "$SANDBOX/cur-sid" ) >/dev/null 2>&1 &
     fi ;;
+  "pane read") cat "$SANDBOX/screen" 2>/dev/null ;;
+  "agent send-keys") # Enter on "Exit and stop tasks" ends the process; Enter elsewhere is logged as unsafe.
+    if [ "\$4" = enter ] && grep -q '❯ 1\. Exit and stop tasks' "$SANDBOX/screen" 2>/dev/null; then
+      rm -f "$SANDBOX/screen"; : > "$SANDBOX/agent"; echo unknown > "$SANDBOX/status"; : > "$SANDBOX/cur-sid"
+    else echo "keys-without-dialog \$4" >> "$SANDBOX/unsafe-run"; fi ;;
   "pane run") [ -z "\$(cat "$SANDBOX/agent" 2>/dev/null || echo claude)" ] || echo typed-into-agent >> "$SANDBOX/unsafe-run"
     [ ! -f "$SANDBOX/run-fails" ] || exit 1
     echo claude > "$SANDBOX/agent"; echo sid-restarted > "$SANDBOX/cur-sid"; echo idle > "$SANDBOX/status" ;;
@@ -157,7 +165,7 @@ S="$SANDBOX/state"
 mr() { # every call is sandboxed: state dir, herdr, pane-tell
   rm -f "$SANDBOX/query-started"
   rm -f "$SANDBOX/cur-sid"
-  rm -f "$SANDBOX/agent" "$SANDBOX/unsafe-run"
+  rm -f "$SANDBOX/agent" "$SANDBOX/unsafe-run" "$SANDBOX/screen"
   rm -f "$SANDBOX/told" "$SANDBOX/herdr-log" "$SANDBOX/box-n" "$SANDBOX/request-n" "$SANDBOX/ready-get-n" "$SANDBOX/unsafe-request" "$SANDBOX/pending-once" "$S/orchestrator/refresh.log"; : > "$SANDBOX/alerts"; : > "$SANDBOX/errors"
   env XDG_STATE_HOME="$S" HERDR_BIN_PATH="$SANDBOX/herdr" HERDR_ERROR_NOTIFY="$SANDBOX/error-notify" MAIN_REFRESH_PANE_TELL="$SANDBOX/pane-tell" \
     MAIN_REFRESH_POLL=0.05 MAIN_REFRESH_QUIET=0 MAIN_REFRESH_RETRY_QUIET=0 MAIN_REFRESH_DEADLINE="${MAIN_REFRESH_DEADLINE:-60}" MAIN_REFRESH_HANDOFF_WAIT="${MAIN_REFRESH_HANDOFF_WAIT:-60}" \
@@ -498,6 +506,18 @@ rm -f "$SANDBOX/run-fails"
 check "a failed start alerts with the way back" "$(grep -c 'CLAUDE_STARTUP_PROFILE=full claude' "$SANDBOX/errors")" 1
 check "a failed start keeps the handoff for the session the way back starts" \
   "$([ -s "$S/agent-handoff/w5:p3.md" ] && echo kept)|$([ -f "$S/agent-handoff/w5:p3.md.skipped" ] && echo skipped)" "kept|"
+# Background tasks make /exit ask first (seen on the main pane 11/13). The handoff lists them with their restart commands,
+# so the default "Exit and stop tasks" is taken; any other selected line is left alone and the wait times out.
+rm_stamp; set_main; status idle; echo '   ❯ 1. Exit and stop tasks' > "$SANDBOX/bg-dialog"
+restart MAIN_REFRESH_HOUR=09
+check "--restart confirms the background-work dialog's default and starts claude again" \
+  "$(grep -c '^agent send-keys w5:p3 enter$' "$SANDBOX/herdr-log")|$(grep -cxF "pane run w5:p3 $RESTART_LINE" "$SANDBOX/herdr-log")|$([ -f "$SANDBOX/unsafe-run" ] && cat "$SANDBOX/unsafe-run")" "1|1|"
+check "the log says the background tasks were stopped" "$(grep -c 'Exit and stop tasks를 고름 (1번째)' "$S/orchestrator/refresh.log")" 1
+rm_stamp; set_main; status idle; echo '   ❯ 3. Stay' > "$SANDBOX/bg-dialog"
+restart MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=2
+check "a dialog with another line selected gets no key and no restart" \
+  "$(grep -c '^agent send-keys' "$SANDBOX/herdr-log")|$(grep -c '^pane run' "$SANDBOX/herdr-log")|$(grep -c '끝나지 않아' "$SANDBOX/errors")" "0|0|1"
+rm -f "$SANDBOX/bg-dialog"
 set_main; status idle
 
 check "routine skips and errors never use the legacy notification API" "$([ -f "$SANDBOX/legacy-alerts" ] && cat "$SANDBOX/legacy-alerts")" ""
