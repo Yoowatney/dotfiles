@@ -106,8 +106,11 @@ codex() {
   # Expand the skill catalog after the terminal has received the short launch
   # command. Serializing it into terminal input can exceed its line limit.
   local -a runner=("$bin")
-  if [[ ${HERDR_CODEX_STARTUP_ROLE:-} == worker && -f ${HERDR_CODEX_STARTUP_HELPER:-} ]]; then
-    runner=(python3 "$HERDR_CODEX_STARTUP_HELPER" "$bin")
+  local -x HERDR_CODEX_STARTUP_ROLE=${HERDR_CODEX_STARTUP_ROLE:-}
+  [[ -n $HERDR_CODEX_STARTUP_ROLE || $PWD != $HOME/work/munice(|/*) ]] || HERDR_CODEX_STARTUP_ROLE=general
+  local startup_helper=${HERDR_CODEX_STARTUP_HELPER:-$HOME/.dotfiles/tools/agent-hooks/codex-startup.py}
+  if [[ -n $HERDR_CODEX_STARTUP_ROLE && -f $startup_helper ]]; then
+    runner=(python3 "$startup_helper" "$bin")
   fi
   # `codex exec` with a prompt argument still reads "additional input" from a
   # non-TTY stdin until EOF, and an agent's background shell can leave that

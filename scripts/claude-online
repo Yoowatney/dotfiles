@@ -39,6 +39,9 @@ if [ -z "$role" ] && [ -n "${HERDR_PANE_ID:-}" ] && [ -f "$main_file" ]; then
   terminal=$(herdr pane get "$HERDR_PANE_ID" 2>/dev/null | jq -r '.result.pane.terminal_id // empty')
   [ -z "$terminal" ] || [ "$(cat "$main_file")" != "$terminal" ] || role=main
 fi
+if [ -z "$role" ]; then
+  case "$PWD/" in "$HOME/work/munice/"*) role=general ;; esac
+fi
 # paneRules (worker only): rule files a pane under a lead loads without their `<!-- pane:skip -->` blocks, which only
 # leads and the main pane need. The full file goes in claudeMdExcludes and the filtered copy comes back through
 # --append-system-prompt-file, so the file stays the one source and sessions opened by hand still load it whole
@@ -70,10 +73,10 @@ pane_rules() { # Rewrites $settings; sets $rules_file when anything was filtered
     --args ${excludes[@]+"${excludes[@]}"} <<<"$settings")
 }
 case "$role" in
-  worker | main)
+  worker | main | general | check)
     if [ "${CLAUDE_STARTUP_PROFILE:-}" != full ]; then
       profile="$(cd "$(dirname "$0")/.." && pwd)/tools/claude/startup-profile.json"
-      settings=$(jq -c --arg role "$role" '.common * .roles[$role]' "$profile") || exit 1
+      settings=$(jq -c --arg role "$role" '.common * (.roles[$role] // {})' "$profile") || exit 1
       # pane-spawn --artifact: a job that publishes a page keeps the Artifact tool; the rest of the profile stays (api#1065).
       [ -z "${CLAUDE_STARTUP_ARTIFACT:-}" ] || settings=$(jq -c 'del(.enableArtifact)' <<<"$settings") || exit 1
       # dietSkills (worker only): skills a pane under a lead almost never calls (api#1066). pane-spawn --skills keeps them; the key never reaches claude.

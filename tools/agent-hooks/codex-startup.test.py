@@ -53,13 +53,36 @@ class StartupTest(unittest.TestCase):
 
     def test_main_checks_unknown_type_and_switch_use_original_home(self):
         with tempfile.TemporaryDirectory() as tmp:
-            for role, kind in [('main', 'code'), ('check', 'code'), ('worker', 'unknown')]:
+            for role, kind in [('unknown', 'code'), ('worker', 'unknown')]:
                 env = {'HOME': tmp, 'HERDR_CODEX_STARTUP_ROLE': role, 'HERDR_CODEX_TASK_TYPE': kind}
                 self.assertFalse(startup.prepare(env)['active'])
             switch = Path(tmp) / '.local/state/codex-startup/mode'
             switch.parent.mkdir(parents=True)
             switch.write_text('full\n')
             self.assertFalse(startup.prepare({'HOME': tmp, 'HERDR_CODEX_STARTUP_ROLE': 'worker', 'HERDR_CODEX_TASK_TYPE': 'code'})['active'])
+
+    def test_general_main_and_check_profiles_restore_without_changing_safety(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / '.codex'
+            source.mkdir()
+            (source / 'config.toml').write_text('\n'.join('[mcp_servers.' + name + ']\ncommand="fixture"' for name in ('rea', 'Amplitude', 'notion-token', 'obsidian')))
+            for role in ('general', 'main', 'check', 'worker'):
+                env = {'HOME': tmp, 'HERDR_CODEX_STARTUP_ROLE': role, 'HERDR_CODEX_TASK_TYPE': 'code'}
+                plan = startup.prepare(env)
+                self.assertTrue(plan['active'])
+                self.assertEqual(plan['env'], env)
+                self.assertIn('skills.max_context_tokens=2500', plan['args'])
+                for name in ('rea', 'Amplitude', 'notion-token', 'obsidian'):
+                    self.assertIn('mcp_servers.' + name + '.enabled=false', plan['args'])
+                for name in ('figma', 'discord'):
+                    self.assertIn('plugins.' + name + '@claude-plugins-official.enabled=false', plan['args'])
+                self.assertFalse(any('hooks' in arg or 'approval' in arg or 'sandbox' in arg for arg in plan['args']))
+                self.assertEqual(startup.prepare(dict(env, HERDR_CODEX_STARTUP_PROFILE='full'))['args'], [])
+
+    def test_absent_servers_do_not_create_invalid_transport_tables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = startup.prepare({'HOME': tmp, 'HERDR_CODEX_WORKDIR': tmp, 'HERDR_CODEX_STARTUP_ROLE': 'general'})
+            self.assertFalse(any(arg.startswith('mcp_servers.') for arg in plan['args']))
 
     def test_existing_skill_disables_survive_worker_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -73,6 +96,18 @@ class StartupTest(unittest.TestCase):
             skill.write_text('demo')
             plan = startup.prepare({'HOME': tmp, 'HERDR_CODEX_STARTUP_ROLE': 'worker', 'HERDR_CODEX_TASK_TYPE': 'code'})
             self.assertIn('/custom/blocked/SKILL.md', plan['args'][1])
+
+    def test_name_based_skill_entries_survive_worker_filtering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            source = home / '.codex'
+            source.mkdir()
+            (source / 'config.toml').write_text('[skills]\nconfig=[{name="custom-safety",enabled=false}]\n')
+            skill = home / '.agents/skills/hyperframes/SKILL.md'
+            skill.parent.mkdir(parents=True)
+            skill.write_text('demo')
+            plan = startup.prepare({'HOME': tmp, 'HERDR_CODEX_STARTUP_ROLE': 'worker', 'HERDR_CODEX_TASK_TYPE': 'code'})
+            self.assertIn('name="custom-safety"', plan['args'][1])
 
     def test_custom_canonical_home_is_never_replaced_for_workers_or_checks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -110,10 +145,10 @@ class StartupTest(unittest.TestCase):
             local = cwd / '.codex/config.toml'
             local.write_text('[skills]\nconfig=[{path="/project/blocked/SKILL.md",enabled=false}]\n')
             env = {'HOME': tmp, 'HERDR_CODEX_WORKDIR': str(cwd), 'HERDR_CODEX_STARTUP_ROLE': 'worker', 'HERDR_CODEX_TASK_TYPE': 'code'}
-            self.assertEqual(startup.prepare(env)['args'], [])
+            self.assertFalse(any(x.startswith('skills.config=') for x in startup.prepare(env)['args']))
             local.unlink()
             (source / 'config.toml').write_text('[profiles.special.skills]\nconfig=[{path="/profile/blocked/SKILL.md",enabled=false}]\n')
-            self.assertEqual(startup.prepare(env)['args'], [])
+            self.assertFalse(any(x.startswith('skills.config=') for x in startup.prepare(env)['args']))
 
     def test_unreadable_or_malformed_switch_keeps_full_context(self):
         with tempfile.TemporaryDirectory() as tmp:

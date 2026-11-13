@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Conservative, reversible startup context for explicitly typed Codex workers.
+"""Process-local, reversible startup context for explicitly selected roles.
 
-No model, tool permission, MCP, contact routing, or check policy is changed.
+Catalog and connection visibility are role-scoped. Model, contact routing,
+check sandbox, read-only restrictions and approval policy are retained.
 All generated context and manifests stay outside the public repository.
 """
 import hashlib
@@ -76,15 +77,20 @@ def memory_index(text, kind):
     return ''.join(output)
 
 
-def policy(env):
+def compact_mode(env):
     home = Path(env.get('HOME', str(Path.home())))
     switch = Path(env.get('XDG_STATE_HOME', str(home / '.local/state'))) / 'codex-startup/mode'
     try:
         mode = switch.read_text().strip() if switch.exists() else 'compact'
     except (OSError, UnicodeError):
         mode = 'full'
+    return mode == 'compact' and env.get('HERDR_CODEX_STARTUP_PROFILE') != 'full'
+
+
+def policy(env):
+    home = Path(env.get('HOME', str(Path.home())))
     kind = env.get('HERDR_CODEX_TASK_TYPE', 'full')
-    return home, kind, env.get('HERDR_CODEX_STARTUP_ROLE') == 'worker' and kind in TYPES and mode == 'compact'
+    return home, kind, env.get('HERDR_CODEX_STARTUP_ROLE') == 'worker' and kind in TYPES and compact_mode(env)
 
 
 def has_skill_config(value):
@@ -93,11 +99,20 @@ def has_skill_config(value):
     return isinstance(value, list) and any(has_skill_config(v) for v in value)
 
 
+def inline_toml(value):
+    if isinstance(value, dict):
+        return '{' + ','.join(k + '=' + inline_toml(v) for k, v in value.items()) + '}'
+    if isinstance(value, list):
+        return '[' + ','.join(inline_toml(v) for v in value) + ']'
+    return json.dumps(value)
+
+
 def prepare(env):
     env = dict(env)
     home, kind, active = policy(env)
     result = {'active': False, 'env': env, 'args': [], 'task_type': kind}
-    if not active:
+    selected = env.get('HERDR_CODEX_STARTUP_ROLE') in {'main', 'general', 'check'} or active
+    if not selected or not compact_mode(env):
         return result
     source = Path(env.get('CODEX_HOME', str(home / '.codex'))).resolve()
     state = Path(env.get('XDG_STATE_HOME', str(home / '.local/state'))) / 'codex-startup'
@@ -107,16 +122,17 @@ def prepare(env):
     for root in roots:
         if root.exists():
             for path in root.rglob('SKILL.md'):
-                if not keep_skill(kind, path):
+                if active and not keep_skill(kind, path):
                     excluded.update((str(path), str(path.resolve())))
     # pathlib does not recurse through symlinked skill directories.
     user_skills = home / '.agents/skills'
     if user_skills.exists():
         for child in user_skills.iterdir():
             path = child / 'SKILL.md'
-            if path.exists() and not keep_skill(kind, path):
+            if active and path.exists() and not keep_skill(kind, path):
                 excluded.update((str(path), str(path.resolve())))
     existing = []
+    configured_servers = set()
     config = source / 'config.toml'
     reason = None
     if config.exists():
@@ -124,6 +140,7 @@ def prepare(env):
             excluded.clear()
         else:
             data = tomllib.loads(config.read_text())
+            configured_servers.update(data.get('mcp_servers', {}))
             existing = data.get('skills', {}).get('config', [])
             if has_skill_config({k: v for k, v in data.items() if k != 'skills'}):
                 reason = 'profile skill configuration retained'
@@ -131,14 +148,25 @@ def prepare(env):
     for parent in [cwd, *cwd.parents]:
         local = parent / '.codex/config.toml'
         if local.is_file() and local.resolve() != config.resolve():
-            if tomllib is None or has_skill_config(tomllib.loads(local.read_text())):
+            local_data = tomllib.loads(local.read_text()) if tomllib else {}
+            configured_servers.update(local_data.get('mcp_servers', {}))
+            if tomllib is None or has_skill_config(local_data):
                 reason = 'project skill configuration retained'
     if reason:
         excluded.clear()
     # CLI arrays replace rather than append. Preserve every existing skill entry.
-    entries = ['{path=' + json.dumps(entry['path']) + ',enabled=' + str(entry['enabled']).lower() + '}' for entry in existing]
+    entries = [inline_toml(entry) for entry in existing]
     entries += ['{path=' + json.dumps(p) + ',enabled=false}' for p in sorted(excluded)]
     args = ['-c', 'skills.config=[' + ','.join(entries) + ']'] if excluded else []
+    # CLI overrides apply only to this process; a full session uses the original
+    # connections. Keep hooks, approval policy, sandbox and credentials intact.
+    args += ['-c', 'skills.max_context_tokens=2500']
+    for name in ('rea', 'Amplitude', 'notion-token', 'obsidian'):
+        if name in configured_servers:
+            # Codex CLI override paths split on dots; quotes become literal names.
+            args += ['-c', 'mcp_servers.' + name + '.enabled=false']
+    for plugin in ('figma', 'discord'):
+        args += ['-c', 'plugins.' + plugin + '@claude-plugins-official.enabled=false']
     manifest = {'source_home': str(source), 'task_type': kind, 'global_rules': 'unchanged', 'catalog_fallback': reason,
                 'disabled_skill_paths': sorted(excluded)}
     key = hashlib.sha256(str(source).encode()).hexdigest()[:12]

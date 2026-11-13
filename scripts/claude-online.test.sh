@@ -90,13 +90,20 @@ jq -e '(has("claudeMdExcludes") | not) and (has("paneRules") | not) and .env.ENA
 
 # The main pane keeps every rule file whole.
 out=$(cd "$box/home/work/munice/sub" && ROLE=main run)
-jq -e '.enableArtifact == false and .enableWorkflows == false and (has("claudeMdExcludes") | not) and (has("deniedMcpServers") | not) and (has("bashOutputMaxChars") | not)' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'main profile changed'
+jq -e '.enableArtifact == false and .enableWorkflows == false and (has("claudeMdExcludes") | not) and (.deniedMcpServers | length) == 6 and .skillListingBudgetFraction == 0.0015 and (has("bashOutputMaxChars") | not)' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'main profile changed'
 ! grep -qx -- --append-system-prompt-file <<<"$out" || fail 'main pane gets filtered rules'
 printf 'term_test\n' >"$box/state/orchestrator/main"
 out=$(run)
 jq -e '.enableArtifact == false' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'main detection'
 [[ "$(ROLE=worker PROFILE=full run --version)" == --version ]] || fail 'full opt-out'
 rm "$box/state/orchestrator/main"
+# New ordinary munice sessions get the shared budget/connection profile; other
+# folders and the explicit full opt-out retain their installed defaults.
+out=$(cd "$box/home/work/munice/sub" && run --version)
+jq -e '.skillListingBudgetFraction == 0.0015 and .skillListingMaxDescChars == 160 and (.deniedMcpServers | length) == 6 and (has("enableArtifact") | not) and (has("claudeMdExcludes") | not)' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'ordinary munice session has no common-only profile'
+[[ "$(cd "$box/home/work/munice/sub" && PROFILE=full run --version)" == --version ]] || fail 'ordinary session cannot restore installed connections'
+out=$(cd "$box/home/work/munice/sub" && ROLE=check run)
+jq -e '.skillListingBudgetFraction == 0.0015 and (.deniedMcpServers | length) == 6' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'check role misses shared limits'
 [[ "$(run --version)" == --version ]] || fail 'a session opened by hand gets no profile'
 # A check's whole child tree may inspect processes/network, but cannot write its
 # target, even through a symlink. The executable is a local probe, never Claude.
