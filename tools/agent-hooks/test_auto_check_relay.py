@@ -491,6 +491,17 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(self.tells, [])
 
+    def test_a_finished_figure_waiting_for_approval_opens_a_check(self):
+        # Codex review of 675d502: waiting is no work under way.
+        self.finish("그림 PNG를 만들었고 게시 승인을 기다리고 있습니다.\n남은 것: 요유 몫: 게시 승인 · 세션: 열어 둠")
+        self.assertEqual(len(self.spawns), 1)
+
+    def test_work_left_in_the_remaining_line_is_no_finished_sentence(self):
+        # Codex review of 675d502: 남은 것's "그림 수정" is the work left, not work done.
+        self.finish("끝날 예상: 21:30 KST\n그림을 수정 중입니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 그림 수정 · 세션: 열어 둠")
+        self.assertEqual(self.spawns, [])
+        self.assertTrue(self.tells[0][1].startswith("바로 전달하는 칸의 보고입니다("), self.tells[0][1])
+
     def test_numbers_answered_without_a_post_request_open_a_check(self):
         # api#1218 check: a computed figure counted only when the report asked to post it.
         for text in ("비용 계산 결과를 정리했습니다. 월 5만 원입니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠",
