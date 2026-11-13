@@ -28,9 +28,9 @@ An alert about a Home lead's pane that goes to anyone but its lead carries HOME_
 On 집맥 a pane workers-move opened at 퇴근 (agent name with `r`, api#1049) has its lead, the 회사맥 main pane, on no server here: it is
 no orphan, and an alert nobody here takes goes to the pane report day file as `[workers-watch] …`, not to a screen nobody watches.
 After each tick `workers-move bridge` runs, which carries those entries and the moved panes' reports to the 회사맥 main pane.
-A pane that stopped without a report on a sleep or network error (Claude's `API Error: Your computer went to sleep...`, ENOTFOUND,
-Cloudflare's challenge page) is not news but told WAKE itself at once, before the 15-minute alert (와우 카드 04, 요유 2026-11-05: on
-11/05 one sat 77 minutes until the main pane said so). The main pane is told too (wake_main(), 2026-11-13: once the network was back
+A pane that stopped without a report on a sleep, network or server error (Claude's `API Error: Your computer went to sleep...`,
+ENOTFOUND, Cloudflare's challenge page, a 5xx) is not news but told WAKE itself at once, before the 15-minute alert (와우 카드 04,
+요유 2026-11-05: on 11/05 one sat 77 minutes until the main pane said so). The main pane is told too (wake_main(), 2026-11-13: once the network was back
 nothing restarted the stopped panes or the main pane). See wake(); `{state_dir}/wake.log` keeps one line per wake.
 A pane list that cannot be read is no news: nothing is sent and every record stays. State: `{state_dir}/watch.json`, terminal
 id -> seq, status, since (first tick that saw this state), seen (last tick that saw it), floor (`seen` of the state before:
@@ -98,11 +98,13 @@ WAKE_GAPS = (0, 120, 300, 900, 1800)  # the n-th wake of one pane waits WAKE_GAP
 # What Claude ends a turn on when the Mac slept or the network dropped: every such line in the Claude transcripts on 11/05
 # (sleep 66, ENOTFOUND 42, lost 3, stopped arriving 3, ECONNRESET 3, timed out 2) and ECONNREFUSED from a test pane. Not
 # /login, safeguards or rate limits: going on cannot fix those. Except Cloudflare's challenge page, which Claude words as a /login
-# error: 9 stops in seven panes on 11/13 18:47-18:51, and each went on with no new login once told to.
+# error: 9 stops in seven panes on 11/13 18:47-18:51, and each went on with no new login once told to. And a 5xx, which Claude calls
+# a server-side issue, usually temporary: 7 stops in six panes on 11/13 21:52 and 22:21, each went on once told to.
 NET_ERROR = re.compile(r"⏺ (API Error: )?(Your computer went to sleep|Connection (lost|refused|dropped|error)|Can't reach the API server"
                        r"|The response stopped arriving|Request timed out)"
                        r"|⏺ API Error: .*\((ENOTFOUND|EAI_AGAIN|ECONN[A-Z]+|ETIMEDOUT|ENET[A-Z]+|EHOSTUNREACH)\)"
-                       r"|⏺ (Please run /login · )?API Error: 403 Attention Required! \| Cloudflare")
+                       r"|⏺ (Please run /login · )?API Error: 403 Attention Required! \| Cloudflare"
+                       r"|⏺ API Error: 5\d\d ")
 RULE = re.compile(r"─{3,}( .* ─+)?")
 TRIAL = re.compile(r"[\s🟢🔴👑🫡]*임시 ")  # a lead's test pane (pane-spawn, pane-temp); with the space: `임시저장 API 수정` is a work name
 
@@ -1239,10 +1241,19 @@ esac
         assert tick(105300) == [] and wakes() == [f"workers/w1:pCN|{WAKE}"], f"a broken line is read whole: {wakes()}"
         touch_reported("term_CN", 105310)
         assert net_error("⏺ API Error: 403 Attention Required! | Cloudflare\n"), "the same page without the /login words"
+        # 11/13 21:52 and 22:21: six Claude panes ended on a 503 that Claude itself calls temporary; the watch read each screen within
+        # a minute, found no network error and told none, and each went on with no new login once the main pane told it to.
+        panes_on_workers(label("w1:pS5", "🟢 🫡 확인")); agents(agent("w1:pS5", "term_S5", "idle", seq=1, **w))
+        screen("w1:pS5", "⏺ 확인하고 있습니다.", "⏺ API Error: 503 credential validation failed. This is a server-side issue, usually",
+               "  temporary — try again in a moment. If it persists, check https://status.claude.com.")
+        assert tick(105400) == [] and wakes() == [f"workers/w1:pS5|{WAKE}"], f"a server error is told like a dropped network: {wakes()}"
+        touch_reported("term_S5", 105410)
         # Errors that a wake cannot fix, a pane that reported, and a stop that is no error are left alone.
         for i, last in enumerate(("⏺ API Error: Opus 5.5's safeguards flagged this message (https://www.anthropic.com/legal/aup).",
                                   "⏺ Please run /login · API Error: 403 Access to this model requires an access grant",
                                   "⏺ Not logged in · Please run /login",
+                                  "⏺ Prompt is too long",
+                                  "⏺ You've hit your weekly limit · resets Nov 15 at 4am (Asia/Seoul)",
                                   "⏺ 연결이 끊겼던 이유를 정리했습니다: API Error: Connection refused (ECONNREFUSED)")):
             panes_on_workers(label("w1:pX", "🟢 🫡 다른 오류")); screen("w1:pX", last)
             agents(agent("w1:pX", "term_X", "working", seq=100 + 2 * i, **w)); tick(110000 + 100 * i)

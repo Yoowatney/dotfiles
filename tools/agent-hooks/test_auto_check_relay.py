@@ -461,6 +461,140 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(len(self.tells), 2)
         self.assertIn("PASS", self.tells[-1][1])
 
+    # api#1218: a figure, a draft or numbers to post reached 요유 unchecked through the direct route.
+    FIGURE = ("그림 PNG 한 장과 설명 5줄을 만들었고, Slack에는 올리지 않았습니다.\nTASK_RESULT: pass\n"
+              "남은 것: 요유 몫: 없음 · 유요 몫: 메인 세션이 PNG와 설명 글을 스레드에 올리기 · 세션: 이 세션은 일이 끝났고 닫아도 됩니다")
+    DRAFT = ("조사를 마쳤고, 보낼 답 초안(6줄)과 새 그림을 만들었습니다.\n"
+             "남은 것: 요유 몫: 다음 단계 진행 여부 결정 · 유요 몫: 메인 세션이 그림과 답 초안을 스레드에 올리기 · 세션: 닫아도 됨")
+    NUMBERS = ("월 비용을 다시 계산했습니다. 월 13만 원입니다.\n"
+               "남은 것: 요유 몫: 없음 · 유요 몫: 메인 세션이 이 숫자를 요유 스레드에 올리기 · 세션: 열어 둠")
+
+    def main_blocks(self, message, said="모아 두었습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨"):
+        transcript = self.root / "main.jsonl"
+        transcript.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": message}},
+                                         ensure_ascii=False) + "\n")
+        with patch.object(auto.share, "delegates_checks", return_value=True):
+            return auto.share.relay_reason({"transcript_path": str(transcript)}, said, self.env)
+
+    def test_deliverables_open_a_check_whatever_their_direct_reason(self):
+        for text in (self.FIGURE, self.DRAFT, self.NUMBERS):
+            with self.subTest(text=text.splitlines()[0]):
+                self.tells.clear()
+                self.spawns.clear()
+                self.finish(text)
+                self.assertEqual(len(self.spawns), 1, "a deliverable for 요유 goes to a check pane")
+                self.assertEqual(self.tells, [], "the main pane hears nothing before the check reports")
+
+    def test_estimate_line_does_not_hide_a_finished_deliverable(self):
+        # api#1218 check: an estimate line on top of a finished figure report sent it straight to the main pane.
+        self.finish("끝날 예상: 21:30 KST\n" + self.FIGURE)
+        self.assertEqual(len(self.spawns), 1)
+        self.assertEqual(self.tells, [])
+
+    def test_a_finished_figure_waiting_for_approval_opens_a_check(self):
+        # Codex review of 675d502: waiting is no work under way.
+        self.finish("그림 PNG를 만들었고 게시 승인을 기다리고 있습니다.\n남은 것: 요유 몫: 게시 승인 · 세션: 열어 둠")
+        self.assertEqual(len(self.spawns), 1)
+
+    def test_work_left_in_the_remaining_line_is_no_finished_sentence(self):
+        # Codex review of 675d502: 남은 것's "그림 수정" is the work left, not work done.
+        self.finish("끝날 예상: 21:30 KST\n그림을 수정 중입니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 그림 수정 · 세션: 열어 둠")
+        self.assertEqual(self.spawns, [])
+        self.assertTrue(self.tells[0][1].startswith("바로 전달하는 칸의 보고입니다("), self.tells[0][1])
+
+    def test_a_question_after_a_computed_amount_does_not_hide_it(self):
+        # Codex review of 2efb703
+        self.finish("월 비용을 다시 계산했습니다. 월 5만 원입니다.\n질문: 다음 단계로 진행할까요?\n"
+                    "남은 것: 요유 몫: 진행 여부 · 세션: 열어 둠")
+        self.assertEqual(len(self.spawns), 1)
+
+    def test_progress_notes_with_a_finished_side_step_stay_direct(self):
+        # Codex review of 2efb703: a multi-line 남은 것 block, and a finished sentence that is not the figure.
+        for text in ("그림을 수정 중입니다.\n남은 것:\n- 요유 몫: 없음\n- 유요 몫: 그림 수정\n- 세션: 열어 둠",
+                     "자료를 확인했습니다.\n그림을 그리는 중입니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 그림 마무리 · 세션: 열어 둠"):
+            with self.subTest(text=text.splitlines()[0]):
+                self.tells.clear()
+                self.spawns.clear()
+                self.finish(text)
+                self.assertEqual(self.spawns, [])
+                self.assertTrue(self.tells[0][1].startswith("바로 전달하는 칸의 보고입니다("), self.tells[0][1])
+
+    def test_counts_computed_open_a_check(self):
+        # api#1218 check of 952c627: counts with a unit (대, 개, 건) are numbers to post too.
+        for text in ("계산을 마쳤습니다. 최대 인스턴스는 12대, 최소 인스턴스는 3대입니다.\n"
+                     "남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠",
+                     "pytest 12개 통과를 확인했습니다. Slack에는 올리지 않았습니다.\n"
+                     "남은 것: 요유 몫: 머지 결정 · 유요 몫: PR 올리기 · 세션: 닫아도 됨"):
+            with self.subTest(text=text.splitlines()[0]):
+                self.tells.clear()
+                self.spawns.clear()
+                self.assertEqual(auto.direct_reason(text), "")
+                self.finish(text)
+                self.assertEqual(len(self.spawns), 1)
+                self.assertEqual(self.tells, [])
+
+    def test_numbers_answered_without_a_post_request_open_a_check(self):
+        # api#1218 check: a computed figure counted only when the report asked to post it.
+        for text in ("비용 계산 결과를 정리했습니다. 월 5만 원입니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠",
+                     "전환율을 다시 구했습니다. 3.2%입니다.\n남은 것: 요유 몫: 다음 실험 결정 · 세션: 닫아도 됨"):
+            with self.subTest(text=text.splitlines()[0]):
+                self.tells.clear()
+                self.spawns.clear()
+                self.finish(text)
+                self.assertEqual(len(self.spawns), 1)
+                self.assertEqual(self.tells, [])
+
+    def test_deliverable_whose_check_cannot_start_makes_main_open_one(self):
+        self.spawn_error = "workers unavailable"
+        self.finish(self.FIGURE)
+        self.assertEqual(len(self.tells), 1)
+        message = self.tells[0][1]
+        self.assertTrue(message.startswith("이 칸의 보고입니다("), message)
+        self.assertIn(auto.share.DELEGATE_NOTE, message)
+        self.assertIn("workers unavailable", message)
+        self.assertEqual(self.main_blocks(message), auto.share.DELEGATE_REASON)
+
+    def test_deliverable_from_a_waiting_job_tab_asks_for_a_check(self):
+        self.env["MUNICE_AUTO_DISPATCH"] = "1"
+        self.finish(self.DRAFT)
+        message = self.tells[-1][1]
+        self.assertNotIn(auto.share.JOB_NOTE, message)
+        self.assertEqual(self.main_blocks(message), auto.share.DELEGATE_REASON)
+
+    def test_reports_with_nothing_to_post_stay_direct(self):
+        for text in ("질문: 큰 시험을 내일 할까요, 다음 주에 할까요? 비용 차이는 월 2만 원입니다.\n"
+                     "남은 것: 요유 몫: 시험 시점 결정 · 유요 몫: 없음 · 세션: 닫아도 됨",
+                     "끝날 예상: 18:30 KST\n자료를 확인했고 그림을 그리는 중입니다.\n"
+                     "남은 것: 요유 몫: 없음 · 유요 몫: 그림 마무리 · 세션: 열어 둠",
+                     # a time, a version or an issue number before a word is no count or amount
+                     "20:30 회차를 돌렸고, v1.26.1 배포와 tf#1133 대조를 마쳤으며, api#889 원인을 찾았습니다.\n"
+                     "남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠",
+                     "pytest가 모두 통과하는 것을 확인했습니다. Slack에는 올리지 않았습니다.\n"
+                     "남은 것: 요유 몫: 머지 결정 · 유요 몫: PR 올리기 · 세션: 닫아도 됨",
+                     "스레드를 읽고 정할 것을 정리했습니다. 서버 답은 다른 세션 몫이라 초안은 만들지 않았습니다.\n"
+                     "남은 것: 요유 몫: 결정 6개 · 유요 몫: 없음 · 세션: 열어 둠"):
+            with self.subTest(text=text.splitlines()[0]):
+                self.tells.clear()
+                self.spawns.clear()
+                self.finish(text)
+                self.assertEqual(self.spawns, [])
+                self.assertTrue(self.tells[0][1].startswith("바로 전달하는 칸의 보고입니다("), self.tells[0][1])
+                self.assertIsNone(self.main_blocks(self.tells[0][1]))
+
+    def test_waiting_job_without_deliverable_keeps_job_note(self):
+        self.env["MUNICE_AUTO_DISPATCH"] = "1"
+        self.finish("질문: A와 B 중 무엇으로 할까요?\n남은 것: 요유 몫: A 또는 B 결정 · 유요 몫: 없음 · 세션: 닫아도 됨")
+        self.assertIn(auto.share.JOB_NOTE, self.tells[-1][1])
+
+    def test_check_pane_question_about_a_draft_is_not_checked_again(self):
+        self.finish(self.DRAFT)
+        self.finish("초안 문장 3개를 고쳐야 합니다. 질문: 고친 뒤 올릴까요?\n"
+                    "남은 것: 요유 몫: 게시 결정 · 세션: 닫으면 답 대기 멈춤", check=True)
+        self.assertEqual(len(self.spawns), 1, "no check of a check")
+        message = self.tells[0][1]
+        self.assertTrue(message.startswith("바로 전달하는 칸의 보고입니다(확인 칸의"), message)
+        self.assertIsNone(self.main_blocks(message))
+
     def test_direct_report_does_not_trigger_missing_checker_guard(self):
         self.finish("질문: 어느 안을 고를까요?\n남은 것: 요유 몫: A 또는 B 결정 · 세션: 닫아도 됨")
         transcript = self.root / "main.jsonl"
