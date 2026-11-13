@@ -732,7 +732,7 @@ def deliver(env, rec, item, main, ffs) -> bool:
     if rec["key"] not in ffs:
         ffs[rec["key"]] = fast_forward(rec)
     if ffs[rec["key"]]:
-        return send(f"바로 전달하는 칸의 보고입니다(확인 칸을 열지 않습니다: {ffs[rec['key']]}).\n"
+        return send(f"{atc.unchecked_head(reply, '확인 칸을 열지 않습니다: ' + ffs[rec['key']])}\n"
                     f"{atc.short_report(reply, None)}\n{where}\n전체 보고: {file} ({at})")
     me = {"pane_id": f"집맥:{rec['remote']}", "terminal_id": f"집맥:{rec['remote']}", "label": f"{rec['label']} (집맥)",
           "agent_session": {"value": m[1] if m else ""}, "cwd": rec["folder"]}
@@ -740,7 +740,7 @@ def deliver(env, rec, item, main, ffs) -> bool:
     try:
         routed = atc.route_main_report(reply, me, rec["agent"], addr, to, file, now, cenv, send)
     except (OSError, ValueError, KeyError) as error:
-        return send(f"바로 전달하는 칸의 보고입니다(확인 자동 연결 실패). {error}\n{atc.short_report(reply, None)}\n{where}\n전체 보고: {file} ({at})")
+        return send(f"{atc.unchecked_head(reply, '확인 자동 연결 실패')} {error}\n{atc.short_report(reply, None)}\n{where}\n전체 보고: {file} ({at})")
     if routed is None:
         return send(f"이 칸의 보고입니다(집맥). {atc.share.RELAY_NOTE}:\n{atc.short_report(reply)}\n{where}\n전체 보고: {file} ({at})")
     return routed
