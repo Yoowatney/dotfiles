@@ -4,6 +4,10 @@
 [시작 래퍼](../scripts/claude-online)가 CLI 설정으로 전달한다. 따라서 같은
 프로세스 안에서 `/clear`를 실행해도 설정이 유지된다. 이미 실행 중인
 프로세스에는 이 인자가 없으므로 처음 적용할 때 한 번 재시작해야 한다.
+메인 칸은 이 재시작을 매일 05:00 정기 실행이 맡는다. 메인 칸 Claude가 켜질 때
+[main-startup](../tools/agent-hooks/main-startup)이 시작 설정 입력의 해시를 남기고,
+05:00에 그 해시가 달라졌으면 `/clear` 대신 다시 켠다. 다시 켜면 그 세션의 백그라운드
+작업과 Monitor가 끝나므로 낮에는 다시 켜지 않는다(요유, 2026-11-13).
 
 작업 칸의 역할은 [pane-spawn](../tools/agent-hooks/pane-spawn)이 전달하고,
 메인 칸은 저장된 terminal ID로 확인한다. 명시적인 `CLAUDE_STARTUP_ROLE`이

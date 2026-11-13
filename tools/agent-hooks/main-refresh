@@ -1,7 +1,8 @@
 #!/bin/bash
 # Once a day at 05:00 (launchd): ask the main pane for a handoff, then /clear it in place, so the next
 # session starts fresh and loads the handoff by itself. Runs under macOS bash 3.2.
-#   main-refresh         the daily run: only 05:00-06:59, once a day
+#   main-refresh         the daily run: only 05:00-06:59, once a day. It restarts like --restart instead of /clear when
+#                        main-startup finds that what claude loads only at process start changed since this one started.
 #   main-refresh --now   the same at any hour, as often as asked: for a main pane whose context grew too big, since
 #                        nobody types /clear there any more (2026-11-05). What decides when to call it is not here.
 #                        From a pane on the workers server, drop both of its server variables to reach the main pane:
@@ -54,7 +55,8 @@ skip() {
   fi
   exit 0
 }
-in_window() { [ -z "$now" ] || return 0; case "${MAIN_REFRESH_HOUR:-$(date +%H)}" in 05|06) return 0 ;; esac; return 1; }
+# Past /exit there is no skipping: the pane must get its claude back, whatever the hour.
+in_window() { [ -z "$now" ] && [ -z "${exiting:-}" ] || return 0; case "${MAIN_REFRESH_HOUR:-$(date +%H)}" in 05|06) return 0 ;; esac; return 1; }
 late() { in_window || skip "새벽 05~06시가 지나 건너뜀"; }
 status() { "$H" pane get "$1" 2>/dev/null | jq -r '.result.pane.agent_status // empty'; }
 # Polls "$@" until it passes or $limit seconds pass; a background sleep also handles fractions.
@@ -90,6 +92,10 @@ row=$("$H" pane list 2>/dev/null | jq -c --arg t "$term" '[.result.panes[] | sel
 id=$(jq -r '.pane_id // empty' <<<"$row" 2>/dev/null)
 [ -n "$id" ] || { log "메인 칸을 찾지 못함 ($term)"; exit 0; }
 sid=$(jq -r '.agent_session.value // empty' <<<"$row")
+# Only the daily run: a restart ends this pane's background jobs and Monitors, so not in the middle of the day (요유, 11/13).
+if [ -z "$now" ] && startup_now=$(/bin/bash "$HERE/main-startup" changed); then
+  restart=1 startup=$startup_now; log "시작 설정이 바뀌어 /clear 대신 다시 켜기로 함"
+fi
 
 # Stop automatic relays before waiting for the first idle turn. Serialize with
 # pane-tell's final screen-check/prompt lock, so an already accepted prompt
@@ -313,6 +319,9 @@ jq '.clearing = true' "$gate" > "$gate.tmp" && mv -f "$gate.tmp" "$gate" \
 back="되돌리기: 메인 칸 셸에서 CLAUDE_STARTUP_PROFILE=full claude"
 if [ -n "$restart" ]; then
   "$H" agent prompt "$id" /exit >/dev/null 2>&1 || { keep_gate=; skip --error "/exit를 보내지 못해 건너뜀"; }
+  exiting=1
+  [ -z "${startup:-}" ] || /bin/bash "$HERE/main-startup" restarting "$startup" \
+    || log "다시 켠 기록을 남기지 못함: 바뀐 시작 설정이 다음 05:00에 한 번 더 다시 켤 수 있음"
   # /exit returns before the process ends; a line typed before the shell is back would reach the old session.
   # herdr 0.9 omits `agent` for a pane at its shell; an error reply has no pane_id, so it never counts as one.
   shell_back() {
