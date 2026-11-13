@@ -36,7 +36,8 @@ A pane list that cannot be read is no news: nothing is sent and every record sta
 id -> seq, status, since (first tick that saw this state), seen (last tick that saw it), floor (`seen` of the state before:
 a report touched after it belongs to this stop, since the watch sees a new state up to a minute late), opener, home, orphaned,
 lost_at (first tick that found no opener), alerted, net (this stop ended on a sleep or network error), wakes and woke (how many
-wakes since the last stop that was no error, and when the last went; both outlive a state).
+wakes since the last stop that was no error, and when the last went; both outlive a state), idle_why (the last 15-minute alert
+decision of this stop that `{state_dir}/idle-alert.log` has: wait, sent, fallback, unsent, reported or trial, and why; see idle_log()).
 By design, two stops inside one tick interval look like one: a report for the first also covers the second.
 An alert nobody took marks nothing, so the next minute sends it again. Fails open: any error exits 0 quietly. Tick failures
 leave classified entries in watch-errors.log and a consecutive count in watch-errors.json; after three failures the main
@@ -68,6 +69,7 @@ import os
 import re
 import socket
 import subprocess
+import tempfile
 import time
 import unicodedata
 
@@ -179,6 +181,31 @@ def wake(env, sock, rec, pane, address, job, now) -> None:
         rec.update(wakes=n + 1, woke=now)
         with open(os.path.join(herdr_peers.state_dir(env), "wake.log"), "a") as f:
             f.write(f"{time.strftime('%F %T', time.localtime(now))} {address} wake {n + 1}\n")
+
+
+def clock(t) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(t)) if t else "-"
+
+
+def idle_log(env, now, line) -> None:
+    """`{state_dir}/idle-alert.log`: one line per 15-minute alert decision of a stop, kept (11/13 21:52: three panes sat 18 minutes,
+    no alert reached the main pane, and watch.json, rewritten every minute, kept no trace why). Past 1 MB only the last 2000 lines
+    stay, as sync-home.sh keeps its log. Never stops the tick."""
+    path = os.path.join(herdr_peers.state_dir(env), "idle-alert.log")
+    try:
+        if os.path.getsize(path) > 1 << 20:
+            with open(path) as f:
+                keep = f.readlines()[-2000:]
+            with open(path + ".tmp", "w") as f:
+                f.writelines(keep)
+            os.replace(path + ".tmp", path)
+    except OSError:
+        pass
+    try:
+        with open(path, "a") as f:
+            f.write(f"{time.strftime('%F %T', time.localtime(now))} {line}\n")
+    except OSError:
+        pass
 
 
 def wake_main(env, now, where, main) -> None:
@@ -547,27 +574,43 @@ def tick(env, now: float) -> list:
         state = {}
     state = {k: v for k, v in state.items() if k == "_down" or isinstance(v, dict)}
     told: list = []
+    failed: list = []  # each pane-tell the last tell() tried that took nothing: "<address> rc=<exit> <its last error line>"
+    took = [""]  # what took the last tell(): the address of the pane-tell that did, "day file", "error queue", or "" for nothing
 
     def tell(msg, opener="", home=False, moved=None, urgent=True) -> bool:
         """moved: (pane, label, agent name, session) of a pane workers-move opened here, whose lead is on the 회사맥: the day file takes what nobody
         here heard, and `workers-move bridge` carries it there. It is no alert someone took, so it is not in `told`."""
         pt = env.get("WORKERS_WATCH_PANE_TELL") or os.path.join(HERE, "pane-tell")
-        for term in dict.fromkeys(t for t in (opener, "" if moved else main) if t in where):  # a lead that cannot hear (its agent ended) is no stop
+        failed.clear()
+        took[0] = ""
+        to = list(dict.fromkeys(t for t in (opener, "" if moved else main) if t in where))
+        if not to:
+            failed.append("no lead or main pane to tell")
+        for term in to:  # a lead that cannot hear (its agent ended) is no stop
             text = f"{msg} {herdr_peers.HOME_NOTE}" if home and term != opener else msg
-            try:
-                ok = subprocess.run([pt, where[term][0], text], env={**os.environ, **env}, timeout=10, stdin=subprocess.DEVNULL,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-            except (OSError, subprocess.TimeoutExpired):
-                ok = False
-            if ok:
-                told.append(text)
-                return True
+            with tempfile.TemporaryFile() as err:  # a file, not a pipe: a delivery pane-tell leaves behind would hold a pipe open
+                try:
+                    rc = subprocess.run([pt, where[term][0], text], env={**os.environ, **env}, timeout=10, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=err).returncode
+                except subprocess.TimeoutExpired:
+                    rc = "timeout"
+                except OSError as error:
+                    rc = type(error).__name__
+                if rc == 0:
+                    told.append(text)
+                    took[0] = where[term][0]
+                    return True
+                err.seek(max(0, err.seek(0, os.SEEK_END) - 2000))  # its end: the last line says why
+                last = (err.read().decode(errors="replace").strip().splitlines() or [""])[-1][:200]
+            failed.append(f"{where[term][0]} rc={rc} {last}".strip())
         if moved:
+            took[0] = "day file"
             return day_entry(env, now, moved[0], moved[1], f"[workers-watch] {msg}",
                              agent=moved[2], session=moved[3])
         if not urgent:
             return True  # routine cleanup needs no retry when nobody can receive its status
         if notify(env, msg):  # 요유's own screen needs no warning about 요유's own matters
+            took[0] = "error queue"
             told.append(msg)
             return True
         return False
@@ -648,13 +691,22 @@ def tick(env, now: float) -> list:
                     except Exception:
                         pass
                 limit = JOB_HELD if job and "🔴" in name else STOPPED
-                if not reported and now - max(rec["since"], rec.get("woke", 0)) >= limit and "idle" not in rec["alerted"] and not trial(name):
+                start = max(rec["since"], rec.get("woke", 0))
+                why = ("" if "idle" in rec["alerted"] else "reported" if reported else "trial" if trial(name) else
+                       f"wait since {clock(rec['since'])} woke {clock(rec.get('woke', 0))} until {clock(start + limit)}" if now - start < limit else None)
+                if why is None:
                     long = "3시간째" if limit == JOB_HELD else "15분째"
                     text = (f"자동 칸 {name}(workers/{pane})이 보고 없이 {long} 멈춰 있습니다. 화면: `herdr --session workers agent read {pane}`, "
                             f"닫기: `herdr --session workers pane close {pane}`. 입력을 받지 않는 칸이니 보드 항목을 보고 이어 갈 일은 새 칸에 맡기세요. {UNSENT}"
                             if job else f"밑 칸 {name}(workers/{pane})이 보고 없이 15분째 멈춰 있습니다. {UNSENT}")
-                    if tell(text, opener, home, moved):
+                    sent = tell(text, opener, home, moved)
+                    if sent:
                         rec["alerted"].append("idle")
+                    why = ("unsent" if not sent else f"fallback to {took[0]}" if took[0] in ("day file", "error queue") else
+                           f"sent to {took[0]}" + (" after" if failed else "")) + "".join(f" ({x})" for x in failed)
+                if why and why != rec.get("idle_why"):  # a line when the decision changes: one stop is a few lines, not one a minute
+                    idle_log(env, now, f"workers/{pane} {term} {status} {why} | {name}")
+                    rec["idle_why"] = why
                 if lost and reported and now - max(rec["since"], rec["lost_at"]) >= ORPHAN_TTL and not held and not pending_messages(env, term):
                     closed = herdr_peers.herdr(env, "pane", "close", pane, socket=sock)  # {} when it failed: tried again next minute
                     if closed and "closed" not in rec["alerted"] and tell(f"리드가 닫힌 밑 칸 {name}(workers/{pane})을 보고 1시간 뒤라 닫았습니다", home=home, urgent=False):
@@ -747,9 +799,11 @@ esac
         script(f"{d}/error-notify", f'[ "${{NOTIFY_EXIT:-0}}" != 0 ] || echo "default|$1|$2" >> {d}/notified\nexit ${{NOTIFY_EXIT:-0}}\n')
         # A refused or failed pane-tell logs nothing: only what was taken is in `told`.
         # --raw logs as "raw:<pane>@<server>|<text>", the server being the one HERDR_SOCKET_PATH names
-        script(f"{d}/pane-tell", f'[ "$1" != "${{TELL_REFUSE:-}}" ] || exit 2\n'
+        script(f"{d}/pane-tell", f'[ "$1" != "${{TELL_REFUSE:-}}" ] || {{ echo "pane-tell: lead unavailable" >&2; exit 2; }}\n'
                                  f'[ "$1" != --raw ] || {{ s=${{HERDR_SOCKET_PATH%/herdr.sock}}; set -- "raw:$2@${{s##*/}}" "$3"; }}\n'
-                                 f'[ "${{TELL_EXIT:-0}}" != 0 ] || echo "$1|$2" >> {d}/told\nexit ${{TELL_EXIT:-0}}\n')
+                                 f'[ "${{TELL_EXIT:-0}}" != 0 ] || echo "$1|$2" >> {d}/told\n'
+                                 f'[ "${{TELL_EXIT:-0}}" = 0 ] || {{ [ -z "${{TELL_NOISE:-}}" ] || printf "%3000s\\n" "" | tr " " x; '
+                                 f'echo "pane-tell: failed"; }} >&2\nexit ${{TELL_EXIT:-0}}\n')
         env = {"HOME": d, "XDG_STATE_HOME": f"{d}/state", "HERDR_BIN_PATH": f"{d}/herdr", "WORKERS_WATCH_PANE_TELL": f"{d}/pane-tell", "HERDR_ERROR_NOTIFY": f"{d}/error-notify"}
         main_file = f"{d}/state/orchestrator/main"
 
@@ -826,6 +880,12 @@ esac
         assert tick(2899) == [] and "보고 없이" in tick(2900)[0]
         agents(agent("w1:p2", "term_2", "idle", seq=11)); tick(3000); touch_reported("term_2", 3001)
         assert tick(3901) == [], "a pane that reported is waiting on the main pane, not stuck"
+        # Each 15-minute decision of a stop is one kept line, written when it changes (11/13 21:52: three panes sat 18 minutes, no
+        # alert reached the main pane, and watch.json, rewritten every minute, kept no trace why).
+        idle_log = lambda pane: [line.split(" ", 2)[2] for line in open(f"{d}/state/orchestrator/idle-alert.log").read().splitlines()
+                                 if line.split(" ")[2:3] == [f"workers/{pane}"]]
+        assert [line.split()[3] for line in idle_log("w1:p2")] == ["wait", "sent", "wait", "reported"], idle_log("w1:p2")
+        assert idle_log("w1:p2")[0].startswith("workers/w1:p2 term_2 idle wait since ") and " | 🟢 🫡 구현" in idle_log("w1:p2")[0]
         panes_on_workers(label("w1:p4", "🟢 🫡 정리"), label("w1:p1", "")); agents(agent("w1:p4", "term_4", "working", seq=1))
         assert tick(3950) == [], "a working agent is no news"; agents()
         assert len([t for t in tick(4000) if "에이전트가 끝났" in t]) == 1 and tick(4100) == [], "once per pane; the root shell is never news"
@@ -1451,6 +1511,24 @@ esac
         result("default-panes", "panes", [{"pane_id": "w5:p3", "terminal_id": "term_M", "label": "👑 메인", "agent": "claude"}])
         del env["WORKERS_WATCH_MAIN_REFRESH"]
 
+        # A pane-tell that fails says why in the line (its exit and last error line): 11/13 22:07:54-56 three 15-minute alerts fell
+        # to 요유's screen instead of the main pane, and nothing kept why. Past 1 MB only the last 2000 lines stay (sync-home.sh's way).
+        with open(f"{d}/state/orchestrator/idle-alert.log", "w") as f:
+            f.writelines(f"2026-11-13 00:00:00 workers/w1:pOld term_Old idle wait {'x' * 120}\n" for _ in range(9000))
+        panes_on_workers(label("w1:pIL", "🟢 🫡 알림")); agents(agent("w1:pIL", "term_IL", "idle", seq=1)); tick(180000)
+        lines = open(f"{d}/state/orchestrator/idle-alert.log").read().splitlines()
+        assert len(lines) == 2001 and " workers/w1:pIL " in lines[-1], len(lines)
+        # Its last error line is the one kept, after 3000 bytes of earlier output (a check pane, 23:21: the first 2000 bytes lost it).
+        assert tick(180900, TELL_EXIT="1", NOTIFY_EXIT="1") == [] and tick(180960, TELL_EXIT="1", TELL_NOISE="1") == []
+        assert any("w1:pIL" in body and "보고 없이 15분째" in body for body in notified()), notified()
+        assert [line.split()[3] for line in idle_log("w1:pIL")] == ["wait", "unsent", "fallback"], idle_log("w1:pIL")
+        assert idle_log("w1:pIL")[2].startswith("workers/w1:pIL term_IL idle fallback to error queue (w5:p3 rc=1 pane-tell: failed)"), idle_log("w1:pIL")
+        # The lead cannot hear and the main pane took it: sent, to the main pane, the lead's failure after it (the same check pane).
+        result("default-panes", "panes", LEADS); panes_on_workers(label("w1:pIK", "🟢 🫡 알림"))
+        agents(agent("w1:pIK", "term_IK", "idle", seq=1, **K)); tick(181000)
+        assert tick(181900, TELL_REFUSE="w5:p8")[0].startswith("w5:p3|")
+        assert idle_log("w1:pIK")[-1].startswith("workers/w1:pIK term_IK idle sent to w5:p3 after (w5:p8 rc=2 pane-tell: lead unavailable)"), idle_log("w1:pIK")
+        result("default-panes", "panes", [{"pane_id": "w5:p3", "terminal_id": "term_M", "label": "👑 메인", "agent": "claude"}])
         # end to end, the way launchd runs it: python3 -I drops the script folder from sys.path
         panes_on_workers(label("w1:p6", "🟢 🫡 시험")); agents(agent("w1:p6", "term_6", "blocked", seq=11))
         run = lambda now, **e: subprocess.run(["/usr/bin/python3", "-I", os.path.realpath(__file__)], capture_output=True, text=True,
