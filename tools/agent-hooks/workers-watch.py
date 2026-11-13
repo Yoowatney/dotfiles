@@ -28,9 +28,10 @@ An alert about a Home lead's pane that goes to anyone but its lead carries HOME_
 On 집맥 a pane workers-move opened at 퇴근 (agent name with `r`, api#1049) has its lead, the 회사맥 main pane, on no server here: it is
 no orphan, and an alert nobody here takes goes to the pane report day file as `[workers-watch] …`, not to a screen nobody watches.
 After each tick `workers-move bridge` runs, which carries those entries and the moved panes' reports to the 회사맥 main pane.
-A pane that stopped without a report on a sleep or network error (Claude's `API Error: Your computer went to sleep...`, ENOTFOUND)
-is not news but told WAKE itself at once, before the 15-minute alert (와우 카드 04, 요유 2026-11-05: on 11/05 one sat 77 minutes
-until the main pane said so). See wake(); `{state_dir}/wake.log` keeps one line per wake.
+A pane that stopped without a report on a sleep or network error (Claude's `API Error: Your computer went to sleep...`, ENOTFOUND,
+Cloudflare's challenge page) is not news but told WAKE itself at once, before the 15-minute alert (와우 카드 04, 요유 2026-11-05: on
+11/05 one sat 77 minutes until the main pane said so). The main pane is told too (wake_main(), 2026-11-13: once the network was back
+nothing restarted the stopped panes or the main pane). See wake(); `{state_dir}/wake.log` keeps one line per wake.
 A pane list that cannot be read is no news: nothing is sent and every record stays. State: `{state_dir}/watch.json`, terminal
 id -> seq, status, since (first tick that saw this state), seen (last tick that saw it), floor (`seen` of the state before:
 a report touched after it belongs to this stop, since the watch sees a new state up to a minute late), opener, home, orphaned,
@@ -92,14 +93,16 @@ MAIN_REFRESH_SETTLE = 900  # a session's first 15 minutes are its handoff load, 
 USAGE = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 JOB_HELD = 10800
 UNSENT = "보내지 못한 보고가 있다면 ~/.local/state/pane-reports에 있습니다."  # auto-tab-close.py keeps a report it had nobody to send to
-WAKE = "회사맥이 잠들어 응답이 끊겼습니다. 끊긴 곳부터 이어서 하세요."
+WAKE = "잠자기나 네트워크·API 오류로 응답이 끊겼습니다. 끊긴 곳부터 이어서 하세요."
 WAKE_GAPS = (0, 120, 300, 900, 1800)  # the n-th wake of one pane waits WAKE_GAPS[n] s after the one before; then none
 # What Claude ends a turn on when the Mac slept or the network dropped: every such line in the Claude transcripts on 11/05
 # (sleep 66, ENOTFOUND 42, lost 3, stopped arriving 3, ECONNRESET 3, timed out 2) and ECONNREFUSED from a test pane. Not
-# /login, safeguards or rate limits: going on cannot fix those.
+# /login, safeguards or rate limits: going on cannot fix those. Except Cloudflare's challenge page, which Claude words as a /login
+# error: 9 stops in seven panes on 11/13 18:47-18:51, and each went on with no new login once told to.
 NET_ERROR = re.compile(r"⏺ (API Error: )?(Your computer went to sleep|Connection (lost|refused|dropped|error)|Can't reach the API server"
                        r"|The response stopped arriving|Request timed out)"
-                       r"|⏺ API Error: .*\((ENOTFOUND|EAI_AGAIN|ECONN[A-Z]+|ETIMEDOUT|ENET[A-Z]+|EHOSTUNREACH)\)")
+                       r"|⏺ API Error: .*\((ENOTFOUND|EAI_AGAIN|ECONN[A-Z]+|ETIMEDOUT|ENET[A-Z]+|EHOSTUNREACH)\)"
+                       r"|⏺ (Please run /login · )?API Error: 403 Attention Required! \| Cloudflare")
 RULE = re.compile(r"─{3,}( .* ─+)?")
 TRIAL = re.compile(r"[\s🟢🔴👑🫡]*임시 ")  # a lead's test pane (pane-spawn, pane-temp); with the space: `임시저장 API 수정` is a work name
 
@@ -117,12 +120,21 @@ def read_screen(env, sock, pane):
 def net_error(text) -> bool:
     """The last message above the input box (Claude's between its two last rules, Codex's on its last › line) is a sleep or
     network error. An error further up, with work after it, is not. Codex never ends a turn on one: it shows `Reconnecting...
-    waiting for network`, stays working, and goes on by itself once the network is back (test panes 11/05)."""
-    lines = [line.strip() for line in text.replace("\r", "").split("\n")]
+    waiting for network`, stays working, and goes on by itself once the network is back (test panes 11/05). A narrow pane breaks
+    a message itself, its rest indented under it: those lines are read with it."""
+    raw = text.replace("\r", "").split("\n")
+    lines = [line.strip() for line in raw]
     rules = [i for i, line in enumerate(lines) if len(line) >= 10 and RULE.fullmatch(line)]
     prompts = [i for i, line in enumerate(lines) if line.startswith("›")]
     end = rules[-2] if len(rules) >= 2 else prompts[-1] if prompts else len(lines)
-    heads = [line for line in lines[:end] if line and line[0] in "⏺■•❯›"]
+    heads, last = [], -2
+    for i, line in enumerate(lines[:end]):
+        if line and line[0] in "⏺■•❯›":
+            heads.append(line)
+            last = i
+        elif line and heads and last == i - 1 and raw[i].startswith("  "):
+            heads[-1] += " " + line
+            last = i
     return bool(heads) and bool(NET_ERROR.match(heads[-1]))
 
 
@@ -165,6 +177,36 @@ def wake(env, sock, rec, pane, address, job, now) -> None:
         rec.update(wakes=n + 1, woke=now)
         with open(os.path.join(herdr_peers.state_dir(env), "wake.log"), "a") as f:
             f.write(f"{time.strftime('%F %T', time.localtime(now))} {address} wake {n + 1}\n")
+
+
+def wake_main(env, now, where, main) -> None:
+    """The main pane, on the default server, gets the same wake (11/13 20:38: it ended on ENOTFOUND in a dark wake and sat until
+    a new message came). Its record is `{state_dir}/main-wake.json`, apart from watch.json, which keeps only workers panes."""
+    sock = herdr_peers.socket_of(env, "default")
+    if not sock or main not in where:
+        return
+    pane = where[main][1].get("pane_id")
+    a = next((a for a in herdr_peers.herdr(env, "agent", "list", socket=sock).get("agents") or [] if a.get("pane_id") == pane), None)
+    if not a or kind(a.get("agent_status")) != "ready":
+        return
+    path = os.path.join(herdr_peers.state_dir(env), "main-wake.json")
+    try:
+        with open(path) as f:
+            old = json.load(f)
+    except (OSError, ValueError):
+        old = {}
+    if not isinstance(old, dict):
+        old = {}
+    seq, same = a.get("state_change_seq"), old.get("terminal") == main  # a new main pane starts its own count
+    rec = old if same and old.get("seq") == seq else {
+        "seq": seq, "terminal": main, "alerted": [], "wakes": old.get("wakes", 0) if same else 0, "woke": old.get("woke", 0) if same else 0}
+    # ponytail: no 15-minute alert speaks for the main pane, so its wakes never run out: every last gap (30 min) while it stays cut off
+    rec["wakes"] = min(rec["wakes"], len(WAKE_GAPS) - 1)
+    wake(env, sock, rec, pane, where[main][0], False, now)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w") as f:
+        json.dump(rec, f)
+    os.replace(path + ".tmp", path)
 
 
 def pending_messages(env, terminal: str, sock=None) -> bool:
@@ -489,6 +531,10 @@ def tick(env, now: float) -> list:
         refresh_main(env, now, where, main)
     except Exception:  # a fault here must not cost the alerts below
         pass
+    try:
+        wake_main(env, now, where, main)
+    except Exception:
+        pass
     path = os.path.join(herdr_peers.state_dir(env), "watch.json")
     try:
         with open(path) as f:
@@ -689,7 +735,7 @@ case "$1 $2" in
   "pane list") cat {d}/$s-panes.json ;;
   "agent list") cat {d}/$s-agents.json ;;
   "notification show") exit 98 ;;
-  "agent read") [ "$s" = workers ] && [ "$4 $5" = "--source recent-unwrapped" ] && cat "{d}/screen-$3.txt" ;;
+  "agent read") [ "$4 $5" = "--source recent-unwrapped" ] && if [ "$s" = workers ]; then cat "{d}/screen-$3.txt"; else cat "{d}/screen-default-$3.txt"; fi ;;
   "pane close") [ -f {d}/close-fails ] && exit 1; echo "$3" >> {d}/closed; echo '{{"result":{{"type":"ok"}}}}' ;;
   "pane get") jq --arg id "$3" '{{result: {{pane: ([.result.panes[] | select(.pane_id == $id)][0])}}}}' {d}/$s-panes.json ;;
   "agent get") jq --arg id "$3" '{{result: {{agent: ([.result.agents[] | select(.pane_id == $id)][0])}}}}' {d}/$s-agents.json ;;
@@ -1180,9 +1226,23 @@ esac
         agents(agent("w1:pV", "term_V", "working", seq=45, **w)); tick(105100); agents(agent("w1:pV", "term_V", "idle", seq=47, **w))
         assert tick(105160) == [] and len(wakes()) == 1, "after a report the next error is told at once"
         touch_reported("term_V", 105170)
+        # 11/13 18:47-18:51: seven Claude panes ended on Cloudflare's challenge page, which Claude words as a login error. Nothing
+        # told them to go on, so they sat until the main pane did at 20:57, and then went on with no new login.
+        CHALLENGE = "⏺ Please run /login · API Error: 403 Attention Required! | Cloudflare"
+        panes_on_workers(label("w1:pCF", "🟢 🫡 확인")); screen("w1:pCF", "⏺ 확인하고 있습니다.", CHALLENGE)
+        agents(agent("w1:pCF", "term_CF", "idle", seq=1, **w))
+        assert tick(105200) == [] and wakes() == [f"workers/w1:pCF|{WAKE}"], f"Cloudflare's challenge is told like a dropped network: {wakes()}"
+        touch_reported("term_CF", 105210)
+        # A narrow pane breaks the line itself, and its rest comes indented under it (a 44-column test pane, 11/13).
+        panes_on_workers(label("w1:pCN", "🟢 🫡 좁은 칸")); screen("w1:pCN", "⏺ Please run /login · API Error: 403", "  Attention Required! | Cloudflare")
+        agents(agent("w1:pCN", "term_CN", "idle", seq=1, **w))
+        assert tick(105300) == [] and wakes() == [f"workers/w1:pCN|{WAKE}"], f"a broken line is read whole: {wakes()}"
+        touch_reported("term_CN", 105310)
+        assert net_error("⏺ API Error: 403 Attention Required! | Cloudflare\n"), "the same page without the /login words"
         # Errors that a wake cannot fix, a pane that reported, and a stop that is no error are left alone.
         for i, last in enumerate(("⏺ API Error: Opus 5.5's safeguards flagged this message (https://www.anthropic.com/legal/aup).",
                                   "⏺ Please run /login · API Error: 403 Access to this model requires an access grant",
+                                  "⏺ Not logged in · Please run /login",
                                   "⏺ 연결이 끊겼던 이유를 정리했습니다: API Error: Connection refused (ECONNREFUSED)")):
             panes_on_workers(label("w1:pX", "🟢 🫡 다른 오류")); screen("w1:pX", last)
             agents(agent("w1:pX", "term_X", "working", seq=100 + 2 * i, **w)); tick(110000 + 100 * i)
@@ -1210,6 +1270,34 @@ esac
         panes_on_workers(label("w1:pJX", "🟢 api#820 작업")); screen("w1:pJX", SLEPT); agents(agent("w1:pJX", "term_JX", "idle", seq=1, name="auto-api-820"))
         assert tick(114000) == [] and wakes() == [f"raw:w1:pJX@workers|[auto-dispatch] {WAKE}"], wakes()
         touch_reported("term_JX", 114010)
+        # The main pane, on the default server, is told the same way (11/13 20:38: it ended on ENOTFOUND in a dark wake and
+        # sat until a new message came). Once per stop, only while the API answers, and never while it works.
+        panes_on_workers(); agents()
+        main_agent = lambda status, seq: result("default-agents", "agents", [{"pane_id": "w5:p3", "terminal_id": "term_M", "agent": "claude",
+                                                                            "agent_status": status, "state_change_seq": seq}])
+        screen("default-w5:p3", "⏺ 확인하고 있습니다.", "⏺ API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)")
+        main_agent("working", 1); assert tick(114200) == [] and wakes() == [], "a working main pane is no stop"
+        main_agent("idle", 3)
+        assert tick(114260, **offline) == [] and wakes() == [], "offline: not yet"
+        assert tick(114320) == [] and wakes() == [f"w5:p3|{WAKE}"], f"back online: the main pane is told: {wakes()}"
+        assert tick(114380) == [] and wakes() == [], "once per stop"
+        main_agent("working", 5); tick(114390); main_agent("done", 7)
+        assert tick(114439) == [] and wakes() == [] and tick(114440) == [] and len(wakes()) == 1, "the next stop waits the next gap"
+        screen("default-w5:p3", "⏺ API Error: Can't reach the API server (ENOTFOUND)", "❯ 이어서 하세요", "⏺ 다 했습니다.")
+        main_agent("working", 9); tick(114500); main_agent("idle", 11)
+        assert tick(114560) == [] and wakes() == [], "a stop that is no error"
+        # A new main pane does not inherit the old one's spent wakes (Codex review): its first error is told at once.
+        write(f"{d}/state/orchestrator/main-wake.json", json.dumps({"seq": 1, "terminal": "term_OLD", "alerted": ["woke"], "net": True,
+                                                                     "wakes": len(WAKE_GAPS), "woke": 114600}))
+        screen("default-w5:p3", "⏺ API Error: Can't reach the API server (ENOTFOUND)"); main_agent("idle", 13)
+        assert tick(114610) == [] and wakes() == [f"w5:p3|{WAKE}"], f"a new main pane starts its own count: {wakes()}"
+        # Its wakes spent, the main pane is still told every last gap (Codex review): no 15-minute alert speaks for it.
+        write(f"{d}/state/orchestrator/main-wake.json", json.dumps({"seq": 13, "terminal": "term_M", "alerted": ["woke"], "net": True,
+                                                                     "wakes": len(WAKE_GAPS), "woke": 115000}))
+        main_agent("idle", 15)
+        assert tick(115000 + WAKE_GAPS[-1] - 1) == [] and wakes() == [], "not inside the last gap"
+        assert tick(115000 + WAKE_GAPS[-1]) == [] and wakes() == [f"w5:p3|{WAKE}"], f"then told again: {wakes()}"
+        result("default-agents", "agents", [])
         # A fault in the wake costs nothing else: the dialog alert goes out and the state is saved.
         real, globals()["net_error"] = globals()["net_error"], lambda text: 1 / 0
         try:
