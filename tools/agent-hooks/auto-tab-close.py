@@ -18,7 +18,8 @@ any pane while a pane it opened is alive; one whose panes are gone closes like t
 (요유 몫 left, `세션: 닫으면 …`, held as above) goes up the same way and the pane stays: an implementer finished with two
 questions for 요유 and its lead never heard (요유 2026-11-01). A reply without `남은 것:` is no report and tells nobody.
 Ordinary leads check results themselves. For herdr_peers.delegates_checks (the main pane), this hook opens a fresh check pane
-without waking the lead, then sends both reports together once. Questions and failures to start a check go straight through.
+without waking the lead, then sends both reports together once. Questions and failures to start a check go straight through,
+unless the report holds something for 요유 (delivers): that one is checked first, or reaches the lead under the head that asks for a check.
 A check pane's report, which pane-spawn --check's agent name tells apart, asks for no other check.
 A pane pane-spawn opened runs on the workers herdr server, so its opener is looked up on the other server too. The main pane
 hears a short form (first line, `남은 것:`, the pane's address and the saved file); the whole reply stays in that file. Every
@@ -353,6 +354,43 @@ def save(reply: str, me: dict, pane: str, env, now=None) -> str:
 QUESTION = re.compile(r"^\s*(?:[-*]\s*)?(?:질문|결정\s*요청|승인\s*요청|선택\s*요청)\s*[:：]|(?:승인|결정|선택)(?:이|을)?\s*(?:필요|부탁|요청)|확인할\s*결과(?:가)?\s*없|[?？](?:\s|$)", re.M)
 RESULT = re.compile(r"완료|마쳤|끝났|통과|고쳤|수정|바꿨|변경|검증|확인했|만들었|추가했|작성했|정리했|PASS|FAIL|tested|finished|implemented", re.I)
 CHECK_TOKEN = re.compile(r"\[ac-([0-9a-f]{16})\]")
+# api#1218 (2026-11-13): a figure a pane drew went to 요유 unchecked and was wrong, since a report with 요유 몫, a question
+# or a free-form `세션:` line took the direct route. What 요유 would see (a figure, a draft, numbers handed on to post) never
+# does. ponytail: a word list, so an idiom like "큰 그림" costs one more check pane, and a new phrasing can slip past it.
+THING = re.compile(r"그림(?!자)|차트|그래프|스크린샷|(?<![A-Za-z])(?:png|svg|jpe?g|gif|webp)(?![A-Za-z])|"
+                   r"(?:초안|문안)(?![은는을를]?[ \t]*(?:만들|쓰|작성하)지[ \t]*않)", re.I)
+HANDED = re.compile(r"(?:슬랙|slack|스레드|채널|요유(?![ \t]*몫))(?:[^\n.!?。]|\.(?=\d)){0,60}?"
+                    r"(?:올(?:리(?!지)|려|릴|립)|게시(?:하(?!지)|해|할|합)|보(?:내(?!지)|낼|냅))", re.I)
+MADE = re.compile(RESULT.pattern + r"|그렸|계산했|구했", re.I)
+# An estimate line does not make a report a progress note (api#1218 check): a sentence still under way does. Waiting is not.
+UNDER_WAY = re.compile(r"(?<!대기)(?<!대기 )중(?:입니다|이에요|이고|이며|$)|(?<!기다리)(?<!받)고[ \t]*있")
+# A computed amount or count is something to post even when nobody asked to post it; inside a question it is the question.
+# Counts take a unit (api#1218 check: "12대, 3대"). Not a count: a number inside a time, version or issue number ("20:30 회차",
+# "v1.26.1 배포", "tf#1133 대조"), or a unit that starts a word (원인, 개월, 대비, 명령, 배포, 회차).
+NUM = r"(?<![#:.\w])\d(?:[\d,.]*\d)?[ \t]*"
+NUMBER = re.compile(NUM + r"(?:[만억천][ \t]*)?(?:원(?![인래칙본문격하한활])|달러|엔|유로)|[$₩][ \t]?\d|" + NUM + r"%|"
+                    + NUM + r"(?:개|대|건|명|회|배|곳|줄)(?![선발인월비상한령강의사포조차표화기신체응학요념편너확시단복귀경치정열])|"
+                    + NUM + r"(?:ms|[KMGT]B)(?![A-Za-z])")
+SENTENCE = re.compile(r"(?:[^.!?。\n]|(?<=\d)\.(?=\d))+[.!?。]?")
+
+
+def delivers(reply: str) -> bool:
+    """A finished report that holds something for 요유: it gets a check pane before the main pane can post it. The figure or
+    draft must sit in a sentence that is not under way; `남은 것:` and what follows it name work left, not work done."""
+    text = re.sub(r"https?://\S+", "", share.prose(reply))
+    left = list(LEFT.finditer(text))
+    said = [s for s in SENTENCE.findall(text[:left[-1].start()] if left else text) if not UNDER_WAY.search(s)]
+    if not any(MADE.search(s) for s in said):
+        return False
+    return bool(HANDED.search(text) or any(THING.search(s) or (NUMBER.search(s) and not QUESTION.search(s)) for s in said))
+
+
+def unchecked_head(reply: str, why: str) -> str:
+    """The head of a report the main pane gets with no check pane. One that delivers keeps the ordinary head, so share-guard
+    asks the main pane for a check pane, as it does for any other pane's claim."""
+    if delivers(reply):
+        return f"이 칸의 보고입니다({why}). 요유에게 갈 결과물(그림, 답 초안, 올릴 숫자)이 있습니다. {share.DELEGATE_NOTE}."
+    return f"바로 전달하는 칸의 보고입니다({why})."
 
 
 def check_kind(reply: str):
@@ -363,6 +401,8 @@ def check_kind(reply: str):
 
 def direct_reason(reply: str) -> str:
     text = plain(reply)
+    if delivers(reply):
+        return ""
     if share.leaves_yoyoo_work(text):
         return "요유 몫이 있는 보고"
     if question_request(reply):
@@ -613,7 +653,7 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
                 return True
             context["spawn_error"] = error
             write_context(context_path, context)
-        message = (f"바로 전달하는 칸의 보고입니다(확인 칸을 열지 못했습니다). 결과는 아직 확인하지 못했습니다. "
+        message = (f"{unchecked_head(reply, '확인 칸을 열지 못했습니다')} 결과는 아직 확인하지 못했습니다. "
                    f"확인 칸 시작 실패: {context['spawn_error']}\n확인 종류: {context['kind']} ({context['kind_reason']})\n{body}")
         sent = (send_immediate or send)(message)
         if sent:
@@ -685,9 +725,10 @@ def finish(reply: str, env):
                 if routed is not None:
                     return routed
             except (OSError, ValueError, KeyError) as error:
-                return send(f"바로 전달하는 칸의 보고입니다(확인 자동 연결 실패). {error}\n{short_report(reply, None)}\n전체 보고: {path} ({now:%H:%M:%S} 항목)", immediate=True)
+                return send(f"{unchecked_head(reply, '확인 자동 연결 실패')} {error}\n{short_report(reply, None)}\n전체 보고: {path} ({now:%H:%M:%S} 항목)", immediate=True)
         if needs_yoyoo:
-            message = f"{share.JOB_NOTE}:\n{short_report(reply)}\n칸: {me.get('label') or ''}\n전체 보고: {path} ({now:%H:%M:%S} 항목)"
+            head = unchecked_head(reply, "자동 칸이 요유를 기다립니다") if delivers(reply) else f"{share.JOB_NOTE}:"
+            message = f"{head}\n{short_report(reply)}\n칸: {me.get('label') or ''}\n전체 보고: {path} ({now:%H:%M:%S} 항목)"
             return send(message)
         head = "칸의 마지막 보고입니다(칸을 닫기 전에 보냅니다)" if close else "칸의 보고입니다(칸은 열어 둡니다)"
         who, note = "이", share.RELAY_NOTE
