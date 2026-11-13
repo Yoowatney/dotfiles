@@ -25,7 +25,7 @@
 # the registered main's stable visible draft is archived before clearing and the archive path prefixes its relay.
 # Every other nonempty box waits. Dialogs, scrolled screens and drafts that cannot be preserved wait as well.
 #   pane-tell --raw <pane id> "<message>"       the same door for a prompt a machine types as it is, into any pane; one that
-#                                               has to wait stays for the session in the pane now, like every queued message
+#                                               has to wait stays for that session, except the registered main survives /clear
 #   pane-tell --box-ready <pane id> <kind>      exit 0 when the box is empty and in view (ambient/deliver.py asks this)
 #   pane-tell --can-send <pane id> <kind>       read-only: empty, or a main draft that can be archived safely
 # Batching (api#1051): a marked message for the main pane (the terminal in orchestrator/main), a lead (👑), or a worker (🫡)
@@ -59,6 +59,45 @@ die() { echo "pane-tell: $*" >&2; exit 2; }
 BOX=${DRAFT_HELPER%/*}/pane-input-box.py
 if [ "${1:-}" = --box-empty ]; then python3 -I "$BOX" "$2"; exit; fi
 
+refresh_dir=${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator
+refresh_handoff=${XDG_STATE_HOME:-$HOME/.local/state}/agent-handoff
+if [[ "${HERDR_SOCKET_PATH:-}" == */sessions/*/herdr.sock ]]; then
+  server=${HERDR_SOCKET_PATH%/herdr.sock}; server=${server##*/}
+  refresh_handoff=$refresh_handoff/$server
+  # Only the registered default main refreshes through this shared gate.
+  [ "$server" = default ] || refresh_dir=$refresh_dir/$server
+fi
+is_main() { [ -n "$1" ] && [ "$1" = "$(cat "$refresh_dir/main" 2>/dev/null)" ]; }
+refresh_request() {
+  [ -n "${MAIN_REFRESH_REQUEST_TOKEN:-}" ] || return 1
+  python3 -I -c 'import json,sys
+try:
+    request=json.load(open(sys.argv[1]))
+    ok=request["token"] == sys.argv[2] and sys.argv[3].endswith(request["ask"])
+except (OSError,ValueError,KeyError): ok=False
+sys.exit(0 if ok else 1)' "$refresh_handoff/main-refresh.refresh-request" "$MAIN_REFRESH_REQUEST_TOKEN" "$1"
+}
+refresh_blocked() { # called under the send lock, before any draft recovery
+  [ -f "$refresh_dir/refresh-delivery.json" ] || return 1
+  local row terminal
+  row=$("$H" pane get "$1" 2>/dev/null) || return 0
+  terminal=$(printf '%s\n' "$row" | jq -r '.result.pane.terminal_id // empty')
+  [ -n "$terminal" ] || return 0
+  is_main "$terminal" || return 1
+  refresh_request "$2" && return 1
+  # A crashed pre-clear run must not strand traffic. After an accepted clear,
+  # retain the hold until herdr reports a different session, even if the owner died.
+  python3 -I -c 'import json,os,sys
+try:
+    gate=json.load(open(sys.argv[1])); pane=json.loads(sys.argv[2])["result"]["pane"]
+    try: os.kill(gate["pid"],0); alive=True
+    except ProcessLookupError: alive=False
+    changed=pane.get("agent_session",{}).get("value","") != gate["session"]
+    blocked=alive or (gate.get("clearing",False) and not changed)
+except (OSError,ValueError,KeyError): blocked=True
+sys.exit(0 if blocked else 1)' "$refresh_dir/refresh-delivery.json" "$row"
+}
+
 # In view, and empty on two reads: what is typed between them holds the message back.
 box_ready() { # pane kind
   "$H" pane get "$1" 2>/dev/null | jq -e '(.result.pane.scroll.offset_from_bottom // 0) == 0' >/dev/null || return 1
@@ -86,6 +125,7 @@ recover_shell() { # pane kind: workers only; normal box readiness remains read-o
 }
 send_unlocked() {
   local note message=$3
+  refresh_blocked "$1" "$message" && return 1
   if ! box_ready "$1" "$2"; then
     python3 -I "$DRAFT_HELPER" prepare "$1" "$2" >/dev/null 2>&1 || recover_shell "$1" "$2" || return 1
   fi
@@ -216,7 +256,11 @@ queue_file() { # payload, terminal, session, sender terminal, sender socket, opt
   # version. A cancelled middle message cannot disconnect an older dependency.
   if [ ! -f "$STATE/order/dependencies/$(basename "$file")" ]; then
     snapshot=$(mktemp "$STATE/order/dependencies/.new.XXXXXX") || die "cannot keep the delivery order"
-    if ! predecessors "$2" > "$snapshot"; then
+    # The authenticated handoff request must also pass parked predecessors
+    # when the first send lost the nonblocking prompt lock and had to queue.
+    if is_main "$2" && refresh_request "$(cat "$1")"; then
+      : > "$snapshot"
+    elif ! predecessors "$2" > "$snapshot"; then
       rm -f "$snapshot"
       order_failed "$1" "$4" "$5"
     fi
@@ -241,7 +285,8 @@ tell() { # pane, kind, message, receiver's terminal, its session, sender's termi
   mkdir -p "$STATE" || die "cannot keep the message"
   file=$(mktemp "$STATE/.message.XXXXXX") && printf '%s' "$3" > "$file" || die "cannot keep the message"
   previous=$(predecessors "$4") || order_failed "$file" "$6" "${7:-}"
-  if [ -z "$previous" ] && send "$1" "$2" "$3"; then rm -f "$file"; return 0; fi
+  # The only permitted prompt during refresh must pass the parked old backlog.
+  if { [ -z "$previous" ] || { is_main "$4" && refresh_request "$3"; }; } && send "$1" "$2" "$3"; then rm -f "$file"; return 0; fi
   # Own session so neither the caller's tool runner nor the sending pane's close takes it down.
   queue_file "$file" "$4" "$5" "$6" "${7:-}"
   return 1
@@ -309,7 +354,9 @@ deliver() { # message file, receiver's terminal (a moved pane gets a new pane id
     row=$(printf '%s\n' "$list" | jq -r --arg t "$2" '.result.panes[] | select(.terminal_id == $t)
       | [.pane_id, (.agent // ""), (.agent_session.value // ""), (.label // "이름 없는 칸")] | @tsv') || continue
     pane=$(printf '%s\n' "$row" | cut -f1); kind=$(printf '%s\n' "$row" | cut -f2); sid=$(printf '%s\n' "$row" | cut -f3); label=$(printf '%s\n' "$row" | cut -f4)
-    [ -n "$kind" ] && { [ -z "$3" ] || [ "$sid" = "$3" ]; } || break
+    # The registered main is a stable receiver across /clear, including queues
+    # created before refresh began. Other receivers retain session binding.
+    [ -n "$kind" ] && { [ -z "$3" ] || [ "$sid" = "$3" ] || is_main "$2"; } || break
     if predecessors_done "$1" "${6:-}" && send "$pane" "$kind" "$(cat "$1")"; then
       rm -f "$1"
       rm -f "$STATE/receivers/$(basename "$1")"

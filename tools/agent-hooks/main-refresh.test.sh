@@ -7,8 +7,9 @@ SANDBOX="$(mktemp -d)"
 TEST_TERM="term_M_$$"
 trap 'rm -rf "$SANDBOX"' EXIT
 fails=0
-check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected [$3] got [$2]"; fails=1; fi; }
-fail() { echo "FAIL $1"; fails=1; }
+failed_checks=()
+check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else fail "$1: expected [$3] got [$2]"; fi; }
+fail() { echo "FAIL $1"; failed_checks+=("$1"); fails=1; }
 
 mkdir -p "$SANDBOX/state/orchestrator" "$SANDBOX/state/agent-handoff" "$SANDBOX/bin"
 # Fake herdr: every call is logged; `pane get` answers the pane in $SANDBOX/panes with the status in $SANDBOX/status.
@@ -34,7 +35,8 @@ case "\$1 \$2" in
     sid=\$(cat "$SANDBOX/cur-sid" 2>/dev/null || jq -r --arg p "\$3" '.result.panes[] | select(.pane_id == \$p) | .agent_session.value' "$SANDBOX/panes")
     jq -n --arg s "\$(cat "$SANDBOX/status")" --arg p "\$3" --arg sid "\$sid" '{result: {pane: {pane_id: \$p, agent_status: \$s, agent_session: {value: \$sid}}}}' ;;
   "notification show") echo "\$3" >> "$SANDBOX/alerts"; echo legacy >> "$SANDBOX/legacy-alerts" ;;
-  "agent prompt") [ ! -f "$SANDBOX/prompt-fails" ] || exit 1 ;;
+  "agent prompt") [ ! -f "$SANDBOX/prompt-fails" ] || exit 1
+    [ "\$4" != /clear ] || echo sid-refreshed > "$SANDBOX/cur-sid" ;;
   *) exit 2 ;;
 esac
 EOS
@@ -145,6 +147,7 @@ chmod +x "$SANDBOX/retry-pg/pgrep"
 S="$SANDBOX/state"
 mr() { # every call is sandboxed: state dir, herdr, pane-tell
   rm -f "$SANDBOX/query-started"
+  rm -f "$SANDBOX/cur-sid"
   rm -f "$SANDBOX/told" "$SANDBOX/herdr-log" "$SANDBOX/box-n" "$SANDBOX/request-n" "$SANDBOX/ready-get-n" "$SANDBOX/unsafe-request" "$SANDBOX/pending-once" "$S/orchestrator/refresh.log"; : > "$SANDBOX/alerts"; : > "$SANDBOX/errors"
   env XDG_STATE_HOME="$S" HERDR_BIN_PATH="$SANDBOX/herdr" HERDR_ERROR_NOTIFY="$SANDBOX/error-notify" MAIN_REFRESH_PANE_TELL="$SANDBOX/pane-tell" \
     MAIN_REFRESH_POLL=0.05 MAIN_REFRESH_QUIET=0 MAIN_REFRESH_RETRY_QUIET=0 MAIN_REFRESH_DEADLINE="${MAIN_REFRESH_DEADLINE:-60}" MAIN_REFRESH_HANDOFF_WAIT="${MAIN_REFRESH_HANDOFF_WAIT:-60}" \
@@ -406,12 +409,12 @@ check "a run in progress: herdr and pane-tell untouched" "$(told)|$([ -f "$SANDB
 touch -t 202001010000 "$S/orchestrator/refresh.lock"; now MAIN_REFRESH_HOUR=09
 check "a stale lock: goes ahead" "$(cleared)" 1
 [ ! -d "$S/orchestrator/refresh.lock" ] || fail "a run removes its lock"
-# A pane-tell message queued for the main pane is tied to its session: a clear would strand it.
-rm_stamp; ( exec -a "pane-tell --deliver msg $TEST_TERM sid-main term_x " sleep 5 ) & pend=$!
-now MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.5; kill "$pend" 2>/dev/null; wait "$pend" 2>/dev/null
-check "a message waiting for the main pane: no /clear" "$(cleared)|$(grep -c '대기 중인 글' "$S/orchestrator/refresh.log")" "0|1"
-# A message that lands while the last checks run (here: during pgrep) is still caught: the transcript is read last.
-rm_stamp; now PATH="$SANDBOX/pg:$PATH" QUERY_START_DELAY=5.2 MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=30
+# Queued main relays now survive the session change, so they do not delay clear.
+rm_stamp; ( exec -a "pane-tell --deliver msg $TEST_TERM sid-main term_x " sleep 30 ) & pend=$!
+now QUERY_START_DELAY=0.6 MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=12; kill "$pend" 2>/dev/null; wait "$pend" 2>/dev/null
+check "a message waiting for the main pane does not delay /clear" "$(cleared)" "1"
+# A message that lands during the last input checks is still caught: the transcript is read last.
+rm_stamp; now BOX_TURN=1 QUERY_START_DELAY=5.2 MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=30
 check "a message during the last checks: no /clear" "$(cleared)|$(grep -q '새 대화' "$S/orchestrator/refresh.log" && echo 1 || echo 0)" "0|1"
 # Started in the main pane's background, main-refresh must not be listed as a job to start again: it would loop.
 rm_stamp; now MAIN_REFRESH_HOUR=09; check "the request leaves main-refresh itself out" "$(grep -c 'main-refresh 자신은 빼고' "$SANDBOX/told")" 1
@@ -423,18 +426,19 @@ check "--now with words in the box: no request, no /clear" "$(grep -c 'handoff s
 check "the slow-start full-box case reaches the readiness check" "$([ -s "$SANDBOX/box-n" ] && [ "$(cat "$SANDBOX/box-n")" -gt 0 ] && echo yes)" yes
 rm_stamp; now NEW_TURN=yes QUERY_START_DELAY=5.2 MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=30
 check "--now with a message after every save: no /clear" "$(cleared)|$(grep -q '새 대화' "$S/orchestrator/refresh.log" && echo 1 || echo 0)" "0|1"
-# Its quiet default is 5 s, not the night's 600: a turn 2 minutes old goes ahead, one that just ended waits.
-rm_stamp; touch "$SANDBOX/sid-main.jsonl"; now MAIN_REFRESH_QUIET= MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.3
-check "--now right after a turn: not asked" "$(told)|$(cleared)" "|0"
+# Context refresh starts at the first idle turn, even with a fresh transcript.
+rm_stamp; touch "$SANDBOX/sid-main.jsonl"; now MAIN_REFRESH_QUIET= MAIN_REFRESH_HOUR=09
+check "--now right after a turn: clears without quiet wait" "$(cleared)" "1"
 rm_stamp; touch -t "$(date -v-2M +%Y%m%d%H%M.%S)" "$SANDBOX/sid-main.jsonl"; now MAIN_REFRESH_QUIET= MAIN_REFRESH_HOUR=09
 check "--now 2 minutes after a turn: clears" "$(cleared)" 1
 rm_stamp; touch -t "$(date -v-2M +%Y%m%d%H%M.%S)" "$SANDBOX/sid-main.jsonl"; mr MAIN_REFRESH_QUIET= MAIN_REFRESH_HOUR=05 MAIN_REFRESH_DEADLINE=0.3
 check "the night run still waits 10 minutes" "$(told)|$(cleared)" "|0"
 touch -t 202001010000 "$SANDBOX/sid-main.jsonl"
-rm_stamp; now BOX_RECENT_FIRST=1 MAIN_REFRESH_QUIET=5 MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=2
-check "a turn during readiness wait must get its own quiet interval" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "0|0"
+# Keep the quiet interval longer than the deadline, with room for parallel CI load.
+rm_stamp; now BOX_RECENT_FIRST=1 MAIN_REFRESH_QUIET=60 MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=12
+check "a turn during readiness wait needs no quiet interval" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "1|1"
 rm_stamp; touch -t "$(date -v-10S +%Y%m%d%H%M.%S)" "$SANDBOX/sid-main.jsonl"; now MAIN_REFRESH_QUIET= MAIN_REFRESH_HOUR=09
-check "--now accepts a short quiet interval instead of waiting a minute" "$(cleared)" 1
+check "--now proceeds with a recent transcript" "$(cleared)" 1
 
 # A pane on a named herdr server keeps its handoff in that server's folder, as `handoff` writes it.
 rm_stamp; mkdir -p "$S/agent-handoff/workers"; mv "$S/agent-handoff/w5:p3.md.transcript" "$S/agent-handoff/workers/"
@@ -491,4 +495,5 @@ check "the default helper receives the genuine error title and body" \
 check "default pane-tell is also resolved beside the real script" "$(grep -c 'handoff save' "$SANDBOX/told")" 1
 
 [ "$fails" = 0 ] && echo "all ok"
+if [ "$fails" != 0 ]; then printf 'FAIL SUMMARY: %s\n' "${failed_checks[@]}"; fi
 exit "$fails"

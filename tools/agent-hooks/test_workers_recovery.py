@@ -24,6 +24,16 @@ DONE = "Full test evidence and decisions.\n" * 20 + "남은 것: 요유 몫: 없
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_bridge_fallback_caps_default_first_line(self):
+        sent = []
+        rec = dict(remote="workers/w1:p2", label="worker", key="worker", agent="spawn-M-r1", folder="/repo")
+        item = dict(day="2026-11-13", time="14:00:00", text="R" * 600 + "\n남은 것: 없음")
+        with patch.object(move.atc, "route_main_report", return_value=None), \
+             patch.object(move, "tell", side_effect=lambda env, addr, text: sent.append(text) or True):
+            self.assertTrue(move.deliver(self.env, rec, item, ("default/w1:p1", {}), {"worker": ""}))
+        self.assertIn("R" * 200, sent[0])
+        self.assertNotIn("R" * 201, sent[0])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

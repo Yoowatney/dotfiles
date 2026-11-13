@@ -324,6 +324,9 @@ def short_report(reply: str, cap: int | None = 200) -> str:
     raw = share.STRIP[2].sub(" ", share.STRIP[0].sub(" ", unicodedata.normalize("NFC", reply)))
     lines = [line.strip() for line in raw.splitlines()]
     first = next((line for line in lines if line and not LEFT.search(line)), "")[:cap]
+    verdict = next((line for line in reversed(lines) if re.fullmatch(r"TASK_(?:RESULT|CHECK): (?:pass|fail|unknown)", line)), "")
+    if verdict and verdict not in first:
+        first += f" [{verdict}]"
     at = max((i for i, line in enumerate(lines) if LEFT.search(line)), default=-1)
     left = []
     if at >= 0:
@@ -524,15 +527,17 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
                     f"확인 칸의 마지막 보고입니다(일 칸 보고와 확인 결과를 함께 보냅니다). {share.CHECK_NOTE}:")
             worker_address = context.get("worker_address")
             if context.get("worker_terminal"):
-                current = herdr_peers.all_panes(env).get(context["worker_terminal"])
+                current = (herdr_peers.all_panes(env) or {}).get(context["worker_terminal"])
                 if current:
                     server = worker_address.split("/", 1)[0] if worker_address and "/" in worker_address else herdr_peers.server_key(env)
                     worker_address = f"{server}/{current[1]['pane_id']}"
-            message = (f"{head}\n"
-                       f"일: {context['job']}\n일 칸 보고: {context['first']}\n확인 결과: {short_report(reply, None)}\n"
+            message = (f"{head} {context['job']}\n"
+                       f"{context.get('summary') or context['first']}\n"
                        f"일 칸: {worker_address or '주소 없음: 기존 보고 참조'}\n"
                        f"확인 종류: {context['kind']} ({context['kind_reason']})\n"
-                       f"전체 보고: {context['report']} ({context['entry']})\n확인 전체 보고: {path} ({entry})")
+                       f"전체 보고: {context['report']} ({context['entry']})\n"
+                       f"{short_report(reply)}\n"
+                       f"확인 전체 보고: {path} ({entry})")
             sent = send(message)
             if sent:
                 if interim:
@@ -562,7 +567,7 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
         else:
             kind, kind_reason = check_kind(reply)
             job = re.sub(r"^[🟢🔴👑🫡\s]+", "", me.get("label") or "") or "일 칸 결과"
-            context = dict(job=job, first=short_report(reply, None).splitlines()[0], report=path, entry=entry,
+            context = dict(job=job, first=short_report(reply, None).splitlines()[0], summary=short_report(reply), report=path, entry=entry,
                            worker_address=herdr_peers.address(env, me['pane_id']),
                            worker_terminal=me.get("terminal_id"),
                            cwd=me.get("cwd") or os.path.expanduser("~"), kind=kind, kind_reason=kind_reason,

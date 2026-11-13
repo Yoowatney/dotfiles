@@ -20,9 +20,10 @@ STATE=${XDG_STATE_HOME:-$HOME/.local/state}
 DIR=$STATE/orchestrator
 # 5 s: on a sleeping Mac the job gets only short dark-wake slices inside the window.
 POLL=${MAIN_REFRESH_POLL:-5}
-# Quiet = someone may still be reading the last turn. At night that is a long time; --now is asked for in the day.
-QUIET=${MAIN_REFRESH_QUIET:-$([ -n "$now" ] && echo 5 || echo 600)}
-RETRY_QUIET=${MAIN_REFRESH_RETRY_QUIET:-5}
+# Nightly refresh leaves time to read the last turn. Threshold-triggered --now
+# instead takes the first idle turn with an empty input box, ignoring quiet time.
+QUIET=${MAIN_REFRESH_QUIET:-$([ -n "$now" ] && echo 0 || echo 600)}
+RETRY_QUIET=${MAIN_REFRESH_RETRY_QUIET:-$([ -n "$now" ] && echo 0 || echo 5)}
 HANDOFF_WAIT=${MAIN_REFRESH_HANDOFF_WAIT:-1800}
 hdir=$STATE/agent-handoff
 # A named herdr server keeps its handoffs in a folder of its own: the same rule as `handoff`.
@@ -34,7 +35,7 @@ skip() {
   local error=
   [ "${1:-}" != --error ] || { error=1; shift; }
   kill $(jobs -p) 2>/dev/null
-  if [ -n "${req:-}" ] && newer; then
+  if [ -z "${keep_gate:-}" ] && [ -n "${req:-}" ] && newer; then
     # A late save still answers the pending request, even if the pane is busy before our first idle check.
     if memo_ready && ! acknowledge; then log "인계 저장 응답을 기록하지 못해 인계 파일을 보존함"
     else mv -f "$hdir/$key.md" "$hdir/$key.md.skipped"; fi
@@ -80,11 +81,32 @@ if ! mkdir "$lock" 2>/dev/null; then
   { [ -n "$(find "$lock" -maxdepth 0 -mmin +120 2>/dev/null)" ] && rmdir "$lock" && mkdir "$lock"; } 2>/dev/null \
     || { log "다른 실행이 진행 중이라 건너뜀"; exit 0; }
 fi
-trap 'kill $(jobs -p) 2>/dev/null; wait 2>/dev/null; rmdir "$lock" 2>/dev/null' EXIT
+gate=$DIR/refresh-delivery.json
+trap 'kill $(jobs -p) 2>/dev/null; wait 2>/dev/null; [ -n "${keep_gate:-}" ] || rm -f "$gate"; rmdir "$lock" 2>/dev/null' EXIT
 row=$("$H" pane list 2>/dev/null | jq -c --arg t "$term" '[.result.panes[] | select(.terminal_id == $t)][0] // empty')
 id=$(jq -r '.pane_id // empty' <<<"$row" 2>/dev/null)
 [ -n "$id" ] || { log "메인 칸을 찾지 못함 ($term)"; exit 0; }
 sid=$(jq -r '.agent_session.value // empty' <<<"$row")
+
+# Stop automatic relays before waiting for the first idle turn. Serialize with
+# pane-tell's final screen-check/prompt lock, so an already accepted prompt
+# finishes before the hold starts. The handoff request alone may pass the hold.
+hold_delivery() {
+  [ -n "${holding:-}" ] && return 0
+  (umask 077; /usr/bin/python3 -I - "$STATE/pane-tell/sending/$id.lock" "$gate" "$$" "$term" "$sid" <<'PY'
+import fcntl, json, os, sys
+lock_path, gate, pid, terminal, session = sys.argv[1:]
+os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+with open(lock_path, "a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    with open(gate + ".tmp", "w") as stream:
+        json.dump(dict(pid=int(pid), terminal=terminal, session=session), stream)
+    os.replace(gate + ".tmp", gate)
+PY
+  ) || skip --error "전달 보류 상태를 저장하지 못해 건너뜀"
+  holding=1
+}
+[ -z "$now" ] || hold_delivery
 
 # A pane moved between workspaces keeps its old id in HERDR_PANE_ID, and `handoff save` names its file by that,
 # so the key is found through the session id; the listed id is the fallback.
@@ -118,8 +140,7 @@ fi
 idle() { case "$(status "$id")" in idle|done) return 0 ;; esac; return 1; }
 # A turn that just ended means someone may be reading it. mtime is wall clock, so this holds across sleep.
 quiet() { [ $(( $(date +%s) - $(stat -f %m "$transcript" 2>/dev/null || date +%s) )) -ge "$QUIET" ]; }
-rested() { idle && quiet; }
-pending() { pgrep -f -- "--deliver [^ ]+ $term " >/dev/null; }
+rested() { idle && { [ -n "$now" ] || quiet; }; }
 same_session() {
   [ -z "$sid" ] || [ "$("$H" pane get "$id" 2>/dev/null | jq -r '.result.pane.agent_session.value // empty')" = "$sid" ]
 }
@@ -186,9 +207,10 @@ attempt=0
 while :; do
 wait_for "$deadline" rested || skip "메인 칸이 $([ -n "$now" ] && echo '30분 동안' || echo '07:00까지') 쉬지 않아 건너뜀"
 late # the Mac may have slept through the first wait
-# Avoid adding another request while delivery or typed input is still waiting. pane-tell can still queue on a race.
-request_ready() { idle && ! pending && "$TELL" --box-ready "$id" claude >/dev/null 2>&1 && idle; }
-handoff_ready() { rested && request_ready && quiet; }
+hold_delivery
+# Wait for empty input without letting ordinary relays take this idle turn.
+request_ready() { idle && "$TELL" --box-ready "$id" claude >/dev/null 2>&1 && idle; }
+handoff_ready() { rested && request_ready; }
 if [ -n "$now" ]; then
   wait_for "$deadline" handoff_ready || skip "입력창이나 대기 중인 글을 기다리다 건너뜀"
 else
@@ -226,7 +248,7 @@ mkdir -p "$hdir"
   && mv -f "$request_file.tmp.$$" "$request_file") || skip --error "인계 요청을 보관하지 못해 건너뜀"
 rm -f "$ack_file"
 req=1; acknowledged=
-out=$("$TELL" "$id" "$ask" 2>/dev/null) \
+out=$(MAIN_REFRESH_REQUEST_TOKEN="$token" "$TELL" "$id" "$ask" 2>/dev/null) \
   || {
     # A nonzero result can still leave a durable queued payload. Retry only when its nonce
     # is absent; successful but unrecognized results below also retain the pending request.
@@ -258,8 +280,7 @@ fi
 # --box-ready reads the screen twice 0.7 s apart: a sleep or a whole new turn can land in between, so the checks follow it.
 late
 idle || skip "인계 뒤에 칸이 다시 일하고 있어 건너뜀"
-# A pane-tell message queued for this pane waits for its session (pane-tell --deliver): after a clear it would never arrive.
-! pending || { [ -n "$now" ] && { QUIET=$RETRY_QUIET; continue; }; skip "메인 칸을 기다리는 글이 있어 건너뜀"; }
+# Ordinary relays remain durable in pane-tell's queue until the new session.
 # Another run may have cleared the pane meanwhile: every check above read the old session's transcript.
 same_session || skip "세션이 바뀌어 건너뜀"
 # Loading a handoff consumes it: another session may have removed it during the screen checks.
@@ -272,7 +293,7 @@ if ! memo_ready; then
   skip "인계 파일이 바뀌어 건너뜀"
 fi
 # This check runs last, right before the /clear: a message that lands during any earlier check is still seen (11/05).
-# ponytail: what lands during the herdr call itself is not; closing that needs a send-if-idle in herdr.
+# The relay hold also covers the herdr call itself.
 if ! request_current; then
   if [ -n "$now" ]; then
     log "인계 뒤에 새 대화가 있어 인계를 다시 요청함"
@@ -282,7 +303,15 @@ if ! request_current; then
   skip "인계 뒤에 새 대화가 있어 건너뜀"
 fi
 # Straight through herdr, never pane-tell's queue: a queued /clear would fire hours later and wipe the main pane.
-"$H" agent prompt "$id" /clear >/dev/null 2>&1 || skip --error "/clear를 보내지 못해 건너뜀"
+keep_gate=1
+jq '.clearing = true' "$gate" > "$gate.tmp" && mv -f "$gate.tmp" "$gate" \
+  || { keep_gate=; skip --error "새 세션 전달 보류 상태를 저장하지 못함"; }
+"$H" agent prompt "$id" /clear >/dev/null 2>&1 || { keep_gate=; skip --error "/clear를 보내지 못해 건너뜀"; }
+# A successful command can return before /clear finishes. Do not release relays
+# into the old session; a blank new session id is valid before its first prompt.
+new_session_ready() { ! same_session && idle; }
+wait_for "$deadline" new_session_ready || skip --error "/clear 뒤 새 세션을 확인하지 못해 전달 보류를 유지함"
+keep_gate=
 rm -f "$request_file" "$ack_file"
 [ -n "$now" ] || { mkdir -p "$DIR" && : > "$DIR/refreshed-$day"; }
 log "메인 칸 $id 새로 시작함${now:+ (--now)}"
