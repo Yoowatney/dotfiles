@@ -156,10 +156,66 @@ set_main() { # the main pane, and a transcript for its session that the handoff 
   : > "$SANDBOX/sid-main.jsonl"; echo "$SANDBOX/sid-main.jsonl" > "$S/agent-handoff/w5:p3.md.transcript"
 }
 rm_main() { rm -f "$S/orchestrator/main"; }
-rm_stamp() { rm -f "$S/orchestrator"/refreshed-*; rm -f "$S"/agent-handoff/*.md "$S"/agent-handoff/*.md.skipped; }
+rm_stamp() { rm -f "$S/orchestrator"/refreshed-*; rm -f "$S"/agent-handoff/*.md "$S"/agent-handoff/*.md.skipped "$S"/agent-handoff/*.refresh-request*; }
 STAMP="$S/orchestrator/refreshed-$(date +%F)"
 
 set_main; status idle
+# A timeout ends a watcher process, not the request already delivered to the main pane.
+# A second tick must resume waiting, and only that request's saved nonce acknowledges it.
+MR_ARGS=--now mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+original_request=$(grep 'handoff save' "$SANDBOX/told")
+original_token=${original_request##* }
+MR_ARGS=--now mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+check "a later process does not resend an unacknowledged request" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "0|0"
+cp "$SANDBOX/sid-main.jsonl" "$SANDBOX/sid-main-moved.jsonl"
+echo "$SANDBOX/sid-main-moved.jsonl" > "$S/agent-handoff/w5:p3.md.transcript"
+MR_ARGS=--now mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+check "a moved transcript for the same session does not cause a resend" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "0|0"
+mv "$S/agent-handoff/w5:p3.md.transcript" "$S/agent-handoff/w8:p2.md.transcript"
+MR_ARGS=--now mr HANDOFF_KEY=w8:p2 HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+check "a new handoff key for the same session does not cause a resend" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "0|0"
+mv "$S/agent-handoff/w8:p2.md.transcript" "$S/agent-handoff/w5:p3.md.transcript"
+printf '%s\n' '[request:earlier-ack]' > "$S/agent-handoff/main-refresh.refresh-request.ack"
+MR_ARGS=--now mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+check "an earlier acknowledgment cannot unlock a pending request" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "0|0"
+rm -f "$S/agent-handoff/main-refresh.refresh-request.ack"
+printf '%s\nwrong response\n' '[request:unrelated]' > "$S/agent-handoff/w5:p3.md"
+MR_ARGS=--now mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+check "another request's save does not release the pending request" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "0|0"
+printf '%s\nlate saved response\n' "$original_token" > "$S/agent-handoff/w5:p3.md"
+MR_ARGS=--now mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+check "the original save acknowledges across processes without another request" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "0|1"
+rm_stamp; set_main
+# A save may arrive after timeout while the pane is busy with other work. Moving that memo aside
+# must not forget that the pending request was answered; a later fresh request is then allowed.
+MR_ARGS=--now mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+busy_request=$(grep 'handoff save' "$SANDBOX/told")
+printf '%s\nlate save before more work\n' "${busy_request##* }" > "$S/agent-handoff/w5:p3.md"
+status working
+MR_ARGS=--now mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=0.3
+status idle
+MR_ARGS=--now mr MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+check "a save observed while busy permits a fresh request after that work" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "1|1"
+rm_stamp; set_main
+# Unknown delivery could have succeeded. Do not replay it merely because the sender could not confirm it.
+MR_ARGS=--now mr TELL_UNKNOWN=1 HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+MR_ARGS=--now mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+check "uncertain delivery remains pending instead of replaying" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "0|0"
+# A new session owns a new request; an unanswered request for the old session must not block it.
+panes w5:p3 sid-new
+: > "$SANDBOX/sid-new.jsonl"; echo "$SANDBOX/sid-new.jsonl" > "$S/agent-handoff/w5:p3.md.transcript"
+MR_ARGS=--now mr MAIN_REFRESH_HOUR=09
+check "a changed session may receive its own request" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "1|1"
+rm_stamp; set_main
+# Two watcher processes can overlap; the process lock still admits only the first sender.
+rm -f "$SANDBOX/request-n"
+MR_ARGS=--now mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=1 & watcher=$!
+for tick in $(seq 1 100); do [ ! -f "$SANDBOX/request-n" ] || break; sleep 0.02; done
+env XDG_STATE_HOME="$S" HERDR_BIN_PATH="$SANDBOX/herdr" HERDR_ERROR_NOTIFY="$SANDBOX/error-notify" \
+  MAIN_REFRESH_PANE_TELL="$SANDBOX/pane-tell" MAIN_REFRESH_HOUR=09 /bin/bash "$SUBJECT" --now >/dev/null 2>&1
+wait "$watcher"
+check "overlapping watcher processes send only one request" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "1|0"
+rm_stamp; set_main
 mr MAIN_REFRESH_HOUR=09; check "outside 05-06 nothing is sent or alerted" "$(told)|$(cat "$SANDBOX/errors")" "|"
 rm_main; mr MAIN_REFRESH_HOUR=09; check "no main file stays silent even outside the window" "$(cat "$SANDBOX/alerts")" ""
 set_main

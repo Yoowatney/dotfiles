@@ -34,7 +34,11 @@ skip() {
   local error=
   [ "${1:-}" != --error ] || { error=1; shift; }
   kill $(jobs -p) 2>/dev/null
-  if [ -n "${req:-}" ] && newer; then mv -f "$hdir/$key.md" "$hdir/$key.md.skipped"; fi
+  if [ -n "${req:-}" ] && newer; then
+    # A late save still answers the pending request, even if the pane is busy before our first idle check.
+    if memo_ready && ! acknowledge; then log "인계 저장 응답을 기록하지 못해 인계 파일을 보존함"
+    else mv -f "$hdir/$key.md" "$hdir/$key.md.skipped"; fi
+  fi
   log "$*"
   # Busy input, new work and the time window are expected skips. Only failed operations need an alert.
   if [ -n "$error" ]; then
@@ -91,6 +95,25 @@ if [ -n "$sid" ]; then
   [ -z "$m" ] || { key=${m##*/}; key=${key%.md.transcript}; }
 fi
 transcript=$(cat "$hdir/$key.md.transcript" 2>/dev/null)
+# The watcher may time out or die after delivery. Keep the outstanding request across processes;
+# the execution lock alone cannot distinguish that from a request that was never sent.
+# There is one registered main pane per server. Its handoff key can change while its session stays the same.
+request_file=$hdir/main-refresh.refresh-request
+ack_file=$request_file.ack
+if [ -f "$request_file" ]; then
+  jq -e 'type == "object" and (.session | type == "string") and (.transcript | type == "string")
+    and (.token | type == "string" and length > 0) and (.ask | type == "string" and length > 0)' "$request_file" >/dev/null 2>&1 \
+    || skip --error "보관된 인계 요청을 읽지 못해 건너뜀"
+  if jq -e --arg s "$sid" --arg t "$transcript" '.session == $s and ($s != "" or .transcript == $t)' "$request_file" >/dev/null; then
+    req=1
+    token=$(jq -r .token "$request_file")
+    ask=$(jq -r .ask "$request_file")
+    ! grep -Fqx -- "$token" "$ack_file" 2>/dev/null || acknowledged=1
+    log "앞 실행의 인계 요청 응답을 계속 기다림"
+  else
+    rm -f "$request_file" "$ack_file"
+  fi
+fi
 
 idle() { case "$(status "$id")" in idle|done) return 0 ;; esac; return 1; }
 # A turn that just ended means someone may be reading it. mtime is wall clock, so this holds across sleep.
@@ -100,9 +123,20 @@ pending() { pgrep -f -- "--deliver [^ ]+ $term " >/dev/null; }
 same_session() {
   [ -z "$sid" ] || [ "$("$H" pane get "$id" 2>/dev/null | jq -r '.result.pane.agent_session.value // empty')" = "$sid" ]
 }
-newer() { [ -n "$(find "$hdir/$key.md" -newer "$lock" 2>/dev/null)" ]; }
+newer() { [ -n "$(find "$hdir/$key.md" -newer "${request_file:-$lock}" 2>/dev/null)" ]; }
 # -s: an empty memo is none. The nonce also rejects a newer memo saved before queued delivery.
 memo_ready() { [ -s "$hdir/$key.md" ] && newer && grep -Fqx -- "$token" "$hdir/$key.md"; }
+acknowledge() {
+  acknowledged=1
+  # Bind the acknowledgment to its nonce: a crash after replacing the request must not reuse an old acknowledgment.
+  (umask 077; printf '%s\n' "$token" > "$ack_file.tmp.$$" && mv -f "$ack_file.tmp.$$" "$ack_file")
+}
+fresh() {
+  memo_ready || return 1
+  # Saving is the acknowledgment, even if the pane is still finishing its reply.
+  acknowledge || return 1
+  idle
+}
 # The last real user message must still be our whole request (pane-tell prefixes it, so compare the end).
 # Images and queued input count as new work; meta lines, tool results and compaction summaries do not.
 request_current() {
@@ -142,11 +176,10 @@ fi
 # A final-check race can retry without adding any conversation. Reuse this request's saved answer in that case;
 # a missing memo or genuinely later user input still needs another request with its own nonce.
 if [ -n "${req:-}" ] && memo_ready && request_current; then
+  fresh || skip "인계 뒤에 칸이 다시 일하고 있어 건너뜀"
   log "이미 저장된 인계로 확인을 계속함"
 else
-# The lock's mtime marks the request: find -newer compares to the nanosecond, so a handoff saved before it, even in the
-# same second, is never taken for the answer (whole-second times did, check pane 11/05).
-touch "$lock"; req=1
+if [ -z "${req:-}" ] || [ -n "${acknowledged:-}" ]; then
 attempt=$((attempt + 1))
 # Background jobs outlive the clear and their end reaches the next session (tested 2026-11-05), which must know what each
 # one watches; one that has stopped is started again from its command, never a second copy of one still running.
@@ -156,6 +189,14 @@ else ask="[main-refresh] 새벽 정리입니다. ${what} handoff save로 저장�
 # Both the delivered request and the memo must name this attempt. A save made while our request is queued is not its answer.
 token="[request:$$:$attempt]"
 ask="$ask 인계 첫 줄에 다음 요청 번호를 그대로 남기세요: $token"
+# Persist before attempting delivery: an unknown result or a crash may still mean it arrived.
+# Its unchanged mtime rejects an older memo, including a save made in the same second.
+mkdir -p "$hdir"
+(umask 077; jq -n --arg s "$sid" --arg t "$transcript" --arg token "$token" --arg ask "$ask" \
+  '{session:$s, transcript:$t, token:$token, ask:$ask}' > "$request_file.tmp.$$" \
+  && mv -f "$request_file.tmp.$$" "$request_file") || skip --error "인계 요청을 보관하지 못해 건너뜀"
+rm -f "$ack_file"
+req=1; acknowledged=
 out=$("$TELL" "$id" "$ask" 2>/dev/null) \
   || skip --error "인계 요청을 보내지 못해 건너뜀"
 case "$out" in
@@ -163,7 +204,7 @@ case "$out" in
   queued*) log "인계 요청이 대기열에 들어감: 전달과 인계 저장을 기다림" ;;
   *) skip --error "인계 요청 결과를 확인하지 못해 건너뜀" ;;
 esac
-fresh() { memo_ready && idle; }
+fi
 if ! wait_for "$HANDOFF_WAIT" fresh; then
   same_session || skip "세션이 바뀌어 건너뜀"
   memo_ready && skip "인계 뒤에 칸이 다시 일하고 있어 건너뜀"
@@ -205,6 +246,7 @@ if ! request_current; then
 fi
 # Straight through herdr, never pane-tell's queue: a queued /clear would fire hours later and wipe the main pane.
 "$H" agent prompt "$id" /clear >/dev/null 2>&1 || skip --error "/clear를 보내지 못해 건너뜀"
+rm -f "$request_file" "$ack_file"
 [ -n "$now" ] || { mkdir -p "$DIR" && : > "$DIR/refreshed-$day"; }
 log "메인 칸 $id 새로 시작함${now:+ (--now)}"
 break
