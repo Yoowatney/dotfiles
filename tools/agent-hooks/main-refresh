@@ -6,12 +6,15 @@
 #                        nobody types /clear there any more (2026-11-05). What decides when to call it is not here.
 #                        From a pane on the workers server, drop both of its server variables to reach the main pane:
 #                        env -u HERDR_SOCKET_PATH -u HERDR_SESSION main-refresh --now
+#   main-refresh --restart  --now, but ends the Claude process and starts a new one in the pane's shell instead of /clear:
+#                        CLI settings such as the startup profile load only at process start (api#1204).
 # Test knobs: MAIN_REFRESH_HOUR (wins over the clock), _POLL, _DEADLINE, _HANDOFF_WAIT (seconds, fractions ok),
 # _QUIET, _RETRY_QUIET (whole seconds), _PANE_TELL, HERDR_BIN_PATH, and HERDR_ERROR_NOTIFY.
 # A run from inside the main pane would make pane-tell refuse "this pane"; launchd sets none anyway.
 # HERDR_SOCKET_PATH stays: a run from a workers pane must find nothing, not reach the default server.
 unset HERDR_PANE_ID
-now=; [ "${1:-}" != --now ] || now=1
+now=; restart=
+case "${1:-}" in --now) now=1 ;; --restart) now=1 restart=1 ;; esac
 H=${HERDR_BIN_PATH:-herdr}
 # Commands in ~/.local/bin are symlinks; adjacent helpers live beside the real script.
 HERE=$(/usr/bin/python3 -I -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "$0")
@@ -235,7 +238,8 @@ attempt=$((attempt + 1))
 # Background jobs outlive the clear and their end reaches the next session (tested 2026-11-05), which must know what each
 # one watches; one that has stopped is started again from its command, never a second copy of one still running.
 what="열린 상태 다섯 가지만 인계하세요. (1) 지금 도는 부하 세션과 각 세션의 일. (2) 감시 중인 Slack 스레드와 각각의 재감시 명령. (3) 답을 기다리는 요유 질문과 그 위치(회사 결정은 보드 링크, 개인 결정은 파일 위치). (4) 이 세션에서 백그라운드로 도는 작업(main-refresh 자신은 빼고)과 각각의 재시작 명령(명령 전문). 다음 세션은 pgrep -f로 이미 도는 작업은 건너뛰고 다시 겁니다. (5) 오늘 남은 일(이 인계 요청 직전에 받은 글 중 아직 처리하지 않은 요청은 원문 포함). 배운 요령은 ~/.claude/skills/main-orchestrator/references/에 적고 인계에는 쓰지 마세요. '앞 인계 그대로' 같은 사슬 참조는 쓰지 말고 필요한 줄은 직접 옮겨 적으세요."
-if [ -n "$now" ]; then ask="[main-refresh] 대화가 길어 지금 새로 시작합니다. 다음 세션이 이어받도록 ${what} handoff save로 저장하고 '인계 저장함' 한 줄로 끝내세요. 다른 일은 하지 마세요. 저장하면 /clear가 저절로 옵니다."
+if [ -n "$restart" ]; then ask="[main-refresh] 시작 설정을 새로 적용하려고 이 세션의 Claude 프로세스를 다시 켭니다. 다시 켜면 이 세션의 백그라운드 작업과 Monitor도 멈추므로 (4)에 빠짐없이 적으세요. 다음 세션이 이어받도록 ${what} handoff save로 저장하고 '인계 저장함' 한 줄로 끝내세요. 다른 일은 하지 마세요. 저장하면 프로세스가 저절로 다시 켜집니다."
+elif [ -n "$now" ]; then ask="[main-refresh] 대화가 길어 지금 새로 시작합니다. 다음 세션이 이어받도록 ${what} handoff save로 저장하고 '인계 저장함' 한 줄로 끝내세요. 다른 일은 하지 마세요. 저장하면 /clear가 저절로 옵니다."
 else ask="[main-refresh] 새벽 정리입니다. ${what} handoff save로 저장하고 '인계 저장함' 한 줄로 끝내세요. 다른 일은 하지 마세요."; fi
 # Both the delivered request and the memo must name this attempt. A save made while our request is queued is not its answer.
 token="[request:$$:$attempt]"
@@ -306,14 +310,35 @@ fi
 keep_gate=1
 jq '.clearing = true' "$gate" > "$gate.tmp" && mv -f "$gate.tmp" "$gate" \
   || { keep_gate=; skip --error "새 세션 전달 보류 상태를 저장하지 못함"; }
-"$H" agent prompt "$id" /clear >/dev/null 2>&1 || { keep_gate=; skip --error "/clear를 보내지 못해 건너뜀"; }
+back="되돌리기: 메인 칸 셸에서 CLAUDE_STARTUP_PROFILE=full claude"
+if [ -n "$restart" ]; then
+  "$H" agent prompt "$id" /exit >/dev/null 2>&1 || { keep_gate=; skip --error "/exit를 보내지 못해 건너뜀"; }
+  # /exit returns before the process ends; a line typed before the shell is back would reach the old session.
+  # herdr 0.9 omits `agent` for a pane at its shell; an error reply has no pane_id, so it never counts as one.
+  shell_back() {
+    "$H" pane get "$id" 2>/dev/null | jq -e '.result.pane | .pane_id != null and .agent == null and .agent_status == "unknown"' >/dev/null
+  }
+  # A slow exit may still come: keep the handoff for the next start, but drop the hold, since an old session that
+  # stays would otherwise wait for relays forever (its session id never changes).
+  wait_for "$deadline" shell_back || { rm -f "$gate"; skip --error "/exit 뒤 claude가 끝나지 않아 다시 켜지 못함(인계는 남겨 둠)"; }
+  # The pane's own shell runs it, so the claude alias (claude-online) picks this pane's profile by its terminal id.
+  # A start that fails within a minute (a broken profile) retries with the full one; a later exit never does.
+  # Not `herdr agent start`: it names the agent, and a named pane counts as one an agent opened (pane-label --close).
+  # The old session is gone: keep its handoff for whichever start comes next. The kept gate holds nothing now,
+  # since pane-tell releases it once this run ends and the pane's session has changed.
+  "$H" pane run "$id" '_mr=$SECONDS; claude || (( SECONDS - _mr > 60 )) || CLAUDE_STARTUP_PROFILE=full claude' >/dev/null 2>&1 \
+    || skip --error "claude를 다시 실행하지 못함. $back"
+else
+  "$H" agent prompt "$id" /clear >/dev/null 2>&1 || { keep_gate=; skip --error "/clear를 보내지 못해 건너뜀"; }
+fi
 # A successful command can return before /clear finishes. Do not release relays
 # into the old session; a blank new session id is valid before its first prompt.
 new_session_ready() { ! same_session && idle; }
-wait_for "$deadline" new_session_ready || skip --error "/clear 뒤 새 세션을 확인하지 못해 전달 보류를 유지함"
+wait_for "$deadline" new_session_ready \
+  || skip --error "$([ -n "$restart" ] && echo "다시 켠 뒤 새 세션을 확인하지 못해 전달 보류를 유지함. $back" || echo "/clear 뒤 새 세션을 확인하지 못해 전달 보류를 유지함")"
 keep_gate=
 rm -f "$request_file" "$ack_file"
 [ -n "$now" ] || { mkdir -p "$DIR" && : > "$DIR/refreshed-$day"; }
-log "메인 칸 $id 새로 시작함${now:+ (--now)}"
+log "메인 칸 $id $([ -n "$restart" ] && echo '다시 켬 (--restart)' || echo "새로 시작함${now:+ (--now)}")"
 break
 done
