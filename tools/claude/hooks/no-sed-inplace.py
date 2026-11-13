@@ -324,8 +324,20 @@ def _toplevel(path: str) -> str | None:
     return os.path.realpath(done.stdout.strip()) if done.returncode == 0 and done.stdout.strip() else None
 
 
-def _changes_branch(sub: str, args: list[str], cwd: str) -> bool:
-    """`git checkout|switch ...` that leaves main: creates, detaches, or names a branch, tag or commit (not main)."""
+def _is_main(name_: str, cwd: str, lone: bool = True) -> bool:
+    """Whether git would land on main: the word itself, or `-` and `@{-N}` resolved to the branch they point at.
+    A reflog form is read before the command runs, so another switch earlier in the same command may move it: `lone`."""
+    if name_ in ("main", "HEAD"):
+        return True
+    if lone and (name_ == "-" or name_.startswith("@{-")):
+        done = _git_out(cwd, "rev-parse", "--abbrev-ref", "@{-1}" if name_ == "-" else name_)
+        return done.returncode == 0 and done.stdout.strip() == "main"
+    return False
+
+
+def _changes_branch(sub: str, args: list[str], cwd: str, dynamic: bool = False, lone: bool = True) -> bool:
+    """`git checkout|switch ...` that leaves main: creates, detaches, or names a branch, tag or commit (not main).
+    `dynamic`: the command holds a `$(...)` or backtick, which the word list cannot show."""
     if sub not in ("checkout", "switch"):
         return False
     restore = "--" in args and args[args.index("--") + 1:]  # `checkout <tree> -- <file>` leaves HEAD alone
@@ -334,13 +346,18 @@ def _changes_branch(sub: str, args: list[str], cwd: str) -> bool:
         return True
     names = [a for k, a in enumerate(before) if (not a.startswith("-") or a == "-")
              and not (k and before[k - 1] in ("--conflict", "--pathspec-from-file"))]  # their value is not a branch
-    if sub == "switch":  # `switch -- feature` names a branch too
-        names += [a for a in args[len(before) + 1:] if not a.startswith("-")]
-        return bool(names) and names[0] != "main"
-    if restore or len(names) != 1 or names[0] in ("main", "HEAD"):
+    if sub == "switch":  # a branch is always named; `switch -- feature` and `switch -- -` too
+        names += [a for a in args[len(before) + 1:] if not a.startswith("-") or a == "-"]
+        return not names or not _is_main(names[0], cwd, lone)
+    if restore:
+        return False
+    if not names:
+        return dynamic and not any(a.startswith("--pathspec-from-file") for a in before)  # `git checkout $(...)`: unread
+    if len(names) != 1 or _is_main(names[0], cwd, lone):
         return False
     # a branch only on a remote is made and switched to by checkout's --guess
-    return (names[0] == "-" or _git_out(cwd, "rev-parse", "--verify", "--quiet", names[0] + "^{commit}").returncode == 0
+    return (names[0] == "-" or names[0].startswith("@{-")
+            or _git_out(cwd, "rev-parse", "--verify", "--quiet", names[0] + "^{commit}").returncode == 0
             or bool(_git_out(cwd, "for-each-ref", "--format=x", "refs/remotes/*/" + names[0]).stdout.strip()))
 
 
@@ -354,6 +371,8 @@ def switch_problem(cmd: str, cwd: str | None) -> str | None:
                 os.environ.get("LIVE_CHECKOUTS", os.pathsep.join(LIVE_CHECKOUTS)).split(os.pathsep) if d}
         start = here = cwd or os.getcwd()
         seen = {start}
+        dynamic = bool(re.search(r"\$\(|`", cmd))
+        lone = sum(1 for w in simple_commands(cmd) if name(w[0]) == "git" and {"checkout", "switch"} & set(w[1:])) < 2
         # ponytail: a `( ... )` group or `bash -c`'s cd may not last past it, so with one every directory seen is tried; a worktree
         # branch made inside a group from a live cwd is refused too, `git -C <worktree>` says it without a group
         group = bool(re.search(r"(?:^|[;&|(]\s*)\(|\b(?:ba|z)?sh\s+-\w*c\b|\beval\b", code_only(cmd)))
@@ -370,7 +389,7 @@ def switch_problem(cmd: str, cwd: str | None) -> str | None:
                         where = _path(where, w[k + 1])
                     k += 2 if w[k] in GIT_VALUED else 1
                 top = _toplevel(where)
-                if top not in live or not _changes_branch(w[k] if k < len(w) else "", w[k + 1:], where):
+                if top not in live or not _changes_branch(w[k] if k < len(w) else "", w[k + 1:], where, dynamic, lone):
                     continue
                 return (f"live-checkout: launchd 작업과 모든 세션이 코드를 읽는 `{top}`의 브랜치를 바꾸지 말 것. "
                         "그 안의 작업 중 코드가 그대로 돌아감. 작업은 `git worktree add /tmp/codex/<일>-<이름> -b <새 브랜치> origin/main`로 "

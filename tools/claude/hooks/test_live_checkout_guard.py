@@ -38,7 +38,17 @@ class LiveCheckoutGuardTests(unittest.TestCase):
         self.other.mkdir()
         git(self.other, 'init', '-q', '-b', 'main')
         git(self.live, 'update-ref', 'refs/remotes/origin/remote-only', 'HEAD')  # fetched, no local branch yet
-        self.env = dict(os.environ, LIVE_CHECKOUTS=str(self.live), LIVE_ROOT=str(root))
+        git(self.live, 'checkout', '-q', 'feature')  # so that @{-1} is feature while live is on main
+        git(self.live, 'checkout', '-q', 'main')
+        self.back = root / 'back'  # on feature, whose previous branch is main
+        self.back.mkdir()
+        git(self.back, 'init', '-q', '-b', 'main')
+        (self.back / 'f').write_text('x')
+        git(self.back, 'add', '.')
+        git(self.back, 'commit', '-q', '-m', 'one')
+        git(self.back, 'checkout', '-q', '-b', 'feature')
+        self.env = dict(os.environ, LIVE_CHECKOUTS=os.pathsep.join([str(self.live), str(self.back)]),
+                        LIVE_ROOT=str(root))
 
     def decision(self, command, cwd):
         result = subprocess.run([sys.executable, '-I', str(HOOK)], text=True, capture_output=True, env=self.env,
@@ -91,6 +101,29 @@ class LiveCheckoutGuardTests(unittest.TestCase):
         self.denied(f'cd -P {self.live} && git switch feature', self.other)
         self.denied(f'cd {self.live} && (cd {self.work} && git status); git switch feature', self.other)
         self.denied(f'cd {self.live} && bash -c "cd {self.work}"; git switch feature', self.other)
+
+    def test_every_form_that_means_the_previous_branch_is_resolved_not_matched(self):
+        for command in ['git switch -', 'git switch -- -', 'git checkout -', 'git checkout @{-1}', 'git switch @{-1}',
+                        'git switch -f -', 'git checkout -f @{-1}', 'git switch -q -- -', 'git checkout -q -',
+                        'git checkout @{-3}']:  # past the reflog it resolves to nothing, and nothing is refused
+            with self.subTest(command=command):
+                self.denied(command)  # live is on main and its previous branch is feature
+        for command in ['git switch -', 'git switch -- -', 'git checkout -', 'git checkout @{-1}', 'git switch @{-1}']:
+            with self.subTest(command=command):
+                self.allowed(command, self.back)  # there it only goes back to main
+        self.allowed('git checkout @{-2}')  # live: two switches back is main
+
+    def test_a_branch_name_made_by_a_substitution_is_not_trusted(self):
+        for command in ['git switch $(git rev-parse --abbrev-ref @{-1})', 'git checkout $(echo feature)',
+                        'git checkout `echo feature`', 'git switch "$(echo feature)"', 'git switch "$SOME_BRANCH"']:
+            with self.subTest(command=command):
+                self.denied(command)
+
+    def test_a_reflog_form_is_not_trusted_after_another_switch_in_the_same_command(self):
+        self.denied('git checkout main && git checkout @{-2}')  # the first switch moves @{-2} to feature
+        self.denied('git checkout main && git switch -')
+        self.allowed('git checkout @{-2}')
+        self.allowed('git checkout --pathspec-from-file="$(printf paths.txt)"')
 
     def test_going_back_to_main_and_file_restores_are_allowed(self):
         for command in ['git checkout main', 'git switch main', 'git checkout -q main', 'git checkout -- file.txt',
