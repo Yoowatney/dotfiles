@@ -131,6 +131,35 @@ acknowledge() {
   # Bind the acknowledgment to its nonce: a crash after replacing the request must not reuse an old acknowledgment.
   (umask 077; printf '%s\n' "$token" > "$ack_file.tmp.$$" && mv -f "$ack_file.tmp.$$" "$ack_file")
 }
+# pane-tell can fail after moving the payload into waiting, before registering its receiver.
+# Bound the inspection; an unreadable or oversized queue is uncertain, so retain the request.
+request_may_be_queued() {
+  /usr/bin/python3 -I - "$STATE/pane-tell/waiting" "$token" <<'PY'
+import os
+import sys
+
+directory, token = sys.argv[1], sys.argv[2].encode()
+try:
+    entries = os.scandir(directory)
+except FileNotFoundError:
+    sys.exit(10)
+except OSError:
+    sys.exit(0)
+try:
+    with entries:
+        for count, entry in enumerate(entries):
+            if count >= 512 or not entry.is_file(follow_symlinks=False):
+                sys.exit(0)
+            with open(entry.path, "rb") as payload:
+                content = payload.read(65537)
+            if token in content or len(content) > 65536:
+                sys.exit(0)
+except OSError:
+    sys.exit(0)
+sys.exit(10)
+PY
+  [ "$?" -ne 10 ] # Only the explicit "absent" result authorizes another delivery.
+}
 fresh() {
   memo_ready || return 1
   # Saving is the acknowledgment, even if the pane is still finishing its reply.
@@ -198,7 +227,15 @@ mkdir -p "$hdir"
 rm -f "$ack_file"
 req=1; acknowledged=
 out=$("$TELL" "$id" "$ask" 2>/dev/null) \
-  || skip --error "인계 요청을 보내지 못해 건너뜀"
+  || {
+    # A nonzero result can still leave a durable queued payload. Retry only when its nonce
+    # is absent; successful but unrecognized results below also retain the pending request.
+    if ! request_may_be_queued; then
+      rm -f "$request_file" "$ack_file"
+      req=
+    fi
+    skip --error "인계 요청을 보내지 못해 건너뜀"
+  }
 case "$out" in
   told*) ;;
   queued*) log "인계 요청이 대기열에 들어감: 전달과 인계 저장을 기다림" ;;

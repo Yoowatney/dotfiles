@@ -67,6 +67,11 @@ if [ "\$1" = --box-ready ]; then
   fi
   [ -z "\${BOX_FULL:-}" ]; exit
 fi
+if [ -n "\${QUEUE_THEN_FAIL:-}" ]; then
+  mkdir -p "$SANDBOX/state/pane-tell/waiting"
+  printf '%s' "\$2" > "$SANDBOX/state/pane-tell/waiting/failed-registration"
+  exit 1
+fi
 [ ! -f "$SANDBOX/tell-fails" ] || exit 1
 case "\$2" in *"handoff save"*)
   [ "\$(cat "$SANDBOX/status")" != working ] || echo busy >> "$SANDBOX/unsafe-request"
@@ -334,7 +339,15 @@ check "HERDR_PANE_ID never reaches pane-tell" "$(cat "$SANDBOX/tell-env")" unset
 # pane-tell or herdr failing is reported, never stamped.
 rm_stamp; touch "$SANDBOX/tell-fails"; mr MAIN_REFRESH_HOUR=05
 check "pane-tell fails: no /clear, error gateway called" "$(cleared)|$(grep -c '인계 요청을 보내지 못해' "$SANDBOX/errors")" "0|1"
-rm "$SANDBOX/tell-fails"; touch "$SANDBOX/prompt-fails"; rm_stamp; mr MAIN_REFRESH_HOUR=05
+rm "$SANDBOX/tell-fails"
+# No state cleanup between processes: a definite send failure must not leave a request waiting for an impossible answer.
+mr MAIN_REFRESH_HOUR=05 MAIN_REFRESH_HANDOFF_WAIT=0.3
+check "a definite send failure recovers on the next run" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "1|1"
+rm_stamp; mr QUEUE_THEN_FAIL=1 MAIN_REFRESH_HOUR=05
+mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=05 MAIN_REFRESH_HANDOFF_WAIT=0.3
+check "a failed command with a queued nonce does not resend" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "0|0"
+rm -rf "$S/pane-tell"
+touch "$SANDBOX/prompt-fails"; rm_stamp; mr MAIN_REFRESH_HOUR=05
 check "agent prompt fails: error gateway called, no stamp" "$(grep -c '/clear를 보내지 못해' "$SANDBOX/errors")|$([ -f "$STAMP" ] && echo stamped)" "1|"
 rm "$SANDBOX/prompt-fails"
 rm_stamp; mr TELL_UNKNOWN=1 MAIN_REFRESH_HOUR=05

@@ -41,6 +41,7 @@ import glob
 import os
 import re
 import shlex
+import subprocess
 import sys
 import time
 
@@ -60,7 +61,7 @@ REASON = (MARK + " 같은 일의 고치기와 확인이 두 번 이상 돌았습
           "물어야 합니다. 그냥 다시 실행해서는 통과하지 않습니다.")
 # The options that take a value may have it quoted (`--why "Slack 답글"`, api#1036); any other option's value is one bare word.
 VALUED = r"--(?:why|cwd|kind)\s+(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|\S+)"
-ASSIGN = r"[A-Za-z_]\w*=(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|[^\s;&|()]*)\s+"
+ASSIGN = r"[A-Za-z_]\w*=(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|[^\s;&|()]*)[ \t]+"
 SPAWN = re.compile(r"(?:^|[;&|(\n])\s*(?:" + ASSIGN + r")*(?:\S*/)?pane-spawn("
                    r"(?:\s+" + VALUED + r"|\s+--[\w-]+(?:\s+[^\s\"'-]\S*)?)*)\s+"
                    r"(\"(?:\\.|[^\"\\])*\"|'[^']*')")
@@ -90,12 +91,126 @@ def unquote(literal: str) -> str:
         return literal[1:-1]
 
 
+def simple_commands(command: str) -> list[str]:
+    """Split shell command boundaries outside quotes, escapes and comments.
+
+    Keep original quoting for the pane argument parser. This is lexical only;
+    it does not evaluate shell expansions or execute any command.
+    """
+    commands, part = [], []
+    quote, escaped, comment = "", False, False
+    i = 0
+    while i < len(command):
+        char = command[i]
+        if comment:
+            if char != "\n":
+                i += 1
+                continue
+            comment = False
+        if not escaped and quote != "'" and (command.startswith("$(", i) or char == "`"):
+            # Substitutions have their own quote context. Keep their source as
+            # one outer word; pane_commands separately checks their execution.
+            opening = 2 if char == "$" else 1
+            _, end = substitution_regions(command, i + opening, ")" if char == "$" else "`")
+            part.append(command[i:end])
+            i = end
+            continue
+        if escaped:
+            part.append(char)
+            escaped = False
+        elif char == "\\" and quote != "'":
+            part.append(char)
+            escaped = True
+        elif quote:
+            part.append(char)
+            if char == quote:
+                quote = ""
+        elif char in "\"'`":
+            part.append(char)
+            quote = char
+        elif char == "#" and (not part or part[-1].isspace()):
+            comment = True
+        elif char in ";&|()\n":
+            if "".join(part).strip():
+                commands.append("".join(part).strip())
+            part = []
+        else:
+            part.append(char)
+        i += 1
+    if "".join(part).strip():
+        commands.append("".join(part).strip())
+    return commands
+
+
+def substitution_regions(command: str, start=0, closing="") -> tuple[list[str], int]:
+    """Find executable substitutions without evaluating shell expansions.
+
+    A substitution starts a fresh quote context even inside double quotes.
+    Single quotes, escaped dollars/backticks and comments remain display text.
+    """
+    bodies, quote, i = [], "", start
+    while i < len(command):
+        char = command[i]
+        if char == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            i += 1
+            continue
+        if not quote and char == "#" and (i == start or command[i - 1].isspace() or command[i - 1] in ";&|()"):
+            newline = command.find("\n", i)
+            i = len(command) if newline < 0 else newline + 1
+            continue
+        if command.startswith("$(", i):
+            _, end = substitution_regions(command, i + 2, ")")
+            bodies.append(command[i + 2:end - 1])
+            i = end
+            continue
+        if char == "`":
+            if closing == "`":
+                return bodies, i + 1
+            _, end = substitution_regions(command, i + 1, "`")
+            bodies.append(command[i + 1:end - 1])
+            i = end
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char == closing:
+            return bodies, i + 1
+        elif char == "(" and closing == ")":
+            # Ordinary grouping parentheses also balance a substitution body.
+            _, i = substitution_regions(command, i + 1, ")")
+            continue
+        i += 1
+    return bodies, i
+
+
+def pane_commands(command: str) -> list[str]:
+    parts = [part for part in simple_commands(command) if SPAWN.match(part) or TELL.match(part)]
+    for body in substitution_regions(command)[0]:
+        parts.extend(pane_commands(body))
+    return list(dict.fromkeys(parts))
+
+
 def concrete_local_fix(command: str) -> bool:
     """The caller declares a known PR-only edit, not a production-operation authorization.
 
-    Only explicit existing file targets qualify. The scope declaration carries the
-    agent's judgment; separate operational permission guards still apply.
+    Only assignments attached to the actual pane command and existing files in a
+    Git worktree qualify. The declaration carries the agent's scope judgment;
+    separate operational permission guards still apply.
     """
+    parts = pane_commands(command)
+    if not parts:
+        return False
+    return all(local_contract(part) for part in parts)
+
+
+def local_contract(command: str) -> bool:
     try:
         tokens = shlex.split(command)
     except ValueError:
@@ -108,7 +223,22 @@ def concrete_local_fix(command: str) -> bool:
         values[key] = value
     targets = values.get("FIX_ROUND_TARGETS", "").split(",")
     return (values.get("FIX_ROUND_SCOPE") == "local-pr" and bool(targets)
-            and all(os.path.isabs(p) and os.path.isfile(p) for p in targets))
+            and all(worktree_file(p) for p in targets))
+
+
+def worktree_file(path: str) -> bool:
+    """Resolve symlinks before checking repository membership, including linked worktrees."""
+    if not os.path.isabs(path) or not os.path.isfile(path):
+        return False
+    resolved = os.path.realpath(path)
+    try:
+        result = subprocess.run(["git", "-C", os.path.dirname(path), "rev-parse", "--show-toplevel", "--is-inside-work-tree"],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=2)
+        lines = result.stdout.splitlines()
+        return (result.returncode == 0 and len(lines) == 2 and lines[1] == "true"
+                and os.path.commonpath([resolved, os.path.realpath(lines[0])]) == os.path.realpath(lines[0]))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
 
 
 def flat(content) -> str:
@@ -162,7 +292,7 @@ def events(path: str) -> list:
 
 
 def spawn(command: str) -> dict | None:
-    m = SPAWN.search(command)
+    m = SPAWN.match(command)
     if not m:
         return None
     text = command[m.start():]
@@ -172,10 +302,15 @@ def spawn(command: str) -> dict | None:
 
 
 def action(command: str) -> dict | None:
+    parts = pane_commands(command)
+    return simple_action(parts[0]) if parts else None
+
+
+def simple_action(command: str) -> dict | None:
     opened = spawn(command)
     if opened:
         return opened
-    m = TELL.search(command)
+    m = TELL.match(command)
     if not m:
         return None
     text = command[m.start():]
@@ -208,7 +343,19 @@ def check(payload: dict, env) -> str | None:
     command = str((payload.get("tool_input") or {}).get("command") or "")
     if payload.get("tool_name") != "Bash" or not CITE.search(command):
         return None
-    new = action(command)
+    # Each executable pane action must qualify on its own, including actions
+    # nested in substitutions inside another pane action's arguments.
+    for part in pane_commands(command):
+        single = dict(payload, tool_input=dict(payload.get("tool_input") or {}, command=part))
+        reason = check_action(single, env)
+        if reason:
+            return reason
+    return None
+
+
+def check_action(payload: dict, env) -> str | None:
+    command = str((payload.get("tool_input") or {}).get("command") or "")
+    new = simple_action(command)
     if not new or new["check"]:
         return None
     try:
@@ -308,7 +455,7 @@ def check(payload: dict, env) -> str | None:
     chain, job = walk(new, [s for s in spawns if s["refused"] is None])
     if len(chain) <= LIMIT:
         return None
-    if len(chain) == LIMIT + 1 and concrete_local_fix(command):
+    if len(chain) == LIMIT + 1 and local_contract(command):
         return None
     # Each fix past the limit, as the hook saw it then: refused, or let through and its pane opened (that used the answer up).
     rounds = []
@@ -348,6 +495,7 @@ def selftest():
     # on that day, or the selftest fails from 11/07 on (it did, and refused every dotfiles push).
     time.time = lambda: 1793851200.0  # 2026-11-05 13:00 KST
     with tempfile.TemporaryDirectory() as d:
+        subprocess.run(["git", "init", "-q", d], check=True)
         reports = os.path.join(d, "pane-reports")
         os.makedirs(reports)
         env = {"PANE_REPORT_DIR": reports, "HOME": d}
@@ -418,6 +566,15 @@ def selftest():
             assert check(p("FIX_ROUND_SCOPE=local-pr " + new, scenario), env), "an unknown target still requires an answer"
             assert check(p("FIX_ROUND_SCOPE=local-pr FIX_ROUND_TARGETS= " + new, scenario), env), "an empty target declaration still requires an answer"
             assert check(p(f"FIX_ROUND_SCOPE=local-pr FIX_ROUND_TARGETS={d} " + new, scenario), env), "a whole directory is not a concrete target"
+        assert check(p('# ; ' + local + new + '\n' + new, path), env), "a comment's contract cannot authorize a third fix"
+        assert check(p(local + 'pane-spawn "unrelated" "no citation"; ' + new, path), env), "a different pane command's contract cannot authorize a third fix"
+        assert check(p('echo "display; pane-spawn \'fake\' \'no citation\'"; ' + local + new, path), env) is None, "quoted pane text cannot hide a real local contract"
+        for probe in ('echo "$(' + new + ')"', 'out=$(' + new + ')', 'echo `' + new + '`', 'echo "$(echo $(' + new + '))"'):
+            assert check(p(probe, path), env), "executable command substitutions cannot bypass the third-fix check"
+        assert check(p('echo "$(' + local + new + ')"', path), env) is None, "a substitution's own local contract qualifies"
+        assert check(p(local + 'echo "$(' + new + ')"', path), env), "an outer command's contract cannot authorize its substitution"
+        assert check(p(local + 'pane-spawn "unrelated" "$(' + new + ')"', path), env), "a nested pane action needs its own contract"
+        assert check(p("echo '$(" + new.replace("'", "") + ")'", path), env) is None, "single-quoted substitution is display text"
         reason = check(p(new, path), env)
         assert reason and reason.startswith(MARK) and "메인 칸 위임 결함 수정" in reason and "메인 칸 위임 틈 수정" in reason, reason
         assert "decide" in reason and "남은 것" in reason, "it says how to ask 요유, for the main pane and for a pane under a lead"
