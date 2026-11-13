@@ -45,8 +45,8 @@ settings=$(sed -n '2p' <<<"$out")
 jq -e '.enableWorkflows == false and .enabledPlugins["context7@claude-plugins-official"] == false and (has("hooks") | not)' <<<"$settings" >/dev/null || fail 'worker keeps the common profile and no safety settings'
 # api#1065: the Artifact tool's schema (~9k tokens) is resent on every call, so a pane under a lead starts without it.
 jq -e '.enableArtifact == false' <<<"$settings" >/dev/null || fail 'worker starts without the Artifact tool'
-# api#1068: a Bash result over 4000 chars reaches the conversation as a file path and a preview (claude's minimum for this setting).
-jq -e '.bashOutputMaxChars == 4000' <<<"$settings" >/dev/null || fail 'worker caps Bash output at 4000 chars'
+# api#1068: leave Bash output at Claude's default limit after the monitored 4000-char trial.
+jq -e 'has("bashOutputMaxChars") | not' <<<"$settings" >/dev/null || fail 'worker leaves Bash output at the default limit'
 # A job that publishes a page opts back in (pane-spawn --artifact): the key goes, every other worker setting stays.
 opt_in=$(cd "$box/home/work/munice/sub" && ROLE=worker ARTIFACT=1 run)
 jq -e '(has("enableArtifact") | not) and .enableWorkflows == false and .env.ENABLE_CLAUDEAI_MCP_SERVERS == "false" and (.claudeMdExcludes | length) == 2' <<<"$(sed -n '2p' <<<"$opt_in")" >/dev/null || fail 'opt-in keeps Artifact and the rest of the worker profile'
