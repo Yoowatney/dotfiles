@@ -502,6 +502,23 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(self.spawns, [])
         self.assertTrue(self.tells[0][1].startswith("바로 전달하는 칸의 보고입니다("), self.tells[0][1])
 
+    def test_a_question_after_a_computed_amount_does_not_hide_it(self):
+        # Codex review of 2efb703
+        self.finish("월 비용을 다시 계산했습니다. 월 5만 원입니다.\n질문: 다음 단계로 진행할까요?\n"
+                    "남은 것: 요유 몫: 진행 여부 · 세션: 열어 둠")
+        self.assertEqual(len(self.spawns), 1)
+
+    def test_progress_notes_with_a_finished_side_step_stay_direct(self):
+        # Codex review of 2efb703: a multi-line 남은 것 block, and a finished sentence that is not the figure.
+        for text in ("그림을 수정 중입니다.\n남은 것:\n- 요유 몫: 없음\n- 유요 몫: 그림 수정\n- 세션: 열어 둠",
+                     "자료를 확인했습니다.\n그림을 그리는 중입니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 그림 마무리 · 세션: 열어 둠"):
+            with self.subTest(text=text.splitlines()[0]):
+                self.tells.clear()
+                self.spawns.clear()
+                self.finish(text)
+                self.assertEqual(self.spawns, [])
+                self.assertTrue(self.tells[0][1].startswith("바로 전달하는 칸의 보고입니다("), self.tells[0][1])
+
     def test_numbers_answered_without_a_post_request_open_a_check(self):
         # api#1218 check: a computed figure counted only when the report asked to post it.
         for text in ("비용 계산 결과를 정리했습니다. 월 5만 원입니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠",

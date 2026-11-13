@@ -356,24 +356,28 @@ RESULT = re.compile(r"완료|마쳤|끝났|통과|고쳤|수정|바꿨|변경|�
 CHECK_TOKEN = re.compile(r"\[ac-([0-9a-f]{16})\]")
 # api#1218 (2026-11-13): a figure a pane drew went to 요유 unchecked and was wrong, since a report with 요유 몫, a question
 # or a free-form `세션:` line took the direct route. What 요유 would see (a figure, a draft, numbers handed on to post) never
-# does. ponytail: a word list, so an idiom like "큰 그림" costs one more check pane; numbers count only when handed on to post.
-DELIVERABLE = re.compile(r"그림(?!자)|차트|그래프|스크린샷|(?<![A-Za-z])(?:png|svg|jpe?g|gif|webp)(?![A-Za-z])|"
-                         r"(?:초안|문안)(?![은는을를]?[ \t]*(?:만들|쓰|작성하)지[ \t]*않)|"
-                         r"(?:슬랙|slack|스레드|채널|요유(?![ \t]*몫))(?:[^\n.!?。]|\.(?=\d)){0,60}?"
-                         r"(?:올(?:리(?!지)|려|릴|립)|게시(?:하(?!지)|해|할|합)|보(?:내(?!지)|낼|냅))", re.I)
+# does. ponytail: a word list, so an idiom like "큰 그림" costs one more check pane, and a new phrasing can slip past it.
+THING = re.compile(r"그림(?!자)|차트|그래프|스크린샷|(?<![A-Za-z])(?:png|svg|jpe?g|gif|webp)(?![A-Za-z])|"
+                   r"(?:초안|문안)(?![은는을를]?[ \t]*(?:만들|쓰|작성하)지[ \t]*않)", re.I)
+HANDED = re.compile(r"(?:슬랙|slack|스레드|채널|요유(?![ \t]*몫))(?:[^\n.!?。]|\.(?=\d)){0,60}?"
+                    r"(?:올(?:리(?!지)|려|릴|립)|게시(?:하(?!지)|해|할|합)|보(?:내(?!지)|낼|냅))", re.I)
 MADE = re.compile(RESULT.pattern + r"|그렸|계산했|구했", re.I)
 # An estimate line does not make a report a progress note (api#1218 check): a sentence still under way does. Waiting is not.
 UNDER_WAY = re.compile(r"(?<!대기)(?<!대기 )중(?:입니다|이에요|이고|이며|$)|(?<!기다리)(?<!받)고[ \t]*있")
-# A computed amount is something to post even when nobody asked to post it; inside a decision question it is the question.
+# A computed amount is something to post even when nobody asked to post it; inside a question it is the question.
 NUMBER = re.compile(r"\d(?:[\d,.]*\d)?[ \t]*(?:[만억천][ \t]*)?(?:원|달러|엔|유로)|[$₩][ \t]?\d|\d(?:\.\d+)?[ \t]*%")
+SENTENCE = re.compile(r"(?:[^.!?。\n]|(?<=\d)\.(?=\d))+[.!?。]?")
 
 
 def delivers(reply: str) -> bool:
-    """A finished report that holds something for 요유: it gets a check pane before the main pane can post it."""
+    """A finished report that holds something for 요유: it gets a check pane before the main pane can post it. The figure or
+    draft must sit in a sentence that is not under way; `남은 것:` and what follows it name work left, not work done."""
     text = re.sub(r"https?://\S+", "", share.prose(reply))
-    said = "\n".join(line for line in text.splitlines() if not LEFT.search(line))  # 남은 것 names work left, not work done
-    finished = any(MADE.search(s) and not UNDER_WAY.search(s) for s in re.split(r"[.!?。\n]", said))
-    return finished and bool(DELIVERABLE.search(text) or (NUMBER.search(text) and not question_request(reply)))
+    left = list(LEFT.finditer(text))
+    said = [s for s in SENTENCE.findall(text[:left[-1].start()] if left else text) if not UNDER_WAY.search(s)]
+    if not any(MADE.search(s) for s in said):
+        return False
+    return bool(HANDED.search(text) or any(THING.search(s) or (NUMBER.search(s) and not QUESTION.search(s)) for s in said))
 
 
 def unchecked_head(reply: str, why: str) -> str:
