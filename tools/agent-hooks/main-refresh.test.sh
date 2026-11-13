@@ -33,10 +33,19 @@ case "\$1 \$2" in
     fi
     # the session the pane list gives, or the one in cur-sid: a clear that happened meanwhile
     sid=\$(cat "$SANDBOX/cur-sid" 2>/dev/null || jq -r --arg p "\$3" '.result.panes[] | select(.pane_id == \$p) | .agent_session.value' "$SANDBOX/panes")
-    jq -n --arg s "\$(cat "$SANDBOX/status")" --arg p "\$3" --arg sid "\$sid" '{result: {pane: {pane_id: \$p, agent_status: \$s, agent_session: {value: \$sid}}}}' ;;
+    # An empty $SANDBOX/agent is a pane whose agent has exited and left its shell: herdr 0.9 then omits the key (seen 11/13).
+    jq -n --arg s "\$(cat "$SANDBOX/status")" --arg p "\$3" --arg sid "\$sid" --arg a "\$(cat "$SANDBOX/agent" 2>/dev/null || echo claude)" \
+      '{result: {pane: ({pane_id: \$p, agent_status: \$s, agent_session: {value: \$sid}} + (if \$a == "" then {} else {agent: \$a} end))}}' ;;
   "notification show") echo "\$3" >> "$SANDBOX/alerts"; echo legacy >> "$SANDBOX/legacy-alerts" ;;
   "agent prompt") [ ! -f "$SANDBOX/prompt-fails" ] || exit 1
-    [ "\$4" != /clear ] || echo sid-refreshed > "$SANDBOX/cur-sid" ;;
+    [ "\$4" != /clear ] || echo sid-refreshed > "$SANDBOX/cur-sid"
+    # /exit returns before the process ends (EXIT_DELAY); exit-ignored: it never does.
+    if [ "\$4" = /exit ] && [ ! -f "$SANDBOX/exit-ignored" ]; then
+      ( sleep "\${EXIT_DELAY:-0}"; : > "$SANDBOX/agent"; echo unknown > "$SANDBOX/status"; : > "$SANDBOX/cur-sid" ) >/dev/null 2>&1 &
+    fi ;;
+  "pane run") [ -z "\$(cat "$SANDBOX/agent" 2>/dev/null || echo claude)" ] || echo typed-into-agent >> "$SANDBOX/unsafe-run"
+    [ ! -f "$SANDBOX/run-fails" ] || exit 1
+    echo claude > "$SANDBOX/agent"; echo sid-restarted > "$SANDBOX/cur-sid"; echo idle > "$SANDBOX/status" ;;
   *) exit 2 ;;
 esac
 EOS
@@ -148,6 +157,7 @@ S="$SANDBOX/state"
 mr() { # every call is sandboxed: state dir, herdr, pane-tell
   rm -f "$SANDBOX/query-started"
   rm -f "$SANDBOX/cur-sid"
+  rm -f "$SANDBOX/agent" "$SANDBOX/unsafe-run"
   rm -f "$SANDBOX/told" "$SANDBOX/herdr-log" "$SANDBOX/box-n" "$SANDBOX/request-n" "$SANDBOX/ready-get-n" "$SANDBOX/unsafe-request" "$SANDBOX/pending-once" "$S/orchestrator/refresh.log"; : > "$SANDBOX/alerts"; : > "$SANDBOX/errors"
   env XDG_STATE_HOME="$S" HERDR_BIN_PATH="$SANDBOX/herdr" HERDR_ERROR_NOTIFY="$SANDBOX/error-notify" MAIN_REFRESH_PANE_TELL="$SANDBOX/pane-tell" \
     MAIN_REFRESH_POLL=0.05 MAIN_REFRESH_QUIET=0 MAIN_REFRESH_RETRY_QUIET=0 MAIN_REFRESH_DEADLINE="${MAIN_REFRESH_DEADLINE:-60}" MAIN_REFRESH_HANDOFF_WAIT="${MAIN_REFRESH_HANDOFF_WAIT:-60}" \
@@ -463,6 +473,30 @@ rm_stamp; now NEW_TURN_ONCE=1 MAIN_REFRESH_HOUR=09
 check "new work triggers another handoff and then /clear" "$(cleared)|$(cat "$SANDBOX/request-n")|$(tail -n 1 "$S/agent-handoff/w5:p3.md" 2>/dev/null)" "1|2|handoff-2"
 # The next answer must belong to a distinct request, even when the previous text is still last in the transcript.
 check "each retry has a distinct request" "$(grep 'handoff save' "$SANDBOX/told" | sort -u | wc -l | tr -d ' ')" 2
+# --restart (api#1204): a new process in place of /clear, since CLI settings such as the startup profile load only at start.
+restart() { MR_ARGS=--restart mr "$@"; }
+RESTART_LINE='_mr=$SECONDS; claude || (( SECONDS - _mr > 60 )) || CLAUDE_STARTUP_PROFILE=full claude'
+rm_stamp; set_main; status idle
+restart MAIN_REFRESH_HOUR=09 EXIT_DELAY=0.3
+check "--restart exits and starts claude again instead of /clear" \
+  "$(cleared)|$(grep -c '^agent prompt w5:p3 /exit$' "$SANDBOX/herdr-log")|$(grep -cxF "pane run w5:p3 $RESTART_LINE" "$SANDBOX/herdr-log")" "0|1|1"
+check "--restart types claude only after the old process has left the shell" "$([ -f "$SANDBOX/unsafe-run" ] && cat "$SANDBOX/unsafe-run")" ""
+check "--restart asks for a handoff that says the process restarts" "$(grep 'handoff save' "$SANDBOX/told" | grep -c '다시 켭니다')" 1
+check "--restart releases the relay hold and the request once the new session is ready" \
+  "$([ -f "$S/orchestrator/refresh-delivery.json" ] && echo held)|$([ -f "$S/agent-handoff/main-refresh.refresh-request" ] && echo kept)|$(grep -c '다시 켬' "$S/orchestrator/refresh.log")" "||1"
+rm_stamp; set_main; status idle; touch "$SANDBOX/exit-ignored"
+restart MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=2
+rm -f "$SANDBOX/exit-ignored"
+check "--restart never types into a claude that did not exit, and alerts" \
+  "$(grep -c '^pane run' "$SANDBOX/herdr-log")|$(grep -c '끝나지 않아' "$SANDBOX/errors")" "0|1"
+rm_stamp; set_main; status idle; touch "$SANDBOX/run-fails"
+restart MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=2
+rm -f "$SANDBOX/run-fails"
+check "a failed start alerts with the way back" "$(grep -c 'CLAUDE_STARTUP_PROFILE=full claude' "$SANDBOX/errors")" 1
+check "a failed start keeps the handoff for the session the way back starts" \
+  "$([ -s "$S/agent-handoff/w5:p3.md" ] && echo kept)|$([ -f "$S/agent-handoff/w5:p3.md.skipped" ] && echo skipped)" "kept|"
+set_main; status idle
+
 check "routine skips and errors never use the legacy notification API" "$([ -f "$SANDBOX/legacy-alerts" ] && cat "$SANDBOX/legacy-alerts")" ""
 
 # Installed commands are symlinks into the checkout. Exercise the default helper path without an override;
