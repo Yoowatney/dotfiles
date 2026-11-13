@@ -61,7 +61,7 @@ class MemoryHookTest(unittest.TestCase):
             # Without an override Codex reads the whole AGENTS.md itself, so the hook adds nothing.
             self.assertNotIn('Lead owns its panes', memory.context(cwd, {'HOME': str(home)}))
             (codex / 'AGENTS.override.md').write_text('Shared rule\n')  # what activate installs: the shared lines only
-            home_main = memory.context(cwd, {'HOME': str(home)})  # a Discord main on the home Mac: Codex, no role set
+            home_main = memory.context(cwd, {'HOME': str(home)})  # a Codex session with no role set, such as a Codex main
             self.assertIn('Lead owns its panes', home_main)
             self.assertNotIn('Report to your lead', home_main)
             for role in ('main', 'general', 'lead'):

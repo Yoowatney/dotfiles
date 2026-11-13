@@ -72,7 +72,7 @@ def lead_rules(text):
 
 def rules_view(env):
     """Rules follow the role, not the runtime: a worker or check pane reads the worker view, any other session
-    (main, lead, general, or no role such as the home Discord main) the lead view; the full switch keeps all."""
+    (main, lead, general, or no role) the lead view; the full switch keeps all."""
     if not compact_mode(env):
         return 'full'
     return 'worker' if env.get('HERDR_CODEX_STARTUP_ROLE') in {'worker', 'check'} else 'lead'
