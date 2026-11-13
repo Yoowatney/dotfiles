@@ -433,7 +433,8 @@ check "--now 2 minutes after a turn: clears" "$(cleared)" 1
 rm_stamp; touch -t "$(date -v-2M +%Y%m%d%H%M.%S)" "$SANDBOX/sid-main.jsonl"; mr MAIN_REFRESH_QUIET= MAIN_REFRESH_HOUR=05 MAIN_REFRESH_DEADLINE=0.3
 check "the night run still waits 10 minutes" "$(told)|$(cleared)" "|0"
 touch -t 202001010000 "$SANDBOX/sid-main.jsonl"
-rm_stamp; now BOX_RECENT_FIRST=1 MAIN_REFRESH_QUIET=5 MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=2
+# Keep the quiet interval longer than the deadline, with room for parallel CI load.
+rm_stamp; now BOX_RECENT_FIRST=1 MAIN_REFRESH_QUIET=60 MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=12
 check "a turn during readiness wait needs no quiet interval" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "1|1"
 rm_stamp; touch -t "$(date -v-10S +%Y%m%d%H%M.%S)" "$SANDBOX/sid-main.jsonl"; now MAIN_REFRESH_QUIET= MAIN_REFRESH_HOUR=09
 check "--now proceeds with a recent transcript" "$(cleared)" 1
