@@ -35,6 +35,7 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 
 # ponytail: reuse secret-print-guard's tested command parser instead of a second copy.
@@ -300,6 +301,82 @@ def bash_problem(cmd: str) -> str | None:
         reason = git_problem(w)
         if reason:  # an unknown option may sit in front of a harmless command, so its reason says how to rewrite it
             return reason if reason.startswith("git-global-option") else reason + ". 형태를 바꿔 다시 실행하지 말 것"
+    return None
+
+
+# The checkouts launchd jobs and every session read their code from stay on main: a worker switched one to a
+# feature branch (2026-11-13) and a launchd job ran its half-edited code. Work goes in a `git worktree`.
+# LIVE_CHECKOUTS (colon-separated) replaces the list, for the tests. Going back to main and file restores stay allowed.
+# ponytail: branch names, tags and commits given to checkout/switch, -b/-c/--detach; `git --git-dir`, `reset`, `merge`
+# into main, and a script that switches are not seen. Add one when a session reaches for it.
+LIVE_CHECKOUTS = ("~/work/munice/munice-claude", "~/.dotfiles", "~/work/munice")
+BRANCH_CREATE = ("-b", "-B", "-c", "-C", "--orphan", "--create", "--force-create", "--detach", "-d")
+
+
+def _git_out(cwd: str, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, timeout=10)
+
+
+def _toplevel(path: str) -> str | None:
+    if not os.path.isdir(path):
+        return None
+    done = _git_out(path, "rev-parse", "--show-toplevel")
+    return os.path.realpath(done.stdout.strip()) if done.returncode == 0 and done.stdout.strip() else None
+
+
+def _changes_branch(sub: str, args: list[str], cwd: str) -> bool:
+    """`git checkout|switch ...` that leaves main: creates, detaches, or names a branch, tag or commit (not main)."""
+    if sub not in ("checkout", "switch"):
+        return False
+    restore = "--" in args and args[args.index("--") + 1:]  # `checkout <tree> -- <file>` leaves HEAD alone
+    before = args[:args.index("--")] if "--" in args else args
+    if any(a.split("=", 1)[0] in BRANCH_CREATE or re.match(r"-[a-zA-Z]*[bBcC]", a) for a in before):  # -b, -qb, -cnew
+        return True
+    names = [a for k, a in enumerate(before) if (not a.startswith("-") or a == "-")
+             and not (k and before[k - 1] in ("--conflict", "--pathspec-from-file"))]  # their value is not a branch
+    if sub == "switch":  # `switch -- feature` names a branch too
+        names += [a for a in args[len(before) + 1:] if not a.startswith("-")]
+        return bool(names) and names[0] != "main"
+    if restore or len(names) != 1 or names[0] in ("main", "HEAD"):
+        return False
+    # a branch only on a remote is made and switched to by checkout's --guess
+    return (names[0] == "-" or _git_out(cwd, "rev-parse", "--verify", "--quiet", names[0] + "^{commit}").returncode == 0
+            or bool(_git_out(cwd, "for-each-ref", "--format=x", "refs/remotes/*/" + names[0]).stdout.strip()))
+
+
+def _path(here: str, word: str) -> str:
+    return os.path.normpath(os.path.join(here, os.path.expandvars(os.path.expanduser(word))))
+
+
+def switch_problem(cmd: str, cwd: str | None) -> str | None:
+    try:
+        live = {os.path.realpath(os.path.expanduser(d)) for d in
+                os.environ.get("LIVE_CHECKOUTS", os.pathsep.join(LIVE_CHECKOUTS)).split(os.pathsep) if d}
+        start = here = cwd or os.getcwd()
+        seen = {start}
+        # ponytail: a `( ... )` group or `bash -c`'s cd may not last past it, so with one every directory seen is tried; a worktree
+        # branch made inside a group from a live cwd is refused too, `git -C <worktree>` says it without a group
+        group = bool(re.search(r"(?:^|[;&|(]\s*)\(|\b(?:ba|z)?sh\s+-\w*c\b|\beval\b", code_only(cmd)))
+        for w in simple_commands(cmd):
+            if name(w[0]) == "cd":  # skip -P, -L, -e and `--`
+                here = _path(here, next((a for a in w[1:] if not a.startswith("-")), "~"))
+                seen.add(here)
+            if name(w[0]) != "git":
+                continue
+            for base in seen if group else {here}:
+                where, k = base, 1
+                while k < len(w) and w[k].startswith("-"):
+                    if w[k] == "-C" and k + 1 < len(w):
+                        where = _path(where, w[k + 1])
+                    k += 2 if w[k] in GIT_VALUED else 1
+                top = _toplevel(where)
+                if top not in live or not _changes_branch(w[k] if k < len(w) else "", w[k + 1:], where):
+                    continue
+                return (f"live-checkout: launchd 작업과 모든 세션이 코드를 읽는 `{top}`의 브랜치를 바꾸지 말 것. "
+                        "그 안의 작업 중 코드가 그대로 돌아감. 작업은 `git worktree add /tmp/codex/<일>-<이름> -b <새 브랜치> origin/main`로 "
+                        "따로 받은 폴더에서 하고, 이 체크아웃은 main으로 둘 것(main으로 되돌리는 명령은 괜찮음)")
+    except Exception:  # noqa: BLE001 - a broken check must not stop every git call
+        return None
     return None
 
 
@@ -714,7 +791,8 @@ if __name__ == "__main__":
         sys.exit()
     payload = json.load(sys.stdin)
     cmd = (payload.get("tool_input") or {}).get("command") or ""
-    reason = (bash_problem(cmd) or worker_claude_problem(cmd) or quote_problem(cmd, payload.get("cwd"))
+    reason = (bash_problem(cmd) or switch_problem(cmd, payload.get("cwd")) or worker_claude_problem(cmd)
+              or quote_problem(cmd, payload.get("cwd"))
               if payload.get("tool_name") == "Bash" else None)
     if reason:
         print(json.dumps({"hookSpecificOutput": {
