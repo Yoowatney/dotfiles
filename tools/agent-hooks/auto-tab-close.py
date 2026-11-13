@@ -362,13 +362,17 @@ DELIVERABLE = re.compile(r"그림(?!자)|차트|그래프|스크린샷|(?<![A-Za
                          r"(?:슬랙|slack|스레드|채널|요유(?![ \t]*몫))(?:[^\n.!?。]|\.(?=\d)){0,60}?"
                          r"(?:올(?:리(?!지)|려|릴|립)|게시(?:하(?!지)|해|할|합)|보(?:내(?!지)|낼|냅))", re.I)
 MADE = re.compile(RESULT.pattern + r"|그렸|계산했|구했", re.I)
-ESTIMATE = re.compile(r"^\W*끝날[ \t]*예상[ \t]*[:：]", re.M)  # an estimate or progress note has nothing to post yet
+# An estimate line does not make a report a progress note (api#1218 check): a sentence still under way does.
+UNDER_WAY = re.compile(r"중(?:입니다|이에요|이고|이며|$)|고[ \t]*있")
+# A computed amount is something to post even when nobody asked to post it; inside a decision question it is the question.
+NUMBER = re.compile(r"\d(?:[\d,.]*\d)?[ \t]*(?:[만억천][ \t]*)?(?:원|달러|엔|유로)|[$₩][ \t]?\d|\d(?:\.\d+)?[ \t]*%")
 
 
 def delivers(reply: str) -> bool:
     """A finished report that holds something for 요유: it gets a check pane before the main pane can post it."""
     text = re.sub(r"https?://\S+", "", share.prose(reply))
-    return not ESTIMATE.search(text) and bool(DELIVERABLE.search(text)) and bool(MADE.search(text))
+    finished = any(MADE.search(s) and not UNDER_WAY.search(s) for s in re.split(r"[.!?。\n]", text))
+    return finished and bool(DELIVERABLE.search(text) or (NUMBER.search(text) and not question_request(reply)))
 
 
 def unchecked_head(reply: str, why: str) -> str:

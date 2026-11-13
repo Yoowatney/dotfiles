@@ -485,6 +485,23 @@ class RelayTests(unittest.TestCase):
                 self.assertEqual(len(self.spawns), 1, "a deliverable for 요유 goes to a check pane")
                 self.assertEqual(self.tells, [], "the main pane hears nothing before the check reports")
 
+    def test_estimate_line_does_not_hide_a_finished_deliverable(self):
+        # api#1218 check: an estimate line on top of a finished figure report sent it straight to the main pane.
+        self.finish("끝날 예상: 21:30 KST\n" + self.FIGURE)
+        self.assertEqual(len(self.spawns), 1)
+        self.assertEqual(self.tells, [])
+
+    def test_numbers_answered_without_a_post_request_open_a_check(self):
+        # api#1218 check: a computed figure counted only when the report asked to post it.
+        for text in ("비용 계산 결과를 정리했습니다. 월 5만 원입니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠",
+                     "전환율을 다시 구했습니다. 3.2%입니다.\n남은 것: 요유 몫: 다음 실험 결정 · 세션: 닫아도 됨"):
+            with self.subTest(text=text.splitlines()[0]):
+                self.tells.clear()
+                self.spawns.clear()
+                self.finish(text)
+                self.assertEqual(len(self.spawns), 1)
+                self.assertEqual(self.tells, [])
+
     def test_deliverable_whose_check_cannot_start_makes_main_open_one(self):
         self.spawn_error = "workers unavailable"
         self.finish(self.FIGURE)
