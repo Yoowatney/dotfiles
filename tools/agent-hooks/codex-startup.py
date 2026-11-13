@@ -161,12 +161,15 @@ def prepare(env):
     # CLI overrides apply only to this process; a full session uses the original
     # connections. Keep hooks, approval policy, sandbox and credentials intact.
     args += ['-c', 'skills.max_context_tokens=2500']
-    for name in ('rea', 'Amplitude', 'notion-token', 'obsidian'):
-        if name in configured_servers:
-            # Codex CLI override paths split on dots; quotes become literal names.
-            args += ['-c', 'mcp_servers.' + name + '.enabled=false']
-    for plugin in ('figma', 'discord'):
-        args += ['-c', 'plugins.' + plugin + '@claude-plugins-official.enabled=false']
+    # Delegated workers retain the original connection scope, including research
+    # integrations. Before compaction they applied no MCP or plugin overrides.
+    if env.get('HERDR_CODEX_STARTUP_ROLE') != 'worker':
+        for name in ('rea', 'Amplitude', 'notion-token', 'obsidian'):
+            if name in configured_servers:
+                # Codex CLI override paths split on dots; quotes become literal names.
+                args += ['-c', 'mcp_servers.' + name + '.enabled=false']
+        for plugin in ('figma', 'discord'):
+            args += ['-c', 'plugins.' + plugin + '@claude-plugins-official.enabled=false']
     manifest = {'source_home': str(source), 'task_type': kind, 'global_rules': 'unchanged', 'catalog_fallback': reason,
                 'disabled_skill_paths': sorted(excluded)}
     key = hashlib.sha256(str(source).encode()).hexdigest()[:12]

@@ -66,7 +66,7 @@ class StartupTest(unittest.TestCase):
             source = Path(tmp) / '.codex'
             source.mkdir()
             (source / 'config.toml').write_text('\n'.join('[mcp_servers.' + name + ']\ncommand="fixture"' for name in ('rea', 'Amplitude', 'notion-token', 'obsidian')))
-            for role in ('general', 'main', 'check', 'worker'):
+            for role in ('general', 'main', 'check'):
                 env = {'HOME': tmp, 'HERDR_CODEX_STARTUP_ROLE': role, 'HERDR_CODEX_TASK_TYPE': 'code'}
                 plan = startup.prepare(env)
                 self.assertTrue(plan['active'])
@@ -78,6 +78,28 @@ class StartupTest(unittest.TestCase):
                     self.assertIn('plugins.' + name + '@claude-plugins-official.enabled=false', plan['args'])
                 self.assertFalse(any('hooks' in arg or 'approval' in arg or 'sandbox' in arg for arg in plan['args']))
                 self.assertEqual(startup.prepare(dict(env, HERDR_CODEX_STARTUP_PROFILE='full'))['args'], [])
+
+    def test_workers_preserve_pre_compaction_mcp_and_plugin_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / '.codex'
+            source.mkdir()
+            config = source / 'config.toml'
+            original = '\n'.join('[mcp_servers.' + name + ']\ncommand="fixture"' for name in
+                                 ('rea', 'Amplitude', 'notion-token', 'obsidian', 'custom-server'))
+            original += '\n[plugins."figma@claude-plugins-official"]\nenabled=true\n'
+            original += '\n[plugins."discord@claude-plugins-official"]\nenabled=false\n'
+            config.write_text(original)
+            for kind in ('research', 'code'):
+                with self.subTest(kind=kind):
+                    env = {'HOME': tmp, 'HERDR_CODEX_WORKDIR': tmp,
+                           'HERDR_CODEX_STARTUP_ROLE': 'worker', 'HERDR_CODEX_TASK_TYPE': kind}
+                    plan = startup.prepare(env)
+                    self.assertTrue(plan['active'])
+                    self.assertEqual(plan['env'], env)
+                    self.assertIn('skills.max_context_tokens=2500', plan['args'])
+                    self.assertFalse(any(arg.startswith(('mcp_servers.', 'plugins.')) for arg in plan['args']))
+                    self.assertEqual(config.read_text(), original)
+                    self.assertEqual(startup.prepare(dict(env, HERDR_CODEX_STARTUP_PROFILE='full'))['args'], [])
 
     def test_absent_servers_do_not_create_invalid_transport_tables(self):
         with tempfile.TemporaryDirectory() as tmp:
