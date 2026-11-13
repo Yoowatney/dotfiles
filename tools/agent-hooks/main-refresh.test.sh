@@ -489,6 +489,9 @@ restart MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=2
 rm -f "$SANDBOX/exit-ignored"
 check "--restart never types into a claude that did not exit, and alerts" \
   "$(grep -c '^pane run' "$SANDBOX/herdr-log")|$(grep -c '끝나지 않아' "$SANDBOX/errors")" "0|1"
+# /exit was accepted and may still end the process later: its handoff stays, and relays reach the pane either way.
+check "an exit that outlasts the wait keeps the handoff and releases the relay hold" \
+  "$([ -s "$S/agent-handoff/w5:p3.md" ] && echo kept)|$([ -f "$S/orchestrator/refresh-delivery.json" ] && echo held)" "kept|"
 rm_stamp; set_main; status idle; touch "$SANDBOX/run-fails"
 restart MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=2
 rm -f "$SANDBOX/run-fails"

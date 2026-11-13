@@ -318,7 +318,9 @@ if [ -n "$restart" ]; then
   shell_back() {
     "$H" pane get "$id" 2>/dev/null | jq -e '.result.pane | .pane_id != null and .agent == null and .agent_status == "unknown"' >/dev/null
   }
-  wait_for "$deadline" shell_back || { keep_gate=; skip --error "/exit 뒤 claude가 끝나지 않아 다시 켜지 못함"; }
+  # A slow exit may still come: keep the handoff for the next start, but drop the hold, since an old session that
+  # stays would otherwise wait for relays forever (its session id never changes).
+  wait_for "$deadline" shell_back || { rm -f "$gate"; skip --error "/exit 뒤 claude가 끝나지 않아 다시 켜지 못함(인계는 남겨 둠)"; }
   # The pane's own shell runs it, so the claude alias (claude-online) picks this pane's profile by its terminal id.
   # A start that fails within a minute (a broken profile) retries with the full one; a later exit never does.
   # Not `herdr agent start`: it names the agent, and a named pane counts as one an agent opened (pane-label --close).
