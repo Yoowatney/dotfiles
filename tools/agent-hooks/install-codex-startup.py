@@ -33,6 +33,13 @@ def install(path, codex=False):
             groups.append(dict(hooks=[dict(type='command', timeout=10, additionalContextLimit=60000, command=memory_command)]))
         if not ledger_found:
             groups.append(dict(hooks=[dict(type='command', command=ledger_command, timeout=10)]))
+    if not codex:
+        groups = hooks.setdefault('PostToolUse', [])
+        command = 'python3 ' + shlex.quote(str(HERE / 'post-merge-pull.py'))
+        if not any(entry.get('command') == command
+                   for group in groups for entry in group.get('hooks', [])):
+            groups.append(dict(matcher='Bash', hooks=[dict(
+                type='command', command=command, timeout=60)]))
     state.atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + '\n')
 
 
