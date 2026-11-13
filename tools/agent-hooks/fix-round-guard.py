@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""PreToolUse check (Claude Code and Codex): a third fix pane for one job is not opened until 요유 has spoken.
+"""PreToolUse check (Claude Code and Codex): bound repeated fixes of one job.
 
 On the night of 2026-11-05 the main pane ran check, fix, check, fix, check, fix from 01:09 to 04:15 while 요유 slept: four check
 panes and three fix panes, and the third fix undid what the first two fixed. Its rules said "the fix's report gets a new check
-pane" with no limit (daily wow 2026-11-05, card 01). Now two fixes of one job are the limit: the third is refused, and the pane
-asks 요유 (the main pane through `decide`; a pane under a lead through its `남은 것:` report). Repeating the call does not pass. 요유's own words after the refusal do: typed in the pane (also while the
+pane" with no limit (daily wow 2026-11-05, card 01). After two fixes, the third proceeds only when the caller declares a known
+local PR-only edit with FIX_ROUND_SCOPE=local-pr and FIX_ROUND_TARGETS=<absolute existing files, comma separated>. This is
+the caller's scope assertion, not a detector of deployment intent. Do not declare it for operational services/data/settings,
+an unknown fix, or an open-ended investigation. The fourth still requires an answer (daily wow 2026-11-13, item 3).
+Otherwise the pane asks 요유 (the main pane through `decide`; a pane under a lead through its `남은 것:` report).
+Repeating the call without the third-fix contract does not pass. 요유's own words after the refusal do: typed in the pane (also while the
 agent works), or relayed from #0-yoyooyo by main-channel, where of reactions only ✅ answers (❌ is "no", 💤 "ask tomorrow").
 An answer opens one fix of one job. Plain words open the job whose refusal came last before them. A ✅, and words that name
 a board item, open a job only through its question: the first `decide` called after its refusal, unless another job's
@@ -36,13 +40,17 @@ import json
 import glob
 import os
 import re
+import shlex
+import subprocess
 import sys
 import time
 
 sys.dont_write_bytecode = True  # no __pycache__ in the dotfiles at every tool call
 MARK = "fix-round:"
-LIMIT = 2  # fixes of one job before 요유 is asked (요유's wow card: "두 번까지, 세 번째는 열지 않고 멈춥니다")
-REASON = (MARK + " 같은 일의 고치기와 확인이 이미 두 번 돌았습니다({chain}). 세 번째 고치기 칸은 열지 않습니다. 지금까지 고친 것과 남은 결함을 "
+LIMIT = 2  # an explicit concrete local-PR contract permits exactly one third fix
+REASON = (MARK + " 같은 일의 고치기와 확인이 두 번 이상 돌았습니다({chain}). 추가 고치기를 멈춥니다. 세 번째만 고칠 내용이 정해진 로컬 PR 수정이면 "
+          "FIX_ROUND_SCOPE=local-pr 및 FIX_ROUND_TARGETS=<수정할 기존 파일의 절대경로,쉼표로 구분>를 명령 앞에 붙여 진행합니다. "
+          "운영 서비스·데이터·외부 설정을 건드리거나 고칠 내용이 미정이면 이 선언을 쓰지 않습니다. 네 번째는 선언으로 통과하지 않습니다. 지금까지 고친 것과 남은 결함을 "
           "`고를 것`·`추천`·`바뀌는 것` 세 줄로 묶어 요유에게 물으세요. 메인 칸은 다른 결정보다 먼저 그 일의 보드 항목으로 "
           "`python3 /Users/yoyoo/work/munice/munice-claude/.agents/skills/agent-board/main/main-channel.py decide --board <url>`을 부릅니다. "
           "이 거절 뒤 처음 부른 decide가 이 일의 질문입니다. 보드 항목이 없는 일이면 먼저 `echo \"<본문>\" | bash /Users/yoyoo/work/munice/.agents/skills/agent-board/board.sh "
@@ -53,10 +61,11 @@ REASON = (MARK + " 같은 일의 고치기와 확인이 이미 두 번 돌았습
           "물어야 합니다. 그냥 다시 실행해서는 통과하지 않습니다.")
 # The options that take a value may have it quoted (`--why "Slack 답글"`, api#1036); any other option's value is one bare word.
 VALUED = r"--(?:why|cwd|kind)\s+(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|\S+)"
-SPAWN = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?pane-spawn("
+ASSIGN = r"[A-Za-z_]\w*=(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|[^\s;&|()]*)[ \t]+"
+SPAWN = re.compile(r"(?:^|[;&|(\n])\s*(?:" + ASSIGN + r")*(?:\S*/)?pane-spawn("
                    r"(?:\s+" + VALUED + r"|\s+--[\w-]+(?:\s+[^\s\"'-]\S*)?)*)\s+"
                    r"(\"(?:\\.|[^\"\\])*\"|'[^']*')")
-TELL = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?pane-tell\s+"
+TELL = re.compile(r"(?:^|[;&|(\n])\s*(?:" + ASSIGN + r")*(?:\S*/)?pane-tell\s+"
                   r"[\"']?((?:\w+/)?w\w+:p\w+)[\"']?\s+")
 CITE = re.compile(r"(\d{2}:\d{2}:\d{2})\s*(?:entry|항목)")
 CITED_DAY = re.compile(r"pane-reports/(\d{4}-\d{2}-\d{2})\.md")
@@ -80,6 +89,156 @@ def unquote(literal: str) -> str:
         return json.loads(literal)
     except ValueError:
         return literal[1:-1]
+
+
+def simple_commands(command: str) -> list[str]:
+    """Split shell command boundaries outside quotes, escapes and comments.
+
+    Keep original quoting for the pane argument parser. This is lexical only;
+    it does not evaluate shell expansions or execute any command.
+    """
+    commands, part = [], []
+    quote, escaped, comment = "", False, False
+    i = 0
+    while i < len(command):
+        char = command[i]
+        if comment:
+            if char != "\n":
+                i += 1
+                continue
+            comment = False
+        if not escaped and quote != "'" and (command.startswith("$(", i) or char == "`"):
+            # Substitutions have their own quote context. Keep their source as
+            # one outer word; pane_commands separately checks their execution.
+            opening = 2 if char == "$" else 1
+            _, end = substitution_regions(command, i + opening, ")" if char == "$" else "`")
+            part.append(command[i:end])
+            i = end
+            continue
+        if escaped:
+            part.append(char)
+            escaped = False
+        elif char == "\\" and quote != "'":
+            part.append(char)
+            escaped = True
+        elif quote:
+            part.append(char)
+            if char == quote:
+                quote = ""
+        elif char in "\"'`":
+            part.append(char)
+            quote = char
+        elif char == "#" and (not part or part[-1].isspace()):
+            comment = True
+        elif char in ";&|()\n":
+            if "".join(part).strip():
+                commands.append("".join(part).strip())
+            part = []
+        else:
+            part.append(char)
+        i += 1
+    if "".join(part).strip():
+        commands.append("".join(part).strip())
+    return commands
+
+
+def substitution_regions(command: str, start=0, closing="") -> tuple[list[str], int]:
+    """Find executable substitutions without evaluating shell expansions.
+
+    A substitution starts a fresh quote context even inside double quotes.
+    Single quotes, escaped dollars/backticks and comments remain display text.
+    """
+    bodies, quote, i = [], "", start
+    while i < len(command):
+        char = command[i]
+        if char == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            i += 1
+            continue
+        if not quote and char == "#" and (i == start or command[i - 1].isspace() or command[i - 1] in ";&|()"):
+            newline = command.find("\n", i)
+            i = len(command) if newline < 0 else newline + 1
+            continue
+        if command.startswith("$(", i):
+            _, end = substitution_regions(command, i + 2, ")")
+            bodies.append(command[i + 2:end - 1])
+            i = end
+            continue
+        if char == "`":
+            if closing == "`":
+                return bodies, i + 1
+            _, end = substitution_regions(command, i + 1, "`")
+            bodies.append(command[i + 1:end - 1])
+            i = end
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char == closing:
+            return bodies, i + 1
+        elif char == "(" and closing == ")":
+            # Ordinary grouping parentheses also balance a substitution body.
+            _, i = substitution_regions(command, i + 1, ")")
+            continue
+        i += 1
+    return bodies, i
+
+
+def pane_commands(command: str) -> list[str]:
+    parts = [part for part in simple_commands(command) if SPAWN.match(part) or TELL.match(part)]
+    for body in substitution_regions(command)[0]:
+        parts.extend(pane_commands(body))
+    return list(dict.fromkeys(parts))
+
+
+def concrete_local_fix(command: str) -> bool:
+    """The caller declares a known PR-only edit, not a production-operation authorization.
+
+    Only assignments attached to the actual pane command and existing files in a
+    Git worktree qualify. The declaration carries the agent's scope judgment;
+    separate operational permission guards still apply.
+    """
+    parts = pane_commands(command)
+    if not parts:
+        return False
+    return all(local_contract(part) for part in parts)
+
+
+def local_contract(command: str) -> bool:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    values = {}
+    for token in tokens:
+        if not re.match(r"^[A-Za-z_]\w*=", token):
+            break
+        key, value = token.split("=", 1)
+        values[key] = value
+    targets = values.get("FIX_ROUND_TARGETS", "").split(",")
+    return (values.get("FIX_ROUND_SCOPE") == "local-pr" and bool(targets)
+            and all(worktree_file(p) for p in targets))
+
+
+def worktree_file(path: str) -> bool:
+    """Resolve symlinks before checking repository membership, including linked worktrees."""
+    if not os.path.isabs(path) or not os.path.isfile(path):
+        return False
+    resolved = os.path.realpath(path)
+    try:
+        result = subprocess.run(["git", "-C", os.path.dirname(path), "rev-parse", "--show-toplevel", "--is-inside-work-tree"],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=2)
+        lines = result.stdout.splitlines()
+        return (result.returncode == 0 and len(lines) == 2 and lines[1] == "true"
+                and os.path.commonpath([resolved, os.path.realpath(lines[0])]) == os.path.realpath(lines[0]))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
 
 
 def flat(content) -> str:
@@ -133,7 +292,7 @@ def events(path: str) -> list:
 
 
 def spawn(command: str) -> dict | None:
-    m = SPAWN.search(command)
+    m = SPAWN.match(command)
     if not m:
         return None
     text = command[m.start():]
@@ -143,10 +302,15 @@ def spawn(command: str) -> dict | None:
 
 
 def action(command: str) -> dict | None:
+    parts = pane_commands(command)
+    return simple_action(parts[0]) if parts else None
+
+
+def simple_action(command: str) -> dict | None:
     opened = spawn(command)
     if opened:
         return opened
-    m = TELL.search(command)
+    m = TELL.match(command)
     if not m:
         return None
     text = command[m.start():]
@@ -179,7 +343,19 @@ def check(payload: dict, env) -> str | None:
     command = str((payload.get("tool_input") or {}).get("command") or "")
     if payload.get("tool_name") != "Bash" or not CITE.search(command):
         return None
-    new = action(command)
+    # Each executable pane action must qualify on its own, including actions
+    # nested in substitutions inside another pane action's arguments.
+    for part in pane_commands(command):
+        single = dict(payload, tool_input=dict(payload.get("tool_input") or {}, command=part))
+        reason = check_action(single, env)
+        if reason:
+            return reason
+    return None
+
+
+def check_action(payload: dict, env) -> str | None:
+    command = str((payload.get("tool_input") or {}).get("command") or "")
+    new = simple_action(command)
     if not new or new["check"]:
         return None
     try:
@@ -279,6 +455,8 @@ def check(payload: dict, env) -> str | None:
     chain, job = walk(new, [s for s in spawns if s["refused"] is None])
     if len(chain) <= LIMIT:
         return None
+    if len(chain) == LIMIT + 1 and local_contract(command):
+        return None
     # Each fix past the limit, as the hook saw it then: refused, or let through and its pane opened (that used the answer up).
     rounds = []
     for k, s in enumerate(spawns):
@@ -317,6 +495,7 @@ def selftest():
     # on that day, or the selftest fails from 11/07 on (it did, and refused every dotfiles push).
     time.time = lambda: 1793851200.0  # 2026-11-05 13:00 KST
     with tempfile.TemporaryDirectory() as d:
+        subprocess.run(["git", "init", "-q", d], check=True)
         reports = os.path.join(d, "pane-reports")
         os.makedirs(reports)
         env = {"PANE_REPORT_DIR": reports, "HOME": d}
@@ -376,6 +555,26 @@ def selftest():
             report(at, f"workers/{addr}", f"🟢 🫡 {'확인 ' if flags else ''}{name}")
         new = spawn_cmd("", third[3], third[4])
         path = transcript(claude_lines(night))
+        target = os.path.join(d, "specific-fix.py")
+        with open(target, "w") as f:
+            f.write("# local test target\n")
+        local = f"FIX_ROUND_SCOPE=local-pr FIX_ROUND_TARGETS={target} "
+        for format_name, lines in (("claude", claude_lines(night)), ("codex", codex_lines(night))):
+            scenario = transcript(lines, f"local-{format_name}.jsonl")
+            assert check(p(local + new, scenario), env) is None, f"{format_name}: a concrete local-only third fix proceeds"
+            assert check(p(f"FIX_ROUND_SCOPE=production FIX_ROUND_TARGETS={target} " + new, scenario), env), "operational fixes still require an answer"
+            assert check(p("FIX_ROUND_SCOPE=local-pr " + new, scenario), env), "an unknown target still requires an answer"
+            assert check(p("FIX_ROUND_SCOPE=local-pr FIX_ROUND_TARGETS= " + new, scenario), env), "an empty target declaration still requires an answer"
+            assert check(p(f"FIX_ROUND_SCOPE=local-pr FIX_ROUND_TARGETS={d} " + new, scenario), env), "a whole directory is not a concrete target"
+        assert check(p('# ; ' + local + new + '\n' + new, path), env), "a comment's contract cannot authorize a third fix"
+        assert check(p(local + 'pane-spawn "unrelated" "no citation"; ' + new, path), env), "a different pane command's contract cannot authorize a third fix"
+        assert check(p('echo "display; pane-spawn \'fake\' \'no citation\'"; ' + local + new, path), env) is None, "quoted pane text cannot hide a real local contract"
+        for probe in ('echo "$(' + new + ')"', 'out=$(' + new + ')', 'echo `' + new + '`', 'echo "$(echo $(' + new + '))"'):
+            assert check(p(probe, path), env), "executable command substitutions cannot bypass the third-fix check"
+        assert check(p('echo "$(' + local + new + ')"', path), env) is None, "a substitution's own local contract qualifies"
+        assert check(p(local + 'echo "$(' + new + ')"', path), env), "an outer command's contract cannot authorize its substitution"
+        assert check(p(local + 'pane-spawn "unrelated" "$(' + new + ')"', path), env), "a nested pane action needs its own contract"
+        assert check(p("echo '$(" + new.replace("'", "") + ")'", path), env) is None, "single-quoted substitution is display text"
         reason = check(p(new, path), env)
         assert reason and reason.startswith(MARK) and "메인 칸 위임 결함 수정" in reason and "메인 칸 위임 틈 수정" in reason, reason
         assert "decide" in reason and "남은 것" in reason, "it says how to ask 요유, for the main pane and for a pane under a lead"
@@ -397,6 +596,7 @@ def selftest():
             reused += ran(command, f"r{i}", f"workers/{addr}\n" if flags or i == 0 else f"queued for workers/{addr} (Job)\n")
         tell_third = f"pane-tell workers/{night[0][1]} '{cite(third[4])} Fix it.'"
         assert check(p(tell_third, transcript(reused, "reuse.jsonl")), env), "Claude: third fix on the same worker"
+        assert check(p(local + tell_third, transcript(reused, "reuse-local.jsonl")), env) is None, "Claude: a concrete local third fix reuses its worker"
         codex_reused = []
         for i in range(0, len(reused), 2):
             command = reused[i]["message"]["content"][0]["input"]["command"]
@@ -406,6 +606,7 @@ def selftest():
                             {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": f"r{i}",
                               "output": json.dumps(dict(exit_code=0, output=output))}}]
         assert check(p(tell_third, transcript(codex_reused, "reuse-codex.jsonl")), env), "Codex: third fix on the same worker"
+        assert check(p(local + tell_third, transcript(codex_reused, "reuse-local-codex.jsonl")), env) is None, "Codex: a concrete local third fix reuses its worker"
         lookup = ran(f"pane-tell workers/{night[0][1]} '{cite(night[4][0])} Additional lookup.'", "lookup",
                      f"told workers/{night[0][1]} (Job)\n")
         assert check(p(tell_third, transcript(reused + lookup, "reuse-lookup.jsonl")), env), "a lookup cannot reset the fix lineage"
@@ -538,6 +739,14 @@ def selftest():
         third_ran = ran(new, "tP", "workers/w1:p15\n")
         third_check = ran(spawn_cmd("--check ", "잡일 예외 되돌리기 확인", "04:00:20"), "tQ", "workers/w1:p16\n")
         fourth = spawn_cmd("", "메인 칸 잡일 예외 다시 고치기", "04:30:00")
+        local_third_ran = ran(local + new, "local-third", f"workers/{third[1]}\n")
+        assert judged(local + fourth, *local_third_ran, *third_check), "a declared local third fix is counted before the fourth"
+        assert judged(local + fourth, *third_ran, *third_check), "the local-only declaration never opens a fourth fix"
+        spaced_target = os.path.join(d, "specific fix.py")
+        with open(spaced_target, "w") as f:
+            f.write("# another concrete target\n")
+        quoted_local = f"FIX_ROUND_SCOPE=local-pr FIX_ROUND_TARGETS={shlex.quote(spaced_target)} "
+        assert judged(quoted_local + fourth, *third_ran, *third_check), "quoted target paths cannot bypass the fourth-fix limit"
         assert judged(fourth, *refused, said("계속해"), *third_ran, *third_check), "the answer was used up by the third fix"
         refused_4 = ran(fourth, "tX4", f"PreToolUse:Bash hook error: {reason}", error=True)
         assert judged(fourth, *refused, said("계속해"), *third_ran, *third_check, *refused_4, said("응 한 번 더")) is None, "a new answer"
