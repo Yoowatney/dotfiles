@@ -81,7 +81,7 @@ refresh_blocked() { # called under the send lock, before any draft recovery
   [ -f "$refresh_dir/refresh-delivery.json" ] || return 1
   local row terminal
   row=$("$H" pane get "$1" 2>/dev/null) || return 0
-  terminal=$(jq -r '.result.pane.terminal_id // empty' <<<"$row")
+  terminal=$(printf '%s\n' "$row" | jq -r '.result.pane.terminal_id // empty')
   [ -n "$terminal" ] || return 0
   is_main "$terminal" || return 1
   refresh_request "$2" && return 1

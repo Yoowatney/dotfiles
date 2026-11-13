@@ -50,7 +50,7 @@ elif a[:2] == ["pane", "get"]: print(json.dumps(dict(result=dict(pane=main if a[
 elif a[:2] == ["pane", "read"]:
     print("─" * 40 + "\\n❯ " + ("typed draft" if (r / "full").exists() else "") + "\\n" + "─" * 40 + "\\n  footer")
 elif a[:2] == ["tab", "list"]: print('{"result":{"tabs":[]}}')
-elif a[:2] == ["session", "list"]: print('{"sessions":[]}')
+elif a[:2] == ["session", "list"]: print('{"sessions":[{"name":"default","running":true,"socket_path":"/default/herdr.sock"}]}')
 elif a[:2] == ["agent", "prompt"]:
     if a[2] != "w1:p1": raise SystemExit(0)
     text = a[3]
@@ -91,11 +91,18 @@ else: raise SystemExit(2)
         (self.state / "orchestrator/refresh-delivery.json").unlink(missing_ok=True)
         # Drain only this fixture's detached receivers before deleting its files.
         until(lambda: not list((self.state / "pane-tell/waiting").glob("*")), timeout=10)
+        # Removing a payload precedes the supervisor's final metadata/log writes.
+        # Wait for these fixture-owned processes, not just their payloads.
+        def receivers_stopped():
+            rows = subprocess.check_output(["/bin/ps", "-axo", "args="], text=True)
+            return not any(str(self.state / "pane-tell") in row for row in rows.splitlines())
+        until(receivers_stopped, timeout=10)
         self.tmp.cleanup()
 
-    def tell(self, text, raw=False):
-        args = [str(HERE / "pane-tell"), *(["--raw"] if raw else []), "w1:p1", text]
-        return subprocess.check_output(args, env=self.env, text=True, timeout=10)
+    def tell(self, text, raw=False, cross=False):
+        args = [str(HERE / "pane-tell"), *(["--raw"] if raw else []), "default/w1:p1" if cross else "w1:p1", text]
+        env = {**self.env, "HERDR_SOCKET_PATH": "/sessions/workers/herdr.sock"} if cross else self.env
+        return subprocess.check_output(args, env=env, text=True, timeout=10)
 
     def start(self):
         self.proc = subprocess.Popen(["/bin/bash", str(HERE / "main-refresh"), "--now"], env=self.env)
@@ -123,7 +130,7 @@ else: raise SystemExit(2)
             until(lambda: any("[main-refresh]" in path.read_text()
                               for path in (self.state / "pane-tell/waiting").glob("*")))
         until(lambda: (self.root / "clearing").exists())
-        self.assertIn("queued", self.tell("during-clear-report"))
+        self.assertIn("queued", self.tell("during-clear-report", cross=True))
         self.tell("during-clear-automatic")
         self.assertFalse(any("during-" in text for _, text in self.prompts()))
         (self.root / "clear-continue").touch()
@@ -134,6 +141,20 @@ else: raise SystemExit(2)
         for (_, text), expected in zip(received, ["before-refresh", "during-turn", "during-clear-report", "during-clear-automatic"]):
             self.assertTrue(text.endswith(expected), (text, expected))
         self.assertFalse(list((self.state / "pane-tell/undelivered").glob("*")))
+
+    def test_workers_server_message_waits_for_new_main_session(self):
+        # No older queue may mask a cross-server sender reading the wrong gate.
+        (self.root / "status").write_text("idle")
+        self.start()
+        until(lambda: (self.root / "clearing").exists())
+        self.assertIn("queued", self.tell("cross-server-report", cross=True))
+        self.assertFalse(any(text.endswith("cross-server-report") for _, text in self.prompts()))
+        (self.root / "clear-continue").touch()
+        self.assertEqual(self.proc.wait(timeout=10), 0)
+        until(lambda: any(text.endswith("cross-server-report") for _, text in self.prompts()))
+        received = [(sid, text) for sid, text in self.prompts() if text.endswith("cross-server-report")]
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0][0], "new-session")
 
     def test_failed_handoff_releases_durable_messages_without_clear(self):
         (self.root / "no-handoff").touch()
