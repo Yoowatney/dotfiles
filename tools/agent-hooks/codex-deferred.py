@@ -15,6 +15,7 @@ Private state: XDG_STATE_HOME/codex-deferred/state.json (or CODEX_DEFERRED_DIR).
 import argparse
 import datetime as dt
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -219,6 +220,13 @@ def start_notifier():
 
 def observe(event, payload):
     try:
+        if event == "Stop" and os.environ.get("HERDR_PANE_ID"):
+            spec = importlib.util.spec_from_file_location("herdr_peers", Path(__file__).with_name("herdr_peers.py"))
+            peers = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(peers)
+            pane = peers.herdr(os.environ, "pane", "get", os.environ["HERDR_PANE_ID"]).get("pane") or {}
+            if peers.delegates_checks(os.environ, pane.get("terminal_id")):
+                return  # Main triage reports must not become new deferred work.
         text, success = "", None
         if event == "Stop":
             try:

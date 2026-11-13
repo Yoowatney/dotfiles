@@ -28,7 +28,7 @@ class RecoveryTests(unittest.TestCase):
         # reach the production sibling pane-tell executable from these tests.
         self.hooks = self.root / "hooks"
         self.hooks.mkdir()
-        for name in ("task-ledger.py", "codex-deferred.py"):
+        for name in ("task-ledger.py", "codex-deferred.py", "herdr_peers.py"):
             shutil.copyfile(ROOT / name, self.hooks / name)
         self.hook_script = self.hooks / "task-ledger.py"
         self.script = self.hooks / "codex-deferred.py"
@@ -40,6 +40,7 @@ class RecoveryTests(unittest.TestCase):
         herdr.write_text("#!/bin/sh\ncase \"$1 $2\" in\n"
                          "'session list') printf '%s' '{\"sessions\":[{\"name\":\"default\",\"running\":true,\"socket_path\":\"test.sock\"}]}' ;;\n"
                          "'pane list') printf '%s' '{\"result\":{\"panes\":[{\"pane_id\":\"w1:p1\",\"terminal_id\":\"term_TEST\"}]}}' ;;\n"
+                         "'pane get') cat \"$TEST_PANE_GET\" ;;\n"
                          "*) exit 2 ;; esac\n")
         herdr.chmod(0o700)
         self.env = dict(os.environ, CODEX_DEFERRED_DIR=str(self.root / "deferred"),
@@ -92,6 +93,34 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(item["status"], "pending")
         self.assertIn("https://example.org/issues/1", item["links"])
         self.assertIsNone(item.get("notified_at"))
+
+    def current_pane(self, terminal):
+        # pane get resolves the old environment id after a workspace move.
+        self.env["HERDR_PANE_ID"] = "w9:p8"
+        self.env["TEST_PANE_GET"] = str(self.root / "pane-get.json")
+        Path(self.env["TEST_PANE_GET"]).write_text(json.dumps({"result": {"pane": {
+            "pane_id": "w1:p1", "terminal_id": terminal}}}))
+
+    def test_main_stop_does_not_capture_quota_report(self):
+        self.main_pane()
+        self.current_pane("term_TEST")
+        self.defer("Codex quota exhausted; cross-review deferred.")
+        self.assertFalse((self.root / "deferred/state.json").exists())
+
+    def test_worker_stop_still_captures_the_same_quota_report(self):
+        self.main_pane()
+        self.current_pane("term_WORKER")
+        self.defer("Codex quota exhausted; cross-review deferred.")
+        item = self.state()["items"][0]
+        self.assertEqual(item["status"], "pending")
+        self.assertEqual(item["summary"], "Codex quota exhausted; cross-review deferred.")
+
+    def test_failed_pane_lookup_does_not_drop_worker_deferral(self):
+        self.main_pane()
+        self.current_pane("term_WORKER")
+        Path(self.env["TEST_PANE_GET"]).unlink()
+        self.defer()
+        self.assertEqual(self.state()["items"][0]["status"], "pending")
 
     def test_current_codex_final_answer_phase_proves_recovery(self):
         # Codex 0.167.0 writes response_item messages with final_answer, as
