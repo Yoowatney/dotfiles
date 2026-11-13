@@ -64,6 +64,7 @@ jq -e '(has("dietSkills") | not) and (.skillOverrides // {} | has("docx") | not)
 # Deny rules merge with every other source, so they only narrow; nothing here may allow, ask or change the mode.
 jq -e '(.permissions | keys) == ["deny"] and (.permissions.deny | index("AskUserQuestion"))' <<<"$settings" >/dev/null || fail 'worker permissions only deny: a pane never asks 요유'
 jq -e '.enabledPlugins["core-skills@hyperframes"] == false and (.deniedMcpServers | index({serverName: "rea"})) and .env.ENABLE_CLAUDEAI_MCP_SERVERS == "false" and .skillOverrides["hiring-panel"] == "off" and (has("paneRules") | not)' <<<"$settings" >/dev/null || fail 'worker drops unused plugins, MCP servers, claude.ai connectors and skills'
+jq -e '([.deniedMcpServers[].serverName] | sort) == ["obsidian", "rea"]' <<<"$settings" >/dev/null || fail 'worker blocks a connection needed by delegated work'
 jq -e --arg g "$box/home/.codex/AGENTS.md" --arg l "$box/home/work/munice/CLAUDE.local.md" '.claudeMdExcludes == [$g, $l]' <<<"$settings" >/dev/null || fail 'worker excludes the full rule files it loads filtered'
 rules=$(arg_after --append-system-prompt-file <<<"$out")
 [ -f "$rules" ] || fail 'worker gets no filtered rule file'
@@ -90,13 +91,20 @@ jq -e '(has("claudeMdExcludes") | not) and (has("paneRules") | not) and .env.ENA
 
 # The main pane keeps every rule file whole.
 out=$(cd "$box/home/work/munice/sub" && ROLE=main run)
-jq -e '.enableArtifact == false and .enableWorkflows == false and (has("claudeMdExcludes") | not) and (has("deniedMcpServers") | not) and (has("bashOutputMaxChars") | not)' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'main profile changed'
+jq -e '.enableArtifact == false and .enableWorkflows == false and (has("claudeMdExcludes") | not) and (.deniedMcpServers | length) == 6 and .skillListingBudgetFraction == 0.0015 and (has("bashOutputMaxChars") | not)' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'main profile changed'
 ! grep -qx -- --append-system-prompt-file <<<"$out" || fail 'main pane gets filtered rules'
 printf 'term_test\n' >"$box/state/orchestrator/main"
 out=$(run)
 jq -e '.enableArtifact == false' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'main detection'
 [[ "$(ROLE=worker PROFILE=full run --version)" == --version ]] || fail 'full opt-out'
 rm "$box/state/orchestrator/main"
+# New ordinary munice sessions get the shared budget/connection profile; other
+# folders and the explicit full opt-out retain their installed defaults.
+out=$(cd "$box/home/work/munice/sub" && run --version)
+jq -e '.skillListingBudgetFraction == 0.0015 and .skillListingMaxDescChars == 160 and (.deniedMcpServers | length) == 6 and (has("enableArtifact") | not) and (has("claudeMdExcludes") | not)' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'ordinary munice session has no common-only profile'
+[[ "$(cd "$box/home/work/munice/sub" && PROFILE=full run --version)" == --version ]] || fail 'ordinary session cannot restore installed connections'
+out=$(cd "$box/home/work/munice/sub" && ROLE=check run)
+jq -e '.skillListingBudgetFraction == 0.0015 and (.deniedMcpServers | length) == 6' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'check role misses shared limits'
 [[ "$(run --version)" == --version ]] || fail 'a session opened by hand gets no profile'
 # A check's whole child tree may inspect processes/network, but cannot write its
 # target, even through a symlink. The executable is a local probe, never Claude.

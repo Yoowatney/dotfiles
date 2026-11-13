@@ -6,10 +6,36 @@
       "context7@claude-plugins-official": false,
       "discord@claude-plugins-official": false,
       "figma@claude-plugins-official": false
-    }
+    },
+    "skillListingBudgetFraction": 0.0015,
+    "skillListingMaxDescChars": 160,
+    "deniedMcpServers": [
+      {
+        "serverName": "rea"
+      },
+      {
+        "serverName": "Amplitude"
+      },
+      {
+        "serverName": "notion-token"
+      },
+      {
+        "serverName": "obsidian"
+      },
+      {
+        "serverName": "plugin:figma:figma"
+      },
+      {
+        "serverName": "plugin:discord:discord"
+      }
+    ]
   },
   "roles": {
     "worker": {
+      "deniedMcpServers": [
+        { "serverName": "rea" },
+        { "serverName": "obsidian" }
+      ],
       "enabledPlugins": {
         "core-skills@hyperframes": false,
         "watch@claude-video": false,
@@ -17,11 +43,18 @@
         "claude-hud@claude-hud": false,
         "skill-creator@claude-plugins-official": false
       },
-      "deniedMcpServers": [{ "serverName": "rea" }, { "serverName": "obsidian" }],
-      "permissions": { "deny": ["AskUserQuestion", "ScheduleWakeup", "SendFeedback"] },
+      "permissions": {
+        "deny": [
+          "AskUserQuestion",
+          "ScheduleWakeup",
+          "SendFeedback"
+        ]
+      },
       "enableArtifact": false,
       "dietSkills": {
-        "enabledPlugins": { "taste-skill@taste-skill": false },
+        "enabledPlugins": {
+          "taste-skill@taste-skill": false
+        },
         "skillOverrides": {
           "docx": "off",
           "pdf": "off",
@@ -35,7 +68,9 @@
           "init": "off"
         }
       },
-      "env": { "ENABLE_CLAUDEAI_MCP_SERVERS": "false" },
+      "env": {
+        "ENABLE_CLAUDEAI_MCP_SERVERS": "false"
+      },
       "skillOverrides": {
         "closing-household-ledger": "off",
         "hiring-panel": "off",
@@ -57,10 +92,17 @@
         "schedule": "off"
       },
       "paneRules": [
-        { "file": "~/.codex/AGENTS.md" },
-        { "file": "~/work/munice/CLAUDE.local.md", "under": "~/work/munice" }
+        {
+          "file": "~/.codex/AGENTS.md"
+        },
+        {
+          "file": "~/work/munice/CLAUDE.local.md",
+          "under": "~/work/munice"
+        }
       ]
     },
-    "main": { "enableArtifact": false }
+    "main": {
+      "enableArtifact": false
+    }
   }
 }
