@@ -519,6 +519,20 @@ class RelayTests(unittest.TestCase):
                 self.assertEqual(self.spawns, [])
                 self.assertTrue(self.tells[0][1].startswith("바로 전달하는 칸의 보고입니다("), self.tells[0][1])
 
+    def test_counts_computed_open_a_check(self):
+        # api#1218 check of 952c627: counts with a unit (대, 개, 건) are numbers to post too.
+        for text in ("계산을 마쳤습니다. 최대 인스턴스는 12대, 최소 인스턴스는 3대입니다.\n"
+                     "남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠",
+                     "pytest 12개 통과를 확인했습니다. Slack에는 올리지 않았습니다.\n"
+                     "남은 것: 요유 몫: 머지 결정 · 유요 몫: PR 올리기 · 세션: 닫아도 됨"):
+            with self.subTest(text=text.splitlines()[0]):
+                self.tells.clear()
+                self.spawns.clear()
+                self.assertEqual(auto.direct_reason(text), "")
+                self.finish(text)
+                self.assertEqual(len(self.spawns), 1)
+                self.assertEqual(self.tells, [])
+
     def test_numbers_answered_without_a_post_request_open_a_check(self):
         # api#1218 check: a computed figure counted only when the report asked to post it.
         for text in ("비용 계산 결과를 정리했습니다. 월 5만 원입니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠",
@@ -552,9 +566,9 @@ class RelayTests(unittest.TestCase):
                      "남은 것: 요유 몫: 시험 시점 결정 · 유요 몫: 없음 · 세션: 닫아도 됨",
                      "끝날 예상: 18:30 KST\n자료를 확인했고 그림을 그리는 중입니다.\n"
                      "남은 것: 요유 몫: 없음 · 유요 몫: 그림 마무리 · 세션: 열어 둠",
-                     "pytest 12개 통과를 확인했습니다. Slack에는 올리지 않았습니다.\n"
+                     "pytest가 모두 통과하는 것을 확인했습니다. Slack에는 올리지 않았습니다.\n"
                      "남은 것: 요유 몫: 머지 결정 · 유요 몫: PR 올리기 · 세션: 닫아도 됨",
-                     "스레드를 읽고 결정 6개를 정리했습니다. 서버 답은 다른 세션 몫이라 초안은 만들지 않았습니다.\n"
+                     "스레드를 읽고 정할 것을 정리했습니다. 서버 답은 다른 세션 몫이라 초안은 만들지 않았습니다.\n"
                      "남은 것: 요유 몫: 결정 6개 · 유요 몫: 없음 · 세션: 열어 둠"):
             with self.subTest(text=text.splitlines()[0]):
                 self.tells.clear()

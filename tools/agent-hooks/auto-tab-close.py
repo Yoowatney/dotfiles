@@ -364,8 +364,11 @@ HANDED = re.compile(r"(?:슬랙|slack|스레드|채널|요유(?![ \t]*몫))(?:[^
 MADE = re.compile(RESULT.pattern + r"|그렸|계산했|구했", re.I)
 # An estimate line does not make a report a progress note (api#1218 check): a sentence still under way does. Waiting is not.
 UNDER_WAY = re.compile(r"(?<!대기)(?<!대기 )중(?:입니다|이에요|이고|이며|$)|(?<!기다리)(?<!받)고[ \t]*있")
-# A computed amount is something to post even when nobody asked to post it; inside a question it is the question.
-NUMBER = re.compile(r"\d(?:[\d,.]*\d)?[ \t]*(?:[만억천][ \t]*)?(?:원|달러|엔|유로)|[$₩][ \t]?\d|\d(?:\.\d+)?[ \t]*%")
+# A computed amount or count is something to post even when nobody asked to post it; inside a question it is the question.
+# Counts take a unit (api#1218 check: "12대, 3대"); 개월, 개선, 대비, 명령 and the like are words, not counts.
+NUMBER = re.compile(r"\d(?:[\d,.]*\d)?[ \t]*(?:[만억천][ \t]*)?(?:원|달러|엔|유로)|[$₩][ \t]?\d|\d(?:\.\d+)?[ \t]*%|"
+                    r"\d(?:[\d,.]*\d)?[ \t]*(?:개|대|건|명|회|배|곳|줄)(?![선발인월비상한령강의사])|"
+                    r"\d(?:\.\d+)?[ \t]*(?:ms|[KMGT]B)(?![A-Za-z])")
 SENTENCE = re.compile(r"(?:[^.!?。\n]|(?<=\d)\.(?=\d))+[.!?。]?")
 
 
