@@ -34,15 +34,49 @@ class MemoryHookTest(unittest.TestCase):
             self.assertNotIn('Main contact', text)
             self.assertNotIn('[Video]', text)
             self.assertNotIn('Project safety is auto-loaded', text)
-            for role in ('main', 'check'):
-                full = memory.context(cwd, dict(env, HERDR_CODEX_STARTUP_ROLE=role))
-                self.assertIn('Main contact', full)
-                self.assertIn('[Video]', full)
+            main = memory.context(cwd, dict(env, HERDR_CODEX_STARTUP_ROLE='main'))
+            self.assertIn('Main contact', main)
+            self.assertIn('[Video]', main)
+            self.assertNotIn('Worker contract', main)  # the lead view: worker-only lines and markers drop
+            self.assertNotIn('<!--', main)
+            check = memory.context(cwd, dict(env, HERDR_CODEX_STARTUP_ROLE='check'))
+            self.assertNotIn('Main contact', check)  # a check reads the worker view, the one the eval scores
+            self.assertIn('Worker contract', check)
+            self.assertIn('[Video]', check)  # its memory index keeps every entry: a check has no task type
             switch = home / '.local/state/codex-startup/mode'
             switch.parent.mkdir(parents=True)
             switch.write_text('full\n')
             self.assertIn('Main contact', memory.context(cwd, env))
             self.assertIn('[Video]', memory.context(cwd, env))
+
+    def test_global_role_lines_follow_the_role_not_the_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            cwd = home / 'discord'
+            cwd.mkdir()
+            codex = home / '.codex'
+            codex.mkdir()
+            full = 'Shared rule\n<!-- pane:skip -->\nLead owns its panes\n<!-- /pane:skip -->\n<!-- pane: Report to your lead -->\n'
+            (codex / 'AGENTS.md').write_text(full)
+            # Without an override Codex reads the whole AGENTS.md itself, so the hook adds nothing.
+            self.assertNotIn('Lead owns its panes', memory.context(cwd, {'HOME': str(home)}))
+            (codex / 'AGENTS.override.md').write_text('Shared rule\n')  # what activate installs: the shared lines only
+            home_main = memory.context(cwd, {'HOME': str(home)})  # a Codex session with no role set, such as a Codex main
+            self.assertIn('Lead owns its panes', home_main)
+            self.assertNotIn('Report to your lead', home_main)
+            for role in ('main', 'general', 'lead'):
+                self.assertIn('Lead owns its panes', memory.context(cwd, {'HOME': str(home), 'HERDR_CODEX_STARTUP_ROLE': role}))
+            worker = memory.context(cwd, {'HOME': str(home), 'HERDR_CODEX_STARTUP_ROLE': 'worker', 'HERDR_CODEX_TASK_TYPE': 'code'})
+            self.assertIn('Report to your lead', worker)
+            self.assertNotIn('Lead owns its panes', worker)
+            check = memory.context(cwd, {'HOME': str(home), 'HERDR_CODEX_STARTUP_ROLE': 'check'})
+            self.assertEqual(check, worker)
+            switch = home / '.local/state/codex-startup/mode'
+            switch.parent.mkdir(parents=True)
+            switch.write_text('full\n')  # the full-context switch puts back every line the override lacks
+            restored = memory.context(cwd, {'HOME': str(home), 'HERDR_CODEX_STARTUP_ROLE': 'worker', 'HERDR_CODEX_TASK_TYPE': 'code'})
+            self.assertIn('Lead owns its panes', restored)
+            self.assertIn('Report to your lead', restored)
 
     def test_malformed_rule_boundary_keeps_the_whole_rule(self):
         with tempfile.TemporaryDirectory() as tmp:

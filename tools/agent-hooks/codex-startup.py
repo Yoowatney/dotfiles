@@ -40,7 +40,8 @@ def keep_skill(kind, path):
     return True
 
 
-def worker_rules(text):
+def pane_view(text, *kinds):
+    """Lines of the given kinds: 'shared', 'lead' (inside a pane:skip block) or 'worker' (a `<!-- pane: … -->` line)."""
     output, skipping = [], False
     for line in text.splitlines(keepends=True):
         if line.strip() == '<!-- pane:skip -->':
@@ -51,12 +52,30 @@ def worker_rules(text):
             if not skipping:
                 raise ValueError('unmatched worker rule marker')
             skipping = False
-        elif not skipping:
-            match = re.fullmatch(r'\s*<!-- pane: (.*?) -->\s*', line)
-            output.append(match[1] + '\n' if match else line)
+        else:
+            match = None if skipping else re.fullmatch(r'\s*<!-- pane: (.*?) -->\s*', line)
+            kind = 'lead' if skipping else 'worker' if match else 'shared'
+            if kind in kinds:
+                output.append(match[1] + '\n' if match else line)
     if skipping:
         raise ValueError('unclosed worker rule marker')
     return ''.join(output)
+
+
+def worker_rules(text):
+    return pane_view(text, 'shared', 'worker')
+
+
+def lead_rules(text):
+    return pane_view(text, 'shared', 'lead')
+
+
+def rules_view(env):
+    """Rules follow the role, not the runtime: a worker or check pane reads the worker view, any other session
+    (main, lead, general, or no role) the lead view; the full switch keeps all."""
+    if not compact_mode(env):
+        return 'full'
+    return 'worker' if env.get('HERDR_CODEX_STARTUP_ROLE') in {'worker', 'check'} else 'lead'
 
 
 def memory_index(text, kind):

@@ -12,8 +12,23 @@ startup = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(startup)
 
 
+def global_role_rules(env, home, view):
+    """Codex reads one global file, AGENTS.override.md before AGENTS.md. activate.py installs an override with
+    only the shared lines, so the role's own lines come from here; without an override Codex has them all."""
+    source = Path(env.get('CODEX_HOME', str(home / '.codex')))
+    full = source / 'AGENTS.md'
+    if not (source / 'AGENTS.override.md').is_file() or not full.is_file():
+        return ''
+    text = full.read_text()
+    try:
+        return startup.pane_view(text, *{'worker': ['worker'], 'lead': ['lead'], 'full': ['lead', 'worker']}[view])
+    except ValueError:
+        return text  # Never omit rules when boundaries are malformed.
+
+
 def context(cwd, env):
     home, kind, compact = startup.policy(env)
+    view = startup.rules_view(env)
     cwd = Path(cwd).absolute()
     ancestors = [cwd, *cwd.parents]
     root = next((p for p in ancestors if (p / '.git').exists()), cwd)
@@ -25,13 +40,14 @@ def context(cwd, env):
                 continue
             seen.add(path.resolve())
             text = path.read_text()
-            if compact:
+            if view != 'full':
                 try:
-                    text = startup.worker_rules(text)
+                    text = (startup.worker_rules if view == 'worker' else startup.lead_rules)(text)
                 except ValueError:
                     pass  # Never omit rules when boundaries are malformed.
             chunks.append('## ' + str(path) + '\n' + text)
         return '\n\n'.join(chunks)
+    role_rules = global_role_rules(env, home, view)
     parents = rules([p / 'AGENTS.md' for p in reversed(root.parents) if p != Path('/')])
     locals_ = rules([p / 'CLAUDE.local.md' for p in reversed(ancestors) if p != Path('/')])
     def memory_path(path):
@@ -51,6 +67,8 @@ def context(cwd, env):
     parts = ['# Shared memory (Claude + Codex)', 'Write new memories to: ' + write,
              'Index files (read the full file when relevant; omitted domain entries remain there):',
              '\n'.join('- ' + p for p in files) or '(no memories yet for this project)']
+    if role_rules:
+        parts += ['# Global rules for this session\'s role (the rest of ~/.codex/AGENTS.md is in AGENTS.override.md)', role_rules]
     if parents:
         parts += ['# Parent AGENTS.md (above this git root, not auto-loaded by Codex)', parents]
     if locals_:
