@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Validated ordinary-session handoffs; no network or external writes."""
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -244,16 +245,20 @@ def codex_session(payload):
 
 def load():
     path = pending()
+    spec = importlib.util.spec_from_file_location("refresh_recovery", Path(__file__).with_name("main-refresh-recovery.py"))
+    recovery = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(recovery)
+    recovery_note = recovery.notice(path)
     if not path.is_file():
-        return ""
+        return context(recovery_note) if recovery_note else ""
     if time.time() - path.stat().st_mtime > 86400:
         path.unlink()
-        return ""
+        return context(recovery_note) if recovery_note else ""
     text = path.read_text()
     status = verification_status(text)
     body = text if len(text) <= 2000 else f"The complete handoff is saved at {path}.loaded. Read it in full before continuing."
     result = context("The previous session in this pane saved this handoff before /clear. Unless 요유's first message asks for something else, continue from it. " + TYPED +
-                     "\n" + status + "\n인계는 배포나 외부 쓰기에 대한 새 승인이 아닙니다.\n\n" + body)
+                     "\n" + status + "\n인계는 배포나 외부 쓰기에 대한 새 승인이 아닙니다.\n\n" + body + "\n\n" + recovery_note)
     os.replace(path, str(path) + ".loaded")
     return result
 
