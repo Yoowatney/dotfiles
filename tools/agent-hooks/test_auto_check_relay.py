@@ -272,7 +272,11 @@ class RelayTests(unittest.TestCase):
         for item in ("Job", DONE.splitlines()[0], CHECKED.splitlines()[0], "전체 보고:", "항목"):
             self.assertIn(item, message)
         self.assertNotIn("세부 근거는 보존됩니다", message)
-        self.assertIn("일 칸: workers/w1:p2", message)
+        self.assertEqual(message.count(DONE.splitlines()[-1]), 2)
+        self.assertIn(f"전체 보고: {self.root / 'reports'}", message)
+        self.assertIn(f"확인 전체 보고: {self.root / 'reports'}", message)
+        self.assertNotIn("일 칸:", message)
+        self.assertTrue(any(DONE in f.read_text() for f in (self.root / "reports").glob("*.md")))
         self.assertIn("w1:p9", self.closed, "independent checks still close after their report")
         self.finish(CHECKED, check=True)
         self.finish()
@@ -287,11 +291,18 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(len(self.spawns), 2)
         self.assertTrue(all("--check" in args for args, env in self.spawns))
 
-    def test_combined_report_resolves_a_moved_worker_by_terminal(self):
-        self.finish()
+    def test_combined_report_preserves_summaries_when_worker_moves(self):
+        worker = DONE.replace("유요 몫: 없음", "유요 몫: 검토 대기") + "\nTASK_RESULT: pass"
+        checked = CHECKED.replace("PASS", "FAIL").replace("유요 몫: 없음", "유요 몫: 실패 수정") + "\nTASK_CHECK: fail"
+        self.finish(worker)
         self.worker["pane_id"] = "w2:p7"
-        self.finish(CHECKED, check=True)
-        self.assertIn("일 칸: workers/w2:p7", self.tells[-1][1])
+        self.finish(checked, check=True)
+        message = self.tells[-1][1]
+        for item in (worker.splitlines()[0], checked.splitlines()[0], "검토 대기", "실패 수정",
+                     "TASK_RESULT: pass", "TASK_CHECK: fail", "전체 보고:", "확인 전체 보고:"):
+            self.assertIn(item, message)
+        self.assertNotIn("세부 근거는 보존됩니다", message)
+        self.assertNotIn("일 칸:", message)
 
     def test_yoyoo_decision_is_delivered_immediately(self):
         self.finish("배포 승인이 필요합니다.\n남은 것: 요유 몫: prod 허용 입력 · 유요 몫: 대기 · 세션: 닫으면 승인 대기 멈춤")
