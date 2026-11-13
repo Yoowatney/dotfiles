@@ -46,7 +46,11 @@ sid = (r / "session").read_text()
 main = dict(pane_id="w1:p1", terminal_id="main-terminal", agent="claude", agent_session=dict(value=sid), agent_status=(r / "status").read_text(), label="main", scroll=dict(offset_from_bottom=0))
 sender = dict(pane_id="w1:p9", terminal_id="sender-terminal", agent="codex", agent_session=dict(value="sender"), label="worker")
 if a[:2] == ["pane", "list"]: print(json.dumps(dict(result=dict(panes=[main, sender]))))
-elif a[:2] == ["pane", "get"]: print(json.dumps(dict(result=dict(pane=main if a[2] == "w1:p1" else sender))))
+elif a[:2] == ["pane", "get"]:
+    if a[2] == "w1:p1" and (r / "get-fails").exists():
+        (r / "get-failed").touch()
+        raise SystemExit(1)
+    print(json.dumps(dict(result=dict(pane=main if a[2] == "w1:p1" else sender))))
 elif a[:2] == ["pane", "read"]:
     print("─" * 40 + "\\n❯ " + ("typed draft" if (r / "full").exists() else "") + "\\n" + "─" * 40 + "\\n  footer")
 elif a[:2] == ["tab", "list"]: print('{"result":{"tabs":[]}}')
@@ -170,6 +174,64 @@ else: raise SystemExit(2)
         until(lambda: any(text == "after-failed-handoff" for _, text in self.prompts()))
         self.assertNotIn("/clear", [text for _, text in self.prompts()])
         self.assertEqual(self.prompts()[-1], ["old-session", "after-failed-handoff"])
+
+    def test_transient_pane_lookup_does_not_cancel_active_handoff(self):
+        self.start()
+        until(lambda: (self.state / "orchestrator/refresh-delivery.json").exists())
+        self.tell("ordinary-after-recovery", raw=True)
+        with (self.state / "pane-tell/sending/w1:p1.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            (self.root / "status").write_text("idle")
+            until(lambda: any("[main-refresh]" in path.read_text()
+                              for path in (self.state / "pane-tell/waiting").glob("*")))
+            (self.root / "get-fails").touch()
+        until(lambda: (self.root / "get-failed").exists())
+        self.assertFalse((self.root / "requested").exists())
+        self.assertTrue(any("[main-refresh]" in path.read_text()
+                            for path in (self.state / "pane-tell/waiting").glob("*")))
+        (self.root / "get-fails").unlink()
+        until(lambda: (self.root / "clearing").exists())
+        (self.root / "clear-continue").touch()
+        self.assertEqual(self.proc.wait(timeout=10), 0)
+        until(lambda: any(text == "ordinary-after-recovery" for _, text in self.prompts()))
+        self.assertEqual(sum("[main-refresh]" in text for _, text in self.prompts()), 1)
+        self.assertEqual(self.prompts()[-1], ["new-session", "ordinary-after-recovery"])
+
+    def test_skipped_queued_handoff_is_cancelled_after_manual_session_change(self):
+        self.check_skipped_queued_handoff("manually-new-session")
+
+    def test_skipped_queued_handoff_is_cancelled_in_original_session(self):
+        self.check_skipped_queued_handoff("old-session")
+
+    def test_old_queue_cannot_join_resumed_refresh_attempt(self):
+        self.check_skipped_queued_handoff("old-session", resumed=True)
+
+    def check_skipped_queued_handoff(self, session, resumed=False):
+        self.env["MAIN_REFRESH_HANDOFF_WAIT"] = "1"
+        self.start()
+        until(lambda: (self.state / "orchestrator/refresh-delivery.json").exists())
+        self.tell("ordinary-report", raw=True)
+        with (self.state / "pane-tell/sending/w1:p1.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            (self.root / "status").write_text("idle")
+            until(lambda: any("[main-refresh]" in path.read_text()
+                              for path in (self.state / "pane-tell/waiting").glob("*")))
+            self.tell("report-behind-request", raw=True)
+            self.assertEqual(self.proc.wait(timeout=8), 0)
+            # A manual switch after refresh skipped must not inherit its request.
+            (self.root / "session").write_text(session)
+            if resumed:
+                # The durable token is reused by a later refresh watcher, but
+                # its new gate must not revive the old attempt's queued copy.
+                (self.state / "orchestrator/refresh-delivery.json").write_text(
+                    json.dumps(dict(pid=os.getpid(), terminal="main-terminal", session=session)))
+        if resumed:
+            until(lambda: any("cancelled refresh request" in line for line in
+                  (self.state / "pane-tell/log").read_text().splitlines()))
+            (self.state / "orchestrator/refresh-delivery.json").unlink()
+        until(lambda: not list((self.state / "pane-tell/waiting").glob("*")))
+        self.assertEqual(self.prompts(), [[session, "ordinary-report"], [session, "report-behind-request"]])
+        self.assertFalse(list((self.state / "pane-tell/undelivered").glob("*")))
 
     def test_clear_confirmation_timeout_recovers_handoff_and_relays(self):
         (self.root / "return-before-clear").touch()

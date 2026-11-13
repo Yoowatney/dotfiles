@@ -68,6 +68,28 @@ if [[ "${HERDR_SOCKET_PATH:-}" == */sessions/*/herdr.sock ]]; then
   [ "$server" = default ] || refresh_dir=$refresh_dir/$server
 fi
 is_main() { [ -n "$1" ] && [ "$1" = "$(cat "$refresh_dir/main" 2>/dev/null)" ]; }
+# Bind a queued handoff to the refresh attempt that launched it. The request
+# token can legitimately survive a timeout for the next watcher to resume.
+if [ -n "${MAIN_REFRESH_REQUEST_TOKEN:-}" ] && [ "${MAIN_REFRESH_REQUEST_OWNER+x}" != x ]; then
+  MAIN_REFRESH_REQUEST_OWNER=$(jq -r '.pid // empty' "$refresh_dir/refresh-delivery.json" 2>/dev/null)
+  export MAIN_REFRESH_REQUEST_OWNER
+fi
+refresh_request_active() { # pane, message; called again under the send lock
+  [ -n "${MAIN_REFRESH_REQUEST_TOKEN:-}" ] || return 0
+  local row
+  row=$("$H" pane get "$1" 2>/dev/null) || return 1
+  python3 -I -c 'import json,os,sys
+try:
+    gate=json.load(open(sys.argv[1])); request=json.load(open(sys.argv[2]))
+    pane=json.loads(sys.argv[3])["result"]["pane"]
+    ok=(str(gate["pid"]) == sys.argv[4] and request["token"] == sys.argv[5]
+        and sys.argv[6].endswith(request["ask"])
+        and gate["session"] == request["session"] == pane.get("agent_session",{}).get("value")
+        and gate["terminal"] == pane.get("terminal_id"))
+    if ok: os.kill(gate["pid"],0)
+except (OSError,ValueError,KeyError): ok=False
+sys.exit(0 if ok else 10)' "$refresh_dir/refresh-delivery.json" "$refresh_handoff/main-refresh.refresh-request" "$row" "${MAIN_REFRESH_REQUEST_OWNER:-}" "$MAIN_REFRESH_REQUEST_TOKEN" "$2"
+}
 refresh_request() {
   [ -n "${MAIN_REFRESH_REQUEST_TOKEN:-}" ] || return 1
   python3 -I -c 'import json,sys
@@ -115,7 +137,9 @@ recover_shell() { # pane kind: workers only; normal box readiness remains read-o
   box_ready "$1" "$2"
 }
 send_unlocked() {
-  local note message=$3
+  local note message=$3 result
+  refresh_request_active "$1" "$message"; result=$?
+  [ "$result" = 0 ] || return "$result"
   refresh_blocked "$1" "$message" && return 1
   if ! box_ready "$1" "$2"; then
     python3 -I "$DRAFT_HELPER" prepare "$1" "$2" >/dev/null 2>&1 || recover_shell "$1" "$2" || return 1
@@ -125,6 +149,8 @@ send_unlocked() {
   note=$(python3 -I "$DRAFT_HELPER" notice "$1" 2>/dev/null) || return 1
   [ -z "$note" ] || message=$(printf '[pane-tell: 입력창 초안 보관 안내] %s\n\n%s' "$note" "$message")
   box_ready "$1" "$2" || return 1
+  refresh_request_active "$1" "$3"; result=$?
+  [ "$result" = 0 ] || return "$result"
   # Preserve the exact attempted prompt before herdr can accept it. Failure
   # leaves the original payload in the ordinary durable queue for retry.
   local recovery_row recovery_terminal recovery_session
@@ -284,6 +310,8 @@ tell() { # pane, kind, message, receiver's terminal, its session, sender's termi
   local previous file
   umask 077 # messages can name customers
   mkdir -p "$STATE" || die "cannot keep the message"
+  refresh_request_active "$1" "$3"
+  [ "$?" != 10 ] || return 0 # cancelled machine request, never ordinary traffic
   file=$(mktemp "$STATE/.message.XXXXXX") && printf '%s' "$3" > "$file" || die "cannot keep the message"
   previous=$(predecessors "$4") || order_failed "$file" "$6" "${7:-}"
   # The only permitted prompt during refresh must pass the parked old backlog.
@@ -348,7 +376,7 @@ warn() { # what happened, sender's terminal, sender's socket when on another ser
 
 deliver() { # message file, receiver's terminal (a moved pane gets a new pane id), its session when queued, sender's terminal,
   # sender's socket, predecessor payload (if any)
-  local list row pane kind sid label t0=$SECONDS warned=
+  local list row pane kind sid label result t0=$SECONDS warned=
   while (( SECONDS - t0 < ${PANE_TELL_WAIT:-86400} )); do
     sleep "${PANE_TELL_POLL:-5}"
     list=$("$H" pane list 2>/dev/null) || continue # herdr restarting is not the receiver gone
@@ -361,12 +389,20 @@ deliver() { # message file, receiver's terminal (a moved pane gets a new pane id
     # alert time; past it the main counts as gone, kept in a file and announced (11/13 21:28: seven reports went in seconds).
     [ -n "$kind" ] || ! is_main "$2" || (( SECONDS - t0 >= ${PANE_TELL_ALERT:-600} )) || continue
     [ -n "$kind" ] && { [ -z "$3" ] || [ "$sid" = "$3" ] || is_main "$2"; } || break
-    if predecessors_done "$1" "${6:-}" && send "$pane" "$kind" "$(cat "$1")"; then
+    result=1
+    if predecessors_done "$1" "${6:-}"; then
+      send "$pane" "$kind" "$(cat "$1")"; result=$?
+    fi
+    if [ "$result" = 0 ] || [ "$result" = 10 ]; then
       rm -f "$1"
       rm -f "$STATE/receivers/$(basename "$1")"
       rm -f "$STATE/delivery-routes/$(basename "$1")"
       ordered "$2" done "$1"
-      echo "$(date '+%F %T') delivered $(basename "$1") to $pane" >> "$STATE/log"
+      if [ "$result" = 10 ]; then
+        echo "$(date '+%F %T') cancelled refresh request $(basename "$1") for $pane" >> "$STATE/log"
+      else
+        echo "$(date '+%F %T') delivered $(basename "$1") to $pane" >> "$STATE/log"
+      fi
       return
     fi
     if [ -z "$warned" ] && (( SECONDS - t0 >= ${PANE_TELL_ALERT:-600} )); then
