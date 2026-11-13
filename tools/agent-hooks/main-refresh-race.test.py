@@ -187,7 +187,7 @@ else: raise SystemExit(2)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         first = "result " + "long " * 60 + "failed"
-        summary = module.short_report(first + "\nbody must stay in file\nTASK_CHECK: fail\n남은 것: retry")
+        summary = module.short_report(first + "\nbody must stay in file\nTASK_CHECK: fail\n남은 것: retry", cap=None)
         self.assertIn(first, summary)
         self.assertIn("TASK_CHECK: fail", summary.splitlines()[0])
         self.assertNotIn("body must", summary)
@@ -196,7 +196,8 @@ else: raise SystemExit(2)
         context = self.root / "check-context.json"
         context.write_text(json.dumps(dict(job="api#1209", first="worker finished",
                             summary="worker finished [TASK_RESULT: pass]\n남은 것: worker follow-up",
-                            report="worker-report.md", entry="13:00")))
+                            report="worker-report.md", entry="13:00", worker_address="workers/w1:p2",
+                            kind="auto", kind_reason="independent check")))
         sent = []
         reply = "check failed\nprivate body\nTASK_CHECK: fail\n남은 것: 요유 몫: 없음 · 유요 몫: retry · 세션: 닫아도 됨"
         with patch.object(module.herdr_peers, "delegates_checks", return_value=True), \

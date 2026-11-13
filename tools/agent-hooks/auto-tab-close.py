@@ -317,7 +317,7 @@ def nearest_lead(me: dict, panes: list, name: str = "", sideways: bool = True, e
     return (lead_pane(me, panes, name, sideways, env) or ("",))[0]
 
 
-def short_report(reply: str, cap: int | None = None) -> str:
+def short_report(reply: str, cap: int | None = 200) -> str:
     """The first prose line, up to `cap` characters, and the last `남은 것:` line (with the lines under it when it is a heading). Both
     keep their inline code and quotes (`prod 허용` is what 요유 types, and a check pane's first line names what it ran); only fenced
     code and blockquotes are not the report's."""
@@ -525,8 +525,16 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
                 return True
             head = ("바로 전달하는 칸의 보고입니다(확인 칸의 질문·대기 보고입니다)." if interim else
                     f"확인 칸의 마지막 보고입니다(일 칸 보고와 확인 결과를 함께 보냅니다). {share.CHECK_NOTE}:")
+            worker_address = context.get("worker_address")
+            if context.get("worker_terminal"):
+                current = (herdr_peers.all_panes(env) or {}).get(context["worker_terminal"])
+                if current:
+                    server = worker_address.split("/", 1)[0] if worker_address and "/" in worker_address else herdr_peers.server_key(env)
+                    worker_address = f"{server}/{current[1]['pane_id']}"
             message = (f"{head} {context['job']}\n"
                        f"{context.get('summary') or context['first']}\n"
+                       f"일 칸: {worker_address or '주소 없음: 기존 보고 참조'}\n"
+                       f"확인 종류: {context['kind']} ({context['kind_reason']})\n"
                        f"전체 보고: {context['report']} ({context['entry']})\n"
                        f"{short_report(reply)}\n"
                        f"확인 전체 보고: {path} ({entry})")

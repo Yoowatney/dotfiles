@@ -275,7 +275,8 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(message.count(DONE.splitlines()[-1]), 2)
         self.assertIn(f"전체 보고: {self.root / 'reports'}", message)
         self.assertIn(f"확인 전체 보고: {self.root / 'reports'}", message)
-        self.assertNotIn("일 칸:", message)
+        self.assertIn("일 칸: workers/w1:p2", message)
+        self.assertIn("확인 종류: auto (", message)
         self.assertTrue(any(DONE in f.read_text() for f in (self.root / "reports").glob("*.md")))
         self.assertIn("w1:p9", self.closed, "independent checks still close after their report")
         self.finish(CHECKED, check=True)
@@ -302,7 +303,33 @@ class RelayTests(unittest.TestCase):
                      "TASK_RESULT: pass", "TASK_CHECK: fail", "전체 보고:", "확인 전체 보고:"):
             self.assertIn(item, message)
         self.assertNotIn("세부 근거는 보존됩니다", message)
-        self.assertNotIn("일 칸:", message)
+        self.assertIn("일 칸: workers/w2:p7", message)
+        self.assertIn("확인 종류: auto (", message)
+
+    def test_combined_report_caps_both_default_summaries(self):
+        worker = "W" * 600 + "\nTest passed.\n" + DONE.splitlines()[-1]
+        checked = "C" * 600 + "\nTest passed.\n" + CHECKED.splitlines()[-1]
+        self.finish(worker)
+        context = json.loads(next((self.state / "automatic-checks").glob("*.json")).read_text())
+        self.assertEqual(context["summary"].splitlines()[0], "W" * 200)
+        self.finish(checked, check=True)
+        message = self.tells[-1][1]
+        self.assertIn("W" * 200, message)
+        self.assertNotIn("W" * 201, message)
+        self.assertIn("C" * 200, message)
+        self.assertNotIn("C" * 201, message)
+
+    def test_job_report_caps_default_first_line(self):
+        self.env["MUNICE_AUTO_DISPATCH"] = "1"
+        self.finish("J" * 600 + "\n남은 것: 요유 몫: 승인 · 유요 몫: 없음 · 세션: 닫아도 됨")
+        self.assertIn("J" * 200, self.tells[-1][1])
+        self.assertNotIn("J" * 201, self.tells[-1][1])
+
+    def test_stand_in_worker_report_caps_default_first_line(self):
+        self.names["w1:p2"] = "spawn-absent-1"
+        self.finish("S" * 600 + "\n" + DONE.splitlines()[-1])
+        self.assertIn("S" * 200, self.tells[-1][1])
+        self.assertNotIn("S" * 201, self.tells[-1][1])
 
     def test_yoyoo_decision_is_delivered_immediately(self):
         self.finish("배포 승인이 필요합니다.\n남은 것: 요유 몫: prod 허용 입력 · 유요 몫: 대기 · 세션: 닫으면 승인 대기 멈춤")
