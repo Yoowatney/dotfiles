@@ -15,6 +15,8 @@ class StartupTest(unittest.TestCase):
     def test_only_explicit_worker_regions_are_removed(self):
         source = 'Safety\n<!-- pane:skip -->\nMain contact\n<!-- /pane:skip -->\n<!-- pane: Worker contract -->\nPermissions\n'
         self.assertEqual(startup.worker_rules(source), 'Safety\nWorker contract\nPermissions\n')
+        self.assertEqual(startup.lead_rules(source), 'Safety\nMain contact\nPermissions\n')
+        self.assertEqual(startup.pane_view(source, 'shared'), 'Safety\nPermissions\n')
         with self.assertRaises(ValueError):
             startup.worker_rules('Safety\n<!-- pane:skip -->\nunfinished')
 
