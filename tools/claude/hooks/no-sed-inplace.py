@@ -376,16 +376,21 @@ def _subcommand(w: list[str]) -> str:
 
 
 def _alias(sub: str, args: list[str], wheres: list[str], given: dict[str, str]) -> tuple[str, list[str]]:
-    """Expands an alias (`-c alias.x=...` or the repository's config) up to three deep. A `!` alias that runs checkout
-    or switch cannot be read word by word: it becomes a `switch` with no branch, which is refused."""
+    """Expands an alias (`-c alias.x=...` or the repository's config) up to three deep; one still unexpanded after
+    that, or a loop, is refused like an unreadable one. A `!` alias that runs checkout or switch cannot be read word by
+    word: it becomes a `switch` with no branch, which is refused."""
+    def value_of(name_: str) -> str | None:
+        value = given.get(name_)
+        for where in wheres:  # the repository the command names, then the one it runs in
+            if value is None:
+                done = _git_out(where, "config", "--get", "alias." + name_)
+                value = done.stdout.strip() if done.returncode == 0 else None
+        return value
+
     for _ in range(3):
         if sub in ("checkout", "switch") or not sub:
             break
-        value = given.get(sub)
-        for where in wheres:  # the repository the command names, then the one it runs in
-            if value is None:
-                done = _git_out(where, "config", "--get", "alias." + sub)
-                value = done.stdout.strip() if done.returncode == 0 else None
+        value = value_of(sub)
         if value is None:
             break
         if value.startswith("!"):
@@ -401,6 +406,9 @@ def _alias(sub: str, args: list[str], wheres: list[str], given: dict[str, str]) 
         while k < len(words) and words[k].startswith("-"):  # an alias may lead with `-c k=v`
             k += 2 if words[k] in GIT_VALUED else 1
         sub, args = (words[k], words[k + 1:]) if k < len(words) else ("", [])
+    else:  # three expansions done: another alias still ahead is not followed, so the command is not read
+        if sub and sub not in ("checkout", "switch") and value_of(sub) is not None:
+            return "switch", []
     return sub, args
 
 

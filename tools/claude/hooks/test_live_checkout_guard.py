@@ -179,6 +179,12 @@ class LiveCheckoutGuardTests(unittest.TestCase):
     def test_an_explicit_git_dir_and_work_tree_leave_the_calling_directory_alone(self):
         self.allowed(f'git --git-dir={self.work}/.git --work-tree={self.work} checkout -b task2')
 
+    def test_an_alias_chain_longer_than_the_limit_is_refused(self):
+        self.denied('git -c alias.a=b -c alias.b=c -c alias.c=d -c alias.d=checkout a feature')
+        self.denied('git -c alias.a=b -c alias.b=a a feature')  # a loop never ends
+        self.denied('git -c alias.a=b -c alias.b=c -c alias.c=d -c alias.d=log a')  # unknown end: refused, not guessed
+        self.allowed('git -c alias.a=b -c alias.b=c -c alias.c=log a')  # within the limit, and it is only a log
+
     def test_going_back_to_main_and_file_restores_are_allowed(self):
         for command in ['git checkout main', 'git switch main', 'git checkout -q main', 'git checkout -- file.txt',
                         'git checkout HEAD -- file.txt', 'git checkout feature -- file.txt', 'git checkout file.txt',
