@@ -356,6 +356,9 @@ deliver() { # message file, receiver's terminal (a moved pane gets a new pane id
     pane=$(printf '%s\n' "$row" | cut -f1); kind=$(printf '%s\n' "$row" | cut -f2); sid=$(printf '%s\n' "$row" | cut -f3); label=$(printf '%s\n' "$row" | cut -f4)
     # The registered main is a stable receiver across /clear, including queues
     # created before refresh began. Other receivers retain session binding.
+    # The registered main restarting its agent (main-refresh --restart) has none for a moment: wait for the new one, up to the
+    # alert time; past it the main counts as gone, kept in a file and announced (11/13 21:28: seven reports went in seconds).
+    [ -n "$kind" ] || ! is_main "$2" || (( SECONDS - t0 >= ${PANE_TELL_ALERT:-600} )) || continue
     [ -n "$kind" ] && { [ -z "$3" ] || [ "$sid" = "$3" ] || is_main "$2"; } || break
     if predecessors_done "$1" "${6:-}" && send "$pane" "$kind" "$(cat "$1")"; then
       rm -f "$1"

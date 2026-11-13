@@ -232,6 +232,21 @@ panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9"; claude_screen "야" > "$S
 touch "$SANDBOX/herdr-down"; sleep 0.3
 check "herdr away for a moment: the message keeps waiting" "$(ls "$SANDBOX"/state/pane-tell/waiting | wc -l | tr -d ' ')" 1
 rm -f "$SANDBOX/herdr-down"; claude_screen > "$SANDBOX/screen"; settled; check "herdr back: delivered" "$(sent)" "w1:p1 "
+# The registered main restarting its agent (main-refresh --restart) has no agent for a moment: what waits for it waits on
+# for the new one. main-refresh sends /exit and waits for exactly this pane-list shape (`agent` null at the shell) before it
+# starts claude again; 11/13 21:28:42-44 the seven deliveries that polled inside it went to undelivered/, the three that
+# polled outside it were delivered. Any other pane with no agent is gone.
+mkdir -p "$SANDBOX/state/orchestrator"; echo term_p1 > "$SANDBOX/state/orchestrator/main"
+panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9"; touch "$SANDBOX/refuse"; pt "리드" "보고" >/dev/null
+panes "w1:p1|🟢 👑 리드|s1|w1:t1|-" "w1:p9|🟢 일|s9"; rm -f "$SANDBOX/refuse"; sleep 0.3
+check "main restarting its agent: the message keeps waiting" "$(ls "$SANDBOX"/state/pane-tell/waiting | wc -l | tr -d ' ')|$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')|$(sent)" "1|0|"
+panes "w1:p1|🟢 👑 리드|s2" "w1:p9|🟢 일|s9"; settled
+check "main's new agent: delivered" "$(sent)|$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')" "w1:p1 |0"
+# Past the alert time a main with no agent is gone, as before: the message is kept in a file and announced.
+touch "$SANDBOX/refuse"; PANE_TELL_ALERT=0 pt "리드" "보고" >/dev/null; rm -f "$SANDBOX/alerts"
+panes "w1:p1|🟢 👑 리드|s2|w1:t1|-" "w1:p9|🟢 일|s9"; rm -f "$SANDBOX/refuse"; settled
+check "main with no agent past the alert time: kept in a file and announced" "$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')|$(grep -c 'undelivered/' "$SANDBOX/alerts" 2>/dev/null)" "1|1"
+rm -f "$SANDBOX"/state/pane-tell/undelivered/* "$SANDBOX/alerts" "$SANDBOX/state/orchestrator/main"
 panes "w1:p1|🟢 빈 칸|s1|w1:t1|-" "w1:p9|🟢 일|s9"
 pt "빈 칸" "x" 2>/dev/null; check "no agent in the pane refuses" "$?|$(sent)" "2|"
 panes "w1:p1|🟢 다른 도구|s1|w1:t1|gemini" "w1:p9|🟢 일|s9"
