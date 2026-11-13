@@ -898,6 +898,13 @@ def hook(hook_input: dict, env: dict, riders, approvals, is_main, budget: float 
     cleanup = bash_problem((hook_input.get("tool_input") or {}).get("command") or "")
     if cleanup and cleanup[1] == "cleanup" and subordinate_pane(env):
         return reason
+    command = (hook_input.get("tool_input") or {}).get("command") or ""
+    hidden = sorted({f"U+{ord(c):04X}" for c in command if unicodedata.category(c) in ("Cc", "Cf") and c not in "\n\t"})
+    if not liftable and hidden and hook_input.get("tool_name") == "Bash" and (main or is_main(env)):
+        # api#1205: the plain refusal sent the main pane to run the same call again; a ✅ still never lifts this command
+        return (f"{reason}\n{SLACK_NOTE} 지금 Slack: 읽지 않음. 명령에 보이지 않는 문자({', '.join(hidden[:3])})가 있어 "
+                "✅로 풀지 않습니다. ✅ 요청의 명령 파일을 글자 그대로 옮길 것: 파일의 `\\u200b` 같은 escape를 문자 하나로 "
+                "바꾸면 요유가 본 것과 다른 명령입니다(api#1205).")
     turn = relayed_turn(hook_input, env) if liftable else None
     if not liftable or not (main or is_main(env)):
         return reason
@@ -1487,6 +1494,13 @@ def slack_selftest(claude_transcript, tmp):
               "gcloud --configuration=munice-admin iam service-accounts keys create k.json --iam-account=a@x",
               "rm ~/.local/state/gcp-account-guard/slack-approvals/1793850000.000001"):
         assert run(c) and not calls, f"Slack must not lift: {c}"
+    # api#1205: the approved file said `​` and the Bash call held the character itself. Still refused unread, but the main
+    # pane is told which character, since the plain refusal sent it to run the same call again; another pane is told nothing.
+    hidden = "gcloud --configuration=munice-admin firestore documents list | python3 -c \"print('[​-‍]')\""
+    reason = run(hidden) or ""
+    assert not calls and "U+200B" in reason and "U+200D" in reason and "\\u200b" in reason, f"the main pane is told why: {reason}"
+    reason = run(hidden, main=False) or ""
+    assert reason and "U+200B" not in reason and not calls, f"another pane gets the plain refusal: {reason}"
     # but a redirect, a quoted & and a plain pipe are ordinary commands
     for c in ("gcloud --configuration=munice-admin firestore documents list --project p 2>&1 | head",
               "curl -s 'https://x.example/a?b=1&c=2' -H x | CLOUDSDK_ACTIVE_CONFIG_NAME=munice-admin gcloud firestore documents list",
