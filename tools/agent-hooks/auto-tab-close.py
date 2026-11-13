@@ -365,10 +365,12 @@ MADE = re.compile(RESULT.pattern + r"|그렸|계산했|구했", re.I)
 # An estimate line does not make a report a progress note (api#1218 check): a sentence still under way does. Waiting is not.
 UNDER_WAY = re.compile(r"(?<!대기)(?<!대기 )중(?:입니다|이에요|이고|이며|$)|(?<!기다리)(?<!받)고[ \t]*있")
 # A computed amount or count is something to post even when nobody asked to post it; inside a question it is the question.
-# Counts take a unit (api#1218 check: "12대, 3대"); 개월, 개선, 대비, 명령 and the like are words, not counts.
-NUMBER = re.compile(r"\d(?:[\d,.]*\d)?[ \t]*(?:[만억천][ \t]*)?(?:원|달러|엔|유로)|[$₩][ \t]?\d|\d(?:\.\d+)?[ \t]*%|"
-                    r"\d(?:[\d,.]*\d)?[ \t]*(?:개|대|건|명|회|배|곳|줄)(?![선발인월비상한령강의사])|"
-                    r"\d(?:\.\d+)?[ \t]*(?:ms|[KMGT]B)(?![A-Za-z])")
+# Counts take a unit (api#1218 check: "12대, 3대"). Not a count: a number inside a time, version or issue number ("20:30 회차",
+# "v1.26.1 배포", "tf#1133 대조"), or a unit that starts a word (원인, 개월, 대비, 명령, 배포, 회차).
+NUM = r"(?<![#:.\w])\d(?:[\d,.]*\d)?[ \t]*"
+NUMBER = re.compile(NUM + r"(?:[만억천][ \t]*)?(?:원(?![인래칙본문격하한활])|달러|엔|유로)|[$₩][ \t]?\d|" + NUM + r"%|"
+                    + NUM + r"(?:개|대|건|명|회|배|곳|줄)(?![선발인월비상한령강의사포조차표화기신체응학요념편너확시단복귀경치정열])|"
+                    + NUM + r"(?:ms|[KMGT]B)(?![A-Za-z])")
 SENTENCE = re.compile(r"(?:[^.!?。\n]|(?<=\d)\.(?=\d))+[.!?。]?")
 
 
