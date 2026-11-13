@@ -45,7 +45,9 @@ case "\$1 \$2" in
       printf '   Background work is running\n   The following will stop when you exit:\n%s\n' "\$(cat "$SANDBOX/bg-dialog")" > "$SANDBOX/screen"
     elif [ "\$4" = /exit ] && [ ! -f "$SANDBOX/exit-ignored" ]; then
       ( sleep "\${EXIT_DELAY:-0}"; : > "$SANDBOX/agent"; echo unknown > "$SANDBOX/status"; : > "$SANDBOX/cur-sid" ) >/dev/null 2>&1 &
-    fi ;;
+    fi
+    # LATE_ON_EXIT: the 05:00 run's clock passes 07:00 while claude exits.
+    [ "\$4" != /exit ] || [ -z "\${LATE_ON_EXIT:-}" ] || echo 09 > "$SANDBOX/hour" ;;
   "pane read") cat "$SANDBOX/screen" 2>/dev/null ;;
   "agent send-keys") # Enter on "Exit and stop tasks" ends the process; Enter elsewhere is logged as unsafe.
     if [ "\$4" = enter ] && grep -q '❯ 1\. Exit and stop tasks' "$SANDBOX/screen" 2>/dev/null; then
@@ -53,6 +55,8 @@ case "\$1 \$2" in
     else echo "keys-without-dialog \$4" >> "$SANDBOX/unsafe-run"; fi ;;
   "pane run") [ -z "\$(cat "$SANDBOX/agent" 2>/dev/null || echo claude)" ] || echo typed-into-agent >> "$SANDBOX/unsafe-run"
     [ ! -f "$SANDBOX/run-fails" ] || exit 1
+    # run-no-session: claude starts but no new session ever shows idle.
+    [ ! -f "$SANDBOX/run-no-session" ] || { echo claude > "$SANDBOX/agent"; exit 0; }
     echo claude > "$SANDBOX/agent"; echo sid-restarted > "$SANDBOX/cur-sid"; echo idle > "$SANDBOX/status" ;;
   *) exit 2 ;;
 esac
@@ -162,12 +166,28 @@ EOS
 chmod +x "$SANDBOX/retry-pg/pgrep"
 
 S="$SANDBOX/state"
+# A sandboxed home and dotfiles copy for main-startup: what the main pane's claude loads only when it starts.
+SH_=$SANDBOX/home
+mkdir -p "$SH_/.claude/output-styles" "$SH_/.claude/skills/demo/references" "$SH_/.claude/plugins" "$SH_/work" \
+  "$SANDBOX/repo/tools/agent-hooks" "$SANDBOX/repo/tools/claude" "$SANDBOX/repo/scripts"
+echo '{"model":"opus","enabledPlugins":{"a@b":true},"outputStyle":"plain"}' > "$SH_/.claude/settings.json"
+echo '{"version":2,"plugins":{}}' > "$SH_/.claude/plugins/installed_plugins.json"
+echo '{}' > "$SH_/.claude/plugins/known_marketplaces.json"
+echo '# plain' > "$SH_/.claude/output-styles/plain.md"
+printf -- '---\nname: demo\ndescription: first\n---\nbody\n' > "$SH_/.claude/skills/demo/SKILL.md"
+REAL_STARTUP="$(dirname "$SUBJECT")/main-startup"
+cp "$REAL_STARTUP" "$SANDBOX/repo/tools/agent-hooks/main-startup"
+cp "$(dirname "$SUBJECT")/../claude/startup-profile.json" "$SANDBOX/repo/tools/claude/"
+cp "$(dirname "$SUBJECT")/../../scripts/claude-online" "$SANDBOX/repo/scripts/"
+# The copy reads the same file contents as main-refresh's own helper, so both share one record.
+ms() { (cd "$SH_/work" && env HOME="$SH_" XDG_STATE_HOME="$S" /bin/bash "$SANDBOX/repo/tools/agent-hooks/main-startup" "$@"); }
+ms record # the main pane's claude started with what is there now
 mr() { # every call is sandboxed: state dir, herdr, pane-tell
   rm -f "$SANDBOX/query-started"
   rm -f "$SANDBOX/cur-sid"
   rm -f "$SANDBOX/agent" "$SANDBOX/unsafe-run" "$SANDBOX/screen"
   rm -f "$SANDBOX/told" "$SANDBOX/herdr-log" "$SANDBOX/box-n" "$SANDBOX/request-n" "$SANDBOX/ready-get-n" "$SANDBOX/unsafe-request" "$SANDBOX/pending-once" "$S/orchestrator/refresh.log"; : > "$SANDBOX/alerts"; : > "$SANDBOX/errors"
-  env XDG_STATE_HOME="$S" HERDR_BIN_PATH="$SANDBOX/herdr" HERDR_ERROR_NOTIFY="$SANDBOX/error-notify" MAIN_REFRESH_PANE_TELL="$SANDBOX/pane-tell" \
+  env HOME="$SH_" XDG_STATE_HOME="$S" HERDR_BIN_PATH="$SANDBOX/herdr" HERDR_ERROR_NOTIFY="$SANDBOX/error-notify" MAIN_REFRESH_PANE_TELL="$SANDBOX/pane-tell" \
     MAIN_REFRESH_POLL=0.05 MAIN_REFRESH_QUIET=0 MAIN_REFRESH_RETRY_QUIET=0 MAIN_REFRESH_DEADLINE="${MAIN_REFRESH_DEADLINE:-60}" MAIN_REFRESH_HANDOFF_WAIT="${MAIN_REFRESH_HANDOFF_WAIT:-60}" \
     "$@" /bin/bash "$SUBJECT" ${MR_ARGS:-} >/dev/null 2>&1
 }
@@ -518,6 +538,99 @@ restart MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=2
 check "a dialog with another line selected gets no key and no restart" \
   "$(grep -c '^agent send-keys' "$SANDBOX/herdr-log")|$(grep -c '^pane run' "$SANDBOX/herdr-log")|$(grep -c '끝나지 않아' "$SANDBOX/errors")" "0|0|1"
 rm -f "$SANDBOX/bg-dialog"
+set_main; status idle
+
+# main-startup: the inputs a /clear keeps, since claude loads them only when its process starts.
+chg() { ms changed >/dev/null && echo changed || echo same; }
+started() { ms record; } # a new main-pane process loaded what is there now
+exits() { grep -c '^agent prompt w5:p3 /exit$' "$SANDBOX/herdr-log" 2>/dev/null || true; }
+runs() { grep -cxF "pane run w5:p3 $RESTART_LINE" "$SANDBOX/herdr-log" 2>/dev/null || true; }
+check "--restart by hand leaves the restart mark to the 05:00 run" "$([ -e "$S/orchestrator/main-startup.restarted" ] && echo marked)" ""
+check "main-startup: nothing changed since the recorded start" "$(chg)" same
+printf -- '---\nname: demo\ndescription: first\n---\nbody changed\n' > "$SH_/.claude/skills/demo/SKILL.md"
+echo tip > "$SH_/.claude/skills/demo/references/tips.md"
+echo '{"refreshed":1}' > "$SH_/.claude/plugins/known_marketplaces.json"
+echo '{"model":"sonnet","enabledPlugins":{"a@b":true},"outputStyle":"plain"}' > "$SH_/.claude/settings.json"
+jq '.roles.worker.enableArtifact = true' "$SANDBOX/repo/tools/claude/startup-profile.json" > "$SANDBOX/p.tmp" && mv "$SANDBOX/p.tmp" "$SANDBOX/repo/tools/claude/startup-profile.json"
+check "a skill body, its references, a marketplace refresh, the model and the worker profile are no start setting" "$(chg)" same
+printf -- '---\nname: demo\ndescription: second\n---\nbody\n' > "$SH_/.claude/skills/demo/SKILL.md"
+check "a skill description is in the skill list" "$(chg)" changed; started
+mkdir -p "$SH_/.claude/skills/new"; printf -- '---\nname: new\n---\n' > "$SH_/.claude/skills/new/SKILL.md"
+check "a new skill" "$(chg)" changed; started
+echo '# plain 2' > "$SH_/.claude/output-styles/plain.md"
+check "an output style" "$(chg)" changed; started
+echo '{"model":"sonnet","enabledPlugins":{"a@b":false},"outputStyle":"plain"}' > "$SH_/.claude/settings.json"
+check "a plugin switched off in settings.json" "$(chg)" changed; started
+echo '{"version":2,"plugins":{"a@b":[{"version":"2"}]}}' > "$SH_/.claude/plugins/installed_plugins.json"
+check "a plugin update" "$(chg)" changed; started
+echo '{"mcpServers":{"x":{}}}' > "$SH_/work/.mcp.json"
+check "an MCP server in the folder claude started in" "$(chg)" changed; started
+jq -n --arg w "$SH_/work" '{projects: {($w): {mcpServers: {y: {}}}}}' > "$SH_/.claude.json"
+check "a local-scope MCP server in ~/.claude.json" "$(chg)" changed; started
+mkdir -p "$SH_/work/.claude"; echo '{"permissions":{"allow":["Bash(ls)"]}}' > "$SH_/work/.claude/settings.local.json"
+check "a permission approved in the folder's settings is no start setting" "$(chg)" same
+echo '{"permissions":{"allow":["Bash(ls)"]},"enabledPlugins":{"a@b":true}}' > "$SH_/work/.claude/settings.local.json"
+check "a plugin switched on in the folder's settings.local.json" "$(chg)" changed; started
+echo '{"env":{"X":"1"}}' > "$SH_/work/.claude/settings.json"
+check "an env var in the folder's settings.json" "$(chg)" changed; started
+jq '.roles.main.enableArtifact = true' "$SANDBOX/repo/tools/claude/startup-profile.json" > "$SANDBOX/p.tmp" && mv "$SANDBOX/p.tmp" "$SANDBOX/repo/tools/claude/startup-profile.json"
+check "the main role's --settings" "$(chg)" changed
+ms restarting "$(ms changed)"
+check "a restart made for a change is not asked for again" "$(chg)" same
+ms restarting; ms restarting ""
+check "a restart mark needs the hash that changed printed" "$(cat "$S/orchestrator/main-startup.restarted")" "$(ms changed)"
+# Restarted for B, then started by hand with A: going back to B is a change again (Codex review).
+b=$(ms changed); cp "$(dirname "$SUBJECT")/../claude/startup-profile.json" "$SANDBOX/repo/tools/claude/"; started
+jq '.roles.main.enableArtifact = true' "$SANDBOX/repo/tools/claude/startup-profile.json" > "$SANDBOX/p.tmp" && mv "$SANDBOX/p.tmp" "$SANDBOX/repo/tools/claude/startup-profile.json"
+check "a recorded start drops the earlier restart mark" "$(ms changed)|$([ -e "$S/orchestrator/main-startup.restarted" ] && echo marked)|$(chg)" "$b||changed"
+cp "$(dirname "$SUBJECT")/../claude/startup-profile.json" "$SANDBOX/repo/tools/claude/"; started; rm -f "$S/orchestrator/main-startup.restarted"
+check "back to the dotfiles profile, recorded" "$(chg)" same
+
+# 05:00: restart instead of /clear only when those inputs changed; the conversation-size --now keeps clearing.
+rm_stamp; set_main; status idle
+mr MAIN_REFRESH_HOUR=05
+check "05:00 with the start settings unchanged still clears" "$(cleared)|$(exits)" "1|0"
+echo '# plain 3' > "$SH_/.claude/output-styles/plain.md"
+rm_stamp; set_main; status idle
+MR_ARGS=--now mr MAIN_REFRESH_HOUR=09
+check "--now (the conversation-size call) clears even with changed start settings" "$(cleared)|$(exits)|$(chg)" "1|0|changed"
+rm_stamp; set_main; status idle
+mr MAIN_REFRESH_HOUR=05
+check "05:00 with changed start settings restarts claude instead of clearing" "$(cleared)|$(exits)|$(runs)" "0|1|1"
+check "its handoff request says the process restarts" "$(grep 'handoff save' "$SANDBOX/told" | grep -c '다시 켭니다')" 1
+check "the log says why, and the day counts as done" \
+  "$(grep -c '시작 설정이 바뀌어 /clear 대신 다시 켜기로 함' "$S/orchestrator/refresh.log")|$([ -f "$STAMP" ] && echo stamped)" "1|stamped"
+# This fake start records nothing, like a claude started outside claude-online: the restart marker still holds.
+check "a restart is made once per change" "$(chg)" same
+rm_stamp; set_main; status idle
+mr MAIN_REFRESH_HOUR=05
+check "so the next day's 05:00 clears" "$(cleared)|$(exits)" "1|0"
+# No record: a claude started before main-startup existed. Unknown counts as changed, once.
+rm -f "$S/orchestrator/main-startup" "$S/orchestrator/main-startup.restarted"
+rm_stamp; set_main; status idle
+mr MAIN_REFRESH_HOUR=05
+check "no record of the start: 05:00 restarts" "$(cleared)|$(exits)|$(runs)" "0|1|1"
+rm_stamp; set_main; status idle
+mr MAIN_REFRESH_HOUR=05
+check "and a start that never records is not restarted again" "$(cleared)|$(exits)" "1|0"
+started
+# The new session never shows: alert, keep the hold, and do not restart again for the same change.
+echo '# plain 4' > "$SH_/.claude/output-styles/plain.md"
+rm_stamp; set_main; status idle; touch "$SANDBOX/run-no-session"
+mr MAIN_REFRESH_HOUR=05 MAIN_REFRESH_DEADLINE=2
+rm -f "$SANDBOX/run-no-session"
+check "a restart whose new session is not confirmed alerts and keeps the relay hold" \
+  "$(grep -c '다시 켠 뒤 새 세션을 확인하지 못해' "$SANDBOX/errors")|$([ -f "$S/orchestrator/refresh-delivery.json" ] && echo held)" "1|held"
+rm -f "$S/orchestrator/refresh-delivery.json"
+rm_stamp; set_main; status idle
+mr MAIN_REFRESH_HOUR=05
+check "and the next 05:00 does not restart for the same change" "$(cleared)|$(exits)" "1|0"
+# Once /exit is sent the 07:00 cutoff no longer applies: the pane must get its claude back.
+echo '# plain 5' > "$SH_/.claude/output-styles/plain.md"
+rm_stamp; set_main; status idle; echo 05 > "$SANDBOX/hour"
+mr PATH="$SANDBOX/bin:$PATH" LATE_ON_EXIT=1 EXIT_DELAY=0.3
+check "a 05:00 restart whose exit runs past 07:00 still starts claude" "$(exits)|$(runs)|$([ -f "$STAMP" ] && echo stamped)" "1|1|stamped"
+started
 set_main; status idle
 
 check "routine skips and errors never use the legacy notification API" "$([ -f "$SANDBOX/legacy-alerts" ] && cat "$SANDBOX/legacy-alerts")" ""

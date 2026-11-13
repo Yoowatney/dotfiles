@@ -35,7 +35,7 @@ cat >"$box/home/work/munice/CLAUDE.local.md" <<'MD'
 ## SKIP_LOCAL
 <!-- /pane:skip -->
 MD
-run() { env PATH="$box/bin:$PATH" CLAUDE_BIN="$box/bin/claude" HOME="$box/home" XDG_STATE_HOME="${STATE:-$box/state}" HERDR_PANE_ID=w1:p1 CLAUDE_STARTUP_ROLE="${ROLE:-}" CLAUDE_STARTUP_PROFILE="${PROFILE:-}" CLAUDE_STARTUP_ARTIFACT="${ARTIFACT:-}" CLAUDE_STARTUP_SKILLS="${SKILLS:-}" bash "$ROOT/scripts/claude-online" "$@"; }
+run() { env -u CLAUDECODE PATH="$box/bin:$PATH" CLAUDE_BIN="$box/bin/claude" HOME="$box/home" XDG_STATE_HOME="${STATE:-$box/state}" HERDR_PANE_ID=w1:p1 CLAUDE_STARTUP_ROLE="${ROLE:-}" CLAUDE_STARTUP_PROFILE="${PROFILE:-}" CLAUDE_STARTUP_ARTIFACT="${ARTIFACT:-}" CLAUDE_STARTUP_SKILLS="${SKILLS:-}" bash "$ROOT/scripts/claude-online" "$@"; }
 fail() { echo "FAIL: $1"; exit 1; }
 arg_after() { awk -v f="$1" 'p { print; exit } $0 == f { p = 1 }'; }
 
@@ -89,13 +89,24 @@ jq -e '(has("claudeMdExcludes") | not) and (has("paneRules") | not) and .env.ENA
 ! grep -qx -- --append-system-prompt-file <<<"$out" || fail 'unwritable state dir: no appended file'
 [[ "$(tail -1 <<<"$out")" == 'still runs' ]] || fail 'unwritable state dir: arguments pass through'
 
+# The main pane records what its start loads, so main-refresh's 05:00 run restarts once that changes; no other pane does.
+record="$box/state/orchestrator/main-startup"
+startup() { env HOME="$box/home" XDG_STATE_HOME="$box/state" bash "$ROOT/tools/agent-hooks/main-startup" "$@"; }
+rm -f "$record"; (cd "$box/home/work/munice/sub" && ROLE=worker run >/dev/null)
+[ ! -e "$record" ] || fail 'a pane that is not the main pane records a main-pane start'
+(cd "$box/home/work/munice/sub" && env CLAUDECODE=1 PATH="$box/bin:$PATH" CLAUDE_BIN="$box/bin/claude" HOME="$box/home" XDG_STATE_HOME="$box/state" CLAUDE_STARTUP_ROLE=main bash "$ROOT/scripts/claude-online" >/dev/null)
+[ ! -e "$record" ] || fail 'a claude run inside a session (claude -p from the main pane) records a main-pane start'
 # The main pane keeps every rule file whole.
 out=$(cd "$box/home/work/munice/sub" && ROLE=main run)
+[ -n "$(sed -n 1p "$record")" ] && [ "$(sed -n 2p "$record")" = "$box/home/work/munice/sub" ] || fail 'the main pane records its start and folder'
+! startup changed || fail 'what the main pane just started with counts as changed'
 jq -e '.enableArtifact == false and .enableWorkflows == false and (has("claudeMdExcludes") | not) and (.deniedMcpServers | length) == 6 and .skillListingBudgetFraction == 0.0015 and (has("bashOutputMaxChars") | not)' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'main profile changed'
 ! grep -qx -- --append-system-prompt-file <<<"$out" || fail 'main pane gets filtered rules'
 printf 'term_test\n' >"$box/state/orchestrator/main"
+rm "$record"
 out=$(run)
 jq -e '.enableArtifact == false' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'main detection'
+[ -s "$record" ] || fail 'a detected main pane records its start'
 [[ "$(ROLE=worker PROFILE=full run --version)" == --version ]] || fail 'full opt-out'
 rm "$box/state/orchestrator/main"
 # New ordinary munice sessions get the shared budget/connection profile; other

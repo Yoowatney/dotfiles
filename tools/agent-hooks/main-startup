@@ -1,0 +1,59 @@
+#!/bin/bash
+# What the main pane's Claude reads only when its process starts, hashed, so main-refresh can tell a /clear (which keeps
+# them) from a restart (which loads them anew). Runs under macOS bash 3.2.
+#   main-startup record      claude-online, starting the main pane's claude: these inputs are what it loads now
+#   main-startup changed     prints today's hash; exit 0 when it differs from the recorded start and no restart was made
+#                            for it yet
+#   main-startup restarting <hash>  main-refresh, once /exit is sent: one restart per change, even when the new start
+#                            fails (a start that cannot record would otherwise turn every 05:00 /clear into a restart)
+# State: {state}/orchestrator/main-startup (hash, then the folder claude started in) and main-startup.restarted (hash).
+STATE=${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator
+REPO=$(cd "$(dirname "$0")/../.." && pwd)
+
+inputs() { # <folder claude started in>
+  local cwd=$1 f
+  printf '%s\n' "$cwd"
+  # --settings: claude-online builds the main role's from this profile, and the launcher decides what else it passes.
+  jq -cS '.common * (.roles.main // {})' "$REPO/tools/claude/startup-profile.json"
+  cat "$REPO/scripts/claude-online"
+  # ponytail: these keys only, in the user's and the folder's settings. The rest (model, theme, survey state, approved
+  # permissions) changes while sessions run or applies live; add a key here once one turns out to load only at start.
+  for f in "$HOME/.claude/settings.json" "$cwd/.claude/settings.json" "$cwd/.claude/settings.local.json"; do
+    printf '%s\n' "$f"
+    # A file with none of them reads as a missing one: a settings.local.json made for a permission changes nothing.
+    jq -cS '{enabledPlugins, env, outputStyle, skillOverrides, enableAllProjectMcpServers, enabledMcpjsonServers,
+      disabledMcpjsonServers, deniedMcpServers, allowedMcpServers} | with_entries(select(.value != null))' "$f" || echo '{}'
+  done
+  # Plugin versions. Not known_marketplaces.json: every marketplace refresh rewrites it, with no new plugin.
+  cat "$HOME/.claude/plugins/installed_plugins.json"
+  # MCP servers: user and local scope in ~/.claude.json (hashed, never printed: it holds tokens), project scope in .mcp.json.
+  jq -cS --arg cwd "$cwd" '[.mcpServers, .projects[$cwd].mcpServers]' "$HOME/.claude.json"
+  cat "$cwd/.mcp.json"
+  for f in "$HOME/.claude/output-styles"/*.md "$cwd/.claude/output-styles"/*.md; do printf '%s\n' "$f"; cat "$f"; done
+  # The skill list is each SKILL.md's frontmatter. Bodies and references/ are read only when a skill runs (and the main
+  # pane writes references/ every day), so they are left out.
+  for f in "$HOME/.claude/skills"/*/SKILL.md "$cwd/.claude/skills"/*/SKILL.md; do
+    printf '%s\n' "$f"; awk 'NR == 1 { if ($0 != "---") exit; next } $0 == "---" { exit } { print }' "$f"
+  done
+}
+# A missing or unreadable input hashes as absent, the same way each time.
+digest() { inputs "$1" 2>/dev/null | shasum -a 256 | cut -d' ' -f1; }
+
+case "${1:-}" in
+  record)
+    # A recorded start makes the mark moot: a mark from an earlier process would hide a later return to its settings.
+    mkdir -p "$STATE" && h=$(digest "$PWD") && printf '%s\n%s\n' "$h" "$PWD" > "$STATE/main-startup.$$" \
+      && mv -f "$STATE/main-startup.$$" "$STATE/main-startup" && rm -f "$STATE/main-startup.restarted" ;;
+  changed)
+    was= cwd=
+    { read -r was; read -r cwd; } 2>/dev/null < "$STATE/main-startup"
+    # No record: a claude started before this existed, or a start that could not write it. Unknown counts as changed;
+    # the restart marker still stops a second restart when the record never appears.
+    h=$(digest "${cwd:-$HOME}") && echo "$h"
+    [ "$h" != "$was" ] && [ "$h" != "$(cat "$STATE/main-startup.restarted" 2>/dev/null)" ] ;;
+  restarting)
+    # The hash `changed` printed: no second digest between /exit and the new start.
+    [ -n "${2:-}" ] && mkdir -p "$STATE" && printf '%s\n' "$2" > "$STATE/main-startup.restarted.$$" \
+      && mv -f "$STATE/main-startup.restarted.$$" "$STATE/main-startup.restarted" ;;
+  *) echo "usage: main-startup record|changed|restarting <hash>" >&2; exit 2 ;;
+esac
