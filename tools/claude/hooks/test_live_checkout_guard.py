@@ -125,6 +125,60 @@ class LiveCheckoutGuardTests(unittest.TestCase):
         self.allowed('git checkout @{-2}')
         self.allowed('git checkout --pathspec-from-file="$(printf paths.txt)"')
 
+    def test_a_checkout_whose_branch_name_is_wrapped_is_not_read_as_a_file(self):
+        for command in ['git checkout "$(git rev-parse --abbrev-ref @{-1})"', 'git checkout "$(echo feature)"',
+                        'git checkout "`echo feature`"', 'git checkout "$SOME_BRANCH"', 'git checkout $SOME_BRANCH',
+                        'git checkout ${SOME_BRANCH:-feature}', "git checkout 'feature'", 'git checkout fea"ture"',
+                        'git checkout "feature"', 'git checkout ""']:
+            with self.subTest(command=command):
+                self.denied(command)
+
+    def test_an_alias_of_checkout_or_switch_is_expanded(self):
+        git(self.live, 'config', 'alias.co', 'checkout')
+        git(self.live, 'config', 'alias.sw', 'switch')
+        git(self.live, 'config', 'alias.nb', 'checkout -b')
+        git(self.live, 'config', 'alias.lg', 'log --oneline')
+        git(self.live, 'config', 'alias.sh', '!git checkout feature')
+        git(self.live, 'config', 'alias.hi', '!echo hi')
+        for command in ['git co feature', 'git sw feature', 'git nb x', 'git co -b x', 'git sh',
+                        'git -c alias.go=checkout go feature', 'git -c alias.go="checkout -b" go x',
+                        'git -c alias.go=!git\\ checkout\\ feature go']:
+            with self.subTest(command=command):
+                self.denied(command)
+        self.denied('git co main && git checkout @{-2}')  # an alias is a switch too, for the reflog forms
+        for command in ['git co main', 'git sw main', 'git lg', 'git hi', 'git -c alias.go=log go']:
+            with self.subTest(command=command):
+                self.allowed(command)
+
+    def test_the_repository_can_be_named_by_git_dir_and_work_tree(self):
+        self.denied(f'git --git-dir={self.live}/.git --work-tree={self.live} checkout feature', self.other)
+        self.denied(f'git --work-tree={self.live} --git-dir={self.live}/.git switch -c x', self.other)
+        self.denied(f'git --git-dir {self.live}/.git switch feature', self.other)
+        self.denied(f'env git checkout feature')
+        self.denied(f'command git checkout feature')
+        self.denied('bash -c "git checkout feature"')
+        self.denied('eval "git checkout feature"')
+
+    def test_git_dir_work_tree_and_alias_errors_do_not_hide_the_protected_one(self):
+        self.denied(f'git --work-tree=. -C {self.live} checkout feature', self.other)
+        self.denied(f'git --git-dir={self.other}/.git checkout feature')  # cwd is live: its files are overwritten
+        self.denied(f'git --git-dir={self.live}/.git --work-tree={self.other} checkout feature', self.other)
+        self.denied('git -c "alias.bad=\'" bad; git checkout feature')
+        self.allowed('git status && git switch -', self.back)  # a read-only command does not move @{-1}
+        self.allowed('git fetch -q && git log -1 && git checkout @{-1}', self.back)
+        self.denied('git branch -m main moved && git switch -', self.back)
+
+    def test_alias_lookup_follows_the_named_repository_and_leading_options(self):
+        git(self.live, 'config', 'alias.co', 'checkout')
+        git(self.live, 'config', 'alias.cx', '-c advice.detachedHead=false checkout')
+        self.denied(f'git --git-dir={self.live}/.git --work-tree={self.live} co feature', self.other)
+        self.denied('git cx feature')
+        self.denied(f'git -C {self.live} cx -b x', self.other)
+        self.allowed('git cx main')
+
+    def test_an_explicit_git_dir_and_work_tree_leave_the_calling_directory_alone(self):
+        self.allowed(f'git --git-dir={self.work}/.git --work-tree={self.work} checkout -b task2')
+
     def test_going_back_to_main_and_file_restores_are_allowed(self):
         for command in ['git checkout main', 'git switch main', 'git checkout -q main', 'git checkout -- file.txt',
                         'git checkout HEAD -- file.txt', 'git checkout feature -- file.txt', 'git checkout file.txt',

@@ -35,6 +35,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -353,12 +354,54 @@ def _changes_branch(sub: str, args: list[str], cwd: str, dynamic: bool = False, 
         return False
     if not names:
         return dynamic and not any(a.startswith("--pathspec-from-file") for a in before)  # `git checkout $(...)`: unread
+    if any(not n or re.search(r"[$`]", n) for n in names):
+        return True  # a name made by a substitution or a variable (an empty word is one whose `$(...)` was cut out)
     if len(names) != 1 or _is_main(names[0], cwd, lone):
         return False
     # a branch only on a remote is made and switched to by checkout's --guess
     return (names[0] == "-" or names[0].startswith("@{-")
             or _git_out(cwd, "rev-parse", "--verify", "--quiet", names[0] + "^{commit}").returncode == 0
             or bool(_git_out(cwd, "for-each-ref", "--format=x", "refs/remotes/*/" + names[0]).stdout.strip()))
+
+
+READ_ONLY = {"status", "log", "diff", "show", "fetch", "pull", "push", "add", "commit", "rev-parse", "ls-files",
+             "ls-remote", "remote", "blame", "describe", "grep", "stash", "worktree"}  # none moves @{-N}; an alias may
+
+
+def _subcommand(w: list[str]) -> str:
+    k = 1
+    while k < len(w) and w[k].startswith("-"):
+        k += 2 if w[k] in GIT_VALUED else 1
+    return w[k] if k < len(w) else ""
+
+
+def _alias(sub: str, args: list[str], wheres: list[str], given: dict[str, str]) -> tuple[str, list[str]]:
+    """Expands an alias (`-c alias.x=...` or the repository's config) up to three deep. A `!` alias that runs checkout
+    or switch cannot be read word by word: it becomes a `switch` with no branch, which is refused."""
+    for _ in range(3):
+        if sub in ("checkout", "switch") or not sub:
+            break
+        value = given.get(sub)
+        for where in wheres:  # the repository the command names, then the one it runs in
+            if value is None:
+                done = _git_out(where, "config", "--get", "alias." + sub)
+                value = done.stdout.strip() if done.returncode == 0 else None
+        if value is None:
+            break
+        if value.startswith("!"):
+            return ("switch", []) if re.search(r"\b(?:checkout|switch)\b", value) else (sub, args)
+        try:
+            words = shlex.split(value)
+        except ValueError:  # an unclosed quote: only its own command fails, so read what it would have run
+            return ("switch", []) if re.search(r"\b(?:checkout|switch)\b", value) else (sub, args)
+        if not words:
+            break
+        words += args
+        k = 0
+        while k < len(words) and words[k].startswith("-"):  # an alias may lead with `-c k=v`
+            k += 2 if words[k] in GIT_VALUED else 1
+        sub, args = (words[k], words[k + 1:]) if k < len(words) else ("", [])
+    return sub, args
 
 
 def _path(here: str, word: str) -> str:
@@ -372,7 +415,7 @@ def switch_problem(cmd: str, cwd: str | None) -> str | None:
         start = here = cwd or os.getcwd()
         seen = {start}
         dynamic = bool(re.search(r"\$\(|`", cmd))
-        lone = sum(1 for w in simple_commands(cmd) if name(w[0]) == "git" and {"checkout", "switch"} & set(w[1:])) < 2
+        lone = sum(1 for w in simple_commands(cmd) if name(w[0]) == "git" and _subcommand(w) not in READ_ONLY) < 2
         # ponytail: a `( ... )` group or `bash -c`'s cd may not last past it, so with one every directory seen is tried; a worktree
         # branch made inside a group from a live cwd is refused too, `git -C <worktree>` says it without a group
         group = bool(re.search(r"(?:^|[;&|(]\s*)\(|\b(?:ba|z)?sh\s+-\w*c\b|\beval\b", code_only(cmd)))
@@ -383,13 +426,31 @@ def switch_problem(cmd: str, cwd: str | None) -> str | None:
             if name(w[0]) != "git":
                 continue
             for base in seen if group else {here}:
-                where, k = base, 1
+                where, k, given, tree, gitdir = base, 1, {}, "", ""
                 while k < len(w) and w[k].startswith("-"):
-                    if w[k] == "-C" and k + 1 < len(w):
-                        where = _path(where, w[k + 1])
+                    opt, eq, value = w[k].partition("=")
+                    value = value if eq else (w[k + 1] if k + 1 < len(w) else "")
+                    if w[k] == "-C":
+                        where = _path(where, value)
+                    elif w[k] == "-c":
+                        key, _, val = value.partition("=")
+                        if key.lower().startswith("alias."):
+                            given[key[6:]] = val
+                    elif opt == "--work-tree":
+                        tree = value
+                    elif opt == "--git-dir":
+                        gitdir = value
                     k += 2 if w[k] in GIT_VALUED else 1
-                top = _toplevel(where)
-                if top not in live or not _changes_branch(w[k] if k < len(w) else "", w[k + 1:], where, dynamic, lone):
+                # git reads a relative --work-tree and --git-dir after every -C. Its files are the work tree's (the cwd
+                # when none is given) and its HEAD is the git dir's repository: a protected one in either is refused.
+                tree, gitdir = (_path(where, tree) if tree else ""), (_path(where, gitdir) if gitdir else "")
+                owner = os.path.dirname(gitdir) if os.path.basename(gitdir) == ".git" else gitdir
+                named = [d for d in (owner, tree) if d]
+                sub, args = _alias(w[k] if k < len(w) else "", w[k + 1:], named + [where], given)
+                # naming both repository and work tree leaves the calling directory out of it
+                tops = {t: d for d in (named if len(named) == 2 else named + [where]) for t in [_toplevel(d)] if t in live}
+                top = next(iter(tops), None)
+                if not top or not _changes_branch(sub, args, tops[top], dynamic, lone):
                     continue
                 return (f"live-checkout: launchd 작업과 모든 세션이 코드를 읽는 `{top}`의 브랜치를 바꾸지 말 것. "
                         "그 안의 작업 중 코드가 그대로 돌아감. 작업은 `git worktree add /tmp/codex/<일>-<이름> -b <새 브랜치> origin/main`로 "
