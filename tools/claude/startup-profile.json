@@ -32,6 +32,10 @@
   },
   "roles": {
     "worker": {
+      "deniedMcpServers": [
+        { "serverName": "rea" },
+        { "serverName": "obsidian" }
+      ],
       "enabledPlugins": {
         "core-skills@hyperframes": false,
         "watch@claude-video": false,

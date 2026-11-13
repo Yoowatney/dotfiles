@@ -64,6 +64,7 @@ jq -e '(has("dietSkills") | not) and (.skillOverrides // {} | has("docx") | not)
 # Deny rules merge with every other source, so they only narrow; nothing here may allow, ask or change the mode.
 jq -e '(.permissions | keys) == ["deny"] and (.permissions.deny | index("AskUserQuestion"))' <<<"$settings" >/dev/null || fail 'worker permissions only deny: a pane never asks 요유'
 jq -e '.enabledPlugins["core-skills@hyperframes"] == false and (.deniedMcpServers | index({serverName: "rea"})) and .env.ENABLE_CLAUDEAI_MCP_SERVERS == "false" and .skillOverrides["hiring-panel"] == "off" and (has("paneRules") | not)' <<<"$settings" >/dev/null || fail 'worker drops unused plugins, MCP servers, claude.ai connectors and skills'
+jq -e '([.deniedMcpServers[].serverName] | sort) == ["obsidian", "rea"]' <<<"$settings" >/dev/null || fail 'worker blocks a connection needed by delegated work'
 jq -e --arg g "$box/home/.codex/AGENTS.md" --arg l "$box/home/work/munice/CLAUDE.local.md" '.claudeMdExcludes == [$g, $l]' <<<"$settings" >/dev/null || fail 'worker excludes the full rule files it loads filtered'
 rules=$(arg_after --append-system-prompt-file <<<"$out")
 [ -f "$rules" ] || fail 'worker gets no filtered rule file'
