@@ -22,6 +22,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import unicodedata
 
 sys.dont_write_bytecode = True
 
@@ -116,12 +117,30 @@ def transcript(path):
     return text, success
 
 
+def finished_report(text):
+    """Only an explicit final no-work footer overrides historical quota words."""
+    plain = text.replace("**", "")
+    footers = list(re.finditer(r"(?m)^[ \t]*남은 것[ \t]*[:：]", plain))
+    if not footers:
+        return False
+    separator = r"\s*(?:·\s*|\n\s*(?:-\s*)?)"
+    return bool(re.fullmatch(
+        r"남은 것\s*[:：]\s*(?:-\s*)?요유 몫\s*[:：]\s*없음" + separator +
+        r"유요 몫\s*[:：]\s*없음" + separator +
+        r"세션\s*[:：]\s*(?:닫아도 됨|닫음|끝남)"
+        r"(?:\s*[,·]\s*(?:백그라운드|실행 중) 작업 없음)?[.]?\s*",
+        plain[footers[-1].start():].strip()))
+
+
 def blocked(text):
     # Match a single paragraph, not a quota discussion in one section and an
     # unrelated delayed task in another. Quotes/code are not new commitments.
+    text = unicodedata.normalize("NFC", text)
     text = re.sub(r"```.*?```", "", text, flags=re.S)
+    text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(">"))
+    if finished_report(text):
+        return False
     for paragraph in text.split("\n\n"):
-        paragraph = "\n".join(l for l in paragraph.splitlines() if not l.lstrip().startswith(">"))
         sentences = re.split(r"(?<=[.!?。])\s+|\n", paragraph)
         current = []
         for sentence in sentences:
