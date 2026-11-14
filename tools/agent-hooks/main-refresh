@@ -211,6 +211,7 @@ if [ -n "${MAIN_REFRESH_DEADLINE:-}" ]; then deadline=$MAIN_REFRESH_DEADLINE
 elif [ -n "$now" ]; then deadline=1800
 else deadline=$(( $(date -j -f %H:%M:%S 07:00:00 +%s) - $(date +%s) )); [ "$deadline" -gt 0 ] || deadline=0; fi
 # A single budget covers every retry, including queued delivery. The watcher retries a timed-out run next minute.
+recovery_deadline=$(/usr/bin/python3 -I -c 'import sys,time; print(time.time()+float(sys.argv[1]))' "$deadline")
 if [ -n "$now" ]; then sleep "$deadline" & budget=$!; fi
 attempt=0
 while :; do
@@ -314,8 +315,8 @@ if ! request_current; then
 fi
 # Straight through herdr, never pane-tell's queue: a queued /clear would fire hours later and wipe the main pane.
 keep_gate=1
-jq '.clearing = true' "$gate" > "$gate.tmp" && mv -f "$gate.tmp" "$gate" \
-  || { keep_gate=; skip --error "새 세션 전달 보류 상태를 저장하지 못함"; }
+(umask 077; /usr/bin/python3 -I "$HERE/main-refresh-recovery.py" prepare "$gate" "$hdir/$key.md" "$key" "$recovery_deadline") \
+  || { keep_gate=; skip --error "복구 인계와 전달 보류 상태를 저장하지 못해 건너뜀"; }
 back="되돌리기: 메인 칸 셸에서 CLAUDE_STARTUP_PROFILE=full claude"
 if [ -n "$restart" ]; then
   "$H" agent prompt "$id" /exit >/dev/null 2>&1 || { keep_gate=; skip --error "/exit를 보내지 못해 건너뜀"; }
@@ -355,12 +356,20 @@ if [ -n "$restart" ]; then
     || skip --error "claude를 다시 실행하지 못함. $back"
 else
   "$H" agent prompt "$id" /clear >/dev/null 2>&1 || { keep_gate=; skip --error "/clear를 보내지 못해 건너뜀"; }
+  /usr/bin/python3 -I "$HERE/main-refresh-recovery.py" accept "$gate" \
+    || skip --error "/clear 수락을 기록하지 못해 인계와 전달 보류를 유지함"
 fi
 # A successful command can return before /clear finishes. Do not release relays
 # into the old session; a blank new session id is valid before its first prompt.
 new_session_ready() { ! same_session && idle; }
 wait_for "$deadline" new_session_ready \
-  || skip --error "$([ -n "$restart" ] && echo "다시 켠 뒤 새 세션을 확인하지 못해 전달 보류를 유지함. $back" || echo "/clear 뒤 새 세션을 확인하지 못해 전달 보류를 유지함")"
+  || {
+    /usr/bin/python3 -I "$HERE/main-refresh-recovery.py" activate "$gate" \
+      || skip --error "복구 기록을 준비하지 못해 전달 보류를 유지함"
+    skip --error "$([ -n "$restart" ] && echo '다시 켠 뒤 새 세션을 확인하지 못해' || echo '/clear 뒤 새 세션을 확인하지 못해') 복구 기록과 함께 전달을 재개함. $back"
+  }
+/usr/bin/python3 -I "$HERE/main-refresh-recovery.py" complete "$gate" \
+  || skip --error "세션 전환 완료 기록을 저장하지 못해 복구 인계를 보존함"
 keep_gate=
 rm -f "$request_file" "$ack_file"
 [ -n "$now" ] || { mkdir -p "$DIR" && : > "$DIR/refreshed-$day"; }

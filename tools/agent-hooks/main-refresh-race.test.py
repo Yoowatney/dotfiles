@@ -71,6 +71,8 @@ elif a[:2] == ["agent", "prompt"]:
         if not (r / "no-handoff").exists():
             time.sleep(.05)
             (r / "state/agent-handoff/w1:p1.md").write_text(text.split()[-1] + "\\nhandoff")
+            if (r / "snapshot-fails").exists():
+                (r / "state/agent-handoff/refresh-recovery").write_text("not a directory")
 elif a[:2] == ["agent", "send-keys"]: raise SystemExit("must preserve typed draft")
 else: raise SystemExit(2)
 ''')
@@ -145,6 +147,7 @@ else: raise SystemExit(2)
         for (_, text), expected in zip(received, ["before-refresh", "during-turn", "during-clear-report", "during-clear-automatic"]):
             self.assertTrue(text.endswith(expected), (text, expected))
         self.assertFalse(list((self.state / "pane-tell/undelivered").glob("*")))
+        self.assertFalse(list((self.state / "agent-handoff/refresh-recovery").glob("*/active")))
 
     def test_workers_server_message_waits_for_new_main_session(self):
         # No older queue may mask a cross-server sender reading the wrong gate.
@@ -230,7 +233,7 @@ else: raise SystemExit(2)
         self.assertEqual(self.prompts(), [[session, "ordinary-report"], [session, "report-behind-request"]])
         self.assertFalse(list((self.state / "pane-tell/undelivered").glob("*")))
 
-    def test_clear_confirmation_timeout_keeps_handoff_and_messages(self):
+    def test_clear_confirmation_timeout_recovers_handoff_and_relays(self):
         (self.root / "return-before-clear").touch()
         (self.root / "status").write_text("idle")
         self.env["MAIN_REFRESH_DEADLINE"] = "8"
@@ -239,10 +242,63 @@ else: raise SystemExit(2)
         self.tell("after-accepted-clear", raw=True)
         self.assertEqual(self.proc.wait(timeout=12), 0)
         self.assertTrue((self.state / "agent-handoff/w1:p1.md").exists())
-        self.assertFalse(any(text == "after-accepted-clear" for _, text in self.prompts()))
+        until(lambda: any(text == "after-accepted-clear" for _, text in self.prompts()), timeout=3)
+        self.assertEqual(self.prompts()[-1], ["old-session", "after-accepted-clear"])
+        self.tell("second-recovered-relay", raw=True)
+        records = list((self.state / "agent-handoff/refresh-recovery").glob("*/handoff.md"))
+        self.assertEqual(len(records), 1)
+        original = records[0].read_text()
+        self.assertIn("handoff", original)
+        journal = [json.loads(line) for line in records[0].with_name("relays.jsonl").read_text().splitlines()]
+        self.assertEqual([item["message"] for item in journal], ["after-accepted-clear", "second-recovered-relay"])
+        self.assertEqual([item["session"] for item in journal], ["old-session"] * 2)
         (self.root / "session").write_text("new-session")
-        until(lambda: any(text == "after-accepted-clear" for _, text in self.prompts()))
-        self.assertEqual(self.prompts()[-1], ["new-session", "after-accepted-clear"])
+        # Discovery survives a consumed/expired ordinary handoff.
+        (self.state / "agent-handoff/w1:p1.md").unlink()
+        result = subprocess.check_output(["python3", "-I", str(HERE / "handoff-state.py"), "load"],
+                                        env={**self.env, "HERDR_PANE_ID": "w1:p1"}, text=True)
+        self.assertIn(str(records[0]), result)
+        self.assertIn("relays.jsonl", result)
+        self.assertEqual(records[0].read_text(), original)
+
+    def test_dead_clear_owner_expires_and_record_failure_retains_queue(self):
+        (self.root / "return-before-clear").touch()
+        (self.root / "status").write_text("idle")
+        self.env["MAIN_REFRESH_DEADLINE"] = "5"
+        self.start()
+        until(lambda: (self.root / "clearing").exists())
+        gate = json.loads((self.state / "orchestrator/refresh-delivery.json").read_text())
+        self.proc.kill()
+        self.proc.wait(timeout=5)
+        self.tell("owner-died", raw=True)
+        until(lambda: any(text == "owner-died" for _, text in self.prompts()), timeout=7)
+        folder = Path(gate["recovery"])
+        journal = folder / "relays.jsonl"
+        self.assertTrue((folder / "active").exists())
+        first = journal.read_text()
+        self.assertIn("owner-died", first)
+        # A directory simulates an unwritable journal even when running as root.
+        journal.unlink()
+        journal.mkdir()
+        self.tell("must-retain-on-record-failure", raw=True)
+        time.sleep(.3)
+        self.assertFalse(any(text == "must-retain-on-record-failure" for _, text in self.prompts()))
+        self.assertTrue(list((self.state / "pane-tell/waiting").glob("*")))
+        journal.rmdir()
+        journal.write_text(first)
+        until(lambda: any(text == "must-retain-on-record-failure" for _, text in self.prompts()))
+        self.assertIn("must-retain-on-record-failure", journal.read_text())
+        self.assertEqual(self.prompts()[-1][0], "old-session")
+
+    def test_snapshot_failure_prevents_clear_and_preserves_handoff(self):
+        (self.root / "snapshot-fails").touch()
+        (self.root / "status").write_text("idle")
+        self.start()
+        self.assertEqual(self.proc.wait(timeout=10), 0)
+        self.assertNotIn("/clear", [text for _, text in self.prompts()])
+        self.assertTrue((self.state / "agent-handoff/w1:p1.md.skipped").exists())
+        self.assertFalse((self.state / "orchestrator/refresh-delivery.json").exists())
+        (self.state / "agent-handoff/refresh-recovery").unlink()
 
     def test_main_summary_keeps_verdict_and_omits_body(self):
         spec = importlib.util.spec_from_file_location("auto_close", HERE / "auto-tab-close.py")

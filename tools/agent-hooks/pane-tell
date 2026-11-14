@@ -107,17 +107,8 @@ refresh_blocked() { # called under the send lock, before any draft recovery
   [ -n "$terminal" ] || return 0
   is_main "$terminal" || return 1
   refresh_request "$2" && return 1
-  # A crashed pre-clear run must not strand traffic. After an accepted clear,
-  # retain the hold until herdr reports a different session, even if the owner died.
-  python3 -I -c 'import json,os,sys
-try:
-    gate=json.load(open(sys.argv[1])); pane=json.loads(sys.argv[2])["result"]["pane"]
-    try: os.kill(gate["pid"],0); alive=True
-    except ProcessLookupError: alive=False
-    changed=pane.get("agent_session",{}).get("value","") != gate["session"]
-    blocked=alive or (gate.get("clearing",False) and not changed)
-except (OSError,ValueError,KeyError): blocked=True
-sys.exit(0 if blocked else 1)' "$refresh_dir/refresh-delivery.json" "$row"
+  # Expiry is durable wall time: a dead refresh owner cannot strand relays.
+  python3 -I "${DRAFT_HELPER%/*}/main-refresh-recovery.py" blocked "$refresh_dir/refresh-delivery.json" "$row"
 }
 
 # In view, and empty on two reads: what is typed between them holds the message back.
@@ -160,6 +151,15 @@ send_unlocked() {
   box_ready "$1" "$2" || return 1
   refresh_request_active "$1" "$3"; result=$?
   [ "$result" = 0 ] || return "$result"
+  # Preserve the exact attempted prompt before herdr can accept it. Failure
+  # leaves the original payload in the ordinary durable queue for retry.
+  local recovery_row recovery_terminal recovery_session
+  recovery_row=$("$H" pane get "$1" 2>/dev/null) || return 1
+  recovery_terminal=$(printf '%s\n' "$recovery_row" | jq -r '.result.pane.terminal_id // empty')
+  if is_main "$recovery_terminal"; then
+    recovery_session=$(printf '%s\n' "$recovery_row" | jq -r '.result.pane.agent_session.value // empty')
+    python3 -I "${DRAFT_HELPER%/*}/main-refresh-recovery.py" record "$refresh_handoff" "$recovery_terminal" "$recovery_session" "$message" || return 1
+  fi
   "$H" agent prompt "$1" "$message" >/dev/null 2>&1 || return 1
   python3 -I "$DRAFT_HELPER" ack "$1" >/dev/null 2>&1 || :
 }
