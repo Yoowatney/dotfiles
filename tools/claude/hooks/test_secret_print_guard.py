@@ -87,6 +87,30 @@ class GcloudSecretProjectionTests(unittest.TestCase):
                     with self.subTest(command=command):
                         self.assertIsNone(guard.bash_problem(command))
 
+    def test_safe_function_and_run_schema_fields_are_allowed(self):
+        # Function v1/v2 runtime and revision names are scalars, not the env maps
+        # alongside them. Cloud Run exposes metadata in v1 and top-level v2 fields.
+        cases = [("functions", field) for field in (
+            "name", "state", "updateTime", "runtime", "buildConfig.runtime",
+            "serviceConfig.revision",
+        )]
+        cases += [(resource, field) for resource in (
+            "run services", "run revisions", "run jobs", "run jobs executions",
+            "run jobs executions tasks", "run worker-pools", "run worker-pools revisions",
+        ) for field in ("name", "uid", "generation", "createTime", "updateTime")]
+        for resource, field in cases:
+            for verb in ("describe fixture", "list"):
+                for fmt in ("value", "json", "yaml", "table"):
+                    base = f"gcloud {resource} {verb}"
+                    command = f"{base} --format='{fmt}({field})'"
+                    with self.subTest(command=command):
+                        self.assertIsNone(guard.bash_problem(command))
+                    unsafe = ("serviceConfig.environmentVariables" if resource == "functions"
+                              else "template.containers.env")
+                    command = f"{base} --format='{fmt}({field},{unsafe})'"
+                    with self.subTest(command=command):
+                        self.assertIsNotNone(guard.bash_problem(command))
+
     def test_format_cannot_be_borrowed_or_expanded(self):
         for command in (
             "gcloud monitoring channels list | jq 'del(.labels,.sensitiveLabels)'",
