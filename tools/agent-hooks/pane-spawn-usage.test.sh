@@ -52,7 +52,7 @@ has "--kind codex" "auto startup failure stays Codex"
 hasnt "--kind claude" "no fallback on an unclassified start error"
 has "pane close w1:new" "a failed start removes its empty pane"
 hasnt "agent prompt" "a failed start delivers no job"
-grep -q "codex did not start" "$SANDBOX/err" || fail "reports the startup error"
+grep -q "codex start was not confirmed; command was not resent" "$SANDBOX/err" || fail "reports the startup error"
 rc=0
 BLOCKED_START=1 SCREEN='You have hit your usage limit' ps --check "막힘" "지시" 2>"$SANDBOX/err" >/dev/null || rc=$?
 [ "$rc" = 1 ] || fail "an unstructured dialog must fail, got $rc"

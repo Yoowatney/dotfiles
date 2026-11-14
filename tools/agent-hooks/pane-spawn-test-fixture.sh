@@ -24,6 +24,25 @@ cat > "$SANDBOX/herdr" <<EOF
 #!/bin/bash
 case "\$HERDR_SOCKET_PATH" in */sessions/*) s=\${HERDR_SOCKET_PATH%/herdr.sock}; s=\${s##*/} ;; *) s=default ;; esac
 echo "[\$s] \$*" >> "$SANDBOX/log"
+# Existing policy assertions inspect the effective argv, independently of the
+# terminal transport. The cold-PTY suite executes the real helper as well.
+for value in "\$@"; do
+  case "\$value" in HERDR_CODEX_LAUNCH_ARGS=*)
+    printf '%s' "\${value#*=}" | jq -r --arg s "\$s" '"[" + \$s + "] transported codex argv -- " + join(" ")' >> "$SANDBOX/log" ;;
+  esac
+done
+if [ -n "\${CAPTURE_LAUNCH:-}" ] && { [ "\$1 \$2" = 'tab create' ] || [ "\$1 \$2" = 'pane split' ] || [ "\$1 \$2" = 'agent start' ]; }; then
+  python3 - "$SANDBOX/launch.json" "\$@" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); a = sys.argv[2:]
+data = json.loads(p.read_text()) if p.exists() else {}
+if a[:2] in [['tab', 'create'], ['pane', 'split']]:
+    data['env'] = dict(x.split('=', 1) for i, x in enumerate(a) if i and a[i-1] == '--env')
+if a[:2] == ['agent', 'start']:
+    data['args'] = a[a.index('--')+1:] if '--' in a else []
+p.write_text(json.dumps(data))
+PY
+fi
 [ "\$s" != workers ] || [ -z "\${STUCK_WORKERS:-}" ] || exec /bin/sleep 30 # herdr's CLI waits on a stuck server for ever
 case "\$1 \$2" in
   "session list") cat "$SANDBOX/sessions.json" ;;

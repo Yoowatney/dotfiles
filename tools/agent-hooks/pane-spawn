@@ -327,6 +327,17 @@ if [ -n "$check" ]; then
     prompt+=" 확인할 폴더는 $target 입니다. $target/AGENTS.md 가 있으면 먼저 읽으세요. 이 칸은 Codex 샌드박스 안에서 빈 작업 폴더 $cwd 를 쓰므로, 확인할 폴더는 절대경로로 읽으세요. 파일은 작업 폴더와 임시 폴더에만 쓸 수 있고(gcloud 는 자기 설정 폴더에도 씁니다), 확인할 폴더를 비롯한 다른 곳은 쓰기가 막힙니다. 네트워크는 열려 있어 gh, gcloud, bq, curl 로 읽을 수 있습니다. GCP 는 에이전트 계정으로만 읽습니다. Slack은 slack MCP 의 읽기 도구(slack_get_thread_replies, slack_get_channel_history, slack_get_user_profile)로 읽습니다. 프로세스는 ps, pgrep, launchctl list/print 로 봅니다. 이 셋은 파이프, 리다이렉트, cd 없이 명령 하나로 실행해야 샌드박스 밖에서 돌아 다른 프로세스가 보이므로, 걸러 낼 때는 ps 의 옵션을 쓰세요. 확인 칸은 아무것도 쓰지 않습니다. 댓글, 머지, 보드 쓰기, Slack 글, 그 밖에 상태를 바꾸는 명령은 막히지 않은 것도 실행하지 마세요. 막혀서 확인하지 못한 항목은 통과로 쓰지 말고, 무엇이 막혀 못 했는지 쓰세요."
   fi
 fi
+if [ -n "$check" ] && [ "$kind" = codex ]; then
+  # agent start types into a newly opened terminal. Its canonical input can
+  # truncate a long command at 1024 bytes and lose its trailing Enter.
+  # Expand this argv inside the existing shell helper, never in terminal input.
+  [ -f "$helper_dir/codex-startup.py" ] || die "Codex checks require the startup helper"
+  launch_args=$(python3 -I -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@") || die "cannot encode Codex check arguments"
+  env_args+=(--env "HERDR_CODEX_LAUNCH_ARGS=$launch_args" --env "HERDR_CODEX_STARTUP_HELPER=$helper_dir/codex-startup.py")
+  # An absent/old helper must reject this unknown option, not start without the
+  # check's sandbox. The helper consumes it together with the environment data.
+  set -- --pane-spawn-args
+fi
 main= hidden= sock= addr=
 mainfile=$state/orchestrator/main
 workers_help="start it with: launchctl kickstart gui/$(id -u)/com.yoyoo.herdr-workers"
@@ -527,7 +538,11 @@ for try in $(seq 1 15); do # direnv and shell startup can hold the foreground pr
   [ -z "$registered" ] || give_up "$kind start was not confirmed (registered as $registered): $out"
   case "$out" in
     *agent_pane_busy*) [ "$try" != 15 ] || give_up "$kind shell stayed busy: $out" ;;
-    *) [ "$try" -lt 3 ] || give_up "$kind did not start: $out" ;;
+    *)
+      # A timeout/transport failure does not prove that no input was sent.
+      # Retyping can append another CLI to an unfinished shell input line.
+      [ "$kind" != codex ] || give_up "$kind start was not confirmed; command was not resent: $out"
+      [ "$try" -lt 3 ] || give_up "$kind did not start: $out" ;;
   esac
   sleep "${PANE_SPAWN_RETRY_WAIT:-3}"
 done

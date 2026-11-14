@@ -199,18 +199,38 @@ def prepare(env):
     return result
 
 
+def launch_arguments(args, env):
+    """Consume pane-local argv transport before context fallback or exec."""
+    encoded = env.pop('HERDR_CODEX_LAUNCH_ARGS', None)
+    marker = '--pane-spawn-args'
+    if marker not in args:
+        return args
+    try:
+        payload = json.loads(encoded)
+        if args.count(marker) != 1 or not isinstance(payload, list) or not payload:
+            raise ValueError('invalid argument list')
+        if any(not isinstance(a, str) or any(ord(c) < 32 or ord(c) == 127 for c in a) for a in payload):
+            raise ValueError('invalid argument')
+    except (TypeError, ValueError):
+        raise SystemExit('codex-startup: invalid pane launch arguments; refusing to start')
+    index = args.index(marker)
+    return args[:index] + payload + args[index+1:]
+
+
 def main():
     if len(sys.argv) < 2:
         raise SystemExit('usage: codex-startup.py BINARY [ARG ...] | --plan')
+    env = dict(os.environ)
+    args = launch_arguments(sys.argv[2:], env)
     try:
-        plan = prepare(os.environ)
+        plan = prepare(env)
     except (OSError, ValueError) as error:
         print('codex-startup: retaining full context: ' + str(error), file=sys.stderr)
-        plan = {'active': False, 'env': dict(os.environ), 'args': []}
+        plan = {'active': False, 'env': env, 'args': []}
     if sys.argv[1] == '--plan':
         print(json.dumps(dict({k: v for k, v in plan.items() if k != 'env'}, codex_home=plan['env'].get('CODEX_HOME')), indent=2))
         return
-    os.execvpe(sys.argv[1], [sys.argv[1], *plan['args'], *sys.argv[2:]], plan['env'])
+    os.execvpe(sys.argv[1], [sys.argv[1], *plan['args'], *args], plan['env'])
 
 
 if __name__ == '__main__':
