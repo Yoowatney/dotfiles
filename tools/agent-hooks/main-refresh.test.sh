@@ -16,6 +16,9 @@ mkdir -p "$SANDBOX/state/orchestrator" "$SANDBOX/state/agent-handoff" "$SANDBOX/
 cat > "$SANDBOX/herdr" <<EOS
 #!/usr/bin/env bash
 echo "\$*" >> "$SANDBOX/herdr-log"
+if [ -n "\${LOCK_WAIT_ACTION:-}" ] && [ ! -d "$SANDBOX/state/orchestrator/refresh.lock" ]; then
+  echo missing >> "$SANDBOX/unsafe-lock"
+fi
 if [ "\$1 \$2" = 'pane get' ] && [ -n "\${QUERY_START_DELAY:-}" ] && [ ! -f "$SANDBOX/query-started" ]; then
   : > "$SANDBOX/query-started"
   sleep "\$QUERY_START_DELAY"
@@ -153,6 +156,22 @@ exit 1
 EOS
 chmod +x "$SANDBOX/herdr" "$SANDBOX/error-notify" "$SANDBOX/pane-tell" "$SANDBOX/bin/date" "$SANDBOX/pg/pgrep"
 
+# Advance the lock owner's work/time at the first retry, without touching a live pane or waiting minutes.
+cat > "$SANDBOX/bin/sleep" <<EOS
+#!/bin/bash
+if [ -n "\${LOCK_WAIT_ACTION:-}" ] && [ ! -f "$SANDBOX/lock-waited" ] && [ -d "$SANDBOX/state/orchestrator/refresh.lock" ]; then
+  : > "$SANDBOX/lock-waited"
+  case "\$LOCK_WAIT_ACTION" in
+    change) echo '# changed while waiting' > "$SANDBOX/home/.claude/output-styles/plain.md" ;;
+    expire*) echo 07 > "$SANDBOX/hour" ;;
+    stamp) : > "$SANDBOX/state/orchestrator/refreshed-\$(/bin/date +%F)" ;;
+  esac
+  [ "\$LOCK_WAIT_ACTION" = expire ] || rmdir "$SANDBOX/state/orchestrator/refresh.lock"
+fi
+exec /bin/sleep "\$@"
+EOS
+chmod +x "$SANDBOX/bin/sleep"
+
 # A delivery appears during the final checks, then disappears before the retry. It adds no new transcript message.
 mkdir -p "$SANDBOX/retry-pg"
 cat > "$SANDBOX/retry-pg/pgrep" <<EOS
@@ -183,6 +202,7 @@ cp "$(dirname "$SUBJECT")/../../scripts/claude-online" "$SANDBOX/repo/scripts/"
 ms() { (cd "$SH_/work" && env HOME="$SH_" XDG_STATE_HOME="$S" /bin/bash "$SANDBOX/repo/tools/agent-hooks/main-startup" "$@"); }
 ms record # the main pane's claude started with what is there now
 mr() { # every call is sandboxed: state dir, herdr, pane-tell
+  rm -f "$SANDBOX/lock-waited" "$SANDBOX/unsafe-lock"
   rm -f "$SANDBOX/query-started"
   rm -f "$SANDBOX/cur-sid"
   rm -f "$SANDBOX/agent" "$SANDBOX/unsafe-run" "$SANDBOX/screen"
@@ -587,6 +607,40 @@ cp "$(dirname "$SUBJECT")/../claude/startup-profile.json" "$SANDBOX/repo/tools/c
 check "back to the dotfiles profile, recorded" "$(chg)" same
 
 # 05:00: restart instead of /clear only when those inputs changed; the conversation-size --now keeps clearing.
+# A lock collision must defer the daily decision until the owner finishes, including settings changed while waiting.
+rm_stamp; set_main; status idle; started; echo 05 > "$SANDBOX/hour"
+mkdir "$S/orchestrator/refresh.lock"
+mr PATH="$SANDBOX/bin:$PATH" LOCK_WAIT_ACTION=change
+check "daily lock retry rechecks startup settings and restarts" "$(cleared)|$(exits)|$(runs)|$([ -f "$STAMP" ] && echo stamped)" "0|1|1|stamped"
+check "daily retry holds its lock through the restart" "$([ -f "$SANDBOX/unsafe-lock" ] && cat "$SANDBOX/unsafe-lock")" ""
+[ ! -d "$S/orchestrator/refresh.lock" ] || fail "daily retry releases its acquired lock"
+rmdir "$S/orchestrator/refresh.lock" 2>/dev/null || true
+started
+rm_stamp; set_main; status idle; echo 06 > "$SANDBOX/hour"
+mkdir "$S/orchestrator/refresh.lock"
+mr PATH="$SANDBOX/bin:$PATH" LOCK_WAIT_ACTION=release
+check "daily lock retry with unchanged settings only clears" "$(cleared)|$(exits)|$(runs)" "1|0|0"
+check "daily retry holds its lock through clear" "$([ -f "$SANDBOX/unsafe-lock" ] && cat "$SANDBOX/unsafe-lock")" ""
+rmdir "$S/orchestrator/refresh.lock" 2>/dev/null || true
+
+# At 07:00 stop waiting without removing the other run's lock or delivery hold.
+rm_stamp; set_main; status idle; echo 06 > "$SANDBOX/hour"
+mkdir "$S/orchestrator/refresh.lock"; echo other-owner > "$S/orchestrator/refresh-delivery.json"
+mr PATH="$SANDBOX/bin:$PATH" LOCK_WAIT_ACTION=expire
+check "daily lock wait observes the 07:00 cutoff" "$(cat "$SANDBOX/hour")|$(told)|$([ -f "$SANDBOX/herdr-log" ] && echo called)|$([ -f "$STAMP" ] && echo stamped)" "07|||"
+check "expired waiter preserves the owner's lock and delivery hold" "$([ -d "$S/orchestrator/refresh.lock" ] && echo locked)|$(cat "$S/orchestrator/refresh-delivery.json")" "locked|other-owner"
+rmdir "$S/orchestrator/refresh.lock"; rm -f "$S/orchestrator/refresh-delivery.json"
+echo 06 > "$SANDBOX/hour"; mkdir "$S/orchestrator/refresh.lock"
+mr PATH="$SANDBOX/bin:$PATH" LOCK_WAIT_ACTION=expire-release
+check "a lock released at 07:00 cannot start a daily refresh" "$(cat "$SANDBOX/hour")|$(told)|$([ -f "$SANDBOX/herdr-log" ] && echo called)" "07||"
+rmdir "$S/orchestrator/refresh.lock" 2>/dev/null || true
+
+# Another daily caller can finish while this one waits: the stamp must be checked under the acquired lock.
+echo 05 > "$SANDBOX/hour"; mkdir "$S/orchestrator/refresh.lock"
+mr PATH="$SANDBOX/bin:$PATH" LOCK_WAIT_ACTION=stamp
+check "a daily run completed during the lock wait is not repeated" "$([ -f "$STAMP" ] && echo stamped)|$(told)|$([ -f "$SANDBOX/herdr-log" ] && echo called)" "stamped||"
+rmdir "$S/orchestrator/refresh.lock" 2>/dev/null || true
+
 rm_stamp; set_main; status idle
 mr MAIN_REFRESH_HOUR=05
 check "05:00 with the start settings unchanged still clears" "$(cleared)|$(exits)" "1|0"
