@@ -69,13 +69,42 @@ CREDENTIAL_READS = [c.split() for c in (
 )]
 TOKEN_VERB = re.compile(r"(?:print|generate|fetch)-(?:[a-z]+-)*token$")  # auth print-refresh-token, sql generate-login-token
 HELP = {"help", "--help", "-h"}
+# Functions v2 (including alpha/beta) has mixed config objects. Classify the
+# complete reviewed non-secret paths together instead of adding one operational
+# field at a time. Exact paths only: config parents, env/secret fields, source
+# tokens, Git URIs and signed sourceUploadUrl fields are deliberately absent.
+# Unlisted paths remain denied. Allowed objects print their complete contents,
+# including children added by future schema versions, and need periodic review.
+FUNCTION_CONFIG_FIELDS = {
+    "serviceConfig": (
+        "allTrafficOnLatestRevision availableCpu availableMemory binaryAuthorizationPolicy "
+        "directVpcEgress directVpcNetworkInterface directVpcNetworkInterface.network "
+        "directVpcNetworkInterface.subnetwork directVpcNetworkInterface.tags ingressSettings "
+        "maxInstanceCount maxInstanceRequestConcurrency minInstanceCount revision securityLevel "
+        "service serviceAccountEmail timeoutSeconds uri vpcConnector vpcConnectorEgressSettings"
+    ),
+    "buildConfig": (
+        "automaticUpdatePolicy build dockerRegistry dockerRepository entryPoint "
+        "onDeployUpdatePolicy onDeployUpdatePolicy.runtimeVersion runtime serviceAccount workerPool "
+        "source.repoSource source.repoSource.branchName source.repoSource.commitSha "
+        "source.repoSource.dir source.repoSource.projectId source.repoSource.repoName "
+        "source.repoSource.tagName source.storageSource.bucket source.storageSource.generation "
+        "source.storageSource.object sourceProvenance.resolvedRepoSource "
+        "sourceProvenance.resolvedRepoSource.branchName sourceProvenance.resolvedRepoSource.commitSha "
+        "sourceProvenance.resolvedRepoSource.dir sourceProvenance.resolvedRepoSource.projectId "
+        "sourceProvenance.resolvedRepoSource.repoName sourceProvenance.resolvedRepoSource.tagName "
+        "sourceProvenance.resolvedStorageSource.bucket "
+        "sourceProvenance.resolvedStorageSource.generation sourceProvenance.resolvedStorageSource.object"
+    ),
+}
 # These resources mix public metadata with credentials. Even `labels`, annotations,
 # build steps and instance metadata can contain literal secrets. Allow only known
 # non-secret paths, never their enclosing configuration objects or transformations.
 # This is intentionally conservative: add a field only after checking its schema.
 GCLOUD_PROJECTED_READS = (
     ("monitoring channels", "name type displayName enabled verificationStatus"),
-    ("functions", "name state status environment updateTime createTime runtime buildConfig.runtime serviceConfig.revision serviceConfig.uri serviceConfig.service serviceConfig.maxInstanceCount serviceConfig.minInstanceCount httpsTrigger.url"),
+    ("functions", "name state status environment updateTime createTime runtime httpsTrigger.url " + " ".join(
+        f"{parent}.{field}" for parent, fields in FUNCTION_CONFIG_FIELDS.items() for field in fields.split())),
     ("run services", "metadata.name metadata.namespace metadata.uid metadata.generation metadata.creationTimestamp name uid generation createTime updateTime status"),
     ("run revisions", "metadata.name metadata.namespace metadata.uid metadata.generation metadata.creationTimestamp name uid generation createTime updateTime status"),
     ("run jobs", "metadata.name metadata.namespace metadata.uid metadata.generation metadata.creationTimestamp name uid generation createTime updateTime status"),

@@ -70,6 +70,68 @@ class GcloudSecretProjectionTests(unittest.TestCase):
         ("pubsub subscriptions list", "name,topic", "pushConfig", "pushConfig.attributes", "labels"),
     )
 
+    def test_function_config_safe_schema_fields_are_allowed(self):
+        # Rejecting a config parent must not reject its non-secret children.
+        # Literals are reviewed against the Functions v2/alpha/beta schema;
+        # expectations do not come from the guard's field policy.
+        safe = {
+            "serviceConfig": (
+                "allTrafficOnLatestRevision availableCpu availableMemory binaryAuthorizationPolicy "
+                "directVpcEgress directVpcNetworkInterface directVpcNetworkInterface.network "
+                "directVpcNetworkInterface.subnetwork directVpcNetworkInterface.tags ingressSettings "
+                "maxInstanceCount maxInstanceRequestConcurrency minInstanceCount revision securityLevel "
+                "service serviceAccountEmail timeoutSeconds uri vpcConnector vpcConnectorEgressSettings"
+            ).split(),
+            "buildConfig": (
+                "automaticUpdatePolicy build dockerRegistry dockerRepository entryPoint "
+                "onDeployUpdatePolicy onDeployUpdatePolicy.runtimeVersion runtime serviceAccount workerPool "
+                "source.repoSource source.repoSource.branchName source.repoSource.commitSha "
+                "source.repoSource.dir source.repoSource.projectId source.repoSource.repoName "
+                "source.repoSource.tagName source.storageSource.bucket source.storageSource.generation "
+                "source.storageSource.object sourceProvenance.resolvedRepoSource "
+                "sourceProvenance.resolvedRepoSource.branchName sourceProvenance.resolvedRepoSource.commitSha "
+                "sourceProvenance.resolvedRepoSource.dir sourceProvenance.resolvedRepoSource.projectId "
+                "sourceProvenance.resolvedRepoSource.repoName sourceProvenance.resolvedRepoSource.tagName "
+                "sourceProvenance.resolvedStorageSource.bucket "
+                "sourceProvenance.resolvedStorageSource.generation sourceProvenance.resolvedStorageSource.object"
+            ).split(),
+        }
+        for parent, children in safe.items():
+            for field in children:
+                for release in ("", "beta ", "alpha "):
+                    for verb in ("describe fixture", "list"):
+                        for fmt in ("value", "json", "yaml", "table"):
+                            base = f"gcloud {release}functions {verb} --format='{fmt}"
+                            command = f"{base}({parent}.{field})'"
+                            with self.subTest(command=command):
+                                self.assertIsNone(guard.bash_problem(command))
+                            command = f"{base}({parent}.{field},{parent}.environmentVariables)'"
+                            with self.subTest(command=command):
+                                self.assertIsNotNone(guard.bash_problem(command))
+
+    def test_function_config_secrets_parents_and_unknown_fields_are_denied(self):
+        unsafe = (
+            "serviceConfig buildConfig serviceConfig.environmentVariables "
+            "serviceConfig.environmentVariables.FIXTURE serviceConfig.secretEnvironmentVariables "
+            "serviceConfig.secretEnvironmentVariables.secret serviceConfig.secretVolumes "
+            "serviceConfig.secretVolumes.versions buildConfig.environmentVariables "
+            "buildConfig.environmentVariables.FIXTURE buildConfig.sourceToken buildConfig.source "
+            "buildConfig.source.gitUri buildConfig.source.storageSource "
+            "buildConfig.source.storageSource.sourceUploadUrl buildConfig.sourceProvenance "
+            "buildConfig.sourceProvenance.gitUri buildConfig.sourceProvenance.resolvedStorageSource "
+            "buildConfig.sourceProvenance.resolvedStorageSource.sourceUploadUrl "
+            "serviceConfig.futureField buildConfig.futureField serviceConfig.timeoutSeconds.secret "
+            "buildConfig.runtime.environmentVariables"
+        ).split()
+        for field in unsafe:
+            for release in ("", "beta ", "alpha "):
+                for verb in ("describe fixture", "list"):
+                    for fmt in ("value", "json", "yaml", "table"):
+                        for fields in (field, f"serviceConfig.timeoutSeconds,{field}"):
+                            command = f"gcloud {release}functions {verb} --format='{fmt}({fields})'"
+                            with self.subTest(command=command):
+                                self.assertIsNotNone(guard.bash_problem(command))
+
     def test_unprojected_and_sensitive_gcloud_reads_are_denied(self):
         for read, safe, *unsafe in self.READS:
             for release in ("", "beta ", "alpha "):
