@@ -637,7 +637,7 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
         for inherited in ("MUNICE_AUTO_DISPATCH", "MUNICE_AMBIENT", "HERDR_WORKSPACE_ID"):
             receiver_env.pop(inherited, None)
         spawn = env.get("AUTO_TAB_CLOSE_PANE_SPAWN") or os.path.join(HERE, "pane-spawn")
-        args = [spawn, "--check", "--kind", context["kind"], "--cwd", context["cwd"], f"{context['job']} [ac-{key}]", prompt]
+        args = [spawn, "--check", "--kind", context["kind"], "--cwd", context["cwd"], "--", f"{context['job']} [ac-{key}]", prompt]
         if context.get("task_id"):
             args[1:1] = ["--job-id", context["task_id"]]
         # Startup gets one bounded retry. Delivery retries retain the same attempt receipts.

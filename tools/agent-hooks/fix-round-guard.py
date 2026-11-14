@@ -64,7 +64,7 @@ VALUED = r"--(?:why|cwd|kind)\s+(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|\S+)"
 ASSIGN = r"[A-Za-z_]\w*=(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|[^\s;&|()]*)[ \t]+"
 SPAWN = re.compile(r"(?:^|[;&|(\n])\s*(?:" + ASSIGN + r")*(?:\S*/)?pane-spawn("
                    r"(?:\s+" + VALUED + r"|\s+--[\w-]+(?:\s+[^\s\"'-]\S*)?)*)\s+"
-                   r"(\"(?:\\.|[^\"\\])*\"|'[^']*')")
+                   r"(?:--\s+)?(\"(?:\\.|[^\"\\])*\"|'[^']*')")
 TELL = re.compile(r"(?:^|[;&|(\n])\s*(?:" + ASSIGN + r")*(?:\S*/)?pane-tell\s+"
                   r"[\"']?((?:\w+/)?w\w+:p\w+)[\"']?\s+")
 CITE = re.compile(r"(\d{2}:\d{2}:\d{2})\s*(?:entry|항목)")
@@ -767,6 +767,9 @@ def selftest():
                 'pane-spawn --why slack "api#1 고치기" "x"', 'pane-spawn --check "api#1 고치기" "x"'):
         assert (spawn(cmd) or {}).get("name") == "api#1 고치기", f"the work name, not an option's value: {cmd}"
     assert (spawn('pane-spawn --check "api#1 고치기" "x"') or {}).get("check"), "--check is a flag"
+    for flags, checking in (('', False), ('--kind codex ', False), ('--check --cwd /repo ', True)):
+        parsed = spawn('pane-spawn ' + flags + '-- "--check" "instruction"')
+        assert parsed and parsed['name'] == '--check' and parsed['check'] is checking, "a delimiter keeps names out of flags"
     for cmd in ('pane-spawn --why "Codex --check cannot use network" "api#1 고치기" "x"', "pane-spawn --why '--check' \"a\" \"x\"",
                 'pane-spawn --why --check "a" "x"'):  # Codex review: a reason that says --check made a fix a check, which skips the limit
         assert (spawn(cmd) or {"check": True})["check"] is False, f"--check in a reason is no flag: {cmd}"

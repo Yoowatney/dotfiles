@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+REAL_RUN, REAL_POPEN = subprocess.run, subprocess.Popen
+
 SPEC = importlib.util.spec_from_file_location("auto", Path(__file__).with_name("auto-tab-close.py"))
 auto = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(auto)
@@ -142,6 +144,28 @@ class RelayTests(unittest.TestCase):
         self.assertIn("original question as asked", prompt)
         self.assertIn("recommendation and next action", prompt)
         self.assertNotIn("주장 밖의 새 문제를 찾거나", prompt)
+
+    def test_dash_prefixed_job_is_after_option_delimiter(self):
+        for name in ('--help', '--unknown', '-h', '--'):
+            with self.subTest(name=name):
+                self.worker['label'] = '🟢 🫡 ' + name
+                self.finish(name + '\n' + DONE)
+                args = self.spawns[-1][0]
+                job = args[-2]
+                self.assertTrue(job.startswith(name + ' [ac-'), job)
+                self.assertEqual(args[-3], '--')
+
+    def test_dash_prefixed_job_reaches_real_launcher(self):
+        self.worker['label'] = '🟢 🫡 --help'
+        self.finish()
+        args = self.spawns[0][0]
+        fixture = Path(__file__).with_name('pane-spawn-test-fixture.sh')
+        # Keep the real parser and startup flow, replacing only the herdr CLI.
+        with patch.object(subprocess, 'Popen', REAL_POPEN):
+            result = REAL_RUN(['bash', '-c', 'source "$0"; workers_up; is_main; ps "$@"',
+                               str(fixture), *args[1:]], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'workers/w1:new')
 
     def test_checker_gets_source_transcript_location_for_both_harnesses(self):
         for codex in (False, True):

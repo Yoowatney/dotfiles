@@ -42,7 +42,7 @@
 # Prints the new pane id. Exit 1: the agent did not start (the empty pane is removed). Exit 2: bad usage.
 original_args=("$@")
 H=${HERDR_BIN_PATH:-herdr}
-USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
+USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] [--] "<work name>" "<instruction>" [-- <agent arguments>]
   --task-type code|research|media|office|full: worker startup catalog; unknown tasks retain full context.
   --job-id ID: keep the original job id for a check or reassignment; otherwise a new id is generated.
   --allow-duplicate: intentionally start another worker with the same instruction. Otherwise an open worker from the
@@ -81,6 +81,7 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || die "$USAGE"
       case "$1" in --kind) kind=$2 ;; --cwd) cwd=$2 ;; --why) why=$2 ;; --opener) opener=${2#term_}; [[ "$opener" =~ ^[0-9A-Za-z]+$ ]] || die "$USAGE" ;; --task-type) task_type=$2 ;; --job-id) job_id=$2 ;; esac
       shift 2 ;;
+    --) shift; break ;;
     --*) die "$USAGE" ;;
     *) break ;;
   esac
