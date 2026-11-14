@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unicodedata
 from unittest import mock
 
 ROOT = Path(__file__).parent
@@ -311,6 +312,58 @@ class RecoveryTests(unittest.TestCase):
                      "Codex 사용량 한도로 중단됐던 작업을 재개했습니다."):
             self.hook(last_assistant_message=text)
             self.assertFalse((self.root / "deferred/state.json").exists())
+
+    def test_finished_reports_are_not_captured_from_either_runtime(self):
+        report = ("작업 일지를 기록했습니다. Codex 사용량 때문에 중단됐던 확인도 마쳤습니다.\n\n"
+                  "남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 끝남, 백그라운드 작업 없음")
+        for runtime in ("claude", "codex"):
+            with self.subTest(runtime=runtime):
+                if runtime == "claude":
+                    rows = [{"type": "assistant", "message": {"content": report}}]
+                else:
+                    self.success(write_only=True)
+                    rows = [json.loads(line) for line in self.transcript.read_text().splitlines()]
+                    rows[-1]["payload"]["content"][0]["text"] = report
+                self.transcript.write_text("".join(json.dumps(row) + "\n" for row in rows))
+                self.hook("SessionStart")
+                self.hook(transcript_path=str(self.transcript))
+                self.hook(transcript_path=str(self.transcript))  # An already open session's next Stop.
+                self.assertFalse((self.root / "deferred/state.json").exists())
+
+    def test_explicit_empty_finished_footer_overrides_historical_quota_words(self):
+        for footer in (
+                "남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨",
+                "**남은 것:** 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫음",
+                "남은 것:\n- 요유 몫: 없음\n- 유요 몫: 없음\n- 세션: 끝남, 실행 중 작업 없음",
+                unicodedata.normalize("NFD", "남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 끝남")):
+            with self.subTest(footer=footer):
+                self.defer("Codex quota exhausted; review deferred earlier.\n\n" + footer)
+                self.assertFalse((self.root / "deferred/state.json").exists())
+
+    def test_incomplete_or_quoted_finished_footer_does_not_hide_deferral(self):
+        finished = "남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨"
+        for footer in (
+                "남은 것: 요유 몫: 승인 · 유요 몫: 없음 · 세션: 닫아도 됨",
+                "남은 것: 요유 몫: 없음 · 유요 몫: 리뷰 보류 · 세션: 닫아도 됨",
+                "남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫으면 감시 멈춤",
+                "남은 것: 요유 몫: 없음 · 세션: 닫아도 됨",
+                "> " + finished,
+                "```\n" + finished + "\n```",
+                finished + "\n\n다음 확인은 보류합니다.",
+                finished + "\n남은 것: 요유 몫: 없음 · 유요 몫: 확인 보류 · 세션: 닫으면 확인 멈춤"):
+            with self.subTest(footer=footer):
+                self.defer("Codex quota exhausted; review deferred.\n\n" + footer)
+                self.assertEqual(self.state()["items"][0]["status"], "pending")
+
+    def test_finished_report_never_resolves_or_replaces_existing_pending_work(self):
+        self.defer()
+        original = self.state()["items"][0]
+        self.success(write_only=True)
+        self.hook(transcript_path=str(self.transcript), last_assistant_message=(
+            "Codex quota exhausted; review deferred earlier.\n\n"
+            "남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 끝남"))
+        self.assertEqual(self.state()["items"], [original])
+        self.assertEqual(self.state()["recovery"]["provider"], "openai")
 
     def test_unresumed_work_is_still_captured(self):
         self.defer("Codex quota exhausted; deferred tasks have not resumed.")
