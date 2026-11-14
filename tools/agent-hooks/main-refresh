@@ -82,12 +82,22 @@ in_window || skip "새벽 05~06시가 아니라 건너뜀"
 # One run at a time: a caller may ask again while a run waits (up to an hour). A lock 2 hours old is a dead run's.
 lock=$DIR/refresh.lock
 mkdir -p "$DIR"
-if ! mkdir "$lock" 2>/dev/null; then
+while ! mkdir "$lock" 2>/dev/null; do
   { [ -n "$(find "$lock" -maxdepth 0 -mmin +120 2>/dev/null)" ] && rmdir "$lock" && mkdir "$lock"; } 2>/dev/null \
-    || { log "다른 실행이 진행 중이라 건너뜀"; exit 0; }
-fi
+    && break
+  [ -z "$now" ] || { log "다른 실행이 진행 중이라 건너뜀"; exit 0; }
+  # launchd runs only once: keep the daily run pending until the 07:00 cutoff.
+  [ -n "${waiting:-}" ] || log "다른 실행이 진행 중이라 잠금 해제를 기다림"
+  waiting=1
+  late
+  sleep "$POLL"
+  late
+done
 gate=$DIR/refresh-delivery.json
 trap 'kill $(jobs -p) 2>/dev/null; wait 2>/dev/null; [ -n "${keep_gate:-}" ] || rm -f "$gate"; rmdir "$lock" 2>/dev/null' EXIT
+late
+# A daily run may have finished while we waited. Decide startup changes only after this check.
+[ -n "$now" ] || [ ! -f "$DIR/refreshed-$day" ] || exit 0
 row=$("$H" pane list 2>/dev/null | jq -c --arg t "$term" '[.result.panes[] | select(.terminal_id == $t)][0] // empty')
 id=$(jq -r '.pane_id // empty' <<<"$row" 2>/dev/null)
 [ -n "$id" ] || { log "메인 칸을 찾지 못함 ($term)"; exit 0; }
