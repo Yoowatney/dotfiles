@@ -240,7 +240,7 @@ if op == "open":
     spawn = os.environ.get("WORKERS_MOVE_REMOTE_SPAWN") or home + "/.local/bin/pane-spawn"
     # Claude, whatever the 회사맥 pane ran: in a fresh worktree here a Codex pane would stop at a trust dialog that eats the
     # instruction (Claude review)
-    rc, o, e = run(spawn, "--opener", a["opener"], "--kind", "claude", "--cwd", a["folder"], a["name"],
+    rc, o, e = run(spawn, "--opener", a["opener"], "--kind", "claude", "--cwd", a["folder"], "--", a["name"],
                    a["prompt"].replace("{memo}", memo), timeout=600)
     addr = next((l for l in o.splitlines() if l.startswith("workers/")), "")
     if addr:  # exit 1 with an address: it shows no work yet, and the instruction was typed
@@ -1128,7 +1128,7 @@ if text.startswith("[퇴근 인계]") and addr in memos:
         assert git(wt, "rev-parse", "HEAD")[1] == git(f"{d}/repo", "rev-parse", "origin/feat/x")[1] != "", "WIP pushed"
         spawned = [json.loads(x) for x in lines("rspawn.log")]
         assert len(spawned) == 1 and spawned[0][:6] == ["--opener", "term_MAIN", "--kind", "claude", "--cwd", wt], spawned
-        assert spawned[0][6] == "일 A (집맥)" and f"{rhome}/.local/state/workers-move/memos/spawn-MAIN-11.md" in spawned[0][7]
+        assert spawned[0][6:8] == ["--", "일 A (집맥)"] and f"{rhome}/.local/state/workers-move/memos/spawn-MAIN-11.md" in spawned[0][8]
         with open(f"{rhome}/.local/state/workers-move/memos/spawn-MAIN-11.md", encoding="utf-8") as f:
             memo = f.read()
         assert "원래 지시 sA" in memo and "목표: A를 끝낸다" in memo and "feat/x (push됨)" in memo
@@ -1221,6 +1221,8 @@ while True:
 ''')
         repo = os.path.realpath(f"{d}/repo")
         ask = dict(timeout=90, agent="spawn-MAIN-t1", memo="m", opener="term_MAIN", folder=wt, main_tree=repo, name="t", prompt="{memo}")
+        assert remote(env, "open", trust=False, **{**ask, "name": "--help [literal]"})["ok"]
+        assert json.loads(lines("rspawn.log")[-1])[6:8] == ["--", "--help [literal]"], "remote names are literal too"
         assert remote(env, "open", trust=False, **ask)["ok"] and not lines("claude.log"), "a repo the 회사맥 does not trust stays so"
         open(f"{d}/trust-stuck", "w").close()  # Down did not move the mark: no Enter, which would say no
         assert remote(env, "open", trust=True, **ask)["ok"] and lines("claude-keys.log") == ["down"], lines("claude-keys.log")

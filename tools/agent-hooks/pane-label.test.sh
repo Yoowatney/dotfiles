@@ -64,6 +64,15 @@ if pl 2>/dev/null; then fail "no argument should exit 2"; fi
 # A new name starts 🟢: 요유 may close the session.
 pl "api#1 첫 일"; expect "🟢 api#1 첫 일" "first name"
 
+# Unknown options must never become a pane or tab name.
+for option in --help --unknown --hold-typo '--help with spaces'; do
+    rc=0
+    pl "$option" 2>"$SANDBOX/err" || rc=$?
+    [ "$rc" = 2 ] || fail "$option should report usage (exit 2), got $rc"
+    grep -q '^usage:' "$SANDBOX/err" || fail "$option should print usage"
+    expect "🟢 api#1 첫 일" "$option must not rename"
+done
+
 # --hold marks 🔴 and keeps the name; a rename keeps 🔴 while something still runs.
 pl --hold; expect "🔴 api#1 첫 일" "hold"
 pl "api#2 새 일"; expect "🔴 api#2 새 일" "rename keeps 🔴"

@@ -131,7 +131,6 @@ lead() { # lead|"" label: rewrite the label with or without 👑, keeping mark a
 }
 
 case "${1:-}" in
-  "") echo 'usage: pane-label "<text>" | --hold | --free | --lead | --unlead | --main | --mark-subs | --sync-tabs | --sync-all-tabs | --clear | --clear-if-prefix "<prefix>" | --close' >&2; exit 2 ;;
   --sync-tabs) sync_tabs ;;
   --sync-all-tabs) sync_all_tabs ;;
   --clear) rename --clear ;;
@@ -173,6 +172,7 @@ case "${1:-}" in
     nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' bash "$0" --close-now >/dev/null 2>&1 &
     echo "pane-label: closing this pane once the turn ends" ;;
   --close-now) close_when_idle ;;
+  "" | --*) echo 'usage: pane-label "<text>" | --hold | --free | --lead | --unlead | --main | --mark-subs | --sync-tabs | --sync-all-tabs | --clear | --clear-if-prefix "<prefix>" | --close' >&2; exit 2 ;;
   *)
     cur=$(current)
     follow_tab "$(task_of "$cur")" "$(task_of "$*")"
