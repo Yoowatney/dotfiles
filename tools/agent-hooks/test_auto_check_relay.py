@@ -308,6 +308,65 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(len(self.tells), 1, "duplicate Stop/sweep must not redeliver")
         self.assertEqual(len(self.spawns), 1)
 
+    def test_completed_check_delivers_receipt_without_requesting_pane_close(self):
+        self.completed_check_replay(codex=False)
+
+    def test_codex_completed_check_delivers_once_in_new_and_open_sessions(self):
+        self.completed_check_replay(codex=True)
+
+    def completed_check_replay(self, codex):
+        self.finish()
+        checked = ("확인했습니다.\nTASK_CHECK: pass\n"
+                   "남은 것: 요유 몫: 없음 · 유요 몫: 리드가 PR 교차 검토 · 세션: 확인 완료·실행 중 작업 없음")
+        transcript = self.transcript([{"type": "assistant", "message": {
+            "content": [{"type": "text", "text": checked}]}}])
+        payload = {"last_assistant_message": checked} if codex else {"transcript_path": str(transcript)}
+        # First report from a new checker, then the same Stop in its still-open session.
+        for _ in range(2):
+            text = auto.decide(payload, {**self.env, "HERDR_PANE_ID": "w1:p9"})
+            self.assertEqual(text, checked)
+            self.finish(text, check=True)
+        context = json.loads(next((self.state / "automatic-checks").glob("*.json")).read_text())
+        self.assertIs(context.get("check_delivered"), True)
+        self.assertEqual(len(self.tells), 1)
+        self.assertIn("확인 칸의 마지막 보고", self.tells[0][1])
+        self.assertNotIn("w1:p9", self.closed, "delivery does not grant permission to close a pane")
+        self.assertEqual(len(self.spawns), 1, "a finished check never requests another check")
+
+    def test_completion_alias_requires_one_real_terminal_marker_and_no_running_work(self):
+        completed = "확인했습니다.\nTASK_CHECK: pass\n남은 것: 요유 몫: 없음 · 세션: 확인 완료·실행 중 작업 없음"
+        for result in ("pass", "fail", "unknown"):
+            self.assertTrue(auto.check_finished(completed.replace("TASK_CHECK: pass", "TASK_CHECK: " + result)))
+        for report in (completed.replace("TASK_CHECK: pass", ""),
+                       completed.replace("TASK_CHECK: pass", "> TASK_CHECK: pass"),
+                       completed.replace("TASK_CHECK: pass", "```\nTASK_CHECK: pass\n```"),
+                       completed.replace("TASK_CHECK: pass", "TASK_CHECK: pass\nTASK_CHECK: fail"),
+                       completed.replace("작업 없음", "작업 있음"),
+                       completed.replace("확인 완료·실행 중 작업 없음", "열어 둠")):
+            with self.subTest(report=report):
+                self.assertFalse(auto.check_finished(report))
+
+    def test_completion_alias_still_relays_questions_and_user_decisions_as_interim(self):
+        self.finish()
+        for extra, left in (("질문: 어떤 방법으로 할까요?\n", "없음"), ("", "배포 승인")):
+            report = (extra + "TASK_CHECK: pass\n남은 것: 요유 몫: " + left +
+                      " · 세션: 확인 완료·실행 중 작업 없음")
+            self.finish(report, check=True)
+            context = json.loads(next((self.state / "automatic-checks").glob("*.json")).read_text())
+            self.assertFalse(context.get("check_delivered"))
+            self.assertIn("질문·대기 보고", self.tells[-1][1])
+        self.finish("TASK_CHECK: pass\n남은 것: 요유 몫: 없음 · 세션: 확인 완료·실행 중 작업 없음", check=True)
+        context = json.loads(next((self.state / "automatic-checks").glob("*.json")).read_text())
+        self.assertIs(context.get("check_delivered"), True)
+
+    def test_checker_prompt_defaults_to_one_nonproduction_check(self):
+        self.finish()
+        prompt = self.spawns[0][0][-1]
+        self.assertIn("One completed automatic check", prompt)
+        self.assertIn("Do not request another cross-review", prompt)
+        self.assertIn("explicit user-mandated", prompt)
+        self.assertIn("TASK_CHECK: pass|fail|unknown", prompt)
+
     def test_follow_up_uses_same_worker_and_gets_a_fresh_independent_check(self):
         self.finish()
         self.finish(CHECKED, check=True)

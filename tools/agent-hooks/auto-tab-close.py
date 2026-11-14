@@ -107,6 +107,17 @@ def should_close(text: str) -> bool:
     return value.startswith("닫아도 됨") and not share.leaves_yoyoo_work(plain(text))
 
 
+def check_finished(text: str) -> bool:
+    """A terminal check can finish delivery while leaving its pane open."""
+    if should_close(text):
+        return True  # Preserve existing reports; closing still uses should_close separately.
+    body = plain(text).strip()
+    markers = re.findall(r"^TASK_CHECK:[ \t]*(\S+)[ \t]*$", body, re.M)
+    return (len(markers) == 1 and markers[0] in ("pass", "fail", "unknown")
+            and bool(re.search(r"^남은 것:[^\n]*세션:[ \t]*확인 완료[ \t]*·[ \t]*실행 중 작업 없음[ \t]*\Z",
+                               body, re.M)))
+
+
 STARTS = ("Monitor", "Agent", "Workflow")  # with a background Bash, CronCreate and ScheduleWakeup: what pane-hold.sh marks 🔴
 TASK = re.compile(r"(with ID: |\(task |agentId: |stopped task: )(\w+)")
 NOTICE = re.compile(r"<tool-use-id>(toolu_\w+)</tool-use-id>")
@@ -559,7 +570,7 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
                 context = json.load(f)
             if context.get("check_delivered"):
                 return True
-            interim = not should_close(reply) or share.leaves_yoyoo_work(plain(reply)) or question_request(reply)
+            interim = not check_finished(reply) or share.leaves_yoyoo_work(plain(reply)) or question_request(reply)
             fingerprint = hashlib.sha256(reply.encode()).hexdigest()
             if interim and fingerprint in context.get("interim_delivered", []):
                 return True
@@ -629,6 +640,11 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
                   "Read the original request from its primary source; if unavailable, report coverage as unverified. "
                   "For investigations, check the recommendation and next action and executed checks for material unknowns. "
                   "Missing scope is a failed or unverified check, not a passed claim. "
+                  "One completed automatic check is the default for non-production tooling. "
+                  "Do not request another cross-review of the same PR; report concrete failures instead. "
+                  "Preserve explicit user-mandated reviews and production/data/billing/security approval gates. "
+                  "When your own checks finish, report TASK_CHECK: pass|fail|unknown and use 세션: 닫음. "
+                  "A remaining lead action does not mean the check itself is still running. "
                   "항목별 실행 명령과 실제 결과, 통과·실패·확인 불가를 적고 첫 줄에 전체 판정을 적으세요. "
                   f"상관 표식 [ac-{key}]는 보고가 끝날 때까지 칸 이름에 남겨 두세요."
                   + recording_restrictions(me, env))
