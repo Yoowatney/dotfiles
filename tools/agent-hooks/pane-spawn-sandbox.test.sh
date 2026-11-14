@@ -74,8 +74,9 @@ has "보고 첫 줄에" "its first line is what the main pane reads"
 # 요유 2026-11-07: a check pane reads GCP, GitHub, the board and the network itself, so the network is on, and gcloud's own
 # folder is the one more place it writes: gcloud rewrites its login files on every call. The checked folder stays read-only.
 SANDBOXED="--sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=true"
-has "--kind codex --pane w1:new --timeout 120000 -- $SANDBOXED" "a check pane is a sandboxed Codex with the network"
-[ "$(grep 'agent start' "$SANDBOX/log" | grep -o -- '--sandbox' | wc -l | tr -d ' ')" = 1 ] || fail "a check gets exactly one sandbox option"
+has "--kind codex --pane w1:new --timeout 120000 -- --pane-spawn-args" "a check uses short terminal input"
+has "transported codex argv -- $SANDBOXED" "a check pane is a sandboxed Codex with the network"
+[ "$(grep 'transported codex argv' "$SANDBOX/log" | grep -o -- '--sandbox' | wc -l | tr -d ' ')" = 1 ] || fail "a check gets exactly one sandbox option"
 has "-c sandbox_workspace_write.writable_roots=[\"$SANDBOX/home/.config/gcloud\"]" "gcloud's folder is the one writable root it adds"
 hasnt "network_access=false" "the network is not shut"
 hasnt "danger-full-access" "a check pane keeps its sandbox"
@@ -177,7 +178,7 @@ has "/work/repo" "and named in the instruction"
 ps --check "로그인" "돌려 보세요" -- -m gpt-5 >/dev/null
 grep -qE -- "-- $SANDBOXED .*--disable plugins $NOUPDATE -m gpt-5\$" "$SANDBOX/log" || fail "the caller's Codex arguments follow the sandbox, and a check pane skips the update prompt: $(log)"
 ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
-has "--kind codex --pane w1:new --timeout 120000 -- $SANDBOXED" "--kind codex is the same"
+has "transported codex argv -- $SANDBOXED" "--kind codex is the same"
 SESSIONLESS=1 ps --kind codex --cwd /work/repo "조사" "지시" >/dev/null
 has "--cwd /work/repo " "a Codex pane that does the job starts where it is told"
 # 2026-11-05: Codex runs commands with mise's shims first on PATH. A test that swaps HOME then hid mise's config and installs from

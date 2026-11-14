@@ -12,6 +12,22 @@ spec.loader.exec_module(startup)
 
 
 class StartupTest(unittest.TestCase):
+    def test_launch_transport_preserves_argv_and_consumes_environment(self):
+        payload = ['--sandbox', 'workspace-write', '-c', 'value="with spaces"', '--model', 'example']
+        env = {'HERDR_CODEX_LAUNCH_ARGS': json.dumps(payload)}
+        self.assertEqual(startup.launch_arguments(['--no-daemon', '--pane-spawn-args'], env), ['--no-daemon', *payload])
+        self.assertNotIn('HERDR_CODEX_LAUNCH_ARGS', env)
+        env = {'HERDR_CODEX_LAUNCH_ARGS': json.dumps(payload)}
+        self.assertEqual(startup.launch_arguments(['--help'], env), ['--help'])
+        self.assertNotIn('HERDR_CODEX_LAUNCH_ARGS', env)
+
+    def test_launch_transport_fails_closed_on_missing_or_invalid_data(self):
+        for encoded in (None, '', '{}', '[]', '[1]', '["bad\\nargument"]'):
+            with self.subTest(encoded=encoded), self.assertRaises(SystemExit):
+                startup.launch_arguments(['--pane-spawn-args'], {'HERDR_CODEX_LAUNCH_ARGS': encoded})
+        with self.assertRaises(SystemExit):
+            startup.launch_arguments(['--pane-spawn-args', '--pane-spawn-args'], {'HERDR_CODEX_LAUNCH_ARGS': '["--help"]'})
+
     def test_only_explicit_worker_regions_are_removed(self):
         source = 'Safety\n<!-- pane:skip -->\nMain contact\n<!-- /pane:skip -->\n<!-- pane: Worker contract -->\nPermissions\n'
         self.assertEqual(startup.worker_rules(source), 'Safety\nWorker contract\nPermissions\n')
