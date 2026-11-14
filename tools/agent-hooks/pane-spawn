@@ -43,6 +43,8 @@
 original_args=("$@")
 H=${HERDR_BIN_PATH:-herdr}
 USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] [--] "<work name>" "<instruction>" [-- <agent arguments>]
+  Work name and instruction must contain non-whitespace text. Agent configuration/model/effort/sandbox/approval
+    options cannot be work names; put agent options after both task operands and a second --.
   --task-type code|research|media|office|full: worker startup catalog; unknown tasks retain full context.
   --job-id ID: keep the original job id for a check or reassignment; otherwise a new id is generated.
   --allow-duplicate: intentionally start another worker with the same instruction. Otherwise an open worker from the
@@ -86,7 +88,14 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
-[ $# -ge 2 ] && [ -n "$1" ] && [ -n "$2" ] || die "$USAGE"
+[ $# -ge 2 ] || die "$USAGE"
+[[ "$1" =~ [^[:space:]] ]] && [[ "$2" =~ [^[:space:]] ]] || die "$USAGE"
+# A leading -- can introduce literal names, but must not turn forwarded agent
+# settings into a task when the caller forgot both required operands.
+case "$1" in
+  -[acms]|-[acms]?*|--config|--config=*|--model|--model=*|--effort|--effort=*|--sandbox|--sandbox=*|--ask-for-approval|--ask-for-approval=*)
+    die "work name and instruction are required before agent options; $USAGE" ;;
+esac
 [ -z "$opener" ] || [ -z "$check$same$new_tab" ] || die "--opener opens a moved pane's own tab: no --check, --same-tab or --new-tab"
 asked=${kind:-claude} # what the caller chose, before auto resolves to Codex
 # A check pane runs Codex regardless of weekly usage. Both kinds protect the checked folder.
