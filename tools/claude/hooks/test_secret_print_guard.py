@@ -18,6 +18,182 @@ guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guard)
 
 
+class GcloudSecretProjectionTests(unittest.TestCase):
+    # Synthetic resources only: these strings are passed to the parser, never gcloud.
+    READS = (
+        ("monitoring channels list", "name,type,displayName,enabled", "labels", "sensitiveLabels", "labels.url"),
+        ("monitoring channels describe fixture", "name,type,enabled", "labels", "sensitiveLabels", "sensitiveLabels.authToken"),
+        ("functions describe fixture", "name,state,serviceConfig.uri", "environmentVariables", "serviceConfig", "buildConfig"),
+        ("functions list", "name,state", "environmentVariables", "serviceConfig.environmentVariables", "buildConfig.environmentVariables"),
+        ("run services describe fixture", "metadata.name,status.url", "spec", "spec.template", "spec.template.spec.containers"),
+        ("run services list", "metadata.name,status.url", "spec", "metadata.annotations", "spec.template.spec.containers.env"),
+        ("run revisions describe fixture", "metadata.name,status", "spec", "spec.containers", "spec.containers.env"),
+        ("run revisions list", "metadata.name,status", "spec", "metadata", "spec.containers.env.value"),
+        ("run jobs describe fixture", "metadata.name,status", "spec", "spec.template", "spec.template.spec.template.spec.containers.env"),
+        ("run jobs list", "metadata.name,status", "spec", "metadata.annotations", "spec.template"),
+        ("run jobs executions describe fixture", "metadata.name,status", "spec", "spec.template", "spec.template.spec.containers.env"),
+        ("run jobs executions list", "metadata.name,status", "spec", "metadata", "spec.template"),
+        ("compute instances describe fixture", "name,id,status", "metadata", "metadata.items", "metadata.items.value"),
+        ("compute instances list", "name,id,status", "metadata", "metadata.items", "metadata.items.value"),
+        ("compute instance-templates describe fixture", "name,id", "properties", "properties.metadata", "properties.metadata.items"),
+        ("compute instance-templates list", "name,id", "properties", "properties.metadata", "properties.metadata.items.value"),
+        ("compute project-info describe", "name,id", "commonInstanceMetadata", "commonInstanceMetadata.items", "commonInstanceMetadata.items.value"),
+        ("builds describe fixture", "id,status,createTime", "substitutions", "secrets", "steps"),
+        ("builds list", "id,status", "substitutions", "availableSecrets", "steps.env"),
+        ("builds triggers describe fixture", "id,name,disabled", "substitutions", "webhookConfig", "build"),
+        ("builds triggers list", "id,name,disabled", "substitutions", "webhookConfig.secret", "build.steps"),
+        ("container clusters describe fixture", "name,status", "masterAuth", "masterAuth.clientKey", "nodeConfig.metadata"),
+        ("container clusters list", "name,status", "masterAuth", "nodeConfig", "nodeConfig.metadata"),
+        ("container node-pools describe fixture", "name,status,version", "config", "config.metadata", "config.metadata.value"),
+        ("container node-pools list", "name,status,version", "config", "config.metadata", "config.labels"),
+        ("scheduler jobs describe fixture", "name,schedule,state", "httpTarget", "httpTarget.headers", "httpTarget.body"),
+        ("run worker-pools describe fixture", "metadata.name,status", "spec", "spec.template", "spec.template.spec.containers.env"),
+        ("run worker-pools list", "metadata.name,status", "spec", "metadata", "metadata.annotations"),
+        ("run worker-pools revisions describe fixture", "metadata.name,status", "spec", "spec.containers", "spec.containers.env"),
+        ("run jobs executions tasks describe fixture", "metadata.name,status", "spec", "spec.containers", "spec.containers.env"),
+        ("container aws clusters describe fixture", "name,state", "authorization", "awsRegion", "controlPlane"),
+        ("container azure clusters describe fixture", "name,state", "authorization", "azureClient", "controlPlane"),
+        ("container attached clusters describe fixture", "name,state", "authorization", "oidcConfig", "labels"),
+        ("tasks describe fixture", "name,scheduleTime", "httpRequest", "httpRequest.headers", "httpRequest.body"),
+        ("tasks list", "name,scheduleTime", "httpRequest", "appEngineHttpRequest", "httpRequest.url"),
+        ("workflows describe fixture", "name,state", "sourceContents", "userEnvVars", "labels"),
+        ("workflows list", "name,state", "sourceContents", "userEnvVars", "labels"),
+        ("workflows executions describe fixture", "name,state", "argument", "result", "error"),
+        ("workflows executions list", "name,state", "argument", "result", "error.payload"),
+        ("batch jobs describe fixture", "name,uid", "taskGroups", "taskGroups.taskSpec.environment", "labels"),
+        ("batch jobs list", "name,uid", "taskGroups", "taskGroups.taskSpec.runnables", "labels"),
+        ("app versions describe fixture", "id,name,servingStatus", "envVariables", "buildEnvVariables", "handlers"),
+        ("app versions list", "id,name,servingStatus", "envVariables", "buildEnvVariables", "deployment"),
+        ("composer environments describe fixture", "name,state", "config", "config.softwareConfig.envVariables", "labels"),
+        ("composer environments list", "name,state", "config", "config.softwareConfig", "labels"),
+        ("pubsub subscriptions describe fixture", "name,topic", "pushConfig", "pushConfig.pushEndpoint", "labels"),
+        ("pubsub subscriptions list", "name,topic", "pushConfig", "pushConfig.attributes", "labels"),
+    )
+
+    def test_unprojected_and_sensitive_gcloud_reads_are_denied(self):
+        for read, safe, *unsafe in self.READS:
+            for release in ("", "beta ", "alpha "):
+                base = "gcloud " + release + read
+                for suffix in ("", " --format=json", " --format yaml", " --format='json(*)'",
+                               *(f" --format='json({field})'" for field in unsafe)):
+                    with self.subTest(command=base + suffix):
+                        self.assertIsNotNone(guard.bash_problem(base + suffix))
+
+    def test_explicit_safe_projections_are_allowed(self):
+        for read, safe, *_ in self.READS:
+            for fmt in (f"json({safe})", f"yaml({safe})", f"table({safe})", f"value({safe})"):
+                for flag in (f"--format='{fmt}'", f"--format '{fmt}'"):
+                    command = f"gcloud beta --project=fixture {read} {flag}"
+                    with self.subTest(command=command):
+                        self.assertIsNone(guard.bash_problem(command))
+
+    def test_format_cannot_be_borrowed_or_expanded(self):
+        for command in (
+            "gcloud monitoring channels list | jq 'del(.labels,.sensitiveLabels)'",
+            "gcloud monitoring channels list; gcloud monitoring channels list --format='value(name)'",
+            "gcloud monitoring channels list --format='json(name,labels)'",
+            "gcloud monitoring channels list --format='json(name)' --format=json",
+            "gcloud monitoring channels list --format='json(name)' --flags-file=fixture.yaml",
+            "gcloud monitoring channels list --format='json(name)' --log-http",
+            "CLOUDSDK_CORE_LOG_HTTP=true gcloud monitoring channels list --format='json(name)'",
+            "gcloud monitoring channels list --format='$FORMAT'",
+            "gcloud monitoring channels list --format='json(name,)'",
+            "gcloud monitoring channels list --format='json(name).foo(labels)'",
+            "gcloud functions describe fixture --format='json(serviceConfig)'",
+            "gcloud run services describe fixture --format='json(metadata)'",
+            "gcloud monitoring channels list --format='table(name,labels.url:label=name)'",
+            "gcloud functions describe help",
+            "(/opt/sdk/bin/gcloud beta monitoring channels list)",
+            "gcloud --project fixture --quiet monitoring channels list",
+            "gcloud scheduler jobs describe fixture --format='value(httpTarget)'",
+            "gcloud scheduler jobs list --format='value(httpTarget.body)'",
+            "gcloud scheduler jobs list --format=yaml",
+            "timeout 5 bash -lc 'gcloud beta monitoring channels list'",
+            "ssh fixture-host 'gcloud monitoring channels describe fixture'",
+            "R=$(gcloud monitoring channels list); echo $R",
+            "R=$(gcloud functions describe fixture); printf '%s' \"${R:0:8}\"",
+            'echo "$(gcloud monitoring channels list)"',
+            'printf "%s" "`gcloud functions describe fixture`"',
+            "R=$(gcloud monitoring channels list); echo ${#R}",
+            "R=$(gcloud functions describe fixture)",
+            'echo "R=$(gcloud monitoring channels list)"',
+            "bash -c 'echo \"$(gcloud monitoring channels list)\"'",
+            'cat <<EOF\n$(gcloud monitoring channels list)\nEOF',
+            'export CLOUDSDK_CORE_LOG_HTTP=1; gcloud functions describe fixture --format="value(name)"',
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(guard.bash_problem(command))
+
+    def test_help_captures_and_ordinary_reads_remain_allowed(self):
+        for command in (
+            "gcloud monitoring channels list --help",
+            "gcloud help functions describe",
+            "gcloud config get-value project",
+            "gcloud projects list", "gcloud auth list", "gcloud secrets list",
+            "gcloud monitoring metrics list --format=json",
+            "gcloud tasks queues list", "gcloud builds worker-pools list",
+            "cat <<'EOF'\n$(gcloud monitoring channels list)\nEOF",
+            "R=$(gcloud monitoring channels list --format='value(name)'); echo ${#R}",
+            "R=$(gcloud functions describe fixture --format='json(name)')",
+            "gcloud monitoring channels list --format='json(name, type)'",
+            "gcloud --project fixture --format 'value(name)' beta monitoring channels list",
+            "git commit -m 'guard gcloud monitoring channels list'",
+            "rg 'gcloud monitoring channels list' tools",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(guard.bash_problem(command))
+
+    def test_review_shell_and_logging_bypasses(self):
+        for command in (
+            r'bash -c "echo \"\$(gcloud monitoring channels list)\""',
+            "bash --noprofile -c 'gcloud monitoring channels list'",
+            "bash -euo pipefail -c 'gcloud monitoring channels list'",
+            "bash -eo pipefail -c 'gcloud monitoring channels list'",
+            "bash +x -c 'gcloud monitoring channels list'",
+            "bash -c -e 'gcloud monitoring channels list'",
+            "bash <<'EOF'\ngcloud monitoring channels list\nEOF",
+            "bash 2>&1 <<'EOF'\ngcloud monitoring channels list\nEOF",
+            "bash -s 2>&1 <<'EOF'\ngcloud monitoring channels list\nEOF",
+            "timeout 30 bash 2>&1 <<'EOF'\ngcloud monitoring channels list\nEOF",
+            "ssh fixture-host bash -s 2>&1 <<'EOF'\ngcloud monitoring channels list\nEOF",
+            "ssh fixture-host 2>&1 <<'EOF'\ngcloud monitoring channels list\nEOF",
+            "cat <<'EOF' 2>&1 | bash\ngcloud monitoring channels list\nEOF",
+            "cat <<'EOF' |& bash\ngcloud monitoring channels list\nEOF",
+            "timeout 30 bash <<'EOF'\ngcloud monitoring channels list\nEOF",
+            "env FOO=1 bash <<'EOF'\ngcloud monitoring channels list\nEOF",
+            "ssh fixture-host bash -s <<'EOF'\ngcloud monitoring channels list\nEOF",
+            "ssh fixture-host <<'EOF'\ngcloud monitoring channels list\nEOF",
+            'declare -x CLOUDSDK_CORE_LOG_HTTP=1; gcloud functions describe fixture --format="value(name)"',
+            'typeset -x CLOUDSDK_CORE_LOG_HTTP=true; gcloud functions describe fixture --format="value(name)"',
+            'gcloud config set core/log_http true',
+            'gcloud config set core/log_http 1; gcloud functions describe fixture --format="value(name)"',
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(guard.bash_problem(command))
+        for command in (
+            r'''pane-tell w "\"\$(x)\"' gcloud functions describe x"''',
+            'gcloud config set core/log_http false',
+            'gcloud config get-value core/log_http',
+            r"bash -c 'echo \$(gcloud monitoring channels list)'",
+            "bash scripts/fixture.sh -c 'gcloud monitoring channels list'",
+            "ssh fixture-host cat <<'EOF'\ngcloud monitoring channels list\nEOF",
+            "bash scripts/check.sh && git commit -F - <<'EOF'\nfix: guard gcloud monitoring channels list\nEOF",
+            "sh -c true; cat <<'EOF'\nnote: gcloud functions describe fixture\nEOF",
+            "bash -c true | cat > /tmp/fixture <<'EOF'\nnote: gcloud monitoring channels list\nEOF",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(guard.bash_problem(command))
+
+    def test_hook_protocol_blocks_synthetic_gcloud_read(self):
+        result = subprocess.run(
+            [sys.executable, "-I", str(GUARD)],
+            input=json.dumps({"tool_name": "Bash", "tool_input": {
+                "command": "gcloud beta monitoring channels list --project=fixture"}}),
+            text=True, capture_output=True, check=True,
+        )
+        self.assertEqual(json.loads(result.stdout or "{}").get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
+
+
 class SecretFileOutputTests(unittest.TestCase):
     def test_content_readers_are_denied_locally_and_over_ssh(self):
         paths = (

@@ -45,8 +45,8 @@ PRINTS_SECRET = re.compile(
 )
 # Reads whose answer is a stored credential, as words in order: flags, `beta`, `timeout` or `do` around them
 # change nothing, and a quoted mention (a commit message, a prompt) stays one word and never matches.
-# Left out on purpose: `run`/`functions describe` (350 uses in three weeks, and env is meant to hold secret refs),
-# `apps:sdkconfig` (a public id), `get-credentials` (writes a file), and create/reset commands (not reads).
+# Left out: `apps:sdkconfig` (a public id), `get-credentials` (writes a file),
+# and create/reset commands (not reads). Mixed configuration reads below need a safe projection.
 CREDENTIAL_READS = [c.split() for c in (
     "gh auth token",  # the GitHub login itself
     "gcloud auth describe",  # credential JSON, refresh token included
@@ -56,7 +56,6 @@ CREDENTIAL_READS = [c.split() for c in (
     "gcloud redis instances get-auth-string",
     "gcloud domains authorization-code",
     "gcloud iap oauth-clients",  # the client secret is an output field
-    "gcloud container clusters describe",  # masterAuth.clientKey
     "gcloud runtime-config variables get-value",  # the store behind functions:config
     "gcloud runtime-config variables list --values",
     "gcloud parametermanager render",  # renderedPayload fills in Secret Manager values
@@ -70,8 +69,39 @@ CREDENTIAL_READS = [c.split() for c in (
 )]
 TOKEN_VERB = re.compile(r"(?:print|generate|fetch)-(?:[a-z]+-)*token$")  # auth print-refresh-token, sql generate-login-token
 HELP = {"help", "--help", "-h"}
-SCHEDULER = "gcloud scheduler jobs".split()
-NARROW_FORMAT = re.compile(r"--format=(?:value|csv|table|get)\((?!.*headers)")
+# These resources mix public metadata with credentials. Even `labels`, annotations,
+# build steps and instance metadata can contain literal secrets. Allow only known
+# non-secret paths, never their enclosing configuration objects or transformations.
+# This is intentionally conservative: add a field only after checking its schema.
+GCLOUD_PROJECTED_READS = (
+    ("monitoring channels", "name type displayName enabled verificationStatus"),
+    ("functions", "name state status environment updateTime createTime serviceConfig.uri serviceConfig.service serviceConfig.maxInstanceCount serviceConfig.minInstanceCount httpsTrigger.url"),
+    ("run services", "metadata.name metadata.namespace metadata.uid metadata.generation metadata.creationTimestamp status"),
+    ("run revisions", "metadata.name metadata.namespace metadata.uid metadata.generation metadata.creationTimestamp status"),
+    ("run jobs", "metadata.name metadata.namespace metadata.uid metadata.generation metadata.creationTimestamp status"),
+    ("run jobs executions", "metadata.name metadata.namespace metadata.uid metadata.generation metadata.creationTimestamp status"),
+    ("run jobs executions tasks", "metadata.name metadata.namespace metadata.uid metadata.generation metadata.creationTimestamp status"),
+    ("run worker-pools", "metadata.name metadata.namespace metadata.uid metadata.generation metadata.creationTimestamp status"),
+    ("run worker-pools revisions", "metadata.name metadata.namespace metadata.uid metadata.generation metadata.creationTimestamp status"),
+    ("compute instances", "name id status zone machineType creationTimestamp"),
+    ("compute instance-templates", "name id creationTimestamp"),
+    ("compute project-info", "name id"),
+    ("builds", "id name status createTime startTime finishTime logUrl"),
+    ("builds triggers", "id name disabled createTime"),
+    ("container clusters", "name id location zone status currentMasterVersion currentNodeVersion endpoint createTime"),
+    ("container node-pools", "name status version initialNodeCount locations"),
+    ("container aws clusters", "name uid state createTime updateTime"),
+    ("container azure clusters", "name uid state createTime updateTime"),
+    ("container attached clusters", "name uid state createTime updateTime"),
+    ("scheduler jobs", "name schedule state timeZone lastAttemptTime scheduleTime"),
+    ("tasks", "name scheduleTime createTime dispatchCount responseCount"),
+    ("workflows", "name state createTime updateTime revisionId"),
+    ("workflows executions", "name state startTime endTime duration workflowRevisionId"),
+    ("batch jobs", "name uid createTime updateTime"),
+    ("app versions", "id name servingStatus createTime versionUrl"),
+    ("composer environments", "name state createTime updateTime"),
+    ("pubsub subscriptions", "name topic ackDeadlineSeconds messageRetentionDuration"),
+)
 CREDENTIAL_URL = re.compile(
     r"secretmanager\.googleapis\.com\S*:access|apikeys\.googleapis\.com\S*/keyString"
     r"|redis\.googleapis\.com\S*/authString"
@@ -135,15 +165,25 @@ def heredoc(m: re.Match, text: str) -> str:
 
     The rest of the marker's line stays, since `<<'EOF' && cat secret` runs that command too.
     """
-    line = text[:m.start()].rsplit("\n", 1)[-1] + m[2]
+    prefix = text[:m.start()].rsplit("\n", 1)[-1]
+    line = prefix + m[2]
+    if any(heredoc_shell(seg) for seg in heredoc_receivers(prefix, m[2])):
+        return m[2] + "\n" + m[3]  # A shell executes even a quoted heredoc body.
     paths = SECRET_PATH.findall(m[3]) if INTERPRETER.search(line) else []
-    return " ".join(["<<heredoc", *paths]) + m[2]
+    # An unquoted delimiter expands substitutions even when cat consumes the body.
+    captures = [] if re.match(r"<<-?\s*['\"]", m[0]) else [c[0] for c in CAPTURE.finditer(m[3])]
+    return " ".join(["<<heredoc", *paths]) + m[2] + "\n" + "\n".join(captures)
 
 
 def strip_captures(cmd: str) -> str:
     """Drop `$( ... )` and backtick bodies: their output goes into a variable, not the chat."""
     out, depth, i = [], 0, 0
     while i < len(cmd):
+        if cmd[i] == "\\" and i + 1 < len(cmd):
+            if not depth:
+                out.extend(cmd[i:i + 2])
+            i += 2
+            continue
         if cmd.startswith("$(", i):
             depth += 1
             i += 2
@@ -157,7 +197,7 @@ def strip_captures(cmd: str) -> str:
         if not depth:
             out.append(cmd[i])
         i += 1
-    return re.sub(r"`[^`]*`", "", "".join(out))
+    return re.sub(r"(?<!\\)`[^`]*(?<!\\)`", "", "".join(out))
 
 
 def strip_comments(cmd: str) -> str:
@@ -186,6 +226,9 @@ def strip_comments(cmd: str) -> str:
 def segments(cmd: str) -> list[list[str]]:
     """Simple commands as word lists, split on ; & | and newlines that sit outside quotes."""
     cmd = strip_comments(cmd.replace("\\\n", " "))  # a continued line is one command
+    # Unlike shlex, a real shell removes the backslash before $ and ` inside
+    # double quotes. A nested shell receives those characters literally.
+    cmd = QUOTED.sub(lambda m: re.sub(r"\\([$`])", r"\1", m[0]) if m[0][0] == '"' else m[0], cmd)
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=";&|\n")
         lex.commenters = ""  # strip_comments did the shell's part
@@ -230,14 +273,63 @@ def reads_credential(n: list[str]) -> bool:
     return any(in_order(n, r) for r in CREDENTIAL_READS) or ("gcloud" in n and any(TOKEN_VERB.match(x) for x in n))
 
 
-def dumps_scheduler_job(w: list[str]) -> bool:
-    """A job comes back with its custom HTTP headers as they are, and a shared secret can sit in one."""
-    n, fmt = names(w), next((x for x in w if x.startswith("--format=")), "")
-    if HELP & set(n):
+def dumps_gcloud_config(w: list[str]) -> bool:
+    """A full or ambiguous response may contain secrets; require an explicit safe field list."""
+    n = names(w)
+    if {"--help", "-h"} & set(n) or ("gcloud" in n and n[n.index("gcloud") + 1:n.index("gcloud") + 2] == ["help"]):
         return False
-    if in_order(n, SCHEDULER + ["describe"]):
-        return not NARROW_FORMAT.match(fmt)
-    return in_order(n, SCHEDULER + ["list"]) and re.match(r"--format=(?:json|yaml)", fmt) is not None
+    if "gcloud" not in n:
+        return False
+    # HTTP diagnostics bypass every output projection and persist across calls.
+    if in_order(n, ("gcloud", "config", "set", "log_http")):
+        pos = n.index("log_http")
+        return pos + 1 >= len(n) or n[pos + 1].lower() not in {"false", "0", "off"}
+    # Match a command path, not a subsequence: tasks queues list is a different
+    # resource from tasks list. Global flags may precede or interrupt the path.
+    path, i = [], n.index("gcloud") + 1
+    switches = {"--quiet", "-q", "--async", "--uri", "--log-http", "--no-log-http",
+                "--user-output-enabled", "--no-user-output-enabled"}
+    while i < len(w):
+        arg = n[i]
+        i += 1
+        if arg.startswith("-"):
+            if "=" not in arg and arg not in switches:
+                i += 1
+            continue
+        if not path and arg in {"alpha", "beta"}:
+            continue
+        path.append(arg)
+        if arg in {"list", "describe"}:
+            break
+    read = " ".join(path)
+    allowed = set()
+    for resource, fields in GCLOUD_PROJECTED_READS:
+        if read in {resource + " list", resource + " describe"}:
+            allowed = set(fields.split())
+            break
+    if not allowed:
+        return False
+    formats = []
+    for i, arg in enumerate(w):
+        if arg.startswith("--log-http") or re.match(r"CLOUDSDK_CORE_LOG_HTTP=(?!(?:false|0)$)", arg, re.I):
+            return True  # HTTP diagnostics expose the unprojected response.
+        if arg.startswith("--flags-file"):
+            return True  # A file can inject or override output flags; it is not inspected here.
+        if arg.startswith("--format="):
+            formats.append(arg.partition("=")[2])
+        elif arg == "--format":
+            formats.append(w[i + 1] if i + 1 < len(w) else "")
+    # Scheduler list's built-in table omits HTTP targets. Preserve that ordinary read.
+    if not formats and read == "scheduler jobs list":
+        return False
+    if len(formats) != 1:
+        return True
+    match = re.fullmatch(r"(?:json|yaml|value|get|csv|table|list|flattened)\(([\w.,\s]+)\)", formats[0])
+    if not match:
+        return True
+    # Only status is an allowed subtree (Cloud Run status never holds the container spec).
+    return any(field not in allowed and not ("status" in allowed and field.startswith("status."))
+               for field in (part.strip() for part in match[1].split(",")))
 
 
 def reads_transfer(seg: list[str]) -> bool:
@@ -251,8 +343,20 @@ def shell_text(w: list[str]) -> str | None:
     if n and n[0] == "eval":
         return " ".join(w[1:])
     for k, x in enumerate(n[:-2]):
-        if x in SHELLS and SHELL_C.fullmatch(w[k + 1]):
-            return w[k + 2]
+        if x not in SHELLS:
+            continue
+        i = k + 1
+        command = False
+        while i < len(w):
+            arg = w[i]
+            if arg == "--":
+                return w[i + 1] if command and i + 1 < len(w) else None
+            if not arg.startswith(("-", "+")):
+                return arg if command else None
+            command = command or bool(SHELL_C.fullmatch(arg))
+            option_value = arg in {"--rcfile", "--init-file"} or (
+                not arg.startswith("--") and bool(set(arg[1:]) & {"o", "O"}))
+            i += 2 if option_value else 1
     return None
 
 
@@ -272,6 +376,58 @@ def ssh_text(w: list[str]) -> str | None:
     return " ".join(w[i + 1:]) or None
 
 
+def heredoc_receivers(prefix: str, suffix: str) -> list[list[str]]:
+    """Only the pipeline owning this redirection receives the heredoc body."""
+    marker = "__secret_guard_heredoc__"
+    try:
+        lex = shlex.shlex(prefix + " " + marker + suffix, posix=True, punctuation_chars=";&|<>")
+        lex.whitespace_split, lex.commenters = True, ""
+        pipeline, command = [], []
+        for token in lex:
+            if re.fullmatch(r"(?:[<>]+&?|&>{1,2})", token):
+                if command and command[-1].isdigit():
+                    command.pop()  # Optional file descriptor before the redirection.
+                next(lex, None)  # Its target is not a command argument.
+                continue
+            if token and set(token) <= set(";&|"):
+                if token not in {"|", "|&"}:
+                    if any(marker in part for part in [*pipeline, command]):
+                        break
+                    pipeline = []
+                else:
+                    pipeline.append(command)
+                command = []
+            else:
+                command.append(token)
+        pipeline.append(command)
+        start = next((i for i, part in enumerate(pipeline) if marker in part), 0)
+        return [[word for word in part if word != marker] for part in pipeline[start:]]
+    except ValueError:
+        return segments(prefix + suffix)
+
+
+def heredoc_shell(w: list[str]) -> bool:
+    """Whether stdin is executed by a local or remote shell, through common wrappers."""
+    w = words(w)
+    if not w:
+        return False
+    verb = names(w)[0]
+    if verb in SHELLS:
+        return True
+    if verb == "ssh":
+        remote = ssh_text(w)
+        return remote is None or any(heredoc_shell(seg) for seg in segments(remote))
+    if verb not in {"env", "timeout"}:
+        return False
+    i = 1
+    values = {"-u", "--unset", "-C", "--chdir"} if verb == "env" else {"-k", "--kill-after", "-s", "--signal"}
+    while i < len(w) and w[i].startswith("-"):
+        i += 2 if w[i] in values else 1
+    if verb == "timeout":
+        i += 1  # duration
+    return heredoc_shell(w[i:])
+
+
 def reads_secret(body: str) -> bool:
     """A capture body whose output is a secret: the same reads this guard blocks when printed."""
     if CREDENTIAL_URL.search(body):
@@ -279,7 +435,7 @@ def reads_secret(body: str) -> bool:
     for seg in segments(body):
         w = words(seg)
         n = names(w)
-        if PRINTS_SECRET.match(" ".join(w)) or reads_credential(n) or (
+        if PRINTS_SECRET.match(" ".join(w)) or reads_credential(n) or dumps_gcloud_config(seg) or (
             any(map(is_reader, n)) and SECRET_PATH.search(" ".join(w))
         ):
             return True
@@ -315,16 +471,28 @@ def bash_problem(cmd: str) -> str | None:
     # Remote captures run on the other shell: keep them until its own check
     # distinguishes using a value from printing it after assignment.
     for seg in segments(text):
-        inner = ssh_text(words(seg))
+        inner = ssh_text(words(seg)) or shell_text(words(seg))
         if inner and (problem := bash_problem(inner)):
             return problem
     visible = strip_captures(text)
     if CD_CODEX.search(visible):
         visible = re.sub(r"(?<![\w/.-])config\.toml\b", "~/.codex/config.toml", visible)
     seen = segments(visible)
-    # A capture keeps one value out of the chat, but a transfer config is a whole answer read in order to print it.
-    runs = QUOTED.sub(lambda m: "''" if m[0][0] == "'" else m[0], text)  # nothing runs in single quotes
+    # Mixed configuration responses need projection even in captures: they are
+    # whole documents, not a single credential deliberately retained for use.
+    # Mask captures before removing inert single-quoted text. Quotes *inside* a
+    # runnable capture (notably --format='value(name)') belong to its inner shell.
+    captures = []
+    def mask_capture(m):
+        captures.append(m[0])
+        return f"\0{len(captures) - 1}\0"
+    masked = CAPTURE.sub(mask_capture, text)
+    runs = QUOTED.sub(lambda m: "''" if m[0][0] == "'" else m[0], masked)
+    runs = re.sub(r"\0(\d+)\0", lambda m: captures[int(m[1])], runs)
+    http_logging = re.search(r"(?:^|[;\n&|])\s*(?:(?:export|declare|typeset|local|readonly)(?:\s+-[a-zA-Z]+)*\s+)?CLOUDSDK_CORE_LOG_HTTP=(?!(?:false|0)\b)", runs, re.I)
     captured = [s for pair in CAPTURE.findall(runs) for s in segments("".join(pair))]
+    if any(dumps_gcloud_config(seg + (["--log-http"] if http_logging else [])) for seg in captured):
+        return "gcloud 구성 응답은 명령 치환에서도 비밀 필드를 뺀 명시적인 --format이 필요함"
     # `${#S}` prints only the length; every other expansion of S prints some of the value.
     tainted = [re.compile(rf"\$(?:{v}\b|\{{(?!#){v}\b)") for v in secret_vars(runs)]
     shown = {x for seg in seen for x in names(seg)}
@@ -346,8 +514,11 @@ def bash_problem(cmd: str) -> str | None:
         segment = " ".join(w)
         if PRINTS_SECRET.match(segment) or reads_credential(names(w)):
             return "토큰이나 비밀값을 출력하는 명령은 `VAR=$(...)`로 변수에 담아서만 쓸 것"
-        if dumps_scheduler_job(w):
-            return "Scheduler 잡 응답의 HTTP 헤더에 비밀값이 있을 수 있음. `--format='value(name,schedule,state)'`처럼 필드를 골라 읽을 것"
+        if dumps_gcloud_config(seg_words + (["--log-http"] if http_logging else [])):
+            return ("이 gcloud 응답에는 인증 URL·환경변수·구성의 비밀값이 있을 수 있음. "
+                    "`--format='value(name)'`처럼 안전한 필드만 명시할 것 "
+                    "(Cloud Run은 `--format='value(metadata.name,status.url)'`). "
+                    "labels/sensitiveLabels, 환경변수와 이를 포함하는 상위 객체는 출력하지 말 것")
         verb = w[0].rsplit("/", 1)[-1]
         if verb == "printenv" or (verb == "env" and all(a.startswith("-") for a in w[1:])):
             return "printenv/env는 환경변수의 비밀값을 그대로 출력함"
