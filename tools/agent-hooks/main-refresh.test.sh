@@ -541,8 +541,10 @@ check "--restart never types into a claude that did not exit, and alerts" \
 check "an exit that outlasts the wait keeps the handoff and releases the relay hold" \
   "$([ -s "$S/agent-handoff/w5:p3.md" ] && echo kept)|$([ -f "$S/orchestrator/refresh-delivery.json" ] && echo held)" "kept|"
 rm_stamp; set_main; status idle; touch "$SANDBOX/run-fails"
-restart MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=2
+# Startup latency must not turn a command-failure check into a readiness timeout.
+restart MAIN_REFRESH_HOUR=09 QUERY_START_DELAY=2.2 MAIN_REFRESH_DEADLINE=12
 rm -f "$SANDBOX/run-fails"
+check "a failed start reaches the failing command" "$(grep -c '^pane run' "$SANDBOX/herdr-log")" 1
 check "a failed start alerts with the way back" "$(grep -c 'CLAUDE_STARTUP_PROFILE=full claude' "$SANDBOX/errors")" 1
 check "a failed start keeps the handoff for the session the way back starts" \
   "$([ -s "$S/agent-handoff/w5:p3.md" ] && echo kept)|$([ -f "$S/agent-handoff/w5:p3.md.skipped" ] && echo skipped)" "kept|"
