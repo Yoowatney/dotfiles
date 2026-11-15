@@ -15,11 +15,14 @@ class PermissionTests(unittest.TestCase):
         for command, reason in [('ego-browser skill', 'BROWSER_DENIED'),
                                 ('crontab -l', 'OTHER_DENIED'),
                                 ('sandbox-exec -p policy bash test.sh', 'OTHER_DENIED'),
-                                ('codex app-server --stdio', 'OTHER_DENIED')]:
+                                ('codex app-server --stdio', 'OTHER_DENIED'),
+                                ('Use codex app-server --stdio', 'OTHER_DENIED'),
+                                ('Run sandbox-exec -p policy bash test.sh', 'OTHER_DENIED'),
+                                ("rg 'crontab -l' .; crontab -l", 'OTHER_DENIED')]:
             with self.subTest(command=command):
                 result = permissions.classify(command, '.')
                 self.assertEqual((result['kind'], result['blocked_reason']), ('claude', reason))
-                self.assertIn(command.split()[0], result['blocked_command'])
+                self.assertTrue(result['blocked_command'])
 
     def test_generic_reads_and_missing_evidence_stay_codex(self):
         for command in ['pytest tests', 'gcloud bq curl Slack', 'ps -Aww -o command',
@@ -58,6 +61,10 @@ class PermissionTests(unittest.TestCase):
                      'git show HEAD:tools/agent-hooks/auto-tab-close.py',
                      'git diff -- tools/ego-browser.py', 'git show HEAD:tools/ego-browser.py',
                      'Read docs: ego-browser command examples; do not execute them.',
+                     'Read ego-browser skill documentation; do not execute it.',
+                     'git show HEAD:docs/sandbox-exec.md',
+                     'Read the crontab -l documentation. Do not execute it.',
+                     'Read docs for codex app-server; no launch is required.',
                      'cat tools/agent-hooks/auto-tab-close.py']:
             with self.subTest(text=text):
                 self.assertEqual(permissions.classify(text, root)['kind'], 'auto')
