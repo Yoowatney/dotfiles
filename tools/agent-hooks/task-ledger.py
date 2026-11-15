@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Private, append-only task accounting. No prompt or response text is stored.
+"""Private, append-only task accounting. Only structured outcomes are stored,
+including permission reason, redacted command and retry target; never full replies.
 
 Record a stable job ID across runs/retries/checks. Reports select root requests
 in [since, until), then include every recorded descendant and associated session.
@@ -13,6 +14,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -22,6 +24,9 @@ import uuid
 from zoneinfo import ZoneInfo
 
 KINDS = ("request", "run", "check", "complete", "reassign", "session_stop")
+_spec = importlib.util.spec_from_file_location("check_permissions", Path(__file__).with_name("check-permissions.py"))
+check_permissions = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(check_permissions)
 
 
 def timestamp(value, zone="UTC"):
@@ -50,7 +55,7 @@ def read_events(path):
     return events, corrupt
 
 
-def append_event(state, event):
+def append_event(state, event, *, outcome_update=False):
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(state, 0o700)
     path = state / "events.jsonl"
@@ -58,6 +63,16 @@ def append_event(state, event):
         os.chmod(state / ".lock", 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX)
         events, _ = read_events(path)
+        if outcome_update:
+            identity = ("job_id", "kind", "check_id", "attempt")
+            previous = next((row for row in reversed(events)
+                             if all(row.get(key) == event.get(key) for key in identity)), None)
+            if previous:
+                if all(previous.get(key) == event.get(key)
+                       for key in ("verdict", *check_permissions.FIELDS)):
+                    return False  # Only a retransmission of the current state is a duplicate.
+                event = dict(event, event_id="hook-" + hashlib.sha256(
+                    (event["event_id"] + ":after:" + previous["event_id"]).encode()).hexdigest())
         if any(row["event_id"] == event["event_id"] for row in events):
             return False
         # Recover a torn final write without concatenating the next event to it.
@@ -484,10 +499,16 @@ def hook(args, state):
             verdict = verdicts[0] if len(set(verdicts)) == 1 else "unknown"
             if role == "check" or verdicts:
                 outcome = dict(fields, kind="check" if role == "check" else "complete", verdict=verdict)
+                blocked = check_permissions.blockage(text) if role == "check" and isinstance(text, str) else {}
+                outcome.update(blocked)
                 outcome["check_id"] = os.environ.get("HERDR_CHECK_ID") or sid
                 identity += ":outcome:" + verdict
+                if blocked:
+                    identity += ":" + json.dumps(blocked, sort_keys=True)
                 outcome["event_id"] = "hook-" + hashlib.sha256(identity.encode()).hexdigest()
-                append_event(state, outcome)
+                # Explicit notification IDs retain deduplication across later states.
+                # Without one, only a retransmission of the latest state is knowable.
+                append_event(state, outcome, outcome_update=not bool(payload.get("hook_event_id")))
     except Exception:
         # Accounting must never block an agent, modify its output, or leak hook input.
         pass

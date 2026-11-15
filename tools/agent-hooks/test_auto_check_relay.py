@@ -516,6 +516,58 @@ class RelayTests(unittest.TestCase):
                 args = self.spawns[-1][0]
                 self.assertEqual(args[args.index("--kind") + 1], "auto")
 
+    def test_browser_requirement_selects_claude_before_opening(self):
+        self.finish(DONE + "\nego-browser skill로 실제 화면을 확인했습니다.")
+        args = self.spawns[0][0]
+        self.assertEqual(args[args.index("--kind") + 1], "claude")
+
+    def test_named_process_test_selects_claude_before_opening(self):
+        self.worker['cwd'] = str(self.root)
+        (self.root / 'process.test.py').write_text("import subprocess\nsubprocess.run(['ps', '-A'])\n")
+        self.finish(DONE + "\npython3 process.test.py를 실행했습니다.")
+        args = self.spawns[0][0]
+        self.assertEqual(args[args.index("--kind") + 1], "claude")
+
+    def test_variable_process_probe_selects_claude_before_opening(self):
+        path = self.root / '.local/state/codex-fast-probe.py'
+        path.parent.mkdir(parents=True)
+        path.write_text("import subprocess\ncommand = ['codex', 'app-server']\nsubprocess.Popen(command)\n")
+        self.finish(DONE + f"\npython3 -B {path}\n")
+        args = self.spawns[0][0]
+        self.assertEqual(args[args.index('--kind') + 1], 'claude')
+
+    def test_permission_unknown_reaches_lead_and_context_without_retry(self):
+        self.finish()
+        blocked = ("확인은 권한 차단으로 미완료입니다.\nTASK_CHECK: unknown\n"
+                   "blocked_reason: SIGNAL_DENIED\nblocked_command: python3 process.test.py -> ps -A\n"
+                   "retry_target: claude\n남은 것: 요유 몫: 없음 · 유요 몫: 리드의 재배정 · 세션: 닫음")
+        self.finish(blocked, check=True)
+        message = self.tells[0][1]
+        for field in blocked.splitlines()[1:5]:
+            self.assertIn(field, message)
+        self.assertIn('권한 차단', message)
+        self.assertEqual(len(self.spawns), 1)
+        contexts = list((self.state / 'automatic-checks').glob('*.json'))
+        saved = json.loads(contexts[0].read_text())
+        self.assertEqual(saved['blocked_reason'], 'SIGNAL_DENIED')
+        self.assertEqual(saved['retry_target'], 'claude')
+        self.assertIn('TASK_CHECK: unknown', auto.short_report(blocked))
+        self.assertNotIn('TASK_CHECK: fail', message)
+
+    def test_independent_failure_with_blockage_remains_fail(self):
+        text = ("실제 assertion 실패도 있습니다.\nTASK_CHECK: fail\nblocked_reason: BROWSER_DENIED\n"
+                "blocked_command: ego-browser skill\nretry_target: claude\n남은 것: 세션: 닫음")
+        self.assertIn('TASK_CHECK: fail', auto.short_report(text))
+        self.assertIn('blocked_reason: BROWSER_DENIED', auto.short_report(text))
+
+    def test_later_success_clears_interim_permission_fields(self):
+        self.finish()
+        self.finish('확인 진행 중입니다.\nblocked_reason: OTHER_DENIED\nblocked_command: crontab -l\n'
+                    'retry_target: claude\n남은 것: 요유 몫: 없음 · 유요 몫: 추가 확인 · 세션: 열어 둠', check=True)
+        self.finish('확인을 마쳤습니다.\nTASK_CHECK: pass\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫음', check=True)
+        saved = json.loads(next((self.state / 'automatic-checks').glob('*.json')).read_text())
+        self.assertNotIn('blocked_reason', saved)
+
     def test_other_lead_and_home_are_unchanged(self):
         for terminal, name in (("term_L", "spawn-L-1"), ("term_M", "spawn-M-h1")):
             with self.subTest(name=name):

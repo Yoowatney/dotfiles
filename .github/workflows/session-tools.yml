@@ -18,6 +18,7 @@ on:
       - 'tools/agent-hooks/install-handoff*'
       - 'tools/agent-hooks/codex-memory*'
       - 'tools/agent-hooks/install-codex-startup*'
+      - 'tools/agent-hooks/check-permissions*'
       - 'tools/agent-hooks/task-ledger*'
       - 'tools/agent-hooks/codex-deferred*'
       - 'tools/agent-hooks/auto-tab-close.py'
@@ -47,6 +48,7 @@ on:
       - 'tools/agent-hooks/install-handoff*'
       - 'tools/agent-hooks/codex-memory*'
       - 'tools/agent-hooks/install-codex-startup*'
+      - 'tools/agent-hooks/check-permissions*'
       - 'tools/agent-hooks/task-ledger*'
       - 'tools/agent-hooks/codex-deferred*'
       - 'tools/agent-hooks/auto-tab-close.py'
@@ -97,6 +99,7 @@ jobs:
       - run: python3 tools/agent-hooks/install-handoff.test.py
       - run: python3 tools/agent-hooks/codex-memory.test.py
       - run: python3 tools/agent-hooks/install-codex-startup.test.py
+      - run: python3 tools/agent-hooks/check-permissions.test.py
       - run: python3 tools/agent-hooks/task-ledger.test.py
       - run: bash tools/agent-hooks/codex-deferred.test.sh
       - run: python3 -m unittest discover -s tools/agent-hooks -p test_auto_check_relay.py
