@@ -909,10 +909,12 @@ def short_question(payload: dict) -> bool:
         return False
     # Quoting a request or saying not to write HTML is not a direct request.
     request = re.sub(r'`[^`]*`|"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’', '', latest)
-    page = r'(?:html|설명\s*페이지|웹\s*페이지|explainer\s*page)'
+    page = r'(?:html|설명\s*페이지|웹\s*페이지|explainer\s*page|페이지)'
     negative = re.search(page + r'[^.!?\n]{0,24}(?:말고|말아|마세요|마라|쓰지|만들지|필요\s*없)', request, re.I)
     negative = negative or re.search(r"\b(?:do\s+not|don't|no|without)\b[^.!?\n]{0,24}" + page, request, re.I)
-    positive = re.search(page + r'[^.!?\n]{0,24}(?:만들어|써\s*줘|작성해|설명해|정리해|보여줘|수정해|고쳐|부탁|주세요)', request, re.I)
+    # Format particles (로/으로) fit between the page noun and request verb.
+    # Korean auxiliary verbs may be written with or without a space.
+    positive = re.search(page + r'[^.!?\n]{0,24}(?:만들어|써\s*줘|작성해|설명해|정리해|보여\s*(?:줘|주)|답해|답하|해\s*(?:줘|주)|수정해|고쳐|부탁|주세요)', request, re.I)
     english = re.search(r'\b(?:create|write|make|show|build)\b[^.!?\n]{0,32}' + page, request, re.I)
     english = english or re.search(r'\b(?:explain|summarize)\s+in\s+' + page, request, re.I)
     if not negative and (positive or english):

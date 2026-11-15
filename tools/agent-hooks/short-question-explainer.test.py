@@ -78,6 +78,26 @@ class ShortQuestionTest(unittest.TestCase):
             with self.subTest(payload=payload):
                 self.assertIn('short-question', COMMON.riders(payload) or '')
 
+    def test_explicit_page_requests_pass_the_native_hook_in_both_runtimes(self):
+        for runtime in ('claude', 'codex'):
+            for prompt in (
+                'HTML로 답해줘', '설명 페이지로 보여 줘', 'html로 해줘',
+                '설명 페이지 만들어줘', '설명 페이지로 보여줘',
+                'HTML로 답해 줘', 'html로 해 줘', 'HtMl로 보여 줘',
+                '페이지로 보여줘', '페이지로 답해 줘', '페이지 만들어 줘',
+                '설명 페이지로 만들어 줘', 'HTML으로 해 줘', '페이지로 해줘',
+            ):
+                self.record(prompt, runtime)
+                with self.subTest(runtime=runtime, prompt=prompt):
+                    result = subprocess.run(
+                        [sys.executable, '-I', str(ROOT / 'tools/claude/hooks/gcp-account-guard.py')],
+                        input=json.dumps(self.payload()), capture_output=True, text=True,
+                        env=self.env, timeout=12)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    output = json.loads(result.stdout) if result.stdout.strip() else {}
+                    self.assertNotEqual(output.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny',
+                                        result.stdout)
+
     def test_reads_documentation_deletes_and_unrelated_files_pass(self):
         self.record('이건 어디에서 봐?')
         cases = [self.payload(c) for c in [
@@ -117,6 +137,9 @@ class ShortQuestionTest(unittest.TestCase):
             (unicodedata.normalize('NFD', '한' * 40), True),
             ('"HTML 만들어줘"라는 말이 무슨 뜻이야?', True),
             ('HTML 태그가 무슨 뜻이야?', True),
+            ('페이지로 보여 주지 말고 짧게 답해줘', True),
+            ('"페이지로 답해 줘"는 무슨 뜻이야?', True),
+            ('페이지로 이동하는 방법이 뭐야?', True),
         ]:
             self.record(prompt)
             with self.subTest(prompt=prompt):
