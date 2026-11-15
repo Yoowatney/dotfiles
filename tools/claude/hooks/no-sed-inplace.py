@@ -24,7 +24,7 @@ it. So options are read in any order, in clusters and as the abbreviations git a
 `git rebase -i` stays on the list only: it waits on an editor and loses nothing.
 Scripts a command runs and `trap` cleanups are not seen, so hooks and jobs that clean up after themselves keep working.
 ponytail: `$(rm -r x)`, a heredoc fed to bash, `case` arms, function bodies, `find -exec sudo rm`, `find -delete`, `ssh host rm`,
-git aliases, `-c clean.requireForce=false` and `git -c core.hooksPath=` get past it. Add one when a session reaches for it;
+git aliases and `-c clean.requireForce=false` get past it. Add one when a session reaches for it;
 a determined caller beats any command check.
 
     no-sed-inplace.py --selftest
@@ -120,6 +120,8 @@ def removes_recursively(w: list[str]) -> bool:
 
 NO_VERIFY = ("no-verify: `git push --no-verify`와 `git commit --no-verify`(`-n`)는 막혀 있음. "
              "훅이나 push 전 시험이 실패하면 고치거나 그대로 보고할 것")
+HOOKS_PATH = ("git-hooks-path: overriding core.hooksPath with git -c or --config-env is blocked. "
+              "Fix the cause of a failing hook; if blocked, report it to the lead instead of bypassing hooks.")
 FORCE_PUSH = "git-force-push: 강제 push(`-f`, `--force`, `--force-with-lease`, `+브랜치`)는 막혀 있음. 원격 기록을 덮어씀"
 REWRITE = "git-rewrite: `git filter-branch`와 `git filter-repo`는 막혀 있음. 저장소 기록 전체를 다시 씀"
 RESET_HARD = "git-reset-hard: `git reset --hard`는 막혀 있음. 커밋하지 않은 변경이 지워짐. 치워 둘 것은 `git stash`"
@@ -139,7 +141,7 @@ GIT_BANS = {
 }
 # git's global options, which must be skipped to find the subcommand: `man git` plus every option-shaped string in the git
 # 2.50.1 binary tried in front of `status`, which added the undocumented `--shallow-file` and `--no-literal-pathspecs`.
-# git takes no abbreviation of these and no attached short value (`--git-d`, `--no-pa`, `-C.` are "unknown option"), so an
+# git takes no abbreviation of these and no attached -C value (`--git-d`, `--no-pa`, `-C.` are "unknown option"), so an
 # option outside both lists runs on no git here. It is refused rather than guessed: a newer git's option could take the next
 # word as its value, and reading that word as the subcommand let `git --namespace foo push -f` through (2026-11-05).
 # `--super-prefix` left git, but an older git still takes a value after it. A `--name=value` word holds its own value.
@@ -161,7 +163,15 @@ def git_problem(w: list[str]) -> str | None:
         return None
     k = 1
     while k < len(w) and w[k].startswith("-"):
-        if w[k] in GIT_VALUED:
+        option = w[k]
+        if option in {"-c", "--config-env"} or option.startswith(("-c", "--config-env=")):
+            separate = option in {"-c", "--config-env"}
+            config = (w[k + 1] if k + 1 < len(w) else "") if separate else (
+                option[2:] if option.startswith("-c") else option.split("=", 1)[1])
+            if config.split("=", 1)[0].lower() == "core.hookspath":
+                return HOOKS_PATH
+            k += 2 if separate else 1
+        elif option in GIT_VALUED:
             k += 2
         elif w[k] in GIT_FLAGS or "=" in w[k]:
             k += 1
@@ -709,6 +719,43 @@ def selftest():
     for c in deny:
         assert "no-verify" in (bash_problem(c) or ""), f"should deny: {c}"
     for c in allow:
+        assert bash_problem(c) is None, f"should allow: {c} -> {bash_problem(c)}"
+
+    # Removing the global override check must let these bypasses through and fail these tests.
+    deny_hooks_path = [
+        "git -c core.hooksPath=/dev/null commit -m x",
+        "git -c core.hookspath=/dev/null push",
+        "git -c CORE.HOOKSPATH=/dev/null status",
+        "git -c core.hooksPath= commit -m x",
+        "git -ccore.hooksPath=/dev/null commit -m x",
+        "git -ccore.hooksPath= push",
+        "git --config-env core.hooksPath=HOOKS_PATH commit -m x",
+        "git --config-env=core.hookspath=HOOKS_PATH push",
+        "git -C repo -c core.hooksPath=/dev/null commit -m x",
+        "git -C repo --config-env core.hooksPath=HOOKS_PATH push",
+        "git --no-pager -c user.name=agent -ccore.hookspath= push",
+        "git -c 'core.hooksPath=/some hooks' status",
+        "env LC_ALL=C git -c core.hooksPath=/dev/null push",
+        "bash -c 'git -c core.hooksPath=/dev/null commit -m x'",
+        "git -c core.hooksPath status",
+    ]
+    allow_hooks_path = [
+        "git config core.hooksPath .husky/_",
+        "git config --get core.hooksPath",
+        "git -c user.name=agent commit -m x",
+        "git -cuser.name=agent status",
+        "git -C repo -c user.name=agent status",
+        "git --config-env user.name=GIT_NAME status",
+        "git --config-env=user.name=GIT_NAME status",
+        "git -c core.hooksPathExtra=value status",
+        "git commit -m 'git -c core.hooksPath=/dev/null'",
+        "echo 'git -c core.hooksPath=/dev/null commit'",
+    ]
+    for c in deny_hooks_path:
+        reason = bash_problem(c) or ""
+        assert "git-hooks-path" in reason, f"should deny hook override: {c} -> {reason}"
+        assert "Fix" in reason and "lead" in reason, f"missing recovery guidance: {reason}"
+    for c in allow_hooks_path:
         assert bash_problem(c) is None, f"should allow: {c} -> {bash_problem(c)}"
 
     # Claude's deny list matches spellings from the front: `git clean -n -fd` ran past `git clean -fd:*` and
