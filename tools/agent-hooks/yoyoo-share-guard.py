@@ -9,7 +9,8 @@ missing `무엇을:` when a reply carries more `왜:` labels than `무엇을:` l
 when `원인:`, `조치:` and `재발 방지:` do not come in equal numbers.
 Only the `요유 몫:` value counts, up to `·` or the end of its line; `없음` passes, and so does a reply without the line.
 Code, quotes and blockquotes are ignored (a report about the format is not a report). Skipped for headless Claude runs
-(claude -p / SDK) and on the second stop of a turn (stop_hook_active), so it blocks at most once. Fails open.
+(claude -p / SDK) and on the second stop of a turn (stop_hook_active), so ordinary prose checks block at most once and fail open.
+An optional private reaction policy runs on every verified-main Stop, including recursive Stops. Its errors block both runtimes.
 A session is asked about each 요유 몫 item once (asked_before): an open decision rides in every report until 요유 answers.
 A report whose 요유 몫 holds only decisions is not asked at all (only_decisions); auto-tab-close still sees it as work left.
 It also sends back names 요유 cannot read: a pane's herdr id (`w5:pKR`, 27 reports in 14 days; the reason carries the
@@ -44,9 +45,11 @@ import ast
 import glob
 import importlib.util
 import json
+import math
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -1114,16 +1117,80 @@ def inbox_context(payload: dict, env) -> str | None:
         return None  # An unreadable inbox must not erase an existing Stop reason.
 
 
+def reaction_reason(payload: dict, env) -> str | None:
+    """Run an optional local checker on every verified-main Stop, including retries."""
+    if env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
+        return None
+    home = env.get("HOME") or os.path.expanduser("~")
+    policy = os.path.join(env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"),
+                          "agent-hooks", "reaction-policy.json")
+    if not os.path.lexists(policy):
+        return None
+    session, pane_id = payload.get("session_id"), env.get("HERDR_PANE_ID")
+    if not isinstance(session, str) or not session or not pane_id:
+        return None
+    try:
+        peers = peers_module()
+        pane = peers.herdr(env, "pane", "get", pane_id).get("pane") or {}
+        terminal = pane.get("terminal_id")
+        if (not isinstance(terminal, str) or not terminal
+                or (pane.get("agent_session") or {}).get("value") != session
+                or not peers.delegates_checks(env, terminal)):
+            return None
+    except Exception:
+        return None  # An unverifiable pane must not acquire main-only obligations.
+    prefix = "reaction-policy: "
+    try:
+        with open(policy, encoding="utf-8") as stream:
+            config = json.load(stream)
+        command = config.get("command")
+        timeout = config.get("timeout_seconds")
+        if (type(config.get("version")) is not int or config["version"] != 1
+                or not isinstance(command, list) or not command
+                or not all(isinstance(arg, str) and arg.strip() and "\0" not in arg for arg in command)
+                or type(timeout) not in (int, float) or not math.isfinite(timeout) or not 1 <= timeout <= 20):
+            raise ValueError("invalid schema")
+    except Exception:
+        return prefix + "invalid local policy; repair it before ending this turn."
+    try:
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, encoding="utf-8", errors="replace",
+                                   env={**os.environ, **env}, start_new_session=True)
+    except Exception:
+        return prefix + "checker could not start; restore the local checker before ending this turn."
+    try:
+        stdout, stderr = process.communicate(json.dumps(payload, ensure_ascii=False), timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        return prefix + "checker timed out; resolve pending reactions before ending this turn."
+    except Exception:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        return prefix + "checker failed; resolve pending reactions before ending this turn."
+    if process.returncode == 0:
+        return None
+    detail = (stderr.strip() or stdout.strip())[-1500:]
+    return prefix + f"checker exited {process.returncode}; resolve pending reactions before ending this turn." + ("\n" + detail if detail else "")
+
+
 def hook_output(payload: dict, env, claude: bool = False) -> dict | None:
     try:
         reason = decide(payload, env, claude)
     except Exception:
         reason = None  # Ordinary report checks fail open without suppressing waiting user context.
     context = inbox_context(payload, env)
-    combined = "\n\n".join(part for part in (context, reason) if part)
+    reaction = reaction_reason(payload, env)
+    combined = "\n\n".join(part for part in (context, reason, reaction) if part)
     if not combined:
         return None
-    if claude:
+    if claude and not reaction:
         return {"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": combined}}
     return {"decision": "block", "reason": combined}
 
