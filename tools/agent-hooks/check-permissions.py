@@ -43,10 +43,17 @@ def blockage(text):
     return values
 
 
+def execution_text(text):
+    # Search/read arguments describe text, not commands to execute. Preserve shell
+    # separators so a later real browser command on the same line still counts.
+    return re.sub(r'''\b(?:rg|grep|cat|head|tail)\s+(?:"[^"\n]*"|'[^'\n]*'|[^;&|`\n'"])+''', ' ', text)
+
+
 def requirement(text):
     """Only commands observed failing, not generic service/process keywords."""
+    text = execution_text(text)
     patterns = [
-        ('BROWSER_DENIED', r'\bego-browser\b[^\n`]*'),
+        ('BROWSER_DENIED', r'(?:^|[;`\n])\s*ego-browser(?=$|[ \t])[^\n`]*|\b(?:run|use|using|via)\s+ego-browser\b(?![./-])[^\n`]*|(?<![\w/.-])ego-browser\s+skill\b[^\n`]*'),
         ('BROWSER_DENIED', r'(?:실제|현재|로그인)[^\n.]{0,16}화면|브라우저[^\n.]{0,24}(?:QA|확인|검증)|(?:렌더링|DOM|스크린샷)[^\n.]{0,16}(?:확인|검증)'),
         ('OTHER_DENIED', r'\bcrontab\s+-l\b[^\n`]*'),
         ('OTHER_DENIED', r'\bsandbox-exec\b[^\n`]*'),
@@ -102,10 +109,14 @@ def classify(text, cwd):
         if blocked['retry_target'] == 'claude':
             return dict(result, kind='claude', reason='reported permission requirement', **{k: blocked[k] for k in FIELDS[:2]})
         return result  # Shared guards/account access need the lead, not a runner change.
+    text = execution_text(text)
     found = requirement(text)
     if not found:
         # Read only named scripts, at most 32 files of 256 KiB. Missing evidence keeps the default.
-        names = re.findall(r'(?:~?/|\.{1,2}/)?[\w.@/+\-]+\.(?:py|sh)|(?:[\w.@/+\-]*/)?pre-push\b', text)
+        script = r'(?:~?/|\.{1,2}/)?[\w.@/+\-]+\.(?:py|sh)|(?:[\w.@/+\-]*/)?pre-push\b'
+        invocation = r'(?:\b(?:python(?:3(?:\.\d+)?)?|bash|sh)\s+(?:-\S+\s+)*|(?:^|[`;\n])\s*(?:Run\s+)?)'
+        # A source named for reading/diff review does not imply running its tests.
+        names = re.findall(invocation + '(' + script + ')', text, flags=re.I)
         for name in dict.fromkeys(names[:32]):
             path = Path(name).expanduser()
             if not path.is_absolute():

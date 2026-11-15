@@ -29,7 +29,7 @@ class RecoveryTests(unittest.TestCase):
         # reach the production sibling pane-tell executable from these tests.
         self.hooks = self.root / "hooks"
         self.hooks.mkdir()
-        for name in ("task-ledger.py", "codex-deferred.py", "herdr_peers.py"):
+        for name in ("task-ledger.py", "codex-deferred.py", "herdr_peers.py", "check-permissions.py"):
             shutil.copyfile(ROOT / name, self.hooks / name)
         self.hook_script = self.hooks / "task-ledger.py"
         self.script = self.hooks / "codex-deferred.py"

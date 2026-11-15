@@ -50,6 +50,20 @@ class PermissionTests(unittest.TestCase):
         result = permissions.classify('bash tools/git-hooks/pre-push', root)
         self.assertEqual((result['kind'], result['blocked_reason']), ('claude', 'SIGNAL_DENIED'))
 
+    def test_reading_sources_and_search_arguments_stay_codex(self):
+        root = Path(__file__).resolve().parents[2]
+        for text in ['Read tools/agent-hooks/auto-tab-close.py and review its diff. Do not execute it.',
+                     "Run rg 'ego-browser' tools/agent-hooks", "Run rg 'crontab -l' .",
+                     "Run rg 'python3 tools/agent-hooks/auto-tab-close.py' .",
+                     'git show HEAD:tools/agent-hooks/auto-tab-close.py',
+                     'git diff -- tools/ego-browser.py', 'git show HEAD:tools/ego-browser.py',
+                     'Read docs: ego-browser command examples; do not execute them.',
+                     'cat tools/agent-hooks/auto-tab-close.py']:
+            with self.subTest(text=text):
+                self.assertEqual(permissions.classify(text, root)['kind'], 'auto')
+        self.assertEqual(permissions.classify("rg 'ego-browser' .; ego-browser skill", root)['kind'], 'claude')
+        self.assertEqual(permissions.classify('Use ego-browser to check the page', root)['kind'], 'claude')
+
     def test_valid_blockage_keeps_all_five_reasons_and_command(self):
         for reason in permissions.REASONS:
             text = f'TASK_CHECK: unknown\nblocked_reason: {reason}\nblocked_command: /bin/ps -axo args=\nretry_target: claude\n'

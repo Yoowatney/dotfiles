@@ -55,7 +55,7 @@ def read_events(path):
     return events, corrupt
 
 
-def append_event(state, event):
+def append_event(state, event, *, outcome_update=False):
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(state, 0o700)
     path = state / "events.jsonl"
@@ -63,6 +63,16 @@ def append_event(state, event):
         os.chmod(state / ".lock", 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX)
         events, _ = read_events(path)
+        if outcome_update:
+            identity = ("job_id", "kind", "check_id", "attempt")
+            previous = next((row for row in reversed(events)
+                             if all(row.get(key) == event.get(key) for key in identity)), None)
+            if previous:
+                if all(previous.get(key) == event.get(key)
+                       for key in ("verdict", *check_permissions.FIELDS)):
+                    return False  # Only a retransmission of the current state is a duplicate.
+                event = dict(event, event_id="hook-" + hashlib.sha256(
+                    (event["event_id"] + ":after:" + previous["event_id"]).encode()).hexdigest())
         if any(row["event_id"] == event["event_id"] for row in events):
             return False
         # Recover a torn final write without concatenating the next event to it.
@@ -496,7 +506,9 @@ def hook(args, state):
                 if blocked:
                     identity += ":" + json.dumps(blocked, sort_keys=True)
                 outcome["event_id"] = "hook-" + hashlib.sha256(identity.encode()).hexdigest()
-                append_event(state, outcome)
+                # Explicit notification IDs retain deduplication across later states.
+                # Without one, only a retransmission of the latest state is knowable.
+                append_event(state, outcome, outcome_update=not bool(payload.get("hook_event_id")))
     except Exception:
         # Accounting must never block an agent, modify its output, or leak hook input.
         pass
