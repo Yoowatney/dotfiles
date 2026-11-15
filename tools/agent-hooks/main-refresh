@@ -34,10 +34,14 @@ hdir=$STATE/agent-handoff
 if [[ "${HERDR_SOCKET_PATH:-}" == */sessions/*/herdr.sock ]]; then s=${HERDR_SOCKET_PATH%/herdr.sock}; hdir=$hdir/${s##*/}; fi
 
 log() { mkdir -p "$DIR" && echo "$(date '+%F %T') $*" >> "$DIR/refresh.log"; }
+job_outcome() {
+  [ -z "${SCHEDULED_JOB_OUTCOME_FILE:-}" ] || printf '%s\n' "$1" > "$SCHEDULED_JOB_OUTCOME_FILE" || true
+}
 # A skipped run must not leave its memo behind: a later hand /clear would load it and say "continue from this".
 skip() {
   local error=
   [ "${1:-}" != --error ] || { error=1; shift; }
+  if [ -n "$error" ]; then job_outcome failed; else job_outcome skipped; fi
   kill $(jobs -p) 2>/dev/null
   if [ -z "${keep_gate:-}" ] && [ -n "${req:-}" ] && newer; then
     # A late save still answers the pending request, even if the pane is busy before our first idle check.
@@ -76,7 +80,7 @@ wait_for() { # <limit> <cmd...>
 
 day=$(date +%F)
 term=$(cat "$DIR/main" 2>/dev/null)
-[ -n "$term" ] || { log "메인 칸 파일 없음"; exit 0; }
+[ -n "$term" ] || { job_outcome skipped; log "메인 칸 파일 없음"; exit 0; }
 [ -n "$now" ] || [ ! -f "$DIR/refreshed-$day" ] || exit 0
 in_window || skip "새벽 05~06시가 아니라 건너뜀"
 # One run at a time: a caller may ask again while a run waits (up to an hour). A lock 2 hours old is a dead run's.
@@ -85,7 +89,7 @@ mkdir -p "$DIR"
 while ! mkdir "$lock" 2>/dev/null; do
   { [ -n "$(find "$lock" -maxdepth 0 -mmin +120 2>/dev/null)" ] && rmdir "$lock" && mkdir "$lock"; } 2>/dev/null \
     && break
-  [ -z "$now" ] || { log "다른 실행이 진행 중이라 건너뜀"; exit 0; }
+  [ -z "$now" ] || { job_outcome skipped; log "다른 실행이 진행 중이라 건너뜀"; exit 0; }
   # launchd runs only once: keep the daily run pending until the 07:00 cutoff.
   [ -n "${waiting:-}" ] || log "다른 실행이 진행 중이라 잠금 해제를 기다림"
   waiting=1
@@ -100,7 +104,7 @@ late
 [ -n "$now" ] || [ ! -f "$DIR/refreshed-$day" ] || exit 0
 row=$("$H" pane list 2>/dev/null | jq -c --arg t "$term" '[.result.panes[] | select(.terminal_id == $t)][0] // empty')
 id=$(jq -r '.pane_id // empty' <<<"$row" 2>/dev/null)
-[ -n "$id" ] || { log "메인 칸을 찾지 못함 ($term)"; exit 0; }
+[ -n "$id" ] || { job_outcome skipped; log "메인 칸을 찾지 못함 ($term)"; exit 0; }
 sid=$(jq -r '.agent_session.value // empty' <<<"$row")
 # Only the daily run: a restart ends this pane's background jobs and Monitors, so not in the middle of the day (요유, 11/13).
 if [ -z "$now" ] && startup_now=$(/bin/bash "$HERE/main-startup" changed); then
