@@ -865,6 +865,178 @@ def remember(payload: dict, env, keys: set) -> set:
     return new
 
 
+SHORT_REASON = ("short-question-explainer: 마지막 질문이 짧습니다. 설명 페이지를 만들지 말고 터미널에서 짧게 답하세요. "
+                "요유가 이번 질문에서 설명 페이지를 직접 요청한 경우에는 허용됩니다.")
+
+
+def short_question(payload: dict) -> bool:
+    """Use the latest human turn, never a tool argument or an assistant's summary.
+
+    The review examples are a link plus one question, and two one-line follow-ups.
+    Their lengths after stripping links were 14, 19 and 27 characters. At most
+    two nonempty lines / 40 characters covers those short follow-ups with margin.
+    Missing/unreadable context is unknown and passes. Do not reuse the GCP grant
+    parser: notifications terminate grants there but must not erase this question.
+    """
+    latest = ''
+    try:
+        with open(payload.get('transcript_path') or '', encoding='utf-8') as stream:
+            for raw in stream:
+                try:
+                    entry = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(entry, dict) or entry.get('isMeta') or entry.get('isSidechain'):
+                    continue
+                origin = entry.get('sourceToolAssistantUUID') or entry.get('sourceToolUseID')
+                if origin:
+                    continue
+                attachment = entry.get('attachment') if isinstance(entry.get('attachment'), dict) else {}
+                provenance = attachment if entry.get('type') == 'attachment' else entry
+                source = provenance.get('origin')
+                if isinstance(source, dict) and source.get('kind') not in (None, 'human'):
+                    continue
+                if attachment.get('commandMode') == 'bash':
+                    continue
+                item = next(records([raw]), None)
+                if not item or item[0] != 'in':
+                    continue
+                text = item[1].strip()
+                if text.startswith(('<task-notification', '<system-reminder', '[', '# AGENTS.md', '<environment_context')):
+                    continue
+                latest = unicodedata.normalize('NFC', text)
+    except (OSError, TypeError):
+        return False
+    # Quoting a request or saying not to write HTML is not a direct request.
+    request = re.sub(r'`[^`]*`|"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’', '', latest)
+    page = r'(?:html|설명\s*페이지|웹\s*페이지|explainer\s*page)'
+    negative = re.search(page + r'[^.!?\n]{0,24}(?:말고|말아|마세요|마라|쓰지|만들지|필요\s*없)', request, re.I)
+    negative = negative or re.search(r"\b(?:do\s+not|don't|no|without)\b[^.!?\n]{0,24}" + page, request, re.I)
+    positive = re.search(page + r'[^.!?\n]{0,24}(?:만들어|써\s*줘|작성해|설명해|정리해|보여줘|수정해|고쳐|부탁|주세요)', request, re.I)
+    english = re.search(r'\b(?:create|write|make|show|build)\b[^.!?\n]{0,32}' + page, request, re.I)
+    english = english or re.search(r'\b(?:explain|summarize)\s+in\s+' + page, request, re.I)
+    if not negative and (positive or english):
+        return False
+    question = re.sub(r'https?://\S+', '', latest)
+    lines = [line.strip() for line in question.splitlines() if line.strip()]
+    return bool(lines) and len(lines) <= 2 and len(' '.join(' '.join(lines).split())) <= 40
+
+
+def writes_explainer(payload: dict) -> bool:
+    """Recognize the existing page CLI and ordinary direct writers, not arbitrary
+    hidden scripts. Inspect destinations, not quoted documentation or source code.
+    """
+    inp = payload.get('tool_input') or {}
+    tool = payload.get('tool_name')
+    cwd = payload.get('cwd') or os.getcwd()
+    home = os.path.expanduser('~')
+    root = os.path.realpath(os.path.join(home, 'explain'))
+
+    def page_path(path, base=cwd):
+        path = path.replace('${HOME}', home).replace('$HOME', home)
+        path = os.path.realpath(os.path.join(base, os.path.expanduser(path)))
+        return os.path.dirname(path) == root and path.lower().endswith('.html')
+
+    if tool in ('Write', 'Edit', 'MultiEdit'):
+        return page_path(str(inp.get('file_path') or ''))
+    if tool == 'apply_patch':
+        patch = str(inp.get('input') or inp.get('patch') or inp.get('command') or '')
+        return any(page_path(path) for path in re.findall(r'^\*\*\* (?:Add File|Update File|Move to): (.+)$', patch, re.M))
+    if tool != 'Bash':
+        return False
+    raw = str(inp.get('command') or '')
+    if not any(word in raw for word in ('explain', '.html')) and os.path.realpath(cwd) != root:
+        return False
+
+    def shell(command, base, depth=0):
+        if depth > 6:
+            return False
+        # Reuse the Actions guard's substitution reader so quoted documentation
+        # is not mistaken for a command. Heredoc data is removed below.
+        helper = importlib.util.spec_from_file_location('page_shell', os.path.join(os.path.dirname(__file__), 'actions-run-guard.py'))
+        parser = importlib.util.module_from_spec(helper)
+        helper.loader.exec_module(parser)
+        if any(shell(inner, base, depth + 1) for inner in parser.substitutions(command)):
+            return True
+        heredoc = re.compile(r"<<-?\s*(['\"]?)(\w+)\1([^\n]*)\n(.*?)\n[\t ]*\2\b", re.S)
+        for match in heredoc.finditer(command):
+            head = command[:match.start()].rsplit('\n', 1)[-1]
+            if re.search(r'\b(?:bash|sh|zsh)\s*$', head) and shell(match[4], base, depth + 1):
+                return True
+            if re.search(r'\b(?:python3?|node|ruby|perl)\b', head) and script(match[4], base):
+                return True
+        command = heredoc.sub(lambda match: match[3] + '\n', command)
+        lexer = shlex.shlex(command.replace('\\\n', ''), posix=True, punctuation_chars=';|&()\n<>')
+        lexer.whitespace = ' \t\r'
+        lexer.wordchars += '{}'
+        try:
+            words = list(lexer)
+        except ValueError:
+            return False
+        segments, current = [], []
+        for word in words + [';']:
+            if word and set(word) <= set(';|&()\n'):
+                segments.append(current)
+                current = []
+            else:
+                current.append(word)
+        for words in segments:
+            if not words:
+                continue
+            while words and (re.match(r'^\w+=', words[0]) or words[0] in ('env', 'command', 'exec')):
+                words = words[1:]
+            if not words:
+                continue
+            if words[:2] == ['uv', 'run']:
+                words = words[2:]
+                while words and words[0].startswith('-'):
+                    option = words.pop(0)
+                    if option in ('--project', '--directory', '--with', '--python') and words:
+                        words.pop(0)
+                if not words:
+                    continue
+            name = os.path.basename(words[0])
+            if name in ('bash', 'sh', 'zsh'):
+                for i, word in enumerate(words[:-1]):
+                    if word.startswith('-') and not word.startswith('--') and 'c' in word:
+                        if shell(words[i + 1], base, depth + 1):
+                            return True
+            if name == 'cd' and len(words) > 1:
+                base = os.path.realpath(os.path.join(base, os.path.expanduser(words[1].replace('$HOME', home))))
+            if name == 'explain-page' or name in ('python', 'python3'):
+                if any(os.path.basename(w) == 'explain-page' and i + 1 < len(words) and words[i + 1] in ('write', 'publish')
+                       for i, w in enumerate(words)):
+                    return True
+            if any(w in ('>', '>>') and i + 1 < len(words) and page_path(words[i + 1], base) for i, w in enumerate(words)):
+                return True
+            if name in ('tee', 'cp', 'mv', 'install', 'rsync', 'ln') and len(words) > 1:
+                targets = words[1:] if name == 'tee' else words[-1:]
+                if any(page_path(w, base) for w in targets):
+                    return True
+                if name != 'tee':
+                    destination = words[-1]
+                    for flag in ('-t', '--target-directory'):
+                        if flag in words and words.index(flag) + 1 < len(words):
+                            destination = words[words.index(flag) + 1]
+                    destination = destination.replace('${HOME}', home).replace('$HOME', home)
+                    if (os.path.realpath(os.path.join(base, os.path.expanduser(destination))) == root
+                            and any(w.lower().endswith('.html') for w in words[1:])):
+                        return True
+            if name in ('python', 'python3', 'node', 'ruby', 'perl') and script(' '.join(words[1:]), base):
+                return True
+        return False
+
+    def script(code, base):
+        return (bool(re.search(r'write_text|write_bytes|writeFile|open\([^\n]*[\'\"][wax][bt+]*[\'\"]', code))
+                and '.html' in code and ('explain/' in code or os.path.realpath(base) == root))
+
+    return shell(raw, cwd)
+
+
+def short_page_reason(payload: dict) -> str | None:
+    return SHORT_REASON if writes_explainer(payload) and short_question(payload) else None
+
+
 def decide(payload: dict, env, claude: bool = False) -> str | None:
     if payload.get("stop_hook_active") or env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
         return None
@@ -875,7 +1047,9 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
         return None
     # The formats 요유 reads by. 요유 2026-11-04 ("너희끼리는 그냥 편하게 주고받아"): a pane under a lead writes to the lead as it likes.
     formats = [POINTER_REASON if points_only(text) else None, names_reason(text, env), WHAT_REASON if misses_what(text) else None,
-               PROBLEM_REASON if misses_problem_line(text) else None, LONG_REASON if claude and not job_session(env) and too_long(text) else None]
+               PROBLEM_REASON if misses_problem_line(text) else None,
+               (SHORT_REASON if short_question(payload) else LONG_REASON if claude else None)
+               if not job_session(env) and too_long(text) else None]
     if any(formats) and under_lead(payload, env):  # herdr is asked only when a format would send the report back
         formats = []
     # 요유 2026-11-05 21:13: 요유 reads the main pane through Slack only, so a page for its terminal reply is for nobody (20 rewrites that day)

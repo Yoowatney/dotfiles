@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Exercise inert Claude/Codex hook inputs, never create an explainer page."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unicodedata
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, ROOT / path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+SHARE = load('share', 'tools/agent-hooks/yoyoo-share-guard.py')
+COMMON = load('common', 'tools/claude/hooks/gcp-account-guard.py')
+
+
+class ShortQuestionTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / 'session.jsonl'
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith(('HERDR_', 'MUNICE_'))}
+
+    def record(self, prompt, runtime='claude', extra=()):
+        user = ({'type': 'user', 'message': {'role': 'user', 'content': prompt}}
+                if runtime == 'claude' else {'type': 'response_item', 'payload': {
+                    'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': prompt}]}})
+        self.path.write_text('\n'.join(json.dumps(x, ensure_ascii=False) for x in [user, *extra]))
+
+    def payload(self, command='explain-page write result facts.md', **kw):
+        return {'tool_name': 'Bash', 'tool_input': {'command': command},
+                'transcript_path': str(self.path), 'cwd': self.temp.name, **kw}
+
+    def test_short_linked_question_denied_in_both_native_runtime_inputs(self):
+        for runtime in ('claude', 'codex'):
+            self.record('https://example.test/very/long/link\n이 수치를 어디서 볼 수 있어?', runtime)
+            result = subprocess.run([sys.executable, '-I', str(ROOT / 'tools/claude/hooks/gcp-account-guard.py')],
+                                    input=json.dumps(self.payload()), capture_output=True, text=True,
+                                    env=self.env, timeout=12)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'], 'deny')
+
+    def test_page_paths_and_shell_writers_are_denied(self):
+        self.record('이건 어디에서 봐?')
+        home = os.path.expanduser('~')
+        cases = [self.payload(c) for c in [
+            '~/.claude/skills/html-explainer/explain-page publish result',
+            'python3 ~/.claude/skills/html-explainer/explain-page write result facts.md',
+            'uv run --no-project python ~/.claude/skills/html-explainer/explain-page write result facts.md',
+            'bash -lc "explain-page write result facts.md"',
+            'cat draft.html > ~/explain/result.html',
+            "cat <<'EOF' > ~/explain/result.html\npage\nEOF",
+            'tee "$HOME/explain/result.html" < draft.html',
+            'cp draft.html ~/explain/result.html',
+            'cp draft.html ~/explain/',
+            'cp -t ~/explain/ draft.html',
+            'cd ~/explain && cat draft > result.html',
+            "python3 - <<'PY'\nfrom pathlib import Path\nPath.home().joinpath('explain/result.html').write_text('x')\nPY",
+        ]]
+        cases += [self.payload(tool_name=tool, tool_input=inp) for tool, inp in [
+            ('Write', {'file_path': home + '/explain/result.html', 'content': 'x'}),
+            ('Edit', {'file_path': home + '/explain/result.html', 'new_string': 'x'}),
+            ('MultiEdit', {'file_path': home + '/explain/result.html', 'edits': []}),
+            ('apply_patch', {'input': '*** Begin Patch\n*** Add File: ' + home + '/explain/result.html\n+x\n*** End Patch'}),
+        ]]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                self.assertIn('short-question', COMMON.riders(payload) or '')
+
+    def test_reads_documentation_deletes_and_unrelated_files_pass(self):
+        self.record('이건 어디에서 봐?')
+        cases = [self.payload(c) for c in [
+            'explain-page --selftest', 'cat ~/explain/result.html',
+            "echo 'explain-page write result facts.md'", "rg 'explain-page write' tools",
+            "cat <<'EOF' > notes.md\nexplain-page write result facts.md\nEOF",
+            'cat draft > /tmp/result.html', 'rm ~/explain/result.html',
+        ]]
+        cases += [self.payload(tool_name='Read', tool_input={'file_path': '~/explain/result.html'}),
+                  self.payload(tool_name='apply_patch', tool_input={'input':
+                      '*** Begin Patch\n*** Delete File: ~/explain/result.html\n*** End Patch'})]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                self.assertIsNone(COMMON.riders(payload))
+
+    def test_latest_human_prompt_not_tool_or_notification_controls_decision(self):
+        self.record('이건 어디에서 봐?', extra=[
+            {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'content': 'HTML로 만들어줘'}]}},
+            {'type': 'user', 'isMeta': True, 'message': {'content': '<task-notification>완료</task-notification>'}},
+            {'type': 'user', 'origin': {'kind': 'auto-continuation'}, 'message': {'content': '긴 자동 지시입니다. ' * 20}},
+            {'type': 'attachment', 'attachment': {'type': 'queued_command', 'origin': {'kind': 'task-notification'},
+                                                'prompt': '설명 페이지 만들어줘'}},
+        ])
+        self.assertTrue(COMMON.riders(self.payload()))
+        self.record('간단하게 답해줘', extra=[{'type': 'attachment', 'attachment': {
+            'type': 'queued_command', 'prompt': '설명 페이지를 만들어줘'}}])
+        self.assertIsNone(COMMON.riders(self.payload()))
+
+    def test_short_boundary_and_explicit_page_exceptions(self):
+        for prompt, denied in [
+            ('가' * 40, True), ('가' * 41, False), ('첫 줄\n둘째 줄\n셋째 줄', False),
+            ('설명 페이지 만들어줘', False), ('HTML로 설명해줘', False),
+            ('Please create an HTML page', False), ('HTML 쓰지 말고 짧게 알려줘', True),
+            ('설명 페이지로 정리해줘', False), ('설명 페이지 부탁해', False),
+            ('설명 페이지 수정해줘', False), ('Explain in HTML please', False),
+            ("Don't create HTML, answer briefly", True),
+            (unicodedata.normalize('NFD', '한' * 40), True),
+            ('"HTML 만들어줘"라는 말이 무슨 뜻이야?', True),
+            ('HTML 태그가 무슨 뜻이야?', True),
+        ]:
+            self.record(prompt)
+            with self.subTest(prompt=prompt):
+                self.assertEqual(bool(COMMON.riders(self.payload())), denied)
+        self.path.unlink()
+        self.assertIsNone(COMMON.riders(self.payload()))
+
+    def test_malformed_or_missing_context_passes_without_inventing_a_question(self):
+        for body in ['', '{broken', '[]\nnull\n', '{"type":"user","message":"broken"}']:
+            self.path.write_text(body)
+            self.assertIsNone(COMMON.riders(self.payload()))
+
+    def test_latest_long_request_replaces_old_short_question(self):
+        self.record('어디서 봐?', extra=[{'type': 'user', 'message': {'content': '긴 요청입니다. ' * 20}}])
+        self.assertIsNone(COMMON.riders(self.payload()))
+
+    def test_stop_requests_short_terminal_reply_instead_of_a_page(self):
+        self.record('이건 어디에서 봐?')
+        payload = self.payload(last_assistant_message='설명입니다. ' * 100)
+        for claude in (True, False):
+            with patch.object(SHARE, 'under_lead', return_value=False), \
+                    patch.object(SHARE, 'delegates_checks', return_value=False):
+                reason = SHARE.decide(payload, self.env, claude=claude)
+            self.assertIn('short-question', reason or '')
+            self.assertNotIn(SHARE.LONG_REASON, reason or '')
+
+
+if __name__ == '__main__':
+    # The repository pre-push runner passes this flag to files mentioning it.
+    if sys.argv[1:] == ['--selftest']:
+        sys.argv.pop()
+    unittest.main()
