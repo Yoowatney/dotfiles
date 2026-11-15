@@ -1042,7 +1042,7 @@ def short_page_reason(payload: dict) -> str | None:
 def staging_approval_reason(text: str) -> str | None:
     """Warn about redundant staging approvals; never grant execution authority."""
     stage = re.compile(r"\bstaging\b|스테이징", re.I)
-    protected = re.compile(r"\bprod(?:uction)?\b|운영|과금|\bbilling\b|외부|\bexternal\b|삭제|\b(?:delete|destroy|drop|truncate|wipe|purge|remove)\b|불가능|비가역|되돌릴 수 없|\birreversible\b|\bsecrets?\b|비밀값|자격 증명|서비스 계정 키", re.I)
+    protected = re.compile(r"\bprod(?:uction)?\b|운영|과금|\bbilling\b|외부|\bexternal\b|삭제|\b(?:delete|destroy|drop|truncate|wipe|purge|remove)\b|불가능|비가역|되돌릴 수 없|\birreversible\b|\b(?:secrets?|keys?|credentials?)\b|비밀값|자격 증명|서비스\s*계정\s*키", re.I)
     asks = re.compile(r"\b(?:may|can|should)\s+(?:I|we)\b.*\?|(?:승인|허락|확인)(?:해\s*주세요|\s*부탁드립니다)|(?:될까요|할까요)\s*\?|^(?:고를 것|결정|owner):", re.I | re.M)
     negated = re.compile(r"(?:데이터\s*)?삭제\s*(?:없음|없이|안 함)|운영\s*(?:영향\s*)?(?:없음|없이)|\bno\s+(?:data\s+)?(?:deletion|production\s+impact)\b", re.I)
     # Assess each request separately so an unrelated production report does not hide it.

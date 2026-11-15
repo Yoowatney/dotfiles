@@ -39,6 +39,11 @@ class StagingAutonomy(unittest.TestCase):
                      "staging 승인 요청 차단 시험이 통과했습니다."):
             self.assertIsNone(SHARE.staging_approval_reason(text))
 
+    def test_key_approval_is_not_an_ordinary_staging_request(self):
+        for text in ("May I list service account keys in staging?",
+                     "staging 서비스계정키 조회를 승인해 주세요."):
+            self.assertIsNone(SHARE.staging_approval_reason(text))
+
     def test_separate_production_status_cannot_hide_a_staging_question(self):
         self.assertIsNotNone(SHARE.staging_approval_reason(
             "Production deployment remains held.\n\nMay I merge this staging IAM PR?"))
@@ -67,3 +72,7 @@ class StagingAutonomy(unittest.TestCase):
                        "sql databases describe delete", "storage ls gs://delete"):
             self.assertFalse(GCP.destructive_staging(
                 f"gcloud --account=operator@example.invalid {suffix} --project={project}"))
+
+
+if __name__ == "__main__":
+    unittest.main()
