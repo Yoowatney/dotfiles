@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Private, append-only task accounting. No prompt or response text is stored.
+"""Private, append-only task accounting. Only structured outcomes are stored,
+including permission reason, redacted command and retry target; never full replies.
 
 Record a stable job ID across runs/retries/checks. Reports select root requests
 in [since, until), then include every recorded descendant and associated session.
@@ -13,6 +14,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -22,6 +24,9 @@ import uuid
 from zoneinfo import ZoneInfo
 
 KINDS = ("request", "run", "check", "complete", "reassign", "session_stop")
+_spec = importlib.util.spec_from_file_location("check_permissions", Path(__file__).with_name("check-permissions.py"))
+check_permissions = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(check_permissions)
 
 
 def timestamp(value, zone="UTC"):
@@ -484,8 +489,12 @@ def hook(args, state):
             verdict = verdicts[0] if len(set(verdicts)) == 1 else "unknown"
             if role == "check" or verdicts:
                 outcome = dict(fields, kind="check" if role == "check" else "complete", verdict=verdict)
+                blocked = check_permissions.blockage(text) if role == "check" and isinstance(text, str) else {}
+                outcome.update(blocked)
                 outcome["check_id"] = os.environ.get("HERDR_CHECK_ID") or sid
                 identity += ":outcome:" + verdict
+                if blocked:
+                    identity += ":" + json.dumps(blocked, sort_keys=True)
                 outcome["event_id"] = "hook-" + hashlib.sha256(identity.encode()).hexdigest()
                 append_event(state, outcome)
     except Exception:

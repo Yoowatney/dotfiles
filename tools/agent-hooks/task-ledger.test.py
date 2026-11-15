@@ -155,6 +155,30 @@ class LedgerTests(unittest.TestCase):
         self.cli("hook", "Stop", payload={"session_id": "worker", "last_assistant_message": "TASK_RESULT: pass"}, env=env)
         self.assertEqual(self.report()["no_result"]["numerator"], 0)
 
+    def test_permission_block_is_unknown_and_preserved_in_check_event(self):
+        self.event('request', 'job')
+        env = dict(self.env, HERDR_TASK_ID='job', HERDR_TASK_ROLE='check', HERDR_CHECK_ID='blocked-check')
+        text = ('TASK_CHECK: unknown\nblocked_reason: OTHER_DENIED\n'
+                'blocked_command: crontab -l\nretry_target: claude')
+        self.cli('hook', 'Stop', payload={'session_id': 'check', 'last_assistant_message': text}, env=env)
+        rows = [json.loads(line) for line in (self.root / 'state/events.jsonl').read_text().splitlines()]
+        result = next(row for row in rows if row['kind'] == 'check')
+        self.assertEqual(result['verdict'], 'unknown')
+        self.assertEqual(result['blocked_reason'], 'OTHER_DENIED')
+        self.assertEqual(result['blocked_command'], 'crontab -l')
+        self.assertEqual(result['retry_target'], 'claude')
+        self.assertEqual(self.report()['check_failure']['numerator'], 0)
+        self.assertEqual(self.report()['check_failure']['unknown'], 1)
+
+    def test_permission_details_update_an_existing_unknown_outcome(self):
+        self.event('request', 'job')
+        env = dict(self.env, HERDR_TASK_ID='job', HERDR_TASK_ROLE='check')
+        for details in ('', '\nblocked_reason: SIGNAL_DENIED\nblocked_command: ps -A\nretry_target: claude'):
+            self.cli('hook', 'Stop', payload={'session_id': 'check', 'last_assistant_message': 'TASK_CHECK: unknown' + details}, env=env)
+        rows = [json.loads(line) for line in (self.root / 'state/events.jsonl').read_text().splitlines()]
+        self.assertEqual([row for row in rows if row['kind'] == 'check'][-1]['blocked_command'], 'ps -A')
+        self.assertEqual(self.report()['check_failure']['unknown'], 1)
+
     def test_child_without_session_keeps_token_total_unknown(self):
         self.event("request", "root")
         self.event("run", "root", session_id="cx")

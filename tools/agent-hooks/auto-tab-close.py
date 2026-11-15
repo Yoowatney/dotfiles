@@ -79,6 +79,9 @@ _spec.loader.exec_module(relay_watch)
 _spec = importlib.util.spec_from_file_location("check_start", os.path.join(HERE, "automatic-check-start.py"))
 check_start = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(check_start)
+_spec = importlib.util.spec_from_file_location("check_permissions", os.path.join(HERE, "check-permissions.py"))
+check_permissions = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(check_permissions)
 
 SESSION = re.compile(r"세션[ \t]*\**[ \t]*[:：][ \t]*\**([^·\n]*)")
 LEFT = re.compile(r"남은[ \t]*것[ \t]*\**[ \t]*[:：]")
@@ -345,7 +348,10 @@ def short_report(reply: str, cap: int | None = 200) -> str:
         left = [lines[at]]
         if not LEFT.split(lines[at], 1)[-1].strip(" *"):  # `남은 것:` and its items on the lines below
             left += list(itertools.takewhile(bool, lines[at + 1:]))
-    return "\n".join(line for line in ([] if first in left else [first]) + left if line)
+    blocked = check_permissions.blockage(reply)
+    metadata = (["권한 차단: 확인 미완료이며 코드 실패와 구분합니다."]
+                + [f"{key}: {blocked[key]}" for key in check_permissions.FIELDS]) if blocked else []
+    return "\n".join(line for line in ([] if first in left else [first]) + metadata + left if line)
 
 
 def save(reply: str, me: dict, pane: str, env, now=None) -> str:
@@ -404,10 +410,10 @@ def unchecked_head(reply: str, why: str) -> str:
     return f"바로 전달하는 칸의 보고입니다({why})."
 
 
-def check_kind(reply: str):
-    """Always Codex (요유 2026-11-07): its check pane reads GCP, the network and processes, so no word in a report needs Claude.
-    A check that must write opens by hand with --kind claude."""
-    return "auto", "Codex 확인 칸(네트워크·gcloud·프로세스 조회 가능)"
+def check_kind(reply: str, cwd=None):
+    """Preflight known restrictions without running the check or weakening either boundary."""
+    route = check_permissions.classify(reply, cwd or os.getcwd())
+    return route["kind"], route["reason"]
 
 
 def direct_reason(reply: str) -> str:
@@ -570,6 +576,9 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
                 context = json.load(f)
             if context.get("check_delivered"):
                 return True
+            for field in check_permissions.FIELDS:
+                context.pop(field, None)
+            context.update(check_permissions.blockage(reply))
             interim = not check_finished(reply) or share.leaves_yoyoo_work(plain(reply)) or question_request(reply)
             fingerprint = hashlib.sha256(reply.encode()).hexdigest()
             if interim and fingerprint in context.get("interim_delivered", []):
@@ -616,7 +625,7 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
             if context.get("handed") or context.get("fallback_delivered"):
                 return True
         else:
-            kind, kind_reason = check_kind(reply)
+            kind, kind_reason = check_kind(reply, me.get("cwd") or os.path.expanduser("~"))
             job = re.sub(r"^[🟢🔴👑🫡\s]+", "", me.get("label") or "") or "일 칸 결과"
             context = dict(job=job, first=short_report(reply, None).splitlines()[0], summary=short_report(reply), report=path, entry=entry,
                            worker_address=herdr_peers.address(env, me['pane_id']),
@@ -647,7 +656,7 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
                   "A remaining lead action does not mean the check itself is still running. "
                   "항목별 실행 명령과 실제 결과, 통과·실패·확인 불가를 적고 첫 줄에 전체 판정을 적으세요. "
                   f"상관 표식 [ac-{key}]는 보고가 끝날 때까지 칸 이름에 남겨 두세요."
-                  + recording_restrictions(me, env))
+                  + check_permissions.CONTRACT + recording_restrictions(me, env))
         receiver_server = lead.split("/", 1)[0] if "/" in lead else herdr_peers.server_key(env)
         receiver_env = {**env, "HERDR_PANE_ID": to["pane_id"], "HERDR_SOCKET_PATH": herdr_peers.socket_of(env, receiver_server) or ""}
         for inherited in ("MUNICE_AUTO_DISPATCH", "MUNICE_AMBIENT", "HERDR_WORKSPACE_ID"):

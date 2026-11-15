@@ -21,7 +21,9 @@
 # --check opens a check pane: a fresh pane, not the one that did the job, runs the test or command, or looks at the changed behavior
 # or data, and changes nothing (요유 2026-11-05, api#1002). The agent name carries `chk`, which a rename does not change, so its
 # report asks for no other check (auto-tab-close.py). Only a pane herdr_peers.delegates_checks says yes to may open one (the main
-# pane today); any other lead checks results itself, so there it is bad usage and opens nothing. A check pane is Codex in its
+# pane today); any other lead checks results itself, so there it is bad usage and opens nothing. Checks use Codex unless the
+# instruction or named test requires an observed browser/process/sandbox permission, in which case they use Claude.
+# A Codex check runs in its
 # sandbox, which writes only in a fixed empty folder, temp and gcloud's folder, with the network on: it reads GitHub, GCP and
 # the board itself, Slack through the Slack MCP's read tools, and processes with ps (요유 2026-11-07). With --kind claude it is
 # Claude Sonnet, with the checked folder protected by Seatbelt.
@@ -52,12 +54,12 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] 
   --kind auto: choose a normal worker from fresh subscription quota and weekly pace; unknown/paid usage is excluded.
     If neither runner qualifies, no pane opens. Set the agent-quota policy to codex-only for the previous routing.
     A lookup exceeding six seconds warns once and retains Codex. Forwarded arguments and ambient-runner retain Codex.
-    Startup, readiness and delivery errors never switch runners. Checks and explicit model/effort keep their runner.
+    Startup, readiness and delivery errors never switch runners. Checks use permission preflight; explicit work model/effort keeps its runner.
   --why: in the main pane, why a pane that does the job must be Claude, in one line. A Claude pane without one, or with a
     reason mentioning Slack, 슬랙, GCP, gcloud, bq or BigQuery (any case), is refused there: Codex runs GCP commands too.
     Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요
-  --check: a fresh check (main pane only): neither agent can write the checked folder; process/network reads work.
-    Codex by default regardless of weekly usage; --kind claude selects Claude.
+  --check: a fresh check (main pane only): neither agent can write the checked folder.
+    Codex by default regardless of weekly usage; observed permission requirements or --kind claude select Claude.
   --artifact: keep the Artifact tool in a Claude pane (a job that publishes a page); every Claude pane starts without it otherwise.
   --skills: keep the design (taste-skill), office-file (docx/pdf/pptx/xlsx) and Claude-API skills in a Claude pane (UI or office-file job).
   --opus: opt out of the main pane Claude work trial (Sonnet 5.5/high); use global model/effort defaults for heavy work.
@@ -98,7 +100,7 @@ case "$1" in
 esac
 [ -z "$opener" ] || [ -z "$check$same$new_tab" ] || die "--opener opens a moved pane's own tab: no --check, --same-tab or --new-tab"
 asked=${kind:-claude} # what the caller chose, before auto resolves to Codex
-# A check pane runs Codex regardless of weekly usage. Both kinds protect the checked folder.
+# Checks default to Codex; observed permission requirements select Claude below. Both protect the checked folder.
 [ -z "$check" ] || [ -n "$kind" ] || kind=auto
 [ "$kind" != auto ] || kind=codex
 kind=${kind:-claude}
@@ -179,6 +181,14 @@ elif [ "$asked" = auto ] && [ -z "$check" ]; then
       if [ "$quota_rc" != 0 ]; then exit 1; fi
       case "$quota_kind" in claude) kind=claude auto_claude=1 ;; codex) kind=codex ;; *) exit 1 ;; esac
     fi
+  fi
+fi
+if [ -n "$check" ] && [ "$kind" = codex ]; then
+  permission_route=$(printf '%s' "$request_prompt" | python3 -I "$helper_dir/check-permissions.py" "$cwd") || die "cannot classify check permissions"
+  if [ "$(printf '%s' "$permission_route" | jq -r '.kind')" = claude ]; then
+    [ $# -eq 0 ] || die "check requires Claude permissions; omit forwarded Codex arguments"
+    kind=claude
+    echo "pane-spawn: check uses Claude: $(printf '%s' "$permission_route" | jq -r '.reason')" >&2
   fi
 fi
 env_args=()
@@ -296,6 +306,8 @@ if [ -n "$check" ]; then
   name="확인 $name"
   prompt+=' 이 칸은 확인 칸입니다. 다른 칸이 다 했다고 보고한 일을 확인만 합니다. 코드나 설정을 고치지 말고, 테스트나 명령을 직접 실행하거나 바뀐 동작과 데이터를 직접 보세요. 다른 칸의 보고를 다시 읽는 것은 확인이 아닙니다. 다른 칸을 열지 마세요. 보고 첫 줄에 실행한 명령, 본 결과, 통과 여부를 모두 쓰세요.'
   prompt+=' Check whether the result answers the original question as asked, including the improvement the user is considering. Read the original request from its primary source; if unavailable, report that coverage is unverified. For investigative results, check the recommendation and next action, and whether available checks were executed for material unknowns. Do not mark an unanswered material question as passed merely because individual factual claims are correct. Report missing scope and follow-up evidence explicitly; do not implement the proposed changes.'
+  permission_contract=$(python3 -I "$helper_dir/check-permissions.py" --contract) || die "cannot load check result contract"
+  prompt+="$permission_contract"
   if [ "$kind" = claude ]; then
     env_args+=(--env "CLAUDE_CHECK_TARGET=$cwd")
     prompt+=' 대상 폴더 쓰기는 Claude 프로세스와 그 하위 명령 전체에서 막힙니다. 프로세스 목록은 /bin/ps로 읽고, 네트워크는 읽기 확인에만 쓰세요. pgrep와 launchctl은 macOS 제한으로 목록을 읽지 못할 수 있습니다.'
