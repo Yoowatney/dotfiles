@@ -9,7 +9,8 @@ missing `무엇을:` when a reply carries more `왜:` labels than `무엇을:` l
 when `원인:`, `조치:` and `재발 방지:` do not come in equal numbers.
 Only the `요유 몫:` value counts, up to `·` or the end of its line; `없음` passes, and so does a reply without the line.
 Code, quotes and blockquotes are ignored (a report about the format is not a report). Skipped for headless Claude runs
-(claude -p / SDK) and on the second stop of a turn (stop_hook_active), so it blocks at most once. Fails open.
+(claude -p / SDK) and on the second stop of a turn (stop_hook_active), so ordinary prose checks block at most once and fail open.
+An optional private reaction policy runs on every verified-main Stop, including recursive Stops. Its errors block both runtimes.
 A session is asked about each 요유 몫 item once (asked_before): an open decision rides in every report until 요유 answers.
 A report whose 요유 몫 holds only decisions is not asked at all (only_decisions); auto-tab-close still sees it as work left.
 It also sends back names 요유 cannot read: a pane's herdr id (`w5:pKR`, 27 reports in 14 days; the reason carries the
@@ -41,12 +42,18 @@ explicit because CLAUDE_CODE_ENTRYPOINT leaks into commands Claude runs, Codex i
 from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
 
 import ast
+from concurrent.futures import ThreadPoolExecutor
+import fcntl
 import glob
+import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shlex
+import signal
+import stat
 import subprocess
 import sys
 import time
@@ -1139,16 +1146,175 @@ def inbox_context(payload: dict, env) -> str | None:
         return None  # An unreadable inbox must not erase an existing Stop reason.
 
 
-def hook_output(payload: dict, env, claude: bool = False) -> dict | None:
+def reaction_reason(payload: dict, env) -> str | None:
+    """Run an optional local checker on every verified-main Stop, including retries."""
+    if env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
+        return None
+    home = env.get("HOME") or os.path.expanduser("~")
+    policy = os.path.join(env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"),
+                          "agent-hooks", "reaction-policy.json")
+    if not os.path.lexists(policy):
+        return None
+    session, pane_id = payload.get("session_id"), env.get("HERDR_PANE_ID")
+    if not isinstance(session, str) or not session or not pane_id:
+        return None
     try:
-        reason = decide(payload, env, claude)
+        peers = peers_module()
+        pane = peers.herdr(env, "pane", "get", pane_id).get("pane") or {}
+        terminal = pane.get("terminal_id")
+        if (not isinstance(terminal, str) or not terminal
+                or (pane.get("agent_session") or {}).get("value") != session
+                or not peers.delegates_checks(env, terminal)):
+            return None
     except Exception:
-        reason = None  # Ordinary report checks fail open without suppressing waiting user context.
-    context = inbox_context(payload, env)
-    combined = "\n\n".join(part for part in (context, reason) if part)
+        return None  # An unverifiable pane must not acquire main-only obligations.
+    return bounded_reaction(policy, payload, env)
+
+
+def reaction_context(payload, env, text):
+    """Queue a warning for the next prompt without introducing another Stop continuation."""
+    text = "reaction-policy: " + text[:1500]
+    if not note_next(payload, env, text):
+        print(text, file=sys.stderr)
+
+
+def reaction_turn(payload):
+    explicit = payload.get("turn_id")
+    if isinstance(explicit, str) and explicit:
+        return hashlib.sha256(explicit.encode()).hexdigest()
+    try:
+        with open(payload.get("transcript_path") or "", encoding="utf-8", errors="replace") as stream:
+            latest = ""
+            for index, raw in enumerate(stream):
+                try:
+                    entry = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(entry, dict) or entry.get("isMeta") or entry.get("isSidechain"):
+                    continue
+                if any(kind == "in" for kind, *_ in records([raw])):
+                    latest = str(index) + ":" + raw
+        if latest:
+            return hashlib.sha256(latest.encode()).hexdigest()
+    except (OSError, ValueError, TypeError):
+        pass
+    return "unknown-turn"  # Bounded per-session fallback when a runtime supplies no turn identity.
+
+
+def bounded_reaction(policy, payload, env):
+    """At most three blocks per session/turn, with durable five-minute retry backoff."""
+    home = env.get("HOME") or os.path.expanduser("~")
+    folder = os.path.join(env.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state"),
+                          "agent-hooks", "reaction-checks")
+    key = hashlib.sha256(payload["session_id"].encode()).hexdigest()
+    try:
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        fd = os.open(os.path.join(folder, key + ".json"),
+                     os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        with os.fdopen(fd, "r+", encoding="utf-8") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 65536:
+                raise ValueError("unsafe retry state")
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            raw = stream.read(65537)
+            state = json.loads(raw) if raw else {}
+            if not isinstance(state, dict):
+                raise ValueError("invalid retry state")
+            turn, now = reaction_turn(payload), time.time()
+            if state.get("turn") != turn:
+                state = {"turn": turn, "failures": 0, "backoff_until": 0}
+            failures, until = state.get("failures"), state.get("backoff_until")
+            if type(failures) is not int or failures < 0 or type(until) not in (int, float) or not math.isfinite(until):
+                raise ValueError("invalid retry state")
+            if until > now:
+                return None
+            reason, context = run_reaction_check(policy, payload, env)
+            if reason:
+                failures += 1
+                state.update(failures=failures, backoff_until=now + 300 if failures >= 3 else 0)
+            else:
+                state.update(failures=0, backoff_until=0)
+            stream.seek(0)
+            json.dump(state, stream)
+            stream.truncate()
+            stream.flush()
+            os.fsync(stream.fileno())
+            if context:
+                reaction_context(payload, env, context)
+            if reason and failures >= 3:
+                reaction_context(payload, env, "checker retry backoff for five minutes after three failures. " + reason)
+            return reason if reason and failures <= 3 else None
+    except (OSError, ValueError, TypeError):
+        reaction_context(payload, env, "retry state unavailable; reaction checking is deferred. Existing Stop checks still apply.")
+        return None
+
+
+def run_reaction_check(policy, payload, env):
+    prefix = "reaction-policy: "
+    try:
+        with open(policy, encoding="utf-8") as stream:
+            config = json.load(stream)
+        command = config.get("command")
+        timeout = config.get("timeout_seconds")
+        if (type(config.get("version")) is not int or config["version"] != 1
+                or not isinstance(command, list) or not command
+                or not all(isinstance(arg, str) and arg.strip() and "\0" not in arg for arg in command)
+                or type(timeout) not in (int, float) or not math.isfinite(timeout) or not 1 <= timeout <= 5):
+            raise ValueError("invalid schema")
+    except Exception:
+        return prefix + "invalid local policy; repair it before ending this turn.", None
+    try:
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, encoding="utf-8", errors="replace",
+                                   env={**os.environ, **env}, start_new_session=True)
+    except Exception:
+        return prefix + "checker could not start; restore the local checker before ending this turn.", None
+    try:
+        stdout, stderr = process.communicate(json.dumps(payload, ensure_ascii=False), timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        return prefix + "checker timed out; resolve pending reactions before ending this turn.", None
+    except Exception:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        return prefix + "checker failed; resolve pending reactions before ending this turn.", None
+    if process.returncode == 0:
+        context = None
+        try:
+            value = json.loads(stdout.strip().splitlines()[-1])
+            if isinstance(value, dict) and isinstance(value.get("additional_context"), str):
+                context = value["additional_context"][:1500]
+        except (ValueError, IndexError):
+            pass
+        return None, context
+    detail = (stderr.strip() or stdout.strip())[-1500:]
+    return prefix + f"checker exited {process.returncode}; resolve pending reactions before ending this turn." + ("\n" + detail if detail else ""), None
+
+
+def hook_output(payload: dict, env, claude: bool = False) -> dict | None:
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(reaction_reason, payload, env)
+        try:
+            reason = decide(payload, env, claude)
+        except Exception:
+            reason = None  # Ordinary report checks fail open without suppressing waiting user context.
+        context = inbox_context(payload, env)
+        try:
+            reaction = pending.result()  # Join before returning; the checker owns and reaps its process group.
+        except Exception:
+            reaction_context(payload, env, "checker infrastructure failed; reaction checking is deferred.")
+            reaction = None  # Never erase a reason already produced by the ordinary checks.
+    combined = "\n\n".join(part for part in (context, reason, reaction) if part)
     if not combined:
         return None
-    if claude:
+    if claude and not reaction:
         return {"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": combined}}
     return {"decision": "block", "reason": combined}
 

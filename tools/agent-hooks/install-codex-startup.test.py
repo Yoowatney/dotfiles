@@ -10,6 +10,25 @@ HERE = Path(__file__).resolve().parent
 
 
 class InstallTest(unittest.TestCase):
+    def test_existing_stop_checker_registration_is_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ('.codex/hooks.json', '.claude/settings.json'):
+                path = Path(tmp) / name
+                path.parent.mkdir()
+                path.write_text(json.dumps({'hooks': {'Stop': [{'hooks': [
+                    {'type': 'command', 'command': 'permission-guard', 'timeout': 10},
+                    {'type': 'command', 'command': 'python3 /private/yoyoo-share-guard.py --claude', 'timeout': 10},
+                    {'type': 'command', 'command': 'another-guard', 'timeout': 60}]}]}}))
+            for _ in range(2):
+                result = subprocess.run(['python3', str(HERE / 'install-codex-startup.py')],
+                                        env=dict(os.environ, HOME=tmp), capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            for name in ('.codex/hooks.json', '.claude/settings.json'):
+                entries = json.loads((Path(tmp) / name).read_text())['hooks']['Stop'][0]['hooks']
+                self.assertEqual([entry['timeout'] for entry in entries], [10, 10, 60])
+                self.assertEqual(entries[0]['command'], 'permission-guard')
+                self.assertEqual(entries[1]['command'], 'python3 /private/yoyoo-share-guard.py --claude')
+
     def test_idempotent_preserves_guards_and_replaces_only_memory_hook(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / '.codex/hooks.json'

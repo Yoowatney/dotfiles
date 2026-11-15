@@ -49,6 +49,29 @@ write permission. Do not put private handoff contents in this public repository.
 Reading checks the required fields again, so a damaged or incomplete saved block
 cannot become a verified handoff. This check never replaces the saved Git snapshot.
 
+An optional private policy file at
+`${XDG_CONFIG_HOME:-~/.config}/agent-hooks/handoff-policy.json` applies to both
+ordinary and main-pane handoffs before saving:
+
+```json
+{
+  "version": 1,
+  "rules": [{
+    "id": "example-ownership-rule",
+    "pattern": "(?m)^Assignment: obsolete receiver$",
+    "message": "Keep the current receiver responsible for relayed work."
+  }]
+}
+```
+
+Patterns use Python regular expressions. A matching rule or malformed policy
+rejects the save and preserves the previous memo. Keep private policy contents
+outside this public repository. A previously saved memo is still readable, with
+an inline warning that rejected instructions must not be followed; the warning
+also appears when a long memo is loaded by path. A missing policy file keeps the
+existing behavior; a broken symlink is an error. Remove the policy file to undo
+only this optional validation, leaving ordinary handoff validation intact.
+
 Outside herdr, saving still copies the prompt to the clipboard. The current
 implementation retains handoffs for 24 hours and consumes a memo once by renaming
 it to `.loaded`. Do not rely on a handoff as permanent storage.
