@@ -116,6 +116,8 @@ if [ -n "$session" ] && [ -s "$note" ]; then
     rm -f "$note"
 fi
 
+msg="$msg Ordinary staging IAM, Terraform merges, deploys and settings proceed without owner approval. A staging grant is only for destructive or irreversible staging data operations. Production, billing, external settings and identity protections retain their gates."
+
 emit "${priority}${priority:+
 
 }$msg${correction:+ $correction}${inbox:+ $inbox}"

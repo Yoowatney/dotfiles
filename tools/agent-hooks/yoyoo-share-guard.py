@@ -1039,6 +1039,22 @@ def short_page_reason(payload: dict) -> str | None:
     return SHORT_REASON if writes_explainer(payload) and short_question(payload) else None
 
 
+def staging_approval_reason(text: str) -> str | None:
+    """Warn about redundant staging approvals; never grant execution authority."""
+    stage = re.compile(r"\bstaging\b|스테이징", re.I)
+    protected = re.compile(r"\bprod(?:uction)?\b|운영|과금|\bbilling\b|외부|\bexternal\b|삭제|\b(?:delete|destroy|drop|truncate|wipe|purge|remove)\b|불가능|비가역|되돌릴 수 없|\birreversible\b|\bsecrets?\b|비밀값|자격 증명|서비스 계정 키", re.I)
+    asks = re.compile(r"\b(?:may|can|should)\s+(?:I|we)\b.*\?|(?:승인|허락|확인)(?:해\s*주세요|\s*부탁드립니다)|(?:될까요|할까요)\s*\?|^(?:고를 것|결정|owner):", re.I | re.M)
+    negated = re.compile(r"(?:데이터\s*)?삭제\s*(?:없음|없이|안 함)|운영\s*(?:영향\s*)?(?:없음|없이)|\bno\s+(?:data\s+)?(?:deletion|production\s+impact)\b", re.I)
+    # Assess each request separately so an unrelated production report does not hide it.
+    blocks = re.split(r"\n\s*\n|(?=^고를 것:)", text, flags=re.M)
+    for block in blocks:
+        if stage.search(block) and asks.search(block) and not protected.search(negated.sub("", block)):
+            return ("Ordinary staging IAM, infrastructure PR merges, deployments and settings do not need owner approval. "
+                    "Proceed after required review and checks. Keep approval for destructive or irreversible staging data work, "
+                    "production, billing and external service settings. Do not bypass execution guards.")
+    return None
+
+
 def decide(payload: dict, env, claude: bool = False) -> str | None:
     if payload.get("stop_hook_active") or env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
         return None
@@ -1057,7 +1073,7 @@ def decide(payload: dict, env, claude: bool = False) -> str | None:
     # 요유 2026-11-05 21:13: 요유 reads the main pane through Slack only, so a page for its terminal reply is for nobody (20 rewrites that day)
     if formats and formats[4] and delegates_checks(payload, env):
         formats[4] = None
-    checks = (*formats[:4], left_open_reason(payload, text, env), relay_reason(payload, text, env), explain_reason(payload, text, env),
+    checks = (staging_approval_reason(text), *formats[:4], left_open_reason(payload, text, env), relay_reason(payload, text, env), explain_reason(payload, text, env),
               stale_thread_reason(payload, text, env), owed_reason(payload, env), thread_call_reason(payload, env), *formats[4:])
     rewrites = [r for r in checks if r]
     left = leaves_yoyoo_work(text)
