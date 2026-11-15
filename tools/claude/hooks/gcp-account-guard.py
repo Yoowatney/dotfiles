@@ -35,7 +35,7 @@ import time
 import unicodedata
 
 UNLOCK = "prod 허용"
-# Yoyoo's account for staging alone: every segment that picks it names only the staging project (api#992).
+# Destructive staging data only; every identity-selecting segment must still name staging.
 STAGING_UNLOCK = "staging 허용"
 STAGING_IDS = {"miraclenight-dev", "314440450809"}
 PROD_IDS = re.compile(r"miraclenight-f06c6|498308011792")
@@ -650,6 +650,32 @@ def types_grant(cmd: str) -> bool:
     return False
 
 
+def destructive_staging(cmd: str) -> bool:
+    """Recognized destructive data verbs only; quoted values never create a grant scope."""
+    words = shell_words(cmd.replace("\\\n", " "))
+    if not staging_only(cmd) or not words or words[0] != "gcloud":
+        return False
+    positional, skip = [], False
+    valued = GLOBAL_VALUED | {"--filter", "--database", "--instance"}
+    for word in words[1:]:
+        if skip:
+            skip = False
+        elif word.startswith("-"):
+            flag, eq, _ = word.partition("=")
+            if flag not in valued | GLOBAL_BOOL | {"--recursive", "-r"}:
+                return False
+            skip = not eq and flag in valued
+        elif not positional and word in {"alpha", "beta", "preview"}:
+            continue
+        else:
+            positional.append(word)
+    return bool(not skip and (positional[:2] == ["storage", "rm"]
+                or (len(positional) >= 3 and positional[:2] in
+                    (["firestore", "documents"], ["firestore", "databases"],
+                     ["sql", "databases"], ["sql", "instances"])
+                    and positional[2] == "delete")))
+
+
 def tool_problem(payload: dict, env: dict, prompt: str | None = None) -> str | None:
     """The refusal, or None. `prompt` stands in for the typed one: 요유's words read back from Slack (api#1026)."""
     tool, inp = payload.get("tool_name"), payload.get("tool_input") or {}
@@ -697,13 +723,17 @@ def tool_problem(payload: dict, env: dict, prompt: str | None = None) -> str | N
     elif prompt is None:
         prompt = latest_prompt(payload.get("transcript_path") or "")
     cmd = inp.get("command") or "" if tool in ("Bash", "Monitor") else ""
+    if staging_only(cmd) and not destructive_staging(cmd):
+        return (f"{what}: ordinary staging work needs no owner approval. Use the agent identity and the reviewed "
+                "infrastructure PR route for missing staging permissions. Identity overrides remain blocked; "
+                "do not request a grant for staging IAM, deployment or settings work.")
     prod, staging = granted(UNLOCK, prompt), granted(STAGING_UNLOCK, prompt)
     if prod is not None and in_scope(prod, cmd):
         return None
     items = sorted(((prod or set()) | (staging or set())) - {""})
     scope = f" 이 허용은 {', '.join(items)} 일에만 걸립니다: 명령 끝에 `# {items[0]}`처럼 그 항목을 적을 것(api#1026)." if items else ""
     if staging is not None:
-        if staging_only(cmd) and cmd and in_scope(staging, cmd):
+        if destructive_staging(cmd) and cmd and in_scope(staging, cmd):
             return None
         return (f"{what}: `{STAGING_UNLOCK}` 턴에서는 요유 계정을 고르는 명령마다 staging 프로젝트만 적어야 합니다"
                 "(`--project miraclenight-dev`, firebase는 `-P miraclenight-dev`). prod나 다른 프로젝트를 가리키거나 "
@@ -716,7 +746,7 @@ def tool_problem(payload: dict, env: dict, prompt: str | None = None) -> str | N
     return (f"{what}: AI 세션은 에이전트 계정(staging 쓰기, prod 읽기)으로만 GCP를 씁니다. prod 쓰기가 꼭 필요하면 "
             f"여기서 멈추고, 무엇을 왜 바꾸는지 Slack에 적어 요유에게 `{UNLOCK}`을 받을 것: 요유가 Slack 어느 채널에든 "
             "쓴 그 글이 메인 칸에 넘어온 턴에서만 요유 계정으로 할 수 있음(가드가 Slack에서 글쓴이와 시각을 직접 확인, "
-            f"30분 안, 한 턴). staging만 바꾸는 일이면 `{STAGING_UNLOCK}`(staging 프로젝트를 적은 명령만 풀림). 리드 밑 칸이면 "
+            f"30분 안, 한 턴). staging 데이터 삭제나 되돌릴 수 없는 손상에만 `{STAGING_UNLOCK}`을 씁니다. 일반 staging은 승인 없이 에이전트 계정과 리뷰된 인프라 PR로 진행합니다. 리드 밑 칸이면 "
             "보고로 리드에게 넘길 것: 메인 칸이 요유에게 묻고 직접 실행함. 처음부터 prod 작업 세션이면 요유가 `cla`로 띄움. "
             "terraform#1005, api#1026")
 
@@ -1087,7 +1117,7 @@ def selftest():
                          "cwd": home}, {})
     assert tool_problem({"tool_name": "Edit", "tool_input": {"file_path": "notes.md"}, "transcript_path": unlocked,
                          "cwd": home}, {}) is None
-    # `staging 허용`: Yoyoo's account only for commands that name the staging project and nothing else (api#992)
+    # Ordinary staging never uses a grant to select an alternate identity.
     staged = claude_transcript("고쳐줘", "staging 허용, 키 갈자")
 
     def stg(cmd, env=None):
@@ -1100,7 +1130,7 @@ def selftest():
         "GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gcloud/adc-munice-admin.json firebase deploy --only functions:assets -P miraclenight-dev",
         "gcloud --configuration=munice-admin secrets list --project=miraclenight-dev --billing-project=miraclenight-dev",
     ]:
-        assert stg(c) is None, f"staging unlock should allow: {c} -> {stg(c)}"
+        assert stg(c), "Ordinary staging must not unlock an alternate identity"
     for c in [
         "gcloud --configuration=munice-admin secrets versions add OPENAI_API_KEY --project=miraclenight-f06c6 --data-file=-",
         "gcloud --configuration=munice-admin run services list",  # the admin config's default project is prod
@@ -1168,7 +1198,7 @@ def selftest():
         assert scoped(tagged, claude_transcript(text)) and scoped(f"{tagged} # api#973", claude_transcript(text)) is None, text
     assert scoped(f"{tagged} # API#973", item) is None
     stg_item = claude_transcript("cf#12 staging 허용")
-    stg_cmd = "gcloud --configuration=munice-admin secrets list --project miraclenight-dev"
+    stg_cmd = "gcloud --account=operator@example.invalid firestore documents delete sample/item --project=" + sorted(STAGING_IDS)[-1]
     assert scoped(f"{stg_cmd} # cf#12", stg_item) is None and scoped(stg_cmd, stg_item)
     assert scoped(f"{stg_cmd.replace('miraclenight-dev', 'miraclenight-f06c6')} # cf#12", stg_item), "staging stays staging"
     # api#1026 review, named for the report: a staging grant is judged on what the shell runs; a scope counts only in its
@@ -1206,7 +1236,7 @@ def selftest():
     }
     checks: dict = {name: (lambda c=c: bool(stg(c))) for name, c in stg_refused.items()}
     # third Codex review: a group word in a value is no group, and a joined quoted value is still one option
-    checks["staging_group_word_in_value_ok"] = lambda: all(stg(c) is None for c in (
+    checks["staging_group_word_in_value_ok"] = lambda: all(staging_only(c) and stg(c) for c in (
         f"gcloud {admin} run services update api --description auth --project=miraclenight-dev",
         f"gcloud {admin} secrets describe config --project=miraclenight-dev"))
     checks["persist_joined_quoted_value"] = lambda: all((bash_problem(c) or ("", False))[1] is True for c in (
@@ -1516,7 +1546,7 @@ def slack_selftest(claude_transcript, tmp):
     # a command the guard allows anyway never reaches Slack
     assert run("gcloud run services list --project miraclenight-f06c6") is None and not calls
     # the main pane takes no typed grant: any session can type into its input box (요유 2026-11-06, api#1026)
-    stg_cmd = "gcloud --configuration=munice-admin secrets versions add K --project=miraclenight-dev --data-file=/tmp/k"
+    stg_cmd = "gcloud --account=operator@example.invalid firestore documents delete sample/item --project=" + sorted(STAGING_IDS)[-1]
     for c, word in ((cmd, "prod 허용"), (cmd, "api#973 prod 허용"), (stg_cmd, "staging 허용")):
         reason = run(c if "#" not in word else f"{c} # api#973", prompt=word, found=False)
         assert reason and "입력창" in reason and calls, f"typed {word!r} in the main pane: {reason}"
@@ -1620,7 +1650,7 @@ def typed_pane_selftest(claude_transcript, codex_transcript, tmp):
         ("marked subordinate", {"LABEL": json.dumps("🟢 🫡 task")}, True),
     ]
     commands = [("prod 허용", "gcloud --configuration=munice-admin run services list --project=miraclenight-f06c6"),
-                ("staging 허용", "gcloud --configuration=munice-admin run services list --project=miraclenight-dev")]
+                ("staging 허용", "gcloud --account=operator@example.invalid firestore documents delete sample/item --project=" + sorted(STAGING_IDS)[-1])]
     failures = []
     for make in (claude_transcript, codex_transcript):
         for name, extra, refused in cases:
@@ -1647,7 +1677,7 @@ def slack_grant_selftest(run, asked, claims, claude_transcript, tmp):
     slack_approval.yoyoo_words, which has its own tests (author, age, a forged or missing message)."""
     relay = "[pane-tell: '자동 작업' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] "
     told = relay + "[Slack #main 요유] staging 허용 (ts 1793880711.215309, 글 C0TEST0001/1793880711.215309)"
-    stg = "gcloud --configuration=munice-admin secrets versions add OPENAI_API_KEY --project=miraclenight-dev --data-file=/tmp/k"
+    stg = "gcloud --account=operator@example.invalid firestore documents delete sample/item --project=" + sorted(STAGING_IDS)[-1]
     prod = "gcloud --configuration=munice-admin firestore documents delete a/b --project miraclenight-f06c6"
 
     def slack_said(*texts, why="", claim_ok=True, raises=False):
