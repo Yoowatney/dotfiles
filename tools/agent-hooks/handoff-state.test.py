@@ -17,7 +17,8 @@ class HandoffTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.env = dict(os.environ, XDG_STATE_HOME=str(self.root), HERDR_PANE_ID="test-pane")
+        self.env = dict(os.environ, XDG_STATE_HOME=str(self.root),
+                        XDG_CONFIG_HOME=str(self.root / "config"), HERDR_PANE_ID="test-pane")
         self.env.pop("HERDR_SOCKET_PATH", None)
         self.env.pop("CODEX_THREAD_ID", None)
         # Observe kicks without contacting a real pane, and join the background
@@ -69,6 +70,89 @@ class HandoffTest(unittest.TestCase):
                            env=self.env, text=True, capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    def policy(self):
+        path = self.root / "config/agent-hooks/handoff-policy.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dict(version=1, rules=[dict(
+            id="receiver-owned-call", pattern=r"(?m)^Assignment: remote host owns this call$",
+            message="The receiver must keep the relayed call.")])))
+        return path
+
+    def test_policy_rejects_assignment_without_replacing_previous_memo(self):
+        self.policy()
+        self.assertEqual(self.runho("save", self.memo()).returncode, 0)
+        before = self.file.read_bytes()
+        rejected = self.runho("save", self.memo() + "Assignment: remote host owns this call\n")
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("receiver-owned-call", rejected.stderr)
+        self.assertEqual(self.file.read_bytes(), before)
+        self.assertEqual(self.runho("save", self.memo() + "Assignment: receiver owns this call\n").returncode, 0)
+
+    def test_policy_also_checks_main_freeform_handoffs(self):
+        self.policy()
+        (self.root / "orchestrator").mkdir()
+        (self.root / "orchestrator/main").write_text("main-terminal")
+        herdr = self.root / "herdr"
+        herdr.write_text('#!/bin/sh\nprintf \'%s\\n\' \'{"result":{"pane":{"terminal_id":"main-terminal"}}}\'\n')
+        herdr.chmod(0o755)
+        self.env["HERDR_BIN_PATH"] = str(herdr)
+        self.assertEqual(self.runho("save", "Open request: continue here\n").returncode, 0)
+        before = self.file.read_bytes()
+        rejected = self.runho("save", "Assignment: remote host owns this call\n")
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(self.file.read_bytes(), before)
+
+    def test_policy_checks_decoded_metadata_before_replacing_memo(self):
+        path = self.policy()
+        data = json.loads(path.read_text())
+        data["rules"][0]["pattern"] = "Assignment: obsolete r\u00e9ceiver"
+        path.write_text(json.dumps(data))
+        self.assertEqual(self.runho("save", self.memo()).returncode, 0)
+        before = self.file.read_bytes()
+        self.meta["remaining"] = "Assignment: obsolete r\u00e9ceiver"
+        rejected = self.runho("save", self.memo())
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("receiver-owned-call", rejected.stderr)
+        self.assertEqual(self.file.read_bytes(), before)
+
+    def test_invalid_local_policy_fails_closed_before_save(self):
+        path = self.policy()
+        self.assertEqual(self.runho("save", self.memo()).returncode, 0)
+        before = self.file.read_bytes()
+        for invalid in ("{broken", '[]', '{"version":true,"rules":[]}',
+                        '{"version":1,"rules":[{"id":"bad","pattern":"[","message":"fix it"}]}',
+                        '{"version":1,"rules":[{"id":"bad","pattern":"x"}]}'):
+            with self.subTest(policy=invalid):
+                path.write_text(invalid)
+                rejected = self.runho("save", self.memo())
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("handoff policy", rejected.stderr)
+                self.assertEqual(self.file.read_bytes(), before)
+
+    def test_legacy_policy_warning_survives_long_memo_and_runtime_start(self):
+        self.policy()
+        old = "Assignment: remote host owns this call\n" + "work still pending\n" * 150
+        self.file.parent.mkdir()
+        for runtime, source in (("claude", "startup"), ("claude", "clear"),
+                                ("codex", "startup"), ("codex", "resume")):
+            with self.subTest(runtime=runtime, source=source):
+                self.file.write_text(old)
+                if runtime == "codex":
+                    transcript = self.transcript("new-" + source)
+                    payload = dict(source=source, session_id="new-" + source,
+                                   transcript_path=str(transcript))
+                else:
+                    payload = dict(source=source, transcript_path=str(self.root / "claude.jsonl"))
+                command = ["bash", str(HERE / "handoff"), "session"] + (["codex"] if runtime == "codex" else [])
+                result = subprocess.run(command, input=json.dumps(payload), env=self.env,
+                                        text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("receiver-owned-call", ctx)
+                self.assertIn("Do not follow", ctx)
+                self.assertIn(".loaded", ctx)
+                self.assertEqual(Path(str(self.file) + ".loaded").read_text(), old)
 
     def test_missing_fields_preserve_prior_memo(self):
         self.file.parent.mkdir()
