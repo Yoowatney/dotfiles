@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Use isolated plists; never talk to launchctl or the user's LaunchAgents."""
+import hashlib
 import json
 import os
 from pathlib import Path
 import plistlib
+import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
 
 INSTALLER = Path(__file__).with_name('install-scheduled-job-health.py')
+RUNNER = INSTALLER.with_name('scheduled-job-health.py')
 
 
 class InstallTests(unittest.TestCase):
@@ -115,6 +118,68 @@ class InstallTests(unittest.TestCase):
         subprocess.run(command, env=self.env, check=True)
         subprocess.run(command, env=self.env, check=True)
         self.assertEqual(len(json.loads(inbox.read_text())['events']), 1)
+
+    def assert_profile_outcome(self, program, message, expected):
+        # Exercise the installer's real profile, then the runner and inbox together.
+        with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+            root = Path(temporary)
+            env = {**self.env, 'HOME': str(root), 'XDG_STATE_HOME': str(root / 'state')}
+            script = root / program
+            script.parent.mkdir(parents=True, exist_ok=True)
+            launchd_log = root / 'out.launchd.log'
+            separate_log = program.endswith('run.sh') or program == 'sync-home.sh'
+            actual_log = launchd_log.with_name('out.log') if separate_log else launchd_log
+            script.write_text('#!/bin/sh\nprintf "%s\\n" ' + shlex.quote(message) +
+                              ' >> ' + shlex.quote(str(actual_log)) + '\n')
+            agents = root / 'LaunchAgents'
+            agents.mkdir()
+            plist = {'Label': 'test.profile', 'StartInterval': 60,
+                     'ProgramArguments': ['/bin/sh', str(script)], 'StandardOutPath': str(launchd_log)}
+            (agents / 'job.plist').write_bytes(plistlib.dumps(plist))
+            inventory = subprocess.run([sys.executable, str(INSTALLER), '--agents-dir', str(agents),
+                                        '--prefix', 'test.'], env=env, capture_output=True, text=True, check=True)
+            logs = json.loads(inventory.stdout)['jobs'][0]['logs']
+            self.assertTrue(logs, program)
+            spec = root / 'spec.json'
+            spec.write_text(json.dumps({'label': plist['Label'], 'command': plist['ProgramArguments'], 'logs': logs}))
+            inbox = root / 'state/orchestrator/alerts/state.json'
+            state = root / 'state/scheduled-job-health/runs' / hashlib.sha256(b'test.profile').hexdigest()[:24] / 'state.json'
+            for attempt in range(1, 4):
+                subprocess.run([sys.executable, str(RUNNER), 'run', '--spec', str(spec)], env=env, check=True)
+                events = json.loads(inbox.read_text())['events'] if inbox.exists() else {}
+                self.assertEqual(len(events), int(expected == 'skipped' and attempt >= 2), (message, attempt))
+                recorded = json.loads(state.read_text())
+                self.assertEqual(recorded['recent'][-1]['outcome'], expected, message)
+                self.assertEqual(recorded['streak'], attempt if expected == 'skipped' else 0)
+
+    def test_dispatch_profile_alerts_once_for_every_whole_run_skip(self):
+        for message in ['late slot (14h KST), skipped', 'another dispatch run is going, skipped',
+                        'offline, skipped', 'herdr not reachable, skipped', 'no herdr workspace, skipped',
+                        'future whole-run reason, skipped',
+                        'late slot (13h KST) by the time of opening, nothing opened']:
+            with self.subTest(message=message):
+                self.assert_profile_outcome('dispatch/run.sh', message, 'skipped')
+
+    def test_dispatch_profile_does_not_count_item_skips_or_empty_work(self):
+        for message in ['not a board url, skipped: example', 'not seen working, goal skipped: example',
+                        'nothing to open; all candidates accounted for']:
+            with self.subTest(message=message):
+                self.assert_profile_outcome('dispatch/run.sh', message, 'success')
+
+    def test_watch_profile_accepts_whole_run_skip_format(self):
+        for message in ['offline, skipped', 'future whole-run reason, skipped']:
+            with self.subTest(message=message):
+                self.assert_profile_outcome('watch/run.sh', message, 'skipped')
+
+    def test_sync_profile_covers_whole_run_skips_and_successful_partial_noops(self):
+        for reason in ['this is the other host', 'not cut over yet', 'another sync held the lock for 60 s',
+                       'no ssh target', 'remote unreachable']:
+            with self.subTest(reason=reason):
+                self.assert_profile_outcome('sync-home.sh', '2026-01-01 skip: ' + reason, 'skipped')
+        self.assert_profile_outcome('sync-home.sh', 'skip: one step\nok', 'success')
+
+    def test_collection_lock_skip_is_a_whole_run_skip(self):
+        self.assert_profile_outcome('pinned_post.py', '2026-01-01T00:00:00 post skipped: collection lock busy', 'skipped')
 
     def test_restore_recovers_when_original_was_restored_before_backup_cleanup(self):
         original = self.path.read_bytes()

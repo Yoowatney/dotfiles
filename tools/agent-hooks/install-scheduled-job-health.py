@@ -55,10 +55,12 @@ def profile(plist):
     if 'sync-home.sh' in names and log:
         return [{'path': log.replace('.launchd.log', '.log'), 'skip_pattern': r'\bskip:', 'success_pattern': r'\bok$'}]
     if any(path.name == 'run.sh' and path.parent.name == 'watch' for path in paths) and log:
-        return [{'path': log.replace('.launchd.log', '.log'), 'skip_pattern': r'(?:^|\s)offline, skipped$'}]
+        return [{'path': log.replace('.launchd.log', '.log'), 'skip_pattern': r', skipped$'}]
     if any(path.name == 'run.sh' and path.parent.name == 'dispatch' for path in paths) and log:
         return [{'path': log.replace('.launchd.log', '.log'),
-                 'skip_pattern': r'(?:late slot \([^\n]*\)|another dispatch run is going), skipped$'}]
+                 'skip_pattern': r', skipped$|late slot \([^\n]*\) by the time of opening, nothing opened$'}]
+    if 'pinned_post.py' in names and log:
+        return [{'path': log, 'skip_pattern': r' post skipped:'}]
     if 'graphify-refresh.sh' in names and log:
         return [{'path': log, 'failure_pattern': r' update failed:'}]
     return []
