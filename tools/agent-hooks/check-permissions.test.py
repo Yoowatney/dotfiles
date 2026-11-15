@@ -18,7 +18,11 @@ class PermissionTests(unittest.TestCase):
                                 ('codex app-server --stdio', 'OTHER_DENIED'),
                                 ('Use codex app-server --stdio', 'OTHER_DENIED'),
                                 ('Run sandbox-exec -p policy bash test.sh', 'OTHER_DENIED'),
-                                ("rg 'crontab -l' .; crontab -l", 'OTHER_DENIED')]:
+                                ("rg 'crontab -l' .; crontab -l", 'OTHER_DENIED'),
+                                ('Run these checks:\ncrontab -l\nReport results.', 'OTHER_DENIED'),
+                                ('```sh\ncodex app-server\n```', 'OTHER_DENIED'),
+                                ('sandbox-exec\n', 'OTHER_DENIED'),
+                                ('ego-browser\n', 'BROWSER_DENIED')]:
             with self.subTest(command=command):
                 result = permissions.classify(command, '.')
                 self.assertEqual((result['kind'], result['blocked_reason']), ('claude', reason))

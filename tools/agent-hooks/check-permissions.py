@@ -54,11 +54,11 @@ def requirement(text):
     text = execution_text(text)
     start = r'(?:(?:^|[;`|\n])\s*|\b(?:run|use|using|via)\s+)'
     patterns = [
-        ('BROWSER_DENIED', start + r'ego-browser(?=$|[ \t])[^\n`]*'),
+        ('BROWSER_DENIED', start + r'ego-browser(?=$|\s)[^\n`]*'),
         ('BROWSER_DENIED', r'(?:실제|현재|로그인)[^\n.]{0,16}화면|브라우저[^\n.]{0,24}(?:QA|확인|검증)|(?:렌더링|DOM|스크린샷)[^\n.]{0,16}(?:확인|검증)'),
-        ('OTHER_DENIED', start + r'crontab\s+-l(?=$|[ \t])[^\n`]*'),
-        ('OTHER_DENIED', start + r'sandbox-exec(?=$|[ \t])[^\n`]*'),
-        ('OTHER_DENIED', start + r'codex\s+app-server(?=$|[ \t])[^\n`]*'),
+        ('OTHER_DENIED', start + r'crontab\s+-l(?=$|\s)[^\n`]*'),
+        ('OTHER_DENIED', start + r'sandbox-exec(?=$|\s)[^\n`]*'),
+        ('OTHER_DENIED', start + r'codex\s+app-server(?=$|\s)[^\n`]*'),
     ]
     for reason, pattern in patterns:
         match = re.search(pattern, text, re.I)
