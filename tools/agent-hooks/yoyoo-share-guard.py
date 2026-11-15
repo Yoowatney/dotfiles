@@ -42,7 +42,10 @@ explicit because CLAUDE_CODE_ENTRYPOINT leaks into commands Claude runs, Codex i
 from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
 
 import ast
+from concurrent.futures import ThreadPoolExecutor
+import fcntl
 import glob
+import hashlib
 import importlib.util
 import json
 import math
@@ -50,6 +53,7 @@ import os
 import re
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -1139,6 +1143,88 @@ def reaction_reason(payload: dict, env) -> str | None:
             return None
     except Exception:
         return None  # An unverifiable pane must not acquire main-only obligations.
+    return bounded_reaction(policy, payload, env)
+
+
+def reaction_context(payload, env, text):
+    """Queue a warning for the next prompt without introducing another Stop continuation."""
+    text = "reaction-policy: " + text[:1500]
+    if not note_next(payload, env, text):
+        print(text, file=sys.stderr)
+
+
+def reaction_turn(payload):
+    explicit = payload.get("turn_id")
+    if isinstance(explicit, str) and explicit:
+        return hashlib.sha256(explicit.encode()).hexdigest()
+    try:
+        with open(payload.get("transcript_path") or "", encoding="utf-8", errors="replace") as stream:
+            latest = ""
+            for index, raw in enumerate(stream):
+                try:
+                    entry = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(entry, dict) or entry.get("isMeta") or entry.get("isSidechain"):
+                    continue
+                if any(kind == "in" for kind, *_ in records([raw])):
+                    latest = str(index) + ":" + raw
+        if latest:
+            return hashlib.sha256(latest.encode()).hexdigest()
+    except (OSError, ValueError, TypeError):
+        pass
+    return "unknown-turn"  # Bounded per-session fallback when a runtime supplies no turn identity.
+
+
+def bounded_reaction(policy, payload, env):
+    """At most three blocks per session/turn, with durable five-minute retry backoff."""
+    home = env.get("HOME") or os.path.expanduser("~")
+    folder = os.path.join(env.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state"),
+                          "agent-hooks", "reaction-checks")
+    key = hashlib.sha256(payload["session_id"].encode()).hexdigest()
+    try:
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        fd = os.open(os.path.join(folder, key + ".json"),
+                     os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        with os.fdopen(fd, "r+", encoding="utf-8") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 65536:
+                raise ValueError("unsafe retry state")
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            raw = stream.read(65537)
+            state = json.loads(raw) if raw else {}
+            if not isinstance(state, dict):
+                raise ValueError("invalid retry state")
+            turn, now = reaction_turn(payload), time.time()
+            if state.get("turn") != turn:
+                state = {"turn": turn, "failures": 0, "backoff_until": 0}
+            failures, until = state.get("failures"), state.get("backoff_until")
+            if type(failures) is not int or failures < 0 or type(until) not in (int, float) or not math.isfinite(until):
+                raise ValueError("invalid retry state")
+            if until > now:
+                return None
+            reason, context = run_reaction_check(policy, payload, env)
+            if reason:
+                failures += 1
+                state.update(failures=failures, backoff_until=now + 300 if failures >= 3 else 0)
+            else:
+                state.update(failures=0, backoff_until=0)
+            stream.seek(0)
+            json.dump(state, stream)
+            stream.truncate()
+            stream.flush()
+            os.fsync(stream.fileno())
+            if context:
+                reaction_context(payload, env, context)
+            if reason and failures >= 3:
+                reaction_context(payload, env, "checker retry backoff for five minutes after three failures. " + reason)
+            return reason if reason and failures <= 3 else None
+    except (OSError, ValueError, TypeError):
+        reaction_context(payload, env, "retry state unavailable; reaction checking is deferred. Existing Stop checks still apply.")
+        return None
+
+
+def run_reaction_check(policy, payload, env):
     prefix = "reaction-policy: "
     try:
         with open(policy, encoding="utf-8") as stream:
@@ -1148,16 +1234,16 @@ def reaction_reason(payload: dict, env) -> str | None:
         if (type(config.get("version")) is not int or config["version"] != 1
                 or not isinstance(command, list) or not command
                 or not all(isinstance(arg, str) and arg.strip() and "\0" not in arg for arg in command)
-                or type(timeout) not in (int, float) or not math.isfinite(timeout) or not 1 <= timeout <= 20):
+                or type(timeout) not in (int, float) or not math.isfinite(timeout) or not 1 <= timeout <= 5):
             raise ValueError("invalid schema")
     except Exception:
-        return prefix + "invalid local policy; repair it before ending this turn."
+        return prefix + "invalid local policy; repair it before ending this turn.", None
     try:
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    text=True, encoding="utf-8", errors="replace",
                                    env={**os.environ, **env}, start_new_session=True)
     except Exception:
-        return prefix + "checker could not start; restore the local checker before ending this turn."
+        return prefix + "checker could not start; restore the local checker before ending this turn.", None
     try:
         stdout, stderr = process.communicate(json.dumps(payload, ensure_ascii=False), timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -1166,27 +1252,40 @@ def reaction_reason(payload: dict, env) -> str | None:
         except ProcessLookupError:
             pass
         process.communicate()
-        return prefix + "checker timed out; resolve pending reactions before ending this turn."
+        return prefix + "checker timed out; resolve pending reactions before ending this turn.", None
     except Exception:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         process.communicate()
-        return prefix + "checker failed; resolve pending reactions before ending this turn."
+        return prefix + "checker failed; resolve pending reactions before ending this turn.", None
     if process.returncode == 0:
-        return None
+        context = None
+        try:
+            value = json.loads(stdout.strip().splitlines()[-1])
+            if isinstance(value, dict) and isinstance(value.get("additional_context"), str):
+                context = value["additional_context"][:1500]
+        except (ValueError, IndexError):
+            pass
+        return None, context
     detail = (stderr.strip() or stdout.strip())[-1500:]
-    return prefix + f"checker exited {process.returncode}; resolve pending reactions before ending this turn." + ("\n" + detail if detail else "")
+    return prefix + f"checker exited {process.returncode}; resolve pending reactions before ending this turn." + ("\n" + detail if detail else ""), None
 
 
 def hook_output(payload: dict, env, claude: bool = False) -> dict | None:
-    try:
-        reason = decide(payload, env, claude)
-    except Exception:
-        reason = None  # Ordinary report checks fail open without suppressing waiting user context.
-    context = inbox_context(payload, env)
-    reaction = reaction_reason(payload, env)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(reaction_reason, payload, env)
+        try:
+            reason = decide(payload, env, claude)
+        except Exception:
+            reason = None  # Ordinary report checks fail open without suppressing waiting user context.
+        context = inbox_context(payload, env)
+        try:
+            reaction = pending.result()  # Join before returning; the checker owns and reaps its process group.
+        except Exception:
+            reaction_context(payload, env, "checker infrastructure failed; reaction checking is deferred.")
+            reaction = None  # Never erase a reason already produced by the ordinary checks.
     combined = "\n\n".join(part for part in (context, reason, reaction) if part)
     if not combined:
         return None

@@ -22,11 +22,6 @@ def install(path, codex=False):
         for group in groups:
             for entry in group['hooks']:
                 command = entry.get('command', '')
-                if event == 'Stop' and any(Path(part).name == 'yoyoo-share-guard.py'
-                                            for part in shlex.split(command)):
-                    # The optional checker can take 20 s, in addition to main identity checks.
-                    # Preserve longer limits and existing hook indices/trust identities.
-                    entry['timeout'] = max(30, entry.get('timeout', 30))
                 if 'task-ledger.py hook ' in command:
                     entry['command'] = ledger_command
                     ledger_found = True

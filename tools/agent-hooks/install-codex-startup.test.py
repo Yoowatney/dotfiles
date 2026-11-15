@@ -10,7 +10,7 @@ HERE = Path(__file__).resolve().parent
 
 
 class InstallTest(unittest.TestCase):
-    def test_existing_stop_checker_gets_time_without_moving_or_replacing_guards(self):
+    def test_existing_stop_checker_registration_is_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
             for name in ('.codex/hooks.json', '.claude/settings.json'):
                 path = Path(tmp) / name
@@ -25,7 +25,7 @@ class InstallTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
             for name in ('.codex/hooks.json', '.claude/settings.json'):
                 entries = json.loads((Path(tmp) / name).read_text())['hooks']['Stop'][0]['hooks']
-                self.assertEqual([entry['timeout'] for entry in entries], [10, 30, 60])
+                self.assertEqual([entry['timeout'] for entry in entries], [10, 10, 60])
                 self.assertEqual(entries[0]['command'], 'permission-guard')
                 self.assertEqual(entries[1]['command'], 'python3 /private/yoyoo-share-guard.py --claude')
 
