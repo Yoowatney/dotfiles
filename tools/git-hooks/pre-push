@@ -7,7 +7,7 @@
 # init.sh does that and verify.sh checks it. The path is absolute because a relative one resolves inside each worktree,
 # and a worktree on a branch older than this file would skip the hook without a word.
 #
-# ponytail: `git push --no-verify` and `git -c core.hooksPath=` skip it. Agents are refused the first by the shared Bash
+# ponytail: `git push --no-verify` and global core.hooksPath overrides skip it. Agents are refused both by the shared Bash
 # hook; a determined caller gets past any local check, and only a server-side check would stop one.
 set -uo pipefail
 
