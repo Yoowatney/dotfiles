@@ -1042,13 +1042,22 @@ def short_page_reason(payload: dict) -> str | None:
 def staging_approval_reason(text: str) -> str | None:
     """Warn about redundant staging approvals; never grant execution authority."""
     stage = re.compile(r"\bstaging\b|스테이징", re.I)
-    protected = re.compile(r"\bprod(?:uction)?\b|운영|과금|\bbilling\b|외부|\bexternal\b|삭제|\b(?:delete|destroy|drop|truncate|wipe|purge|remove)\b|불가능|비가역|되돌릴 수 없|\birreversible\b|\b(?:secrets?|keys?|credentials?)\b|비밀값|자격 증명|서비스\s*계정\s*키", re.I)
+    protected = re.compile(
+        r"\bprod(?:uction)?\b|운영|\b\d{12}\b|"
+        r"\b[a-z][a-z0-9]*-[a-z0-9-]*\d[a-z0-9-]*\b|"
+        r"과금|결제|비용|요금|예산|청구|카드|\b(?:billing|payment|cost|budget|price|spend|charge|credit)\w*\b|"
+        r"외부|\bexternal\b|삭제|비[우울워]|초기화|교체|덮어|재생성|포맷|"
+        r"\b(?:rm|delete|destroy|drop|truncate|wipe|purge|remove|empty|reset|replace|overwrite|clear|format|erase|prune|recreate)\w*\b|"
+        r"불가능|비가역|되돌릴 수 없|\birreversible\b|"
+        r"\b(?:secrets?|keys?|credentials?)\b|비밀값|자격 증명|서비스\s*계정\s*키|"
+        r"불명확|불확실|미확인|알 수 없|대상\s*미정|\b(?:unknown|unclear|ambiguous|unverified)\b", re.I)
+    ordinary = re.compile(r"\b(?:IAM|Terraform|merge\w*|deploy\w*|settings?|configuration)\b|머지|배포|설정", re.I)
     asks = re.compile(r"\b(?:may|can|should)\s+(?:I|we)\b.*\?|(?:승인|허락|확인)(?:해\s*주세요|\s*부탁드립니다)|(?:될까요|할까요)\s*\?|^(?:고를 것|결정|owner):", re.I | re.M)
     negated = re.compile(r"(?:데이터\s*)?삭제\s*(?:없음|없이|안 함)|운영\s*(?:영향\s*)?(?:없음|없이)|\bno\s+(?:data\s+)?(?:deletion|production\s+impact)\b", re.I)
     # Assess each request separately so an unrelated production report does not hide it.
     blocks = re.split(r"\n\s*\n|(?=^고를 것:)", text, flags=re.M)
     for block in blocks:
-        if stage.search(block) and asks.search(block) and not protected.search(negated.sub("", block)):
+        if stage.search(block) and asks.search(block) and ordinary.search(block) and not protected.search(negated.sub("", block)):
             return ("Ordinary staging IAM, infrastructure PR merges, deployments and settings do not need owner approval. "
                     "Proceed after required review and checks. Keep approval for destructive or irreversible staging data work, "
                     "production, billing and external service settings. Do not bypass execution guards.")

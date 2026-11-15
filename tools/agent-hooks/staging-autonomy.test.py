@@ -39,6 +39,42 @@ class StagingAutonomy(unittest.TestCase):
                      "staging 승인 요청 차단 시험이 통과했습니다."):
             self.assertIsNone(SHARE.staging_approval_reason(text))
 
+    def test_review_destructive_billing_and_uncertain_questions_keep_approval(self):
+        questions = (
+            "staging 데이터를 비워도 될까요?", "고를 것: staging 데이터를 비울지",
+            "고를 것: staging의 전체 테이블을 초기화할지",
+            "staging bq rm -r -f dataset 실행을 승인해 주세요.",
+            "staging gsutil rm -r gs://example-staging-data 실행을 승인해 주세요.",
+            "고를 것: staging Terraform으로 데이터베이스를 교체할지",
+            "staging 결제 수단을 새 카드로 바꿔도 될까요?",
+            "고를 것: staging Cloud Billing 예산을 늘릴지",
+            "staging 월 비용 한도를 100달러에서 1000달러로 올려도 될까요?",
+            "staging 삭제 안 함, production IAM 변경을 승인해 주세요.",
+            "staging 변경을 승인해 주세요.", "staging IAM 대상이 불명확합니다. 승인해 주세요.",
+            "May I reset staging settings?", "May I overwrite staging data?",
+        )
+        for text in questions:
+            with self.subTest(text=text):
+                self.assertIsNone(SHARE.staging_approval_reason(text))
+
+    def test_existing_production_identifiers_keep_approval_even_with_staging(self):
+        # Reuse the execution guard's existing identifiers; do not duplicate them here.
+        for project in GCP.PROD_IDS.pattern.split("|"):
+            with self.subTest(project=project):
+                self.assertIsNone(SHARE.staging_approval_reason(
+                    f"staging 테스트 후 {project} IAM 변경을 승인해 주세요."))
+
+    def test_review_removal_commands_keep_approval(self):
+        project = next(p for p in GCP.STAGING_IDS if not p.isdigit())
+        for command in (
+            f"gcloud storage rm gs://{project}-data/x --project={project}",
+            f"bq --project_id={project} rm -r -f data",
+            f"gsutil rm -r gs://{project}-data",
+            f"firebase firestore:delete collection -P {project}",
+            "terraform -chdir=/tmp/staging destroy -auto-approve",
+        ):
+            self.assertIsNone(SHARE.staging_approval_reason(f"staging {command} 실행을 승인해 주세요."))
+
     def test_key_approval_is_not_an_ordinary_staging_request(self):
         for text in ("May I list service account keys in staging?",
                      "staging 서비스계정키 조회를 승인해 주세요."):
