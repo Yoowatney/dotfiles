@@ -4,6 +4,7 @@ import ast
 import json
 from pathlib import Path
 import re
+import shlex
 import sys
 
 REASONS = ('SIGNAL_DENIED', 'SOCKET_DENIED', 'LAUNCHCTL_DENIED', 'BROWSER_DENIED', 'OTHER_DENIED')
@@ -73,34 +74,149 @@ def source_requirement(path, source):
             tree = ast.parse(source)
         except (SyntaxError, ValueError):
             return None
+        aliases = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                aliases.update((item.asname or item.name, item.name) for item in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                aliases.update((item.asname or item.name, node.module + '.' + item.name) for item in node.names)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, (ast.Name, ast.Attribute)):
+                head, dot, tail = ast.unparse(node.value).partition('.')
+                value = aliases.get(head, head) + (dot + tail if dot else '')
+                aliases.update((target.id, value) for target in node.targets if isinstance(target, ast.Name))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             name = ast.unparse(node.func)
+            head, dot, tail = name.partition('.')
+            name = aliases.get(head, head) + (dot + tail if dot else '')
             if name in ('os.kill', 'os.killpg'):
                 return 'SIGNAL_DENIED', f'{path}: {ast.unparse(node)[:256]}'
-            if name not in ('subprocess.run', 'subprocess.Popen', 'subprocess.call', 'subprocess.check_call', 'subprocess.check_output') or not node.args:
+            process = (name in ('subprocess.run', 'subprocess.Popen', 'subprocess.call',
+                                'subprocess.check_call', 'subprocess.check_output',
+                                'subprocess.getoutput', 'subprocess.getstatusoutput',
+                                'os.system', 'os.popen', 'asyncio.create_subprocess_exec',
+                                'asyncio.create_subprocess_shell', 'exec', 'builtins.exec')
+                       or re.fullmatch(r'os\.(?:exec[lv]p?e?|spawn[lv]p?e?|posix_spawnp?)', name))
+            if not process:
                 continue
             try:
-                argv = ast.literal_eval(node.args[0])
-            except (ValueError, TypeError):
-                continue
+                if name in ('exec', 'builtins.exec') or any(key.arg is None for key in node.keywords):
+                    raise ValueError('dynamic execution')
+                args = node.args or [key.value for key in node.keywords if key.arg in ('args', 'command', 'cmd', 'path', 'file', 'program')]
+                if not args:
+                    raise ValueError('missing command')
+                # Resolve literals only. Variables, starred arguments, wrappers and
+                # executable overrides can hide the observed app-server/ps calls.
+                values = [ast.literal_eval(arg) for arg in args]
+                argv = values[0]
+                if re.fullmatch(r'os\.(?:exec[lv]p?e?|spawn[lv]p?e?|posix_spawnp?)', name):
+                    offset = 1 if name.startswith('os.spawn') else 0
+                    executable = values[offset]
+                    method = name.rsplit('.', 1)[1]
+                    arguments = (values[offset + 1] if 'v' in method or method.startswith('posix_spawn')
+                                 else values[offset + 1:-1] if method.endswith('e') else values[offset + 1:])
+                    if not isinstance(arguments, (list, tuple)):
+                        raise ValueError('unresolved exec arguments')
+                    argv = [executable, *arguments[1:]]
+                elif name == 'asyncio.create_subprocess_exec':
+                    argv = values
+                shell = name in ('os.system', 'os.popen', 'subprocess.getoutput',
+                                 'subprocess.getstatusoutput', 'asyncio.create_subprocess_shell')
+                shell_option = next((key.value for key in node.keywords if key.arg == 'shell'), None)
+                if shell_option is not None:
+                    shell = bool(ast.literal_eval(shell_option))
+                if shell:
+                    payload = argv[0] if isinstance(argv, (list, tuple)) else argv
+                    if not isinstance(payload, str):
+                        raise ValueError('unresolved shell command')
+                    found = shell_requirement(path, payload)
+                    if found:
+                        return found
+                if isinstance(argv, str):
+                    if re.search(r'[$`]', argv):
+                        raise ValueError('shell expansion')
+                    argv = shlex.split(argv)
+                if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(arg, str) for arg in argv):
+                    raise ValueError('unresolved argv')
+                override = next((key.value for key in node.keywords if key.arg == 'executable'), None)
+                if override is not None:
+                    executable = ast.literal_eval(override)
+                    if executable is not None:
+                        if not isinstance(executable, str):
+                            raise ValueError('unresolved executable')
+                        argv = [executable, *argv[1:]]
+                if Path(argv[0]).name in ('sh', 'bash', 'zsh'):
+                    command_index = next((i + 1 for i, arg in enumerate(argv[1:], 1)
+                                          if re.fullmatch(r'-[a-zA-Z]*c[a-zA-Z]*', arg)), None)
+                    if command_index is not None:
+                        command = argv[command_index]
+                        if re.search(r'[$`]', command):
+                            raise ValueError('shell expansion')
+                        found = shell_requirement(path, command)
+                        if found:
+                            return found
+            except (ValueError, TypeError, IndexError):
+                return 'SIGNAL_DENIED', f'{path}: unresolved process launch: {ast.unparse(node)[:256]}'
             if isinstance(argv, (list, tuple)) and argv and isinstance(argv[0], str):
                 exe = Path(argv[0]).name
                 if exe in ('ps', 'pgrep', 'kill', 'killall'):
                     return 'SIGNAL_DENIED', f'{path}: {argv!r}'
-                found = requirement(' '.join(str(arg) for arg in argv))
+                found = requirement(' '.join([exe, *argv[1:]]))
                 if found:
                     return found[0], f'{path}: {found[1]}'
         return None
-    source = re.sub(r'^\s*#.*$', '', source, flags=re.M)
-    match = re.search(r'(?:^|[;|(&\n])\s*(?:/(?:usr/)?bin/)?(?:ps|pgrep|kill|killall)\s+[^\n;]*', source)
+    return shell_requirement(path, source)
+
+
+def shell_requirement(path, source):
+    # Tokenize without executing. A semicolon or $COMMAND inside an echo/grep
+    # argument is data; shell wrappers explicitly interpret their payload.
+    lexer = shlex.shlex(source, posix=True, punctuation_chars=';&|()\n')
+    lexer.whitespace, lexer.whitespace_split = ' \t\r', True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    commands, command = [], []
+    for token in [*tokens, '\n']:
+        if re.fullmatch(r'[;&|()\n]+', token):
+            if command:
+                commands.append(command)
+            command = []
+        else:
+            command.append(token)
+    for command in commands:
+        while command and command[0] in ('exec', 'command', 'builtin'):
+            command = command[1:]
+            if command and command[0] == '--':
+                command = command[1:]
+        if not command:
+            continue
+        exe = Path(command[0]).name
+        if command[0].startswith(('$', '`')) or exe == 'eval':
+            return 'SIGNAL_DENIED', f'{path}: unresolved process launch: {shlex.join(command)[:256]}'
+        if exe in ('ps', 'pgrep', 'kill', 'killall'):
+            return 'SIGNAL_DENIED', f'{path}: {shlex.join(command)[:256]}'
+        if exe in ('sh', 'bash', 'zsh'):
+            index = next((i + 1 for i, arg in enumerate(command[1:], 1)
+                          if re.fullmatch(r'-[a-zA-Z]*c[a-zA-Z]*', arg)), None)
+            if index is not None:
+                if index >= len(command):
+                    return 'SIGNAL_DENIED', f'{path}: unresolved process launch: {shlex.join(command)[:256]}'
+                found = shell_requirement(path, command[index])
+                if found:
+                    return found
+        if exe in ('ego-browser', 'crontab', 'sandbox-exec', 'codex'):
+            found = requirement(' '.join([exe, *command[1:]]))
+            if found:
+                return found[0], f'{path}: {found[1]}'
     # Shell tests can contain Python heredocs with the same observed Popen restriction.
     nested = re.search(r'subprocess\.(?:run|Popen|check_output|call|check_call)\s*\(\s*\[\s*[\'"](?:/(?:usr/)?bin/)?(?:ps|pgrep)[\'"]', source)
-    if match or nested:
-        return 'SIGNAL_DENIED', f'{path}: {(match or nested).group(0).strip()[:256]}'
-    found = requirement(source)
-    return (found[0], f'{path}: {found[1]}') if found else None
+    if nested:
+        return 'SIGNAL_DENIED', f'{path}: {nested.group(0).strip()[:256]}'
+    return None
 
 
 def classify(text, cwd):
@@ -137,7 +253,8 @@ def classify(text, cwd):
             if found:
                 break
     if found:
-        result.update(kind='claude', reason='observed sandbox requirement: ' + found[0],
+        reason = 'unresolved process requirement' if 'unresolved process launch:' in found[1] else 'observed sandbox requirement: ' + found[0]
+        result.update(kind='claude', reason=reason,
                       blocked_reason=found[0], blocked_command=found[1])
     return result
 

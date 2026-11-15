@@ -528,6 +528,14 @@ class RelayTests(unittest.TestCase):
         args = self.spawns[0][0]
         self.assertEqual(args[args.index("--kind") + 1], "claude")
 
+    def test_variable_process_probe_selects_claude_before_opening(self):
+        path = self.root / '.local/state/codex-fast-probe.py'
+        path.parent.mkdir(parents=True)
+        path.write_text("import subprocess\ncommand = ['codex', 'app-server']\nsubprocess.Popen(command)\n")
+        self.finish(DONE + f"\npython3 -B {path}\n")
+        args = self.spawns[0][0]
+        self.assertEqual(args[args.index('--kind') + 1], 'claude')
+
     def test_permission_unknown_reaches_lead_and_context_without_retry(self):
         self.finish()
         blocked = ("확인은 권한 차단으로 미완료입니다.\nTASK_CHECK: unknown\n"

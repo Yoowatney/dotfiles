@@ -12,6 +12,10 @@ mkdir -p "$SANDBOX/repo"
 printf '%s\n' 'import subprocess' "subprocess.run(['ps', '-A'])" > "$SANDBOX/repo/process.test.py"
 ps --check --cwd "$SANDBOX/repo" 'process test' 'Run python3 process.test.py' > "$SANDBOX/out"
 has '--kind claude' 'nested ps requires Claude'
+mkdir -p "$SANDBOX/home/.local/state"
+printf '%s\n' 'import subprocess' "command = ['codex', 'app-server']" 'subprocess.Popen(command)' > "$SANDBOX/home/.local/state/codex-fast-probe.py"
+ps --check 'variable process check' "Run python3 -B $SANDBOX/home/.local/state/codex-fast-probe.py" > "$SANDBOX/out"
+has '--kind claude' 'unresolved observed probe requires Claude'
 ps --check --kind codex 'pinned options' 'Run ego-browser skill' -- -c example=true > "$SANDBOX/out" 2> "$SANDBOX/err" && fail 'Codex options must not reach Claude'
 [ ! -s "$SANDBOX/log" ] || hasnt 'agent start' 'incompatible options must be refused before opening'
 echo 'PASS: permission routing preserves check boundaries'

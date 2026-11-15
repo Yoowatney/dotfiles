@@ -52,6 +52,84 @@ class PermissionTests(unittest.TestCase):
             path.write_text("# subprocess.run(['ps']) is historical evidence\nassert 2 + 2 == 4\n")
             self.assertEqual(permissions.classify('python3 plain.test.py', folder)['kind'], 'auto')
 
+    def test_unresolved_process_launches_require_claude_without_execution(self):
+        sources = [
+            "import subprocess\ncommand = ['codex', 'app-server']\nsubprocess.Popen(command)\n",
+            "import subprocess as sp\nsp.run(command)\n",
+            "from subprocess import Popen as launch\nlaunch(args=command)\n",
+            "import subprocess\nsubprocess.check_output(*commands)\n",
+            "import subprocess\nsubprocess.run(['echo'], **options)\n",
+            "import subprocess\nsubprocess.run(['echo'], executable=program)\n",
+            "import os\nos.execv(program, arguments)\n",
+            "from os import execvp as replace\nreplace('python3', arguments)\n",
+            "import os\nos.system(command)\n",
+            "import asyncio\nasyncio.create_subprocess_exec(*command)\n",
+            "exec(source)\n",
+            "import os\nos.execv('/bin/sh', ['sh', '-c', '$COMMAND'])",
+            "import os\nos.execl('/bin/sh', 'sh', '-c', '$COMMAND')",
+            "import os\nos.spawnv(0, '/bin/sh', ['sh', '-c', '$COMMAND'])",
+            "import os\nos.posix_spawn('/bin/sh', ['sh', '-c', '$COMMAND'], {})",
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'codex-fast-probe.py'
+            for source in sources:
+                with self.subTest(source=source):
+                    path.write_text(source + "\nraise RuntimeError('must not execute')\n")
+                    result = permissions.classify('python3 -B codex-fast-probe.py', folder)
+                    self.assertEqual(result['kind'], 'claude')
+                    self.assertIn('unresolved', result['reason'])
+                    self.assertIn(str(path), result['blocked_command'])
+
+    def test_literal_process_commands_keep_existing_routing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'literal.py'
+            for source, kind in [
+                    ("import subprocess\nsubprocess.run(['echo', 'ok'])", 'auto'),
+                    ("import subprocess\nsubprocess.run(['echo', 'ok; ps -A'])", 'auto'),
+                    ("import subprocess as sp\nsp.run(['codex', 'app-server'])", 'claude'),
+                    ("from subprocess import run\nrun(args=['ps', '-A'])", 'claude'),
+                    ("import os\nos.execv('/bin/echo', ['echo', 'ok'])", 'auto'),
+                    ("import os\nos.execv('/bin/ps', ['ps', '-A'])", 'claude'),
+                    ("import os\nos.execvp('codex', ['codex', 'app-server'])", 'claude')]:
+                with self.subTest(source=source):
+                    path.write_text(source)
+                    self.assertEqual(permissions.classify('python3 literal.py', folder)['kind'], kind)
+
+    def test_process_aliases_and_shell_wrappers_do_not_hide_launches(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'wrapper.py'
+            for source in [
+                    "import subprocess as sp\nlaunch = sp.Popen\nlaunch(command)",
+                    "from builtins import exec as execute\nexecute(source)",
+                    "import subprocess\nsubprocess.run(['sh', '-c', '$COMMAND'])",
+                    "import subprocess\nsubprocess.run(['ignored', '-c', '$COMMAND'], executable='/bin/bash')",
+                    "import subprocess\nsubprocess.run(['bash', '-c', 'ps -A'])",
+                    "import subprocess\nsubprocess.run(['bash', '-c', 'ps'])",
+                    "import subprocess\nsubprocess.run(['bash', '-c', 'exec ps -A'])",
+                    "import subprocess\nsubprocess.run(['bash', '--norc', '-c', '$COMMAND'])",
+                    "import subprocess\nsubprocess.run(['bash', '--noprofile', '--norc', '-c', 'ps -A'])",
+                    "import os\nos.system('echo ok; ps -A')",
+                    "import subprocess\nsubprocess.getoutput('echo ok; ps -A')",
+                    "import subprocess\nsubprocess.run('echo ok; ps -A', shell=True)",
+                    "import subprocess\nsubprocess.run(['echo ok; ps -A'], shell=True)",
+                    "import asyncio\nasyncio.create_subprocess_shell('echo ok; ps -A')",
+                    "import subprocess\nsubprocess.run(['bash', '-c', 'codex app-server'])"]:
+                with self.subTest(source=source):
+                    path.write_text(source)
+                    self.assertEqual(permissions.classify('python3 wrapper.py', folder)['kind'], 'claude')
+            path = Path(folder) / 'wrapper.sh'
+            for source in ['exec "$command"', '"$command"', 'eval "$command"', 'bash -c "$command"',
+                           'command "$COMMAND"', 'bash -lc "$COMMAND"', 'exec "$@"',
+                           'ps', 'exec ps -A', 'command ps', "'ps' -A"]:
+                with self.subTest(source=source):
+                    path.write_text(source)
+                    self.assertEqual(permissions.classify('bash wrapper.sh', folder)['kind'], 'claude')
+            for source in ["printf '%s' '$COMMAND'\necho 'ps -A'\n", "echo 'bash -c $COMMAND'",
+                           "grep 'bash -c $COMMAND' README.md", "printf '%s' 'example; ps -A'"]:
+                with self.subTest(source=source):
+                    path.write_text(source)
+                    self.assertEqual(permissions.classify('bash wrapper.sh', folder)['kind'], 'auto')
+
     def test_current_full_suite_reads_nested_processes(self):
         root = Path(__file__).resolve().parents[2]
         result = permissions.classify('bash tools/git-hooks/pre-push', root)
