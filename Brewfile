@@ -98,7 +98,6 @@ brew "ttyd"
 brew "universal-ctags"
 brew "vhs"
 brew "vim"
-brew "watchman"
 brew "yt-dlp"
 
 # ===========================================
