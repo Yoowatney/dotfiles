@@ -472,6 +472,11 @@ def read(path):
         raise ValueError("unsupported batch server socket")
     if canonical != m["server"]: raise ValueError("ambiguous batch server")
     return m
+def default(s): # how pane-tell names the default server: "" in its own panes, its path from a workers pane (default/<pane>)
+    return s == "" or s.endswith("/sessions/default/herdr.sock") or (s.endswith("/herdr.sock") and "/sessions/" not in s)
+def same(m): # one route even when its two senders spell the default socket differently (2026-11-16: refused check reports)
+    return (m["terminal"] == terminal and m["server"] == server and
+            (m["socket"] == socket or server == "default" and default(m["socket"]) and default(socket)))
 def write(path, m):
     tmp = path.with_name("." + path.name + ".new." + str(os.getpid()))
     with open(tmp, "x") as f:
@@ -484,7 +489,7 @@ if action == "init":
     path = d / "open/.meta"
     if path.exists():
         m = read(path)
-        if m["terminal"] != terminal or m["server"] != server or m["socket"] != socket:
+        if not same(m):
             raise ValueError("batch belongs to another server")
     else:
         now = int(time.time())
@@ -498,7 +503,7 @@ elif action == "claim":
         write(path, dict(version=1, terminal=terminal, server=server, socket=socket,
                         generation=uuid.uuid4().hex, opened=now, due=now))
     m = read(path)
-    if m["terminal"] != terminal or m["server"] != server or m["socket"] != socket:
+    if not same(m):
         raise ValueError("batch route changed")
     print(m["generation"])
 elif action == "handoff":
@@ -511,7 +516,7 @@ elif action == "ready":
     path = d / "claimed/.meta" if (d / "claimed").exists() else d / "open/.meta"
     if not path.exists(): sys.exit(1)
     m = read(path)
-    if m["terminal"] != terminal or m["server"] != server or m["socket"] != socket:
+    if not same(m):
         sys.exit(1)
     if token and token != "recovery" and m["generation"] != token: sys.exit(1)
     if token == "recovery" and path.parent.name == "open" and m["due"] > time.time(): sys.exit(1)

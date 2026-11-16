@@ -584,6 +584,21 @@ exec /bin/mv "$@"
         self.assertEqual(self.prompts(), [b"first"])
         self.assertTrue((self.batch / "open").is_dir())
 
+    def test_default_batch_takes_both_spellings_of_the_default_socket(self):
+        # A default pane has no socket in its env (""); a workers pane telling default/<pane> names the default server's path.
+        # Both are the default server: refusing the second dropped two check reports on 2026-11-16 (pane-tell exit 2).
+        default = "/private/fixture/herdr.sock"
+        for opener, joiner in (("", default), (default, "")):
+            with self.subTest(opener=opener):
+                result = self.call("fixture-open", "first", HERDR_SOCKET_PATH=opener)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                result = self.call("fixture-open", "second", HERDR_SOCKET_PATH=joiner)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("held up to", result.stdout)
+                result = self.call("--flush", str(self.batch), "term_M", PANE_TELL_BATCH="0", HERDR_SOCKET_PATH=opener)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.prompts(), [b"first\n\nsecond", b"first\n\nsecond"])
+
     def test_wrong_server_cannot_append_or_flush_recorded_batch(self):
         self.open()
         socket = "/private/fixture/sessions/workers/herdr.sock"
