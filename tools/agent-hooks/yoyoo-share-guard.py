@@ -162,7 +162,9 @@ CHECK_REPORT_REASON = ("yoyoo-share-guard: 확인 칸의 보고를 받은 뒤 �
 # for the check. It is the pane's claim alone: no `확인:` line may rest on it, and the combined report still comes after the check.
 PRECHECK_HEAD = "확인 전 보고입니다(확인 칸이 아직 확인하고 있으며, 끝나면 합친 보고가 따로 옵니다). "
 PRECHECK_NOTE = ("아래는 일 칸의 주장이며 아직 확인되지 않았습니다. 확인 칸이 이미 돌고 있으니 새 확인 칸을 열지 마세요. "
-                 "먼저 올릴 수 있는 답은 '확인 중:'으로 시작하고, 합친 보고가 오면 같은 글을 고치세요. 이 보고는 '확인:' 줄의 근거가 아닙니다")
+                 "#0에서 요유에게만 하는 답은 '확인 중:'으로 시작해 먼저 올리고, 합친 보고가 오면 같은 글을 고치세요. "
+                 "요유 이름의 초안(--yoyoo-draft), reply, 팀 전달, decide, 운영·돈·보안 글은 이 예외가 아니니 합친 보고를 기다리세요. "
+                 "이 보고는 '확인:' 줄의 근거가 아닙니다")
 PRECHECK_REASON = ("yoyoo-share-guard: 확인 전 보고를 받은 뒤 쓰는 보고인데, 아직 끝나지 않은 확인 칸을 '확인:' 줄의 근거로 적었습니다. "
                    "합친 보고가 오기 전에는 '확인:' 줄을 빼고, 먼저 올린 답은 '확인 중:'으로 두세요.")
 # 요유 2026-11-05: dispatch tabs run on the hidden workers server, and only what needs 요유 reaches the main pane. It is no claim of work
@@ -490,6 +492,16 @@ def chore(name: str, command: str) -> bool:
     return name in NOT_A_CHECK or all(CHORE_STEP.search(c.split("|")[0]) for c in commands)
 
 
+def relayed_kind(line: str) -> str | None:
+    """The relay head of one transcript line that asks most, or None. pane-tell's batch for the main pane holds several reports in
+    one prompt (api#1051). ponytail: one reason a turn, so a check report batched behind a work report gets no `확인:` demand of
+    its own."""
+    first = next(records([line]), None)
+    found = RELAYED.finditer(unicodedata.normalize("NFC", first[1])) if first and first[0] == "in" else ()
+    relayed = min(found, key=lambda m: RELAYED_ORDER.index(m[1] or m[2]), default=None)
+    return relayed and (relayed[1] or relayed[2])
+
+
 def relay_reason(payload: dict, text: str, env) -> str | None:
     """The rewrite for the first last report after a pane's report arrived, when it shows no check of its own, or None.
     A report answered in a turn that has ended is not asked again. A pane that hands checks out shows a check pane instead: it
@@ -502,17 +514,25 @@ def relay_reason(payload: dict, text: str, env) -> str | None:
             lines = f.read().splitlines()
     except OSError:
         return None
-    for start in reversed([i for i, line in enumerate(lines) if "보고입니다(" in line]):  # parse only from the newest one on
-        first = next(records(lines[start:start + 1]), None)
-        # pane-tell's batch for the main pane holds several reports in one prompt: the one that asks most decides (api#1051).
-        # ponytail: one reason a turn, so a check report batched behind a work report gets no `확인:` demand of its own
-        found = RELAYED.finditer(unicodedata.normalize("NFC", first[1])) if first and first[0] == "in" else ()
-        relayed = min(found, key=lambda m: RELAYED_ORDER.index(m[1] or m[2]), default=None)
-        if relayed:
+    heads = [i for i, line in enumerate(lines) if "보고입니다(" in line]
+    for n in reversed(range(len(heads))):  # parse only from the newest one on
+        start, kind = heads[n], relayed_kind(lines[heads[n]])
+        if kind:
             break
     else:
         return None
-    kind = relayed[1] or relayed[2]
+    if kind == "확인 전":
+        # PANE_TELL_BATCH=0 puts it into a running turn (queued_command) or the next prompt while an older relay may still wait
+        # for its last report: the one that asks most decides, as in one batch, so a combined report's `확인:` line still passes
+        # (#69 review). ponytail: a Stop hook's feedback counts as an answer, as below, so a rewrite after it is judged alone.
+        end = start
+        for j in reversed(heads[:n]):
+            if any(said_kind == "say" and LAST_REPORT.search(prose(said)) for said_kind, said, _, _ in records(lines[j:end])):
+                break
+            older = relayed_kind(lines[j])
+            if older and RELAYED_ORDER.index(older) < RELAYED_ORDER.index(kind):
+                start, kind = j, older
+            end = j
     after = list(records(lines[start + 1:]))
     reports = [i for i, (kind, said, _, _) in enumerate(after) if kind == "say" and LAST_REPORT.search(prose(said))]
     if reports and any(kind == "in" for kind, _, _, _ in after[reports[0] + 1:]):
