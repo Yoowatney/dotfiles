@@ -127,7 +127,12 @@ has '-c mcp_servers.slack.default_tools_approval_mode="approve"' "Slack's read t
 has '-c mcp_servers.munice.default_tools_approval_mode="approve"' "and munice's"
 hasnt 'notion-token.default_tools_approval_mode' "a server that is off gets no approval"
 hasnt 'mcp_servers."' "no quoted server name"
-has "slack_get_thread_replies" "the instruction names the Slack read tools"
+# The Slack MCP is gone (2026-11-17: deprecated, one server grew to 281.90GB); slack-read.py reads instead, with its state in
+# temp because a check pane cannot write ~/.local/state.
+has 'XDG_STATE_HOME=$TMPDIR python3 -I '"$SANDBOX"'/home/work/munice/.agents/skills/agent-board/watch/slack-read.py' "the instruction reads Slack through slack-read.py"
+has "thread <채널 ID> <스레드 ts>" "it names how to read a thread"
+has "user <사용자 ID>" "and how to look up a person"
+hasnt "slack MCP" "it no longer names the Slack MCP"
 hasnt "gh-read" "with the network on, gh reads GitHub itself"
 # Large config output must be read concurrently, including through the installed
 # launcher symlink and Apple's Bash 3.2. Percent signs remain prompt data.
