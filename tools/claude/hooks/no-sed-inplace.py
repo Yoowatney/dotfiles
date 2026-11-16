@@ -511,18 +511,32 @@ def quote_problem(cmd: str, cwd: str | None) -> str | None:
 # "invalid transport" (2026-11-17: `codex mcp remove slack` stopped two check panes). A stub that keeps the table is safe.
 # ponytail: Bash that names the file is read as a rewrite of every table, since the hook cannot tell what a script drops;
 # Codex's apply_patch is not seen, because a new matcher in ~/.codex/hooks.json waits for 요유's trust.
-MCP_TABLE = re.compile(r"^[ \t]*\[mcp_servers\.([A-Za-z0-9_-]+)\][ \t]*(?:#.*)?$", re.M)
-CONFIG_READS = {"grep", "rg", "ls", "wc", "stat", "test", "[", "diff", "cmp", "shasum", "file", "readlink", "realpath"}
+TABLE = re.compile(r"^[ \t]*\[([^\]\n]+)\][ \t]*(?:#.*)?$", re.M)
+# Reads print nothing here; secret-print-guard decides whether cat or head may show the file.
+CONFIG_READS = {"grep", "rg", "ls", "wc", "stat", "test", "[", "diff", "cmp", "shasum", "file", "readlink", "realpath",
+                "cat", "head", "tail"}
 
 
 def _codex_config() -> str:
     return os.path.join(os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex"), "config.toml")
 
 
+def _servers(text: str) -> set[str]:
+    """Server tables that still have a transport: a command or url key before the next table header."""
+    heads = list(TABLE.finditer(text))
+    found = set()
+    for k, head in enumerate(heads):
+        server = re.fullmatch(r"mcp_servers\.([A-Za-z0-9_-]+)", head[1].strip())
+        body = text[head.end():heads[k + 1].start() if k + 1 < len(heads) else len(text)]
+        if server and re.search(r"^[ \t]*(?:command|url)[ \t]*=", body, re.M):
+            found.add(server[1])
+    return found
+
+
 def _config_tables() -> set[str]:
     try:
         with open(_codex_config(), encoding="utf-8") as f:
-            return set(MCP_TABLE.findall(f.read()))
+            return _servers(f.read())
     except OSError:
         return set()
 
@@ -539,7 +553,7 @@ def _codex_carrying(servers) -> dict[str, int]:
 
 
 def _dropped_tables(tool: str, inp: dict) -> set[str]:
-    """Server tables an Edit, MultiEdit or Write of Codex's config.toml would take out."""
+    """Servers an Edit, MultiEdit or Write of Codex's config.toml would take out, or leave without a command or url."""
     target = str(inp.get("file_path") or "")
     if not target or os.path.realpath(os.path.expanduser(target)) != os.path.realpath(_codex_config()):
         return set()
@@ -556,7 +570,7 @@ def _dropped_tables(tool: str, inp: dict) -> set[str]:
             old, new = str(e.get("old_string") or ""), str(e.get("new_string") or "")
             if old:
                 after = after.replace(old, new) if e.get("replace_all") else after.replace(old, new, 1)
-    return set(MCP_TABLE.findall(before)) - set(MCP_TABLE.findall(after))
+    return _servers(before) - _servers(after)
 
 
 def _bash_drops_tables(cmd: str) -> set[str]:
@@ -580,7 +594,7 @@ def _bash_drops_tables(cmd: str) -> set[str]:
     if named:
         reads = [w for w in simple_commands(cmd) if name(w[0]) in CONFIG_READS and any(re.search(path, t) for t in w)]
         read = sum(len(re.findall(path, t)) for w in reads for t in w)
-        if read < named or re.search(r">\|?\s*['\"]?" + path, text):  # a heredoc script, cp, mv, tee or a redirect
+        if read < named or re.search(r">\|?\s*['\"]?[^\s;&|<>'\"]*" + path, text):  # a heredoc script, cp, mv, tee or a redirect
             servers |= _config_tables()
     return servers
 

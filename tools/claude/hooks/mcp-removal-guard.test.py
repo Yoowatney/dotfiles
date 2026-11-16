@@ -56,6 +56,9 @@ class McpRemovalGuardTests(unittest.TestCase):
         self.assert_refused(self.run_hook('MultiEdit', file_path=str(self.config), edits=[
             {'old_string': '[mcp_servers.slack]\ncommand = "npx"\n', 'new_string': ''}]))
 
+    def test_refuses_an_edit_that_leaves_the_table_without_command_or_url(self):
+        self.assert_refused(self.run_hook('Edit', file_path=str(self.config), old_string='command = "npx"\n', new_string=''))
+
     def test_refuses_a_write_without_the_table(self):
         self.assert_refused(self.run_hook('Write', file_path=str(self.config),
                                           content='[mcp_servers.munice]\nurl = "https://x"\n'))
@@ -76,6 +79,8 @@ class McpRemovalGuardTests(unittest.TestCase):
 
     def test_allows_reads_other_files_and_a_stub_that_keeps_the_table(self):
         self.assertIsNone(self.run_hook('Bash', command=f'grep -c slack {self.config}'))
+        self.assertIsNone(self.run_hook('Bash', command='cat ~/.codex/config.toml'))  # secret-print-guard owns reads
+        self.assertIsNone(self.run_hook('Bash', command=f'head -5 {self.config}'))
         self.assertIsNone(self.run_hook('Bash', command="git commit -m 'guard: refuse ~/.codex/config.toml table removal'"))
         self.assertIsNone(self.run_hook('Bash', command=(
             'git commit -m "$(cat <<\'EOF\'\nEdits of ~/.codex/config.toml are checked.\nEOF\n)"')))
