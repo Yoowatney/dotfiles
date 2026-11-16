@@ -22,6 +22,8 @@ spellings from the front and Codex does not read it: a session whose `rm -rf` wa
 30 days to 2026-11-05 Claude sessions sent `git push -q --force-with-lease`, `git reset -q --hard` and `git clean -n -fd` past
 it. So options are read in any order, in clusters and as the abbreviations git accepts (`reset --har` ran).
 `git rebase -i` stays on the list only: it waits on an editor and loses nothing.
+Taking a `[mcp_servers.<name>]` table out of Codex's config.toml is refused while a Codex process carries
+`mcp_servers.<name>` (`codex mcp remove`, Bash that names the file, Claude Edit/Write): see mcp_removal_problem.
 Scripts a command runs and `trap` cleanups are not seen, so hooks and jobs that clean up after themselves keep working.
 ponytail: `$(rm -r x)`, a heredoc fed to bash, `case` arms, function bodies, `find -exec sudo rm`, `find -delete`, `ssh host rm`,
 git aliases and `-c clean.requireForce=false` get past it. Add one when a session reaches for it;
@@ -504,6 +506,117 @@ def quote_problem(cmd: str, cwd: str | None) -> str | None:
     return "quote-guard: " + why if why else None
 
 
+# Removing an MCP server table from Codex's config.toml stops every Codex session started with a -c mcp_servers.<name>...
+# flag (pane-spawn gives one per configured server): its next config reload makes a server with no command and fails with
+# "invalid transport" (2026-11-17: `codex mcp remove slack` stopped two check panes). A stub that keeps the table is safe.
+# ponytail: Bash that names the file is read as a rewrite of every table, since the hook cannot tell what a script drops;
+# Codex's apply_patch is not seen, because a new matcher in ~/.codex/hooks.json waits for 요유's trust.
+TABLE = re.compile(r"^[ \t]*\[([^\]\n]+)\][ \t]*(?:#.*)?$", re.M)
+# Reads print nothing here; secret-print-guard decides whether cat or head may show the file.
+CONFIG_READS = {"grep", "rg", "ls", "wc", "stat", "test", "[", "diff", "cmp", "shasum", "file", "readlink", "realpath",
+                "cat", "head", "tail"}
+
+
+def _codex_config() -> str:
+    return os.path.join(os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex"), "config.toml")
+
+
+def _servers(text: str) -> set[str]:
+    """Server tables that still have a transport: a command or url key before the next table header."""
+    heads = list(TABLE.finditer(text))
+    found = set()
+    for k, head in enumerate(heads):
+        server = re.fullmatch(r"mcp_servers\.([A-Za-z0-9_-]+)", head[1].strip())
+        body = text[head.end():heads[k + 1].start() if k + 1 < len(heads) else len(text)]
+        if server and re.search(r"^[ \t]*(?:command|url)[ \t]*=", body, re.M):
+            found.add(server[1])
+    return found
+
+
+def _config_tables() -> set[str]:
+    try:
+        with open(_codex_config(), encoding="utf-8") as f:
+            return _servers(f.read())
+    except OSError:
+        return set()
+
+
+def _codex_carrying(servers) -> dict[str, int]:
+    """How many running Codex processes carry a mcp_servers.<server> argument, per server that has any."""
+    try:
+        out = subprocess.run(["ps", "-axo", "args="], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}  # ponytail: no ps, no refusal
+    codex = [line for line in out.splitlines() if line.split() and name(line.split()[0]) == "codex"]
+    found = {s: sum(1 for line in codex if re.search(r"mcp_servers\." + re.escape(s) + r"[.=]", line)) for s in servers}
+    return {s: n for s, n in sorted(found.items()) if n}
+
+
+def _dropped_tables(tool: str, inp: dict) -> set[str]:
+    """Servers an Edit, MultiEdit or Write of Codex's config.toml would take out, or leave without a command or url."""
+    target = str(inp.get("file_path") or "")
+    if not target or os.path.realpath(os.path.expanduser(target)) != os.path.realpath(_codex_config()):
+        return set()
+    try:
+        with open(_codex_config(), encoding="utf-8") as f:
+            before = f.read()
+    except OSError:
+        return set()
+    after = before
+    if tool == "Write":
+        after = str(inp.get("content") or "")
+    else:
+        for e in inp.get("edits") or [inp]:
+            old, new = str(e.get("old_string") or ""), str(e.get("new_string") or "")
+            if old:
+                after = after.replace(old, new) if e.get("replace_all") else after.replace(old, new, 1)
+    return _servers(before) - _servers(after)
+
+
+def _bash_drops_tables(cmd: str) -> set[str]:
+    """Servers a Bash command may take out of config.toml: one named by codex mcp remove, or every table when the
+    command names the file anywhere but in a read-only command."""
+    servers = set()
+    for w in simple_commands(cmd):
+        if name(w[0]) == "codex" and "mcp" in w:
+            rest = w[w.index("mcp") + 1:]
+            if rest[:1] == ["remove"]:
+                servers.update(a for a in rest[1:2] if not a.startswith("-"))
+    home = re.escape(os.path.dirname(_codex_config()))
+    path = r"(?:\.codex|\$\{?CODEX_HOME\}?|" + home + r")/config\.toml\b"
+    # Without an interpreter, a heredoc or a quoted string with spaces is text (a commit message, a PR body);
+    # a quoted path keeps no space, so "$HOME/.codex/config.toml" still counts.
+    runs = any(name(w[0]).startswith(("python", "perl", "ruby", "node", "uv")) or name(w[0]) in SHELLS
+               for w in simple_commands(cmd))
+    text = cmd if runs else QUOTED.sub(lambda m: "''" if re.search(r"\s", m[0]) else m[0],
+                                       _guard.HEREDOC.sub("<<heredoc", cmd))
+    named = len(re.findall(path, text))
+    if named:
+        reads = [w for w in simple_commands(cmd) if name(w[0]) in CONFIG_READS and any(re.search(path, t) for t in w)]
+        read = sum(len(re.findall(path, t)) for w in reads for t in w)
+        if read < named or re.search(r">\|?\s*['\"]?[^\s;&|<>'\"]*" + path, text):  # a heredoc script, cp, mv, tee or a redirect
+            servers |= _config_tables()
+    return servers
+
+
+def mcp_removal_problem(payload: dict) -> str | None:
+    tool, inp = payload.get("tool_name"), payload.get("tool_input") or {}
+    if tool == "Bash":
+        servers = _bash_drops_tables(str(inp.get("command") or ""))
+    elif tool in ("Edit", "MultiEdit", "Write"):
+        servers = _dropped_tables(tool, inp)
+    else:
+        return None
+    carried = _codex_carrying(servers) if servers else {}
+    if not carried:
+        return None
+    counts = ", ".join(f"{s} {n}개" for s, n in carried.items())
+    return ("codex-mcp-remove: 이 서버를 mcp_servers 인자로 쓰는 Codex 프로세스가 돌고 있음(" + counts + "). "
+            "지금 ~/.codex/config.toml에서 그 표를 지우면 그 세션이 설정을 다시 읽을 때 invalid transport 오류로 멈춤"
+            "(2026-11-17). 그 세션이 끝난 뒤 다시 할 것. 남은 수는 `ps -axo args= | grep -c 'mcp_servers.<이름>'`로 확인. "
+            "Bash는 어느 표를 지우는지 알 수 없어 파일 이름만 보고 막음. 다른 설정만 고치면 Edit으로 할 것")
+
+
 def selftest():
     deny = [
         "sed -i '' 's/a/b/' file.txt",
@@ -928,7 +1041,7 @@ if __name__ == "__main__":
     cmd = (payload.get("tool_input") or {}).get("command") or ""
     reason = (bash_problem(cmd) or switch_problem(cmd, payload.get("cwd")) or worker_claude_problem(cmd)
               or quote_problem(cmd, payload.get("cwd"))
-              if payload.get("tool_name") == "Bash" else None)
+              if payload.get("tool_name") == "Bash" else None) or mcp_removal_problem(payload)
     if reason:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
