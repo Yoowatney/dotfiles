@@ -45,6 +45,8 @@ class RelayTests(unittest.TestCase):
         self.wake_queries = []
         self.spawn_error = None
         self.tell_exit = 0
+        self.tell_out, self.on_tell = "told default/w5:p3 (👑 test receiver)\n", None
+        self.tell_envs, self.finalizers = [], []
         self.precheck_exit = 0
         self.env = dict(HOME=str(self.root), XDG_STATE_HOME=str(self.root / "state"),
                         HERDR_PANE_ID="w1:p2", HERDR_SOCKET_PATH="/sessions/workers/herdr.sock",
@@ -120,13 +122,19 @@ class RelayTests(unittest.TestCase):
             self.checkers.append(self.checker)
             self.names[f"w1:p{number}"] = f"spawn-M-chk{number}"
             return subprocess.CompletedProcess(args, 0, f"workers/w1:p{number}\n", "")
+        if "--redeliver-check" in args:
+            self.finalizers.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 0, "", "")
         if args[0].endswith("pane-tell"):
             # The pre-check report has its own contract below; every other count here pins the routes it leaves unchanged.
             if args[2].startswith("확인 전 보고입니다("):
                 self.prechecks.append((args[1], args[2], kwargs["env"].get("PANE_TELL_BATCH")))
                 return subprocess.CompletedProcess(args, self.precheck_exit)
             self.tells.append((args[1], args[2]))
-            return subprocess.CompletedProcess(args, self.tell_exit)
+            self.tell_envs.append(kwargs["env"])
+            if self.on_tell:
+                self.on_tell(args[2])
+            return subprocess.CompletedProcess(args, self.tell_exit, self.tell_out, "")
         if args[0].endswith("pane-label"):
             self.closed.append(kwargs["env"]["HERDR_PANE_ID"])
             return subprocess.CompletedProcess(args, 0)
@@ -428,6 +436,107 @@ class RelayTests(unittest.TestCase):
                        completed.replace("확인 완료·실행 중 작업 없음", "열어 둠")):
             with self.subTest(report=report):
                 self.assertFalse(auto.check_finished(report))
+
+    CLOSED = ("초안을 원문과 대조해 통과를 확인했습니다.\nTASK_CHECK: pass\n"
+              "남은 것: 요유 몫: 초안을 읽고 보낼지 정하기 · 유요 몫: 리드가 초안 올리기 · 세션: 닫음")
+
+    def lost_combined_report(self):
+        """A finished check whose combined report pane-tell refused (2026-11-16): archived, failed, no receipt."""
+        self.finish()
+        self.tell_exit = 1
+        self.finish(self.CLOSED, check=True)
+        self.tell_exit = 0
+        context_path = next((self.state / "automatic-checks").glob("*.json"))
+        self.assertFalse(json.loads(context_path.read_text()).get("check_delivered"))
+        return context_path
+
+    def test_redeliver_check_rebuilds_the_lost_combined_report_once(self):
+        context_path = self.lost_combined_report()
+        lost = self.tells[-1]
+        self.assertEqual(auto.redeliver_check("ac-" + context_path.stem, self.env), 0)
+        self.assertEqual(self.tells[-1], lost, "the same combined report, rebuilt from the checker's archived report")
+        self.assertIs(json.loads(context_path.read_text()).get("check_delivered"), True)
+        self.assertEqual(auto.redeliver_check(context_path.stem, self.env), 0)
+        self.assertEqual(len(self.tells), 2, "a delivered check is not sent again")
+
+    def queue_in_main(self):
+        tell_state = self.root / "state/pane-tell"
+        (tell_state / "waiting").mkdir(parents=True, exist_ok=True)
+        self.tell_out = "queued for default/w5:p3 (👑 test receiver): its input box is not empty, so this goes in once it is\n"
+        self.on_tell = lambda message: (tell_state / "waiting/1.q").write_text("[pane-tell: x] " + message)
+        return tell_state
+
+    def test_queued_final_check_gets_its_receipt_only_once_typed_in(self):
+        # Codex review: pane-tell exits 0 for a queued message too, before the main pane has it in front of it.
+        self.finish()
+        tell_state = self.queue_in_main()
+        self.finish(self.CLOSED, check=True)
+        context_path = next((self.state / "automatic-checks").glob("*.json"))
+        self.assertFalse(json.loads(context_path.read_text()).get("check_delivered"), "queued is not delivered")
+        self.assertEqual(self.tell_envs[-1].get("PANE_TELL_BATCH"), "0", "the final report is not held in a batch")
+        self.assertEqual(Path(str(context_path) + ".redeliver").read_text(), "1.q")
+        args, kwargs = self.finalizers[0]
+        self.assertEqual(args[-2:], ["--redeliver-check", "ac-" + context_path.stem])
+        self.assertTrue(kwargs.get("start_new_session"))
+        self.assertEqual(list((self.root / "reports").parent.glob("state/pane-tell/failed-reports/*")), [],
+                         "a queued report is not a lost one")
+        self.finish(self.CLOSED, check=True)
+        self.assertEqual(len(self.tells), 1, "a replayed Stop does not queue a second copy")
+        # A permission-retried check waits on its queued copy the same way.
+        context = json.loads(context_path.read_text())
+        context["permission_retry"] = {"checker_address": "workers/w1:p10"}
+        context_path.write_text(json.dumps(context))
+        (tell_state / "log").write_text("2026-11-16 21:23:33 delivered 1.q to w5:p3\n")
+        self.assertEqual(auto.redeliver_check(context_path.stem, self.env), 0)
+        self.assertEqual(len(self.tells), 1, "the finalizer waits on the queued copy and sends nothing")
+        self.assertIs(json.loads(context_path.read_text()).get("check_delivered"), True)
+        self.assertFalse(Path(str(context_path) + ".redeliver").exists())
+
+    def test_redeliver_check_runs_from_the_main_pane(self):
+        context_path = self.lost_combined_report()
+        self.assertEqual(auto.redeliver_check(context_path.stem, {**self.env, "HERDR_PANE_ID": self.main["pane_id"]}), 0)
+        self.assertNotIn("HERDR_PANE_ID", self.tell_envs[-1], "pane-tell refuses a sender that is its own receiver")
+        self.assertIs(json.loads(context_path.read_text()).get("check_delivered"), True)
+
+    def test_redeliver_check_marks_a_queued_copy_only_once_it_is_typed_in(self):
+        context_path = self.lost_combined_report()
+        tell_state = self.queue_in_main()
+        with patch.object(auto, "REDELIVER_WAIT", 0):
+            self.assertEqual(auto.redeliver_check(context_path.stem, self.env), 1)
+        self.assertFalse(json.loads(context_path.read_text()).get("check_delivered"), "queued is not delivered")
+        (tell_state / "log").write_text("2026-11-16 21:23:33 delivered 1.q to w5:p3\n")
+        self.assertEqual(auto.redeliver_check(context_path.stem, self.env), 0)
+        self.assertEqual(len(self.tells), 2, "the rerun waits on the queued copy instead of sending another")
+        self.assertIs(json.loads(context_path.read_text()).get("check_delivered"), True)
+
+    def test_redeliver_check_never_sends_an_interim_or_unknown_check(self):
+        self.finish()
+        self.tell_exit = 1
+        self.finish("질문: 어느 스레드에 올릴까요?\nTASK_CHECK: pass\n남은 것: 요유 몫: 답하기 · 세션: 닫음", check=True)
+        self.tell_exit = 0
+        sent = len(self.tells)
+        context_path = next((self.state / "automatic-checks").glob("*.json"))
+        self.assertEqual(auto.redeliver_check(context_path.stem, self.env), 1)
+        self.assertEqual(auto.redeliver_check("0" * 16, self.env), 1)
+        self.assertEqual(auto.redeliver_check("not-a-token", self.env), 2)
+        self.assertEqual(len(self.tells), sent)
+        self.assertFalse(json.loads(context_path.read_text()).get("check_delivered"))
+
+    def test_closed_check_with_a_yoyoo_decision_is_the_final_report(self):
+        # A draft in 요유's name always ends with 요유 몫 (whether to send it). A closed check with one TASK_CHECK marker is
+        # the final report and gives the receipt; a question is still interim even when closed (lead, 2026-11-16).
+        self.finish()
+        self.finish("질문: 초안을 어느 스레드에 올릴까요?\nTASK_CHECK: pass\n"
+                    "남은 것: 요유 몫: 질문에 답하기 · 유요 몫: 없음 · 세션: 닫음", check=True)
+        context = json.loads(next((self.state / "automatic-checks").glob("*.json")).read_text())
+        self.assertFalse(context.get("check_delivered"))
+        self.assertIn("질문·대기 보고", self.tells[-1][1])
+        self.finish("초안을 원문과 대조해 통과를 확인했습니다.\nTASK_CHECK: pass\n"
+                    "남은 것: 요유 몫: 초안을 읽고 구디님께 보낼지 정하기 · 유요 몫: 리드가 초안 올리기 · 세션: 닫음", check=True)
+        context = json.loads(next((self.state / "automatic-checks").glob("*.json")).read_text())
+        self.assertIs(context.get("check_delivered"), True)
+        self.assertIn("확인 칸의 마지막 보고", self.tells[-1][1])
+        self.assertIn("요유 몫: 초안을 읽고 구디님께 보낼지 정하기", self.tells[-1][1])
 
     def test_completion_alias_still_relays_questions_and_user_decisions_as_interim(self):
         self.finish()

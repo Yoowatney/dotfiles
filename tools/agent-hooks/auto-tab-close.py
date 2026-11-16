@@ -638,6 +638,30 @@ def permission_retry(context, context_path, reply, me, lead, to, path, entry, en
     return ("waiting" if address else "failed"), retry
 
 
+def read_text(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except (OSError, UnicodeError):
+        return ""
+
+
+def queued_payload(env, message: str) -> str:
+    """The id of the pane-tell waiting payload that holds this message, or ""."""
+    folder = os.path.join(os.path.dirname(herdr_peers.state_dir(env)), "pane-tell", "waiting")
+    return next((os.path.basename(p) for p in glob.glob(os.path.join(folder, "*")) if message in read_text(p)), "")
+
+
+def check_interim(reply: str) -> bool:
+    """A check pane's report that is not its last word: unfinished, a question, or 요유's work in a pane it keeps open. A closed
+    check with one marker has nothing left to wait for: 요유's decision rides on its 남은 것 line, and a draft in 요유's name
+    always ends with one, whether to send it (lead, 2026-11-16)."""
+    closed = (len(re.findall(r"^TASK_CHECK:[ \t]*(?:pass|fail|unknown)[ \t]*$", plain(reply), re.M)) == 1
+              and session_value(reply).startswith("닫음"))
+    return (not check_finished(reply) or bool(question_request(reply))
+            or (share.leaves_yoyoo_work(plain(reply)) and not closed))
+
+
 def route_main_report(reply, me, name, lead, to, path, now, env, send, send_immediate=None):
     """None: ordinary relay. True: delivered or handed to a check. False: delivery failed; keep it for the watch."""
     if not herdr_peers.delegates_checks(env, to.get("terminal_id")) or herdr_peers.home_pane(name):
@@ -659,7 +683,9 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
             for field in check_permissions.FIELDS:
                 context.pop(field, None)
             context.update(check_permissions.blockage(reply))
-            interim = not check_finished(reply) or share.leaves_yoyoo_work(plain(reply)) or question_request(reply)
+            interim = check_interim(reply)
+            if not interim and os.path.exists(context_path + ".redeliver"):
+                return True  # its queued copy is on record; --redeliver-check grants the receipt once that is typed in
             fingerprint = hashlib.sha256(reply.encode()).hexdigest()
             if interim and fingerprint in context.get("interim_delivered", []):
                 return True
@@ -691,10 +717,23 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
                 message += "\n" + original + f"Combined TASK_CHECK: {combined}\n"
                 if retry_status == "failed":
                     message += f"Claude permission retry could not start: {retry['spawn_error']}"
-            sent = send(message)
+            # The final report goes now, not in a batch: its receipt waits for the main pane to have it.
+            sent = (send if interim else send_immediate or send)(message)
             if sent:
                 if interim:
                     context.setdefault("interim_delivered", []).append(fingerprint)
+                elif sent == "queued":
+                    # Queued is not typed in (Codex review): the receipt waits for pane-tell's worker. A background
+                    # --redeliver-check waits on this same copy and never sends another. ponytail: no payload found (it went
+                    # in at once) leaves the receipt to a manual --redeliver-check, which then sends it once more.
+                    queued = queued_payload(env, message)
+                    if queued:
+                        with open(context_path + ".redeliver", "w", encoding="utf-8") as f:
+                            f.write(queued)
+                        subprocess.Popen([sys.executable, os.path.realpath(__file__), "--redeliver-check",
+                                          "ac-" + os.path.basename(context_path).removesuffix(".json")],
+                                         env=env, start_new_session=True, stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 else:
                     context["check_delivered"] = True
                 write_context(context_path, context)
@@ -790,6 +829,128 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
         return sent
 
 
+REDELIVER_WAIT = 600  # seconds a redelivery waits for a queued copy to go in; a rerun waits again on the same copy
+REPORT_HEAD = re.compile(r"^## (\d{2}:\d{2}:\d{2}) (\S+) ([^\n]*)\n\n세션 ([^\n]*)\n\n", re.M)
+
+
+def await_queued(env, queued: str, wait: float) -> str:
+    """delivered, undelivered or waiting: what pane-tell's own log says of a queued message. Delivered means its queue worker
+    typed it in, not that the queue took it."""
+    log, end = os.path.join(os.path.dirname(herdr_peers.state_dir(env)), "pane-tell", "log"), time.time() + wait
+    while True:
+        text = read_text(log)
+        for outcome in ("delivered", "undelivered"):
+            if re.search(rf"^\S+ \S+ {outcome} {re.escape(queued)} ", text, re.M):
+                return outcome
+        if time.time() > end:
+            return "waiting"
+        time.sleep(2)
+
+
+def redeliver_check(token: str, env) -> int:
+    """Finish the delivery of a finished automatic check's combined report. With a queued copy on record (its receipt), wait
+    for pane-tell to type that copy in; else rebuild the lost report (a failed-reports file, no check_delivered) through
+    route_main_report from the checker's own last report in the day files, exactly as its Stop would have. check_delivered is
+    written only once the main pane has it: a refused relay leaves it unset, so main-channel.py's api#1218 receipt still
+    needs a delivered, archived check."""
+    token = token.removeprefix("ac-")
+    if not re.fullmatch(r"[0-9a-f]{16}", token):
+        print("usage: auto-tab-close.py --redeliver-check ac-<16 hex digits>", file=sys.stderr)
+        return 2
+    context_path = os.path.join(herdr_peers.state_dir(env), "automatic-checks", token + ".json")
+    receipt = context_path + ".redeliver"
+    try:
+        with open(context_path, encoding="utf-8") as f:
+            context = json.load(f)
+    except (OSError, ValueError) as error:
+        print(f"ac-{token}: no automatic check record ({error}); not sent", file=sys.stderr)
+        return 1
+    if context.get("check_delivered"):
+        print(f"ac-{token}: already delivered; nothing sent")
+        return 0
+    if not read_text(receipt).strip():
+        sent = rebuild_check(token, context, context_path, env)
+        if sent is not True:
+            return sent
+        with open(context_path, encoding="utf-8") as f:
+            if json.load(f).get("check_delivered") is True:
+                print(f"ac-{token}: delivered to the main pane")
+                return 0
+        if not read_text(receipt).strip():
+            print(f"ac-{token}: queued, but its copy was not found to wait on; check_delivered not set", file=sys.stderr)
+            return 1
+    queued = read_text(receipt).strip()
+    outcome = await_queued(env, queued, REDELIVER_WAIT)  # without the lock: a replayed Stop must not wait on it
+    if outcome == "waiting":
+        print(f"ac-{token}: queued copy {queued} not typed in yet; run again to keep waiting", file=sys.stderr)
+        return 1
+    with open(context_path + ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with open(context_path, encoding="utf-8") as f:
+            context = json.load(f)
+        if outcome == "delivered":
+            context["check_delivered"] = True
+            write_context(context_path, context)
+        try:
+            os.unlink(receipt)  # undelivered: the next run rebuilds and sends it again
+        except FileNotFoundError:
+            pass
+    print(f"ac-{token}: queued copy {queued} {outcome}" + ("" if outcome == "delivered" else "; run again to resend"))
+    return 0 if outcome == "delivered" else 1
+
+
+def rebuild_check(token, context, context_path, env):
+    """True once route_main_report sent the rebuilt report (typed in, or queued with its receipt); else the exit code."""
+    # ponytail: a permission-retried check has two checkers to choose from; add it when one of those loses its report
+    if context.get("permission_retry") or not context.get("checker_address") or not context.get("report"):
+        print(f"ac-{token}: no single checker recorded; not sent", file=sys.stderr)
+        return 2
+    folder, first = os.path.split(context["report"])
+    found = None
+    for day in sorted(glob.glob(os.path.join(folder, "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md"))):
+        if os.path.basename(day) < first:
+            continue
+        text = read_text(day)
+        heads = list(REPORT_HEAD.finditer(text))
+        for i, head in enumerate(heads):
+            # The address main-channel.py's receipt check also reads the checker's report under.
+            if head[2] == context["checker_address"] and f"[ac-{token}]" in head[3]:
+                found = (day, head, text[head.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip())
+    if not found:
+        print(f"ac-{token}: no archived report from {context['checker_address']}; not sent", file=sys.stderr)
+        return 1
+    day, head, reply = found
+    name = (re.search(r", 에이전트 (\S+)$", head[4]) or [None, ""])[1]
+    if not share.CHECK_AGENT.match(name) or check_interim(reply):
+        print(f"ac-{token}: the checker's last report ({head[1]}) is not a finished check; not sent", file=sys.stderr)
+        return 1
+    lead, to = main_pane(env)
+    if not lead:
+        print(f"ac-{token}: main pane not found; not sent", file=sys.stderr)
+        return 1
+    me = dict(terminal_id=context.get("checker_terminal"), label=head[3], pane_id=head[2].rsplit("/", 1)[-1])
+    now = datetime.datetime.strptime(f"{os.path.basename(day)[:10]} {head[1]}", "%Y-%m-%d %H:%M:%S")
+    # Run from the main pane too: pane-tell refuses a sender that is its own receiver (Codex review).
+    sender = {k: v for k, v in env.items() if k != "HERDR_PANE_ID"}
+
+    def send(message):
+        pt = env.get("AUTO_TAB_CLOSE_PANE_TELL") or os.path.join(HERE, "pane-tell")
+        try:  # now, not batched: this report is already late
+            r = subprocess.run([pt, lead, message], env={**sender, "PANE_TELL_BATCH": "0"}, timeout=60,
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            print(f"ac-{token}: pane-tell: {error}", file=sys.stderr)
+            return False
+        print(f"ac-{token}: pane-tell: {(r.stdout + r.stderr).strip()}")
+        if r.returncode != 0:
+            return False
+        return "queued" if r.stdout.startswith("queued ") else bool(re.search(r"^told ", r.stdout, re.M))
+
+    if not route_main_report(reply, me, name, lead, to, day, now, env, send, send):
+        print(f"ac-{token}: NOT delivered to {lead} from {head[1]} 항목", file=sys.stderr)
+        return 1
+    return True
+
 MOVE_HOLD = 2 * 3600  # a move's wait for its notes is 15 minutes; a mark this old was left by one that died
 
 
@@ -843,9 +1004,12 @@ def finish(reply: str, env):
         def send(message, immediate=False):
             try:
                 relay_env = {**env, **({"PANE_TELL_BATCH": "0"} if immediate else {})}
-                return subprocess.run([pt, lead, message], env=relay_env, timeout=10, **quiet).returncode == 0
+                r = subprocess.run([pt, lead, message], env=relay_env, timeout=10, stdin=subprocess.DEVNULL,
+                                   capture_output=True, text=True)
             except (OSError, subprocess.TimeoutExpired):
                 return False
+            # Queued (truthy too) is not yet in front of the receiver; a receipt granted on delivery tells them apart.
+            return r.returncode == 0 and ("queued" if (r.stdout or "").startswith("queued ") else True)
         if not needs_yoyoo:
             try:
                 routed = route_main_report(reply, me, name, lead, to, path, now, env, send,
@@ -1919,6 +2083,8 @@ if __name__ == "__main__":
     if "--after-turn" in sys.argv:
         after_turn(sys.argv[2], os.environ)
         sys.exit()
+    if "--redeliver-check" in sys.argv[1:2]:
+        sys.exit(redeliver_check(sys.argv[2] if len(sys.argv) > 2 else "", os.environ))
     try:
         payload = json.load(sys.stdin)
         sync_mark(payload, os.environ)  # first: a stale 🔴 would also keep a finished job pane from closing
