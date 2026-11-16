@@ -1,6 +1,7 @@
 """Require a current human request for clipboard writes in either runtime.
 
 This is a tool-input guard, not a sandbox: arbitrary scripts can hide a write.
+Only a narrowly parsed secret-source-to-pbcopy pipeline needs no request.
 No environment flag or assistant-supplied reason grants permission.
 """
 import importlib.util
@@ -11,6 +12,56 @@ import shlex
 DENY = ('Clipboard write refused: the current human turn did not explicitly request it. '
         'Deliver the draft in the requested conversation thread. '
         'Do not ask for clipboard permission merely to work around this refusal.')
+
+
+def direct_secret_copy(command):
+    """Only a complete, nonprinting pipeline; no wrappers, expansion or redirection.
+
+    Unknown options fail closed, especially logging, formatting and -g (which
+    prints Keychain metadata/password on stderr). This grants no account access.
+    """
+    if re.search(r'[$`\\\n\r<>;&(){}#*?\[\]~]', command) or command.count('|') != 1:
+        return False
+    try:
+        # Split before quote removal: a quoted pipe is an argument, never a
+        # clipboard sink. Parsing either side then fails on that open quote.
+        source, sink = (shlex.split(part) for part in command.split('|'))
+    except ValueError:
+        return False
+    if sink not in (['pbcopy'], ['/usr/bin/pbcopy']):
+        return False
+    if source[:4] == ['gcloud', 'secrets', 'versions', 'access']:
+        args = source[4:]
+        if not args or not re.fullmatch(r'latest|[0-9]+', args.pop(0)):
+            return False
+        options = {'--secret', '--project', '--location', '--account', '--impersonate-service-account'}
+        found_secret = False
+        while args:
+            flag, equals, value = args.pop(0).partition('=')
+            if flag == '--quiet' and not equals:
+                continue
+            if flag not in options:
+                return False
+            if not equals:
+                value = args.pop(0) if args else ''
+            if value.startswith('-') or not re.fullmatch(r'[A-Za-z0-9_@./:+-]+', value):
+                return False
+            found_secret |= flag == '--secret'
+        return found_secret
+    if source[:2] in (['security', 'find-generic-password'], ['/usr/bin/security', 'find-generic-password']):
+        args, password_only = source[2:], False
+        while args:
+            flag = args.pop(0)
+            if flag == '-w':
+                password_only = True
+            elif flag in ('-a', '-s', '-l', '-D', '-c', '-t'):
+                value = args.pop(0) if args else ''
+                if value.startswith('-') or not re.fullmatch(r'[A-Za-z0-9_@./: +\-]+', value):
+                    return False
+            else:
+                return False
+        return password_only
+    return False
 
 
 
@@ -134,6 +185,8 @@ def reason(payload):
         return None
     command = inp.get('command') or inp.get('cmd') or ''
     if not isinstance(command, str) or not writes_clipboard(command):
+        return None
+    if direct_secret_copy(command):
         return None
     try:
         # Reuse the identity guard's battle-tested Claude/Codex turn parsing.
