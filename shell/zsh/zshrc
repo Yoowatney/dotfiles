@@ -101,7 +101,19 @@ codex() {
   bin=$(cd ~ && mise upgrade npm:@openai/codex >/dev/null 2>&1; mise which codex)
   # A shared daemon can retain another pane's HERDR_* context. Each herdr TUI
   # needs its own server so hooks and shell commands address the current pane.
-  local -a launch_args=()
+  # Review approval requests automatically and start new sessions in Fast mode.
+  local -a launch_args=(--enable fast_mode -c 'service_tier="fast"')
+  # --approve-for-me conflicts with --sandbox, --ask-for-approval and --yolo: Codex then prints "the argument
+  # '--approve-for-me' cannot be used with ..." and exits, so pane-spawn (which passes them) could not open any
+  # Codex pane (2026-11-16). A caller that sets its own approval or sandbox keeps it. A check pane's own flags travel
+  # in HERDR_CODEX_LAUNCH_ARGS and codex-startup.py expands them after this wrapper, so --pane-spawn-args counts too.
+  local a own_approval=
+  for a in "$@"; do
+    case $a in
+      --dangerously-bypass-approvals-and-sandbox | --yolo | --full-auto | -s* | --sandbox | --sandbox=* | -a* | --ask-for-approval | --ask-for-approval=* | --approve-for-me | --pane-spawn-args) own_approval=1 ;;
+    esac
+  done
+  [[ -n $own_approval ]] || launch_args=(--approve-for-me "${launch_args[@]}")
   [[ ${HERDR_ENV:-} == 1 ]] && launch_args+=(--no-daemon)
   # Expand the skill catalog after the terminal has received the short launch
   # command. Serializing it into terminal input can exceed its line limit.
