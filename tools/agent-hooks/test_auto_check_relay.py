@@ -193,6 +193,48 @@ class RelayTests(unittest.TestCase):
                 self.assertIn("source user requests", prompt)
                 path.unlink()
 
+    def test_checker_prompt_batches_commands_and_quotes_source_requests(self):
+        # 11/16, 127 checks: time rose with tool calls (r=0.63), and ~16% went to finding the source request.
+        self.transcript([
+            {"type": "user", "message": {"content": "# AGENTS.md\nscaffold"}},
+            {"type": "user", "message": {"content": "api#1 로그인 오류를 고치고 테스트를 남기세요."}},
+            {"type": "assistant", "message": {"content": "알겠습니다."}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "content": "tool output"}]}},
+            {"type": "user", "message": {"content": [{"type": "text", "text": "추가: PR 링크도 적으세요."}]}},
+            {"type": "user", "isMeta": True, "message": {"content": "Base directory for this skill: skill body"}},
+            {"type": "user", "isCompactSummary": True, "message": {"content": "This session is being continued: summary"}},
+        ])
+        self.finish()
+        prompt = self.spawns[0][0][-1]
+        self.assertIn("한 번의 명령", prompt)
+        requests = self.requests_file(prompt)
+        self.assertEqual(requests.stat().st_mode & 0o777, 0o600)
+        quoted = requests.read_text()
+        self.assertIn("api#1 로그인 오류를 고치고 테스트를 남기세요.", quoted)
+        self.assertIn("추가: PR 링크도 적으세요.", quoted)
+        self.assertLess(quoted.index("api#1"), quoted.index("추가: PR"), "in the order they came")
+        self.assertNotIn("api#1 로그인", prompt, "a prompt is a process argument: requests stay in the file")
+        for absent in ("scaffold", "알겠습니다", "tool output", "skill body", "summary"):
+            self.assertNotIn(absent, quoted)
+
+    def requests_file(self, prompt):
+        path = Path(json.loads(prompt.split("The source user requests are collected in ", 1)[1].split(": read it first", 1)[0]))
+        self.assertEqual(path.parent, self.state / "automatic-checks")
+        return path
+
+    def test_long_source_requests_keep_the_assignment_and_latest_follow_up(self):
+        half = auto.REQUEST_CAP // 2
+        path = self.transcript([{"type": "user", "message": {"content": text * auto.REQUEST_CAP}} for text in "XYZ"])
+        self.finish()
+        prompt = self.spawns[0][0][-1]
+        quoted = self.requests_file(prompt).read_text()
+        self.assertIn("X" * half, quoted)
+        self.assertIn("Z" * half, quoted)
+        self.assertNotIn("Y" * 100, quoted)
+        self.assertNotIn("X" * (half + 1), quoted)
+        self.assertIn("가운데는 원 대화 기록에서", quoted)
+        self.assertIn(str(path), prompt)
+
     def test_claude_recording_restrictions_follow_the_check_without_copying_subject(self):
         self.transcript([{"type": "user", "message": {"content":
             "이 임시 조사 내용은 깃헙 이슈나 워크로그 같은 건 일절 남기지말아줘. 테스트는 실행하세요."}}])
@@ -203,6 +245,7 @@ class RelayTests(unittest.TestCase):
         self.assertIn("GitHub issue", prompt)
         self.assertNotIn("임시 조사", prompt, "do not replicate the restricted subject")
         self.assertNotIn("테스트는 실행하세요", prompt, "copy restrictions, not source tasks")
+        self.assertEqual(list((self.state / "automatic-checks").glob("*.requests.txt")), [], "nor copy the requests to a file")
 
     def test_codex_restrictions_are_read_again_for_a_follow_up(self):
         path = self.transcript([{"type": "response_item", "payload": {"type": "message", "role": "user",
