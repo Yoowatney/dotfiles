@@ -72,6 +72,6 @@ also appears when a long memo is loaded by path. A missing policy file keeps the
 existing behavior; a broken symlink is an error. Remove the policy file to undo
 only this optional validation, leaving ordinary handoff validation intact.
 
-Outside herdr, saving still copies the prompt to the clipboard. The current
+Outside herdr, saving refuses with exit 2 and never copies the prompt. Keep the file and choose its destination explicitly. The current
 implementation retains handoffs for 24 hours and consumes a memo once by renaming
 it to `.loaded`. Do not rely on a handoff as permanent storage.
