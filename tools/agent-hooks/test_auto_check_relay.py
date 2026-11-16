@@ -41,7 +41,7 @@ class RelayTests(unittest.TestCase):
         self.checker = None
         self.checkers = []
         self.names = {"w1:p2": "spawn-M-1"}
-        self.tells, self.spawns, self.closed, self.alerts = [], [], [], []
+        self.tells, self.spawns, self.closed, self.alerts, self.prechecks = [], [], [], [], []
         self.wake_queries = []
         self.spawn_error = None
         self.tell_exit = 0
@@ -120,7 +120,11 @@ class RelayTests(unittest.TestCase):
             self.names[f"w1:p{number}"] = f"spawn-M-chk{number}"
             return subprocess.CompletedProcess(args, 0, f"workers/w1:p{number}\n", "")
         if args[0].endswith("pane-tell"):
-            self.tells.append((args[1], args[2]))
+            # The pre-check report has its own contract below; every other count here pins the routes it leaves unchanged.
+            if args[2].startswith("확인 전 보고입니다("):
+                self.prechecks.append((args[1], args[2], kwargs["env"].get("PANE_TELL_BATCH")))
+            else:
+                self.tells.append((args[1], args[2]))
             return subprocess.CompletedProcess(args, self.tell_exit)
         if args[0].endswith("pane-label"):
             self.closed.append(kwargs["env"]["HERDR_PANE_ID"])
@@ -310,6 +314,38 @@ class RelayTests(unittest.TestCase):
         self.finish()
         self.assertEqual(len(self.tells), 1, "duplicate Stop/sweep must not redeliver")
         self.assertEqual(len(self.spawns), 1)
+
+    def test_check_start_sends_main_a_precheck_report_that_is_not_check_evidence(self):
+        self.finish()
+        self.assertEqual(len(self.prechecks), 1, "main hears the result when its check opens, so it can answer early")
+        address, message, batch = self.prechecks[0]
+        self.assertEqual(address, "default/w5:p3")
+        self.assertEqual(batch, "0", "the early answer must not wait in the idle relay batch")
+        (context_path,) = [p for p in (self.state / "automatic-checks").glob("*.json") if p.name.count(".") == 1]
+        for item in (DONE.splitlines()[0], f"[ac-{context_path.stem}]", "일 칸: workers/w1:p2",
+                     "확인 칸: workers/w1:p9", f"전체 보고: {self.root / 'reports'}"):
+            self.assertIn(item, message)
+        self.assertNotIn("세부 근거는 보존됩니다", message, "short form; the whole reply stays in the file")
+        self.assertNotIn(auto.share.CHECK_NOTE, message)
+        self.assertNotIn("check_delivered", json.loads(context_path.read_text()),
+                         "main-channel.py accepts an [ac-ID] only after check_delivered")
+        # share-guard: a 확인: line resting on this report is refused; no second check is demanded either.
+        claim = "확인: 확인 칸이 테스트 통과를 봤습니다.\n남은 것: 요유 몫: 없음 · 세션: 닫아도 됨"
+        self.assertEqual(self.main_blocks(message, claim), auto.share.PRECHECK_REASON)
+        self.assertIsNone(self.main_blocks(message, "먼저 올릴 답을 '확인 중:'으로 올렸습니다.\n남은 것: 요유 몫: 없음 · 세션: 열어 둠"))
+        self.finish()
+        self.assertEqual(len(self.prechecks), 1, "a replayed Stop does not resend it")
+        self.finish(CHECKED, check=True)
+        self.assertEqual(len(self.tells), 1, "the combined report still comes separately")
+        self.assertTrue(self.tells[0][1].startswith("확인 칸의 마지막 보고입니다("))
+        self.assertIsNone(self.main_blocks(self.tells[0][1], claim), "after the check, the same line is accepted")
+        self.assertEqual(len(self.prechecks), 1)
+
+    def test_no_precheck_report_when_the_check_could_not_open(self):
+        self.spawn_error = "simulated check start failure"
+        self.finish()
+        self.assertEqual(self.prechecks, [], "the failed-start fallback already delivers the original report")
+        self.assertEqual(len(self.tells), 1)
 
     def test_completed_check_delivers_receipt_without_requesting_pane_close(self):
         self.completed_check_replay(codex=False)

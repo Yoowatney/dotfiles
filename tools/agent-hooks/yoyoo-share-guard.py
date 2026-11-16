@@ -139,7 +139,8 @@ LABEL_LINE = re.compile(r"^\W*(?:무엇을|왜|확인|남은[ \t]*것|원인|조
 # report up with RELAY_NOTE; the first last report after one arrived needs a `확인:` line and a command run since it arrived.
 RELAY_NOTE = ("요유나 위 칸에 올리기 전에 결과를 이 칸에서 직접 확인하세요(테스트·명령을 다시 실행하거나 바뀐 동작·데이터를 직접 보기). "
               "아래는 하위 칸의 주장입니다. 보고에는 무엇을 직접 확인했고 결과가 어땠는지 '확인:' 줄로 적으세요")
-RELAYED = re.compile(r"(?:^|\] )(이|확인|바로 전달하는) 칸의 (?:마지막 )?보고입니다\(", re.M)  # auto-tab-close's heads, after pane-tell's mark
+RELAYED = re.compile(r"(?:^|\] )(?:(이|확인|바로 전달하는) 칸의 (?:마지막 )?|(확인 전) )보고입니다\(", re.M)  # auto-tab-close's heads, after pane-tell's mark
+RELAYED_ORDER = ("이", "확인", "확인 전", "바로 전달하는")  # in one batched prompt, the head that asks most decides
 CHECK_LINE = re.compile(r"(?<![가-힣])확인[ \t]*\**[ \t]*[:：][ \t]*\**([^\n]*)")
 RELAY_REASON = ("yoyoo-share-guard: 하위 칸의 보고를 받은 뒤 처음 쓰는 보고인데, 이 칸에서 결과를 직접 확인한 흔적이 없습니다. "
                 "하위 칸의 '다 했다'는 주장일 뿐입니다. 지금 도구로 직접 확인하세요: 테스트·명령을 다시 실행하거나 바뀐 동작·데이터를 직접 보세요. "
@@ -157,6 +158,13 @@ DELEGATE_REASON = (f"yoyoo-share-guard: 하위 칸의 보고를 받은 뒤 처�
                    "확인할 결과가 없는 보고(질문, 결정 요청)였으면 응답 없이 턴을 끝내세요.")
 CHECK_REPORT_REASON = ("yoyoo-share-guard: 확인 칸의 보고를 받은 뒤 처음 쓰는 보고인데, 확인 칸의 결과를 적은 '확인:' 줄이 없습니다. 확인 칸을 또 열지 마세요. "
                        "그 칸이 실행하고 본 것을 적고 확인 칸이 했다고 밝힌 '확인:' 줄을 넣어 보고를 다시 쓰세요.")
+# auto-tab-close sends a pane's result to the main pane as soon as its automatic check opens, so an early answer need not wait
+# for the check. It is the pane's claim alone: no `확인:` line may rest on it, and the combined report still comes after the check.
+PRECHECK_HEAD = "확인 전 보고입니다(확인 칸이 아직 확인하고 있으며, 끝나면 합친 보고가 따로 옵니다). "
+PRECHECK_NOTE = ("아래는 일 칸의 주장이며 아직 확인되지 않았습니다. 확인 칸이 이미 돌고 있으니 새 확인 칸을 열지 마세요. "
+                 "먼저 올릴 수 있는 답은 '확인 중:'으로 시작하고, 합친 보고가 오면 같은 글을 고치세요. 이 보고는 '확인:' 줄의 근거가 아닙니다")
+PRECHECK_REASON = ("yoyoo-share-guard: 확인 전 보고를 받은 뒤 쓰는 보고인데, 아직 끝나지 않은 확인 칸을 '확인:' 줄의 근거로 적었습니다. "
+                   "합친 보고가 오기 전에는 '확인:' 줄을 빼고, 먼저 올린 답은 '확인 중:'으로 두세요.")
 # 요유 2026-11-05: dispatch tabs run on the hidden workers server, and only what needs 요유 reaches the main pane. It is no claim of work
 # done, so it asks for no check pane: this head stays out of RELAYED, and it keeps the main pane's turn short, since 요유's next
 # words wait behind it. Nothing can be typed into that pane, and it has closed by then, so the board and a new pane carry the rest.
@@ -499,11 +507,12 @@ def relay_reason(payload: dict, text: str, env) -> str | None:
         # pane-tell's batch for the main pane holds several reports in one prompt: the one that asks most decides (api#1051).
         # ponytail: one reason a turn, so a check report batched behind a work report gets no `확인:` demand of its own
         found = RELAYED.finditer(unicodedata.normalize("NFC", first[1])) if first and first[0] == "in" else ()
-        relayed = min(found, key=lambda m: ("이", "확인", "바로 전달하는").index(m[1]), default=None)
+        relayed = min(found, key=lambda m: RELAYED_ORDER.index(m[1] or m[2]), default=None)
         if relayed:
             break
     else:
         return None
+    kind = relayed[1] or relayed[2]
     after = list(records(lines[start + 1:]))
     reports = [i for i, (kind, said, _, _) in enumerate(after) if kind == "say" and LAST_REPORT.search(prose(said))]
     if reports and any(kind == "in" for kind, _, _, _ in after[reports[0] + 1:]):
@@ -511,10 +520,12 @@ def relay_reason(payload: dict, text: str, env) -> str | None:
     refused = {i for kind, _, _, i in after if kind == "refused"}
     stated = [v for v in (m.group(1).strip(" \t*_.,;") for m in CHECK_LINE.finditer(prose(text))) if v and not NONE.match(v)]
     if delegates_checks(payload, env):
-        if relayed[1] == "바로 전달하는":
+        if kind == "바로 전달하는":
             return None  # questions, decisions, no result, or a failed automatic spawn: do not ask for a check again
-        if relayed[1] == "확인":
+        if kind == "확인":
             return None if any(BY_CHECK_PANE.search(v) for v in stated) else CHECK_REPORT_REASON
+        if kind == "확인 전":  # its check is already running: ask for no other, and take no `확인:` line from it
+            return PRECHECK_REASON if any(BY_CHECK_PANE.search(v) for v in stated) else None
         opened = {i for kind, _, _, i in after if kind == "opened"}
         handed = any(kind == "call" and i in opened and spawns_check(command) for kind, command, _, i in after)
         return None if handed else DELEGATE_REASON
