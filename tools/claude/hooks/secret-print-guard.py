@@ -13,7 +13,6 @@ and the Read/Grep tools on a secret file.
 from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
 
 import json
-import importlib.util
 from pathlib import Path
 import re
 import shlex
@@ -498,17 +497,6 @@ def rest_problem(cmd: str, shown: set[str], ran: list[str]) -> str | None:
 
 
 def bash_problem(cmd: str) -> str | None:
-    # A password streamed only into pbcopy never enters tool output. Reuse the
-    # clipboard guard's closed grammar; a missing/broken module keeps every
-    # existing secret-output check below (no fail-open import).
-    try:
-        spec = importlib.util.spec_from_file_location('secret_clipboard', Path(__file__).resolve().with_name('clipboard_guard.py'))
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        if module.direct_secret_copy(cmd):
-            return None
-    except Exception:
-        pass
     text = HEREDOC.sub(lambda m: heredoc(m, cmd), cmd)
     # Remote captures run on the other shell: keep them until its own check
     # distinguishes using a value from printing it after assignment.

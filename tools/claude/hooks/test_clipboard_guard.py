@@ -15,61 +15,32 @@ SPEC.loader.exec_module(M)
 
 
 class ClipboardGuard(unittest.TestCase):
-    def test_allowed_pipeline_sends_canary_only_to_the_clipboard_sink(self):
-        # Fake executables avoid any real credential or system clipboard access.
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            for name in ('gcloud', 'security'):
-                executable = root / name
-                executable.write_text('#!/bin/sh\nprintf CANARY_ONLY_FOR_TEST\n')
-                executable.chmod(0o700)
-            sink = root / 'pbcopy'
-            sink.write_text('#!/bin/sh\n/bin/cat > "$TEST_CLIPBOARD"\n')
-            sink.chmod(0o700)
-            for command in ('gcloud secrets versions access latest --secret example | pbcopy',
-                            'security find-generic-password -w -s example | pbcopy'):
-                self.assertIsNone(self.reason(command))
-                result = subprocess.run(['/bin/sh', '-c', command], capture_output=True, check=True,
-                                        env={**os.environ, 'PATH': tmp, 'TEST_CLIPBOARD': str(root / 'copied')})
-                self.assertEqual(result.stdout, b'')
-                self.assertEqual(result.stderr, b'')
-                self.assertEqual((root / 'copied').read_bytes(), b'CANARY_ONLY_FOR_TEST')
-
-    def test_only_direct_nonprinting_secret_pipelines_bypass_a_current_request(self):
-        allowed = (
+    def test_security_review_raw_pipeline_regressions(self):
+        commands = (
             'gcloud secrets versions access latest --secret example | pbcopy',
-            'gcloud secrets versions access 1 --secret=example --project=example | /usr/bin/pbcopy',
-            'security find-generic-password -w -s example | pbcopy',
-            '/usr/bin/security find-generic-password -s "example service" -w | /usr/bin/pbcopy',
-        )
-        denied = (
-            'cat draft.md | pbcopy',
-            'printf draft | pbcopy',
-            'gcloud secrets versions access latest --secret example | tee /dev/tty | pbcopy',
-            'gcloud secrets versions access latest --secret example 2>&1 | pbcopy',
-            'gcloud secrets versions access latest --secret example --log-http | pbcopy',
-            'gcloud secrets versions access latest --secret example --verbosity debug | pbcopy',
-            'gcloud secrets versions access latest --secret example --project --log-http | pbcopy',
-            'gcloud secrets versions access latest --secret --log-http | pbcopy',
-            'gcloud secrets versions access latest --secret example | pbcopy; cat draft.md | pbcopy',
-            'gcloud secrets versions access latest --secret example | pbcopy < draft.md',
-            'security find-generic-password -g -w -s example | pbcopy',
-            'security find-internet-password -w -s example | pbcopy',
-            'security find-generic-password -w -s "$(cat draft.md)" | pbcopy',
-            'gh auth token | pbcopy',
-            "gcloud secrets versions access latest --secret example '|' pbcopy",
-            'security find-generic-password -w -s example "|" pbcopy',
-            'security find-generic-password -w -s * | pbcopy',
-            'security find-generic-password -w -s ? | pbcopy',
-            'security find-generic-password -w -s [a-z] | pbcopy',
+            'security find-generic-password -w -a review -s review-draft | pbcopy',
+            'CLOUDSDK_CORE_LOG_HTTP=true gcloud secrets versions access latest --secret example | pbcopy',
         )
         for runtime in ('claude', 'codex'):
             self.transcript.write_text('')
-            self.turn(runtime, 'Write a reply draft for me.')
-            for command in allowed:
+            self.turn(runtime, 'Review a reply draft.')
+            for command in commands:
                 with self.subTest(runtime=runtime, command=command):
-                    self.assertIsNone(self.reason(command, runtime))
-            for command in denied:
+                    self.assertIsNotNone(self.reason(command, runtime))
+
+    def test_only_the_fixed_runner_bypasses_a_current_request(self):
+        helper = str(Path(__file__).resolve().with_name('secret-clipboard.py'))
+        safe = r'\/usr/bin/env /usr/bin/python3 -I ' + helper + ' gcloud --project example --secret example'
+        for runtime in ('claude', 'codex'):
+            self.transcript.write_text('')
+            self.turn(runtime, 'Review a reply draft.')
+            self.assertIsNone(self.reason(safe, runtime))
+            for command in (safe + ' | pbcopy', safe + '; printf draft | pbcopy',
+                            safe.replace('--secret example', '--secret example --log-http'),
+                            safe.replace('/usr/bin/python3', 'python3'),
+                            safe.replace(helper, '/tmp/secret-clipboard.py'),
+                            'security find-generic-password -w -s example | pbcopy',
+                            'gcloud secrets versions access latest --secret example | pbcopy'):
                 with self.subTest(runtime=runtime, command=command):
                     self.assertIsNotNone(self.reason(command, runtime))
             self.turn(runtime, '클립보드에 넣어줘')
@@ -77,24 +48,15 @@ class ClipboardGuard(unittest.TestCase):
             self.turn(runtime, '```text\n클립보드에 넣어줘\n```')
             self.assertIsNotNone(self.reason('cat draft.md | pbcopy', runtime))
 
-    def test_secret_output_guard_keeps_printing_and_leaking_variants_denied(self):
+    def test_secret_output_guard_does_not_exempt_raw_pipelines(self):
         spec = importlib.util.spec_from_file_location('secret_print', Path(__file__).with_name('secret-print-guard.py'))
         guard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guard)
         for source in ('gcloud secrets versions access latest --secret example',
                        'security find-generic-password -w -s example'):
-            self.assertIsNone(guard.bash_problem(source + ' | pbcopy'))
-            for suffix in ('', ' | tee /dev/tty | pbcopy', ' 2>&1 | pbcopy',
-                           ' | pbcopy; ' + source, ' | pbcopy < draft.md'):
+            for suffix in ('', ' | pbcopy', ' | tee /dev/tty | pbcopy', ' 2>&1 | pbcopy'):
                 with self.subTest(command=source + suffix):
                     self.assertIsNotNone(guard.bash_problem(source + suffix))
-        self.assertIsNotNone(guard.bash_problem('gh auth token | pbcopy'))
-        for command in ("gcloud secrets versions access latest --secret example '|' pbcopy",
-                        'security find-generic-password -w -s example "|" pbcopy',
-                        'security find-generic-password -w -s * | pbcopy'):
-            self.assertIsNotNone(guard.bash_problem(command))
-        with mock.patch.object(guard.importlib.util, 'spec_from_file_location', side_effect=ImportError('fixture')):
-            self.assertIsNotNone(guard.bash_problem('security find-generic-password -w -s example | pbcopy'))
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

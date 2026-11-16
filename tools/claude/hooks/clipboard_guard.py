@@ -1,7 +1,7 @@
 """Require a current human request for clipboard writes in either runtime.
 
 This is a tool-input guard, not a sandbox: arbitrary scripts can hide a write.
-Only a narrowly parsed secret-source-to-pbcopy pipeline needs no request.
+Only the fixed non-shell GCP transfer runner needs no request.
 No environment flag or assistant-supplied reason grants permission.
 """
 import importlib.util
@@ -15,54 +15,19 @@ DENY = ('Clipboard write refused: the current human turn did not explicitly requ
 
 
 def direct_secret_copy(command):
-    """Only a complete, nonprinting pipeline; no wrappers, expansion or redirection.
+    """Only the fixed runner; raw pipelines inherit untrusted shell/SDK state.
 
-    Unknown options fail closed, especially logging, formatting and -g (which
-    prints Keychain metadata/password on stderr). This grants no account access.
+    The launch prefix bypasses aliases/functions for the source and sink names.
+    The runner uses shell=False, fixed binaries, and a closed environment.
     """
-    if re.search(r'[$`\\\n\r<>;&(){}#*?\[\]~]', command) or command.count('|') != 1:
+    helper = str(Path(__file__).resolve().with_name('secret-clipboard.py'))
+    prefix = r'\/usr/bin/env /usr/bin/python3 -I ' + helper + ' '
+    if not command.startswith(prefix):
         return False
-    try:
-        # Split before quote removal: a quoted pipe is an argument, never a
-        # clipboard sink. Parsing either side then fails on that open quote.
-        source, sink = (shlex.split(part) for part in command.split('|'))
-    except ValueError:
-        return False
-    if sink not in (['pbcopy'], ['/usr/bin/pbcopy']):
-        return False
-    if source[:4] == ['gcloud', 'secrets', 'versions', 'access']:
-        args = source[4:]
-        if not args or not re.fullmatch(r'latest|[0-9]+', args.pop(0)):
-            return False
-        options = {'--secret', '--project', '--location', '--account', '--impersonate-service-account'}
-        found_secret = False
-        while args:
-            flag, equals, value = args.pop(0).partition('=')
-            if flag == '--quiet' and not equals:
-                continue
-            if flag not in options:
-                return False
-            if not equals:
-                value = args.pop(0) if args else ''
-            if value.startswith('-') or not re.fullmatch(r'[A-Za-z0-9_@./:+-]+', value):
-                return False
-            found_secret |= flag == '--secret'
-        return found_secret
-    if source[:2] in (['security', 'find-generic-password'], ['/usr/bin/security', 'find-generic-password']):
-        args, password_only = source[2:], False
-        while args:
-            flag = args.pop(0)
-            if flag == '-w':
-                password_only = True
-            elif flag in ('-a', '-s', '-l', '-D', '-c', '-t'):
-                value = args.pop(0) if args else ''
-                if value.startswith('-') or not re.fullmatch(r'[A-Za-z0-9_@./: +\-]+', value):
-                    return False
-            else:
-                return False
-        return password_only
-    return False
-
+    args = command[len(prefix):]
+    return bool(re.fullmatch(
+        r'gcloud --project [a-z][a-z0-9-]{4,62} --secret [A-Za-z0-9_-]{1,255}'
+        r'(?: --version (?:latest|[0-9]+))?', args))
 
 
 def unwrap(words):
@@ -136,6 +101,8 @@ def writes_clipboard(command, depth=0):
             for i, arg in enumerate(args[:-1]):
                 if re.fullmatch(r'-[a-z]*c[a-z]*', arg) and writes_clipboard(args[i + 1], depth + 1):
                     return True
+        if any(Path(arg).name == 'secret-clipboard.py' for arg in args):
+            return True
         if re.fullmatch(r'python(?:\d+(?:\.\d+)?)?', name):
             code = ' '.join(args)
             if re.search(r'pyperclip\s*\.\s*copy\s*\(|(?:set_clipboard|write_clipboard)\s*\(', code):
