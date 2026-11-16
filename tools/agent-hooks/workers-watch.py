@@ -7,6 +7,7 @@ how several leads at once each hear only of their own), else the main pane, else
 - an agent `blocked` (an approval or question dialog) for 60 s or more, once per state_change_seq;
 - an agent `idle`/`done` for 900 s or more that has not reported since it stopped (auto-tab-close.py touches
   `{state_dir}/reported/<terminal>` when its report was sent), once per state_change_seq;
+- a check pane (pane-spawn --check) at work whose session log has not grown for CHECK_STALL s, once per state_change_seq;
 - a pane whose name has 🫡 but no agent in it, once per pane (the unnamed root shell pane is never news): at once when the
   watch saw an agent there, else after 420 s, since pane-spawn names the pane before its agent starts;
 - a pane the watch saw with an agent that is now in neither list and has not reported since its last state (workers
@@ -94,6 +95,10 @@ MAIN_REFRESH_RETRY = 60
 MAIN_REFRESH_SETTLE = 900  # a session's first 15 minutes are its handoff load, not conversation
 USAGE = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 JOB_HELD = 10800
+# A check pane at work whose session log is this quiet is news (11/16: api#1268's check logged nothing for 82 minutes). 11/13-16,
+# the longest silence in each of the 443 checks that ended normally: median 38 s, at most 268 s. The six longer ones were stalls:
+# three of ~500 s that all resumed at the same second, and three of 2926-4931 s. 600 s clears the normal ones twice over.
+CHECK_STALL = 600
 UNSENT = "보내지 못한 보고가 있다면 ~/.local/state/pane-reports에 있습니다."  # auto-tab-close.py keeps a report it had nobody to send to
 WAKE = "잠자기나 네트워크·API 오류로 응답이 끊겼습니다. 끊긴 곳부터 이어서 하세요."
 WAKE_GAPS = (0, 120, 300, 900, 1800)  # the n-th wake of one pane waits WAKE_GAPS[n] s after the one before; then none
@@ -499,6 +504,14 @@ def keep_trial(env, old, term, now) -> bool:
                      f"보고가 있었다면 그 세션 기록에 남아 있습니다.", agent=old.get("agent_name") or "", session=old.get("session") or "")
 
 
+def last_write(env, session) -> float:
+    """When a session's log last grew; inf when it has none, so no log is no stall."""
+    try:
+        return max(map(os.path.getmtime, atc.source_transcripts({"agent_session": {"value": session}}, env)), default=float("inf"))
+    except OSError:
+        return float("inf")
+
+
 def kind(status) -> str:
     """herdr flips done<->idle when a pane is seen; that is the same stop, not a new state."""
     return "ready" if status in ("idle", "done") else status or ""
@@ -676,6 +689,11 @@ def tick(env, now: float) -> list:
                 if tell(f"{who} {name}(workers/{pane})이 질문 창에서 멈춰 있습니다. 화면: `herdr --session workers agent read {pane}`, "
                         f"키 입력: `herdr --session workers agent send-keys {pane} Enter`", opener, home, moved):
                     rec["alerted"].append("blocked")
+            quiet = now - last_write(env, session) if kind(status) not in ("ready", "blocked") and atc.share.CHECK_AGENT.match(a.get("name") or "") else 0
+            if quiet >= CHECK_STALL and "stalled" not in rec["alerted"]:
+                if tell(f"확인 칸 {name}(workers/{pane})의 세션 기록이 {int(quiet // 60)}분째 늘지 않았습니다. 멈췄을 수 있으니 화면을 보세요: "
+                        f"`herdr --session workers agent read {pane}`, 닫기: `herdr --session workers pane close {pane}`", opener, home, moved):
+                    rec["alerted"].append("stalled")
             if kind(status) == "ready":
                 reported = reported_since(rec["floor"], term, session)
                 if reported:
@@ -1529,6 +1547,22 @@ esac
         assert tick(181900, TELL_REFUSE="w5:p8")[0].startswith("w5:p3|")
         assert idle_log("w1:pIK")[-1].startswith("workers/w1:pIK term_IK idle sent to w5:p3 after (w5:p8 rc=2 pane-tell: lead unavailable)"), idle_log("w1:pIK")
         result("default-panes", "panes", [{"pane_id": "w5:p3", "terminal_id": "term_M", "label": "👑 메인", "agent": "claude"}])
+        # A check pane at work whose session log stops growing is news after CHECK_STALL, once per state (11/16: api#1268's check
+        # logged nothing for 82 minutes and nobody heard). An ordinary pane running a long command is no news.
+        quiet_log = f"{d}/.claude/projects/-x/sid-CS.jsonl"; write(quiet_log, "{}\n"); os.utime(quiet_log, (190000, 190000))
+        check = dict(agent("w1:pCS", "term_CS", "working", seq=1, name="spawn-M-chk7"), agent_session={"value": "sid-CS"})
+        build = dict(agent("w1:pPL", "term_PL", "working", seq=1), agent_session={"value": "sid-CS"})
+        panes_on_workers(label("w1:pCS", "🟢 🫡 확인 [ac-3333333333333333]"), label("w1:pPL", "🟢 🫡 빌드")); agents(check, build)
+        tick(189900)  # the panes before this block are gone: their alerts are not this test's
+        assert tick(190000 + CHECK_STALL - 1) == [], "a check that logged within CHECK_STALL is at work"
+        told = tick(190000 + CHECK_STALL)
+        assert len(told) == 1 and told[0].startswith("w5:p3|") and "확인 칸" in told[0] and "agent read w1:pCS" in told[0], told
+        assert tick(190000 + CHECK_STALL + 60) == [], "once per state"
+        agents(dict(check, state_change_seq=2), build); assert len(tick(190000 + CHECK_STALL + 120)) == 1, "a new state alerts again"
+        os.utime(quiet_log, (190700, 190700)); agents(dict(check, state_change_seq=3), build)
+        assert tick(190000 + CHECK_STALL + 180) == [], "a log that grew again is at work"
+        agents(dict(check, state_change_seq=4, agent_session={"value": "sid-none"}), build)
+        assert tick(190000 + CHECK_STALL * 3) == [], "no log found: nothing to measure"
         # end to end, the way launchd runs it: python3 -I drops the script folder from sys.path
         panes_on_workers(label("w1:p6", "🟢 🫡 시험")); agents(agent("w1:p6", "term_6", "blocked", seq=11))
         run = lambda now, **e: subprocess.run(["/usr/bin/python3", "-I", os.path.realpath(__file__)], capture_output=True, text=True,
