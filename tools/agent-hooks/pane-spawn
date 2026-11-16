@@ -474,7 +474,7 @@ if [ -n "$pane" ]; then # every call from here on is about the new pane, so all 
 elif [ -n "$main$opener" ]; then
   echo "pane-spawn: the workers herdr server opened no pane; $workers_help" >&2; exit 1
 else
-  [ -z "$hidden" ] || echo "pane-spawn: workers 서버에 열지 못해 이 탭에 엽니다. 회사맥이면 켜 주세요: ${workers_help#start it with: }" >&2
+  [ -z "$hidden" ] || echo "pane-spawn: workers 서버에 열지 못해 이 탭에 엽니다. 세션맥이면 켜 주세요: ${workers_help#start it with: }" >&2
   pane=$(open_pane "$me" "$ws" "$name")
 fi
 [ -n "$pane" ] || die "herdr opened no pane"
