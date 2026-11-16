@@ -39,6 +39,7 @@ class RelayTests(unittest.TestCase):
         self.worker = dict(pane_id="w1:p2", terminal_id="term_W", cwd="/repo with spaces", label="🟢 🫡 Job",
                            tab_id="w1:t1", workspace_id="w1", agent_session={"value": "sid-W"})
         self.checker = None
+        self.checkers = []
         self.names = {"w1:p2": "spawn-M-1"}
         self.tells, self.spawns, self.closed, self.alerts = [], [], [], []
         self.wake_queries = []
@@ -89,7 +90,7 @@ class RelayTests(unittest.TestCase):
         return {"term_M": ("default/w5:p3", self.main), "term_W": ("w1:p2", self.worker)}
 
     def herdr(self, env, *args, **kwargs):
-        panes = [self.worker] + ([self.checker] if self.checker else [])
+        panes = [self.worker, *self.checkers]
         if args[:2] == ("pane", "get"):
             return {"pane": next((p for p in [self.main, *panes] if p["pane_id"] == args[2]), {})}
         if args[:2] == ("pane", "list"):
@@ -112,10 +113,12 @@ class RelayTests(unittest.TestCase):
                 if isinstance(self.spawn_error, Exception):
                     raise self.spawn_error
                 return subprocess.CompletedProcess(args, 1, "", self.spawn_error)
-            self.checker = dict(self.worker, pane_id="w1:p9", terminal_id="term_C", label="🟢 🫡 확인 " + args[-2],
-                                agent_session={"value": "sid-C"})
-            self.names["w1:p9"] = "spawn-M-chk9"
-            return subprocess.CompletedProcess(args, 0, "workers/w1:p9\n", "")
+            number = 9 + len(self.checkers)
+            self.checker = dict(self.worker, pane_id=f"w1:p{number}", terminal_id=f"term_C{number}",
+                                label="🟢 🫡 확인 " + args[-2], agent_session={"value": f"sid-C{number}"})
+            self.checkers.append(self.checker)
+            self.names[f"w1:p{number}"] = f"spawn-M-chk{number}"
+            return subprocess.CompletedProcess(args, 0, f"workers/w1:p{number}\n", "")
         if args[0].endswith("pane-tell"):
             self.tells.append((args[1], args[2]))
             return subprocess.CompletedProcess(args, self.tell_exit)
@@ -127,8 +130,8 @@ class RelayTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0)
         raise AssertionError(args)
 
-    def finish(self, text=DONE, check=False):
-        auto.finish(text, {**self.env, "HERDR_PANE_ID": "w1:p9" if check else "w1:p2"})
+    def finish(self, text=DONE, check=False, check_id=None):
+        auto.finish(text, {**self.env, "HERDR_PANE_ID": check_id or ("w1:p9" if check else "w1:p2")})
 
     def transcript(self, records, codex=False):
         relative = (".codex/sessions/2026/11/10/rollout-test-sid-W.jsonl" if codex else
@@ -536,23 +539,171 @@ class RelayTests(unittest.TestCase):
         args = self.spawns[0][0]
         self.assertEqual(args[args.index('--kind') + 1], 'claude')
 
-    def test_permission_unknown_reaches_lead_and_context_without_retry(self):
+    BLOCKED = ("Process check is blocked.\nTASK_CHECK: unknown\n"
+               "blocked_reason: SIGNAL_DENIED\nblocked_command: python3 process.test.py -> ps -A\n"
+               "retry_target: claude\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫음")
+
+    def test_permission_unknown_opens_scoped_claude_retry(self):
+        self.env['HERDR_TASK_ID'] = 'job-test-retry'
         self.finish()
-        blocked = ("확인은 권한 차단으로 미완료입니다.\nTASK_CHECK: unknown\n"
-                   "blocked_reason: SIGNAL_DENIED\nblocked_command: python3 process.test.py -> ps -A\n"
-                   "retry_target: claude\n남은 것: 요유 몫: 없음 · 유요 몫: 리드의 재배정 · 세션: 닫음")
-        self.finish(blocked, check=True)
-        message = self.tells[0][1]
-        for field in blocked.splitlines()[1:5]:
-            self.assertIn(field, message)
-        self.assertIn('권한 차단', message)
+        self.finish(self.BLOCKED, check=True)
+        self.assertEqual(len(self.spawns), 2)
+        self.assertEqual(self.tells, [])
+        args, env = self.spawns[-1]
+        self.assertEqual(args[args.index('--kind') + 1], 'claude')
+        self.assertEqual(args[args.index('--job-id') + 1], 'job-test-retry')
+        self.assertEqual(env['HERDR_PANE_ID'], self.main['pane_id'])
+        self.assertIn('only the permission-blocked portion', args[-1])
+        self.assertIn('ps -A', args[-1])
+        self.finish(self.BLOCKED, check=True)
+        self.assertEqual(len(self.spawns), 2, 'replayed first report cannot start another checker')
+        self.finish(CHECKED, check_id='w1:p10')
+        self.assertEqual(len(self.tells), 1)
+        for value in ('Process check is blocked.', CHECKED.splitlines()[0], 'TASK_CHECK: unknown'):
+            self.assertIn(value, self.tells[0][1])
+        self.finish(CHECKED, check_id='w1:p10')
+        self.assertEqual(len(self.tells), 1)
+
+    def test_permission_retry_works_for_both_runtime_payloads_and_open_session_replays(self):
+        self.finish()
+        for codex in (False, True):
+            transcript = self.root / 'check.jsonl'
+            transcript.write_text(json.dumps({"type": "assistant", "message": {
+                "content": [{"type": "text", "text": self.BLOCKED}]}}))
+            payload = ({"last_assistant_message": self.BLOCKED} if codex else
+                       {"transcript_path": str(transcript)})
+            for _ in range(2):
+                report = auto.decide(payload, {**self.env, 'HERDR_PANE_ID': 'w1:p9'})
+                self.finish(report, check=True)
+        self.assertEqual(len(self.spawns), 2)
+        self.assertFalse(self.tells)
+        # Correlation still works after the retry pane loses its original label.
+        self.checkers[-1]['label'] = '🟢 🫡 renamed check'
+        self.finish(CHECKED, check_id='w1:p10')
+        self.assertEqual(len(self.tells), 1)
+
+    def test_permission_retry_does_not_bypass_interim_or_incomplete_reports(self):
+        for text in (self.BLOCKED.replace('세션: 닫음', '세션: 실행 중'),
+                     self.BLOCKED.replace('retry_target: claude', ''),
+                     self.BLOCKED.replace('요유 몫: 없음', '요유 몫: production approval')):
+            self.finish(DONE + text[:30])
+            before = len(self.spawns)
+            self.finish(text, check_id=self.checker['pane_id'])
+            self.assertEqual(len(self.spawns), before)
+
+    def test_existing_claude_check_does_not_start_another_runtime_retry(self):
+        self.finish(DONE + '\nego-browser skill로 실제 화면을 확인했습니다.')
+        self.assertEqual(self.spawns[0][0][self.spawns[0][0].index('--kind') + 1], 'claude')
+        self.finish(self.BLOCKED, check=True)
         self.assertEqual(len(self.spawns), 1)
-        contexts = list((self.state / 'automatic-checks').glob('*.json'))
-        saved = json.loads(contexts[0].read_text())
-        self.assertEqual(saved['blocked_reason'], 'SIGNAL_DENIED')
-        self.assertEqual(saved['retry_target'], 'claude')
-        self.assertIn('TASK_CHECK: unknown', auto.short_report(blocked))
-        self.assertNotIn('TASK_CHECK: fail', message)
+        self.assertEqual(len(self.tells), 1)
+
+    def test_permission_retry_arguments_reach_real_launcher(self):
+        self.finish()
+        self.finish(self.BLOCKED, check=True)
+        args = self.spawns[-1][0]
+        fixture = Path(__file__).with_name('pane-spawn-test-fixture.sh')
+        with patch.object(subprocess, 'Popen', REAL_POPEN):
+            result = REAL_RUN(['bash', '-c', 'source "$0"; workers_up; is_main; ps "$@"',
+                               str(fixture), *args[1:]], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'workers/w1:new')
+
+    def test_permission_retry_resumes_persisted_intent_after_interruption(self):
+        self.finish()
+        context_path = next((self.state / "automatic-checks").glob("*.json"))
+        context = json.loads(context_path.read_text())
+        context['permission_retry'] = dict(summary=auto.short_report(self.BLOCKED), report='check.md', entry='entry',
+            verdict='unknown', **auto.check_permissions.blockage(self.BLOCKED))
+        context_path.write_text(json.dumps(context))
+        self.finish(self.BLOCKED, check=True)
+        self.assertEqual(len(self.spawns), 2)
+        checked = CHECKED.replace('PASS', 'PASS\nTASK_CHECK: pass')
+        self.finish(checked, check_id='w1:p10')
+        self.assertIn('Combined TASK_CHECK: unknown', self.tells[0][1])
+
+    def test_legacy_context_recovers_worker_recording_restrictions(self):
+        self.transcript([{"type": "user", "message": {"content": "Do not save this in memory."}}])
+        self.finish()
+        context_path = next((self.state / "automatic-checks").glob("*.json"))
+        context = json.loads(context_path.read_text())
+        context.pop('recording_policy')
+        context_path.write_text(json.dumps(context))
+        self.finish(self.BLOCKED, check=True)
+        self.assertIn('원 작업의 기록 금지 제한', self.spawns[-1][0][-1])
+        self.assertIn('memory', self.spawns[-1][0][-1])
+
+    def test_legacy_context_without_source_forbids_persistent_writes(self):
+        self.finish()
+        context_path = next((self.state / "automatic-checks").glob("*.json"))
+        context = json.loads(context_path.read_text())
+        context.pop('recording_policy')
+        context_path.write_text(json.dumps(context))
+        self.finish(self.BLOCKED, check=True)
+        self.assertIn('Original recording restrictions unavailable', self.spawns[-1][0][-1])
+        self.assertIn('Do not write memory, issues, board comments, work logs or documentation', self.spawns[-1][0][-1])
+
+    def test_permission_retry_retains_original_recording_restrictions(self):
+        self.transcript([{"type": "user", "message": {"content": "Do not save this in memory."}}])
+        self.finish()
+        self.finish(self.BLOCKED, check=True)
+        self.assertIn('memory', self.spawns[-1][0][-1])
+        self.assertIn('원 작업의 기록 금지 제한', self.spawns[-1][0][-1])
+
+    def test_scoped_retry_pass_does_not_promote_unrelated_unknowns(self):
+        self.finish()
+        self.finish(self.BLOCKED.replace('Process check is blocked.',
+            'Original source unavailable; coverage unknown. Process check is blocked.'), check=True)
+        self.finish(CHECKED.replace('PASS', 'PASS\nTASK_CHECK: pass'), check_id='w1:p10')
+        self.assertIn('Combined TASK_CHECK: unknown', self.tells[0][1])
+        self.assertNotIn('Combined TASK_CHECK: pass', self.tells[0][1])
+
+    def test_permission_retry_preserves_independent_failure(self):
+        self.finish()
+        self.finish(self.BLOCKED.replace('TASK_CHECK: unknown', 'TASK_CHECK: fail'), check=True)
+        self.finish(CHECKED, check_id='w1:p10')
+        self.assertIn('Combined TASK_CHECK: fail', self.tells[0][1])
+        self.assertEqual(len(self.spawns), 2)
+
+    def test_permission_retry_failure_delivers_both_reports_without_recursing(self):
+        self.finish()
+        self.finish(self.BLOCKED, check=True)
+        self.finish(self.BLOCKED.replace('Process check', 'Retry check'), check_id='w1:p10')
+        self.assertEqual(len(self.spawns), 2)
+        self.assertEqual(len(self.tells), 1)
+        self.assertIn('Process check is blocked.', self.tells[0][1])
+        self.assertIn('Retry check is blocked.', self.tells[0][1])
+
+    def test_permission_retry_failed_delivery_uses_same_checker(self):
+        self.finish()
+        self.finish(self.BLOCKED, check=True)
+        self.tell_exit = 1
+        self.finish(CHECKED, check_id='w1:p10')
+        self.tell_exit = 0
+        self.finish(CHECKED, check_id='w1:p10')
+        self.assertEqual(len(self.spawns), 2)
+        self.assertEqual(len(self.tells), 2)
+        self.assertEqual(self.tells[0][1], self.tells[1][1])
+
+    def test_permission_retry_start_failure_reports_original(self):
+        self.finish()
+        self.spawn_error = 'launcher failed'
+        self.finish(self.BLOCKED, check=True)
+        self.assertEqual(len(self.tells), 1)
+        self.assertIn('Process check is blocked.', self.tells[0][1])
+        self.assertIn('launcher failed', self.tells[0][1])
+        count = len(self.spawns)
+        self.finish(self.BLOCKED, check=True)
+        self.assertEqual(len(self.spawns), count)
+
+    def test_permission_retry_keeps_lead_and_safety_blocks_on_existing_route(self):
+        for block in (self.BLOCKED.replace('retry_target: claude', 'retry_target: lead'),
+                      self.BLOCKED.replace('SIGNAL_DENIED', 'OTHER_DENIED').replace(
+                          'python3 process.test.py -> ps -A', 'change security hook trust settings')):
+            self.finish(DONE + block[:30])
+            before = len(self.spawns)
+            self.finish(block, check=True, check_id=self.checker['pane_id'])
+            self.assertEqual(len(self.spawns), before)
 
     def test_independent_failure_with_blockage_remains_fail(self):
         text = ("실제 assertion 실패도 있습니다.\nTASK_CHECK: fail\nblocked_reason: BROWSER_DENIED\n"
