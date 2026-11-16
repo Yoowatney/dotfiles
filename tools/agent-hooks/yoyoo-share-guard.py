@@ -525,7 +525,7 @@ def relay_reason(payload: dict, text: str, env) -> str | None:
         if kind == "확인":
             return None if any(BY_CHECK_PANE.search(v) for v in stated) else CHECK_REPORT_REASON
         if kind == "확인 전":  # its check is already running: ask for no other, and take no `확인:` line from it
-            return PRECHECK_REASON if any(BY_CHECK_PANE.search(v) for v in stated) else None
+            return PRECHECK_REASON if stated else None
         opened = {i for kind, _, _, i in after if kind == "opened"}
         handed = any(kind == "call" and i in opened and spawns_check(command) for kind, command, _, i in after)
         return None if handed else DELEGATE_REASON

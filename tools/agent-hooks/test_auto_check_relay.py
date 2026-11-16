@@ -332,6 +332,9 @@ class RelayTests(unittest.TestCase):
         # share-guard: a 확인: line resting on this report is refused; no second check is demanded either.
         claim = "확인: 확인 칸이 테스트 통과를 봤습니다.\n남은 것: 요유 몫: 없음 · 세션: 닫아도 됨"
         self.assertEqual(self.main_blocks(message, claim), auto.share.PRECHECK_REASON)
+        own = "확인: 테스트 통과를 봤습니다.\n남은 것: 요유 몫: 없음 · 세션: 닫아도 됨"  # Codex review: no pane named
+        self.assertEqual(self.main_blocks(message, own), auto.share.PRECHECK_REASON)
+        self.assertIsNone(self.main_blocks(message, "확인: 없음\n남은 것: 요유 몫: 없음 · 세션: 열어 둠"))
         self.assertIsNone(self.main_blocks(message, "먼저 올릴 답을 '확인 중:'으로 올렸습니다.\n남은 것: 요유 몫: 없음 · 세션: 열어 둠"))
         self.finish()
         self.assertEqual(len(self.prechecks), 1, "a replayed Stop does not resend it")
