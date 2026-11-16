@@ -601,6 +601,7 @@ class RelayTests(unittest.TestCase):
         self.assertIn("Do not request another cross-review", prompt)
         self.assertIn("explicit user-mandated", prompt)
         self.assertIn("TASK_CHECK: pass|fail|unknown", prompt)
+        self.assertIn("alone on its line with no other text on that line; put any explanation on the next line", prompt)
 
     def test_follow_up_uses_same_worker_and_gets_a_fresh_independent_check(self):
         self.finish()
@@ -787,6 +788,7 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(env['HERDR_PANE_ID'], self.main['pane_id'])
         self.assertIn('only the permission-blocked portion', args[-1])
         self.assertIn('ps -A', args[-1])
+        self.assertIn("alone on its line with no other text on that line; put any explanation on the next line", args[-1])
         self.finish(self.BLOCKED, check=True)
         self.assertEqual(len(self.spawns), 2, 'replayed first report cannot start another checker')
         self.finish(CHECKED, check_id='w1:p10')
