@@ -1,6 +1,7 @@
 """Require a current human request for clipboard writes in either runtime.
 
 This is a tool-input guard, not a sandbox: arbitrary scripts can hide a write.
+Only the fixed non-shell GCP transfer runner needs no request.
 No environment flag or assistant-supplied reason grants permission.
 """
 import importlib.util
@@ -12,6 +13,21 @@ DENY = ('Clipboard write refused: the current human turn did not explicitly requ
         'Deliver the draft in the requested conversation thread. '
         'Do not ask for clipboard permission merely to work around this refusal.')
 
+
+def direct_secret_copy(command):
+    """Only the fixed runner; raw pipelines inherit untrusted shell/SDK state.
+
+    The launch prefix bypasses aliases/functions for the source and sink names.
+    The runner uses shell=False, fixed binaries, and a closed environment.
+    """
+    helper = str(Path(__file__).resolve().with_name('secret-clipboard.py'))
+    prefix = r'\/usr/bin/env /usr/bin/python3 -I ' + helper + ' '
+    if not command.startswith(prefix):
+        return False
+    args = command[len(prefix):]
+    return bool(re.fullmatch(
+        r'gcloud --project [a-z][a-z0-9-]{4,62} --secret [A-Za-z0-9_-]{1,255}'
+        r'(?: --version (?:latest|[0-9]+))?', args))
 
 
 def unwrap(words):
@@ -85,6 +101,8 @@ def writes_clipboard(command, depth=0):
             for i, arg in enumerate(args[:-1]):
                 if re.fullmatch(r'-[a-z]*c[a-z]*', arg) and writes_clipboard(args[i + 1], depth + 1):
                     return True
+        if any(Path(arg).name == 'secret-clipboard.py' for arg in args):
+            return True
         if re.fullmatch(r'python(?:\d+(?:\.\d+)?)?', name):
             code = ' '.join(args)
             if re.search(r'pyperclip\s*\.\s*copy\s*\(|(?:set_clipboard|write_clipboard)\s*\(', code):
@@ -134,6 +152,8 @@ def reason(payload):
         return None
     command = inp.get('command') or inp.get('cmd') or ''
     if not isinstance(command, str) or not writes_clipboard(command):
+        return None
+    if direct_secret_copy(command):
         return None
     try:
         # Reuse the identity guard's battle-tested Claude/Codex turn parsing.

@@ -1,9 +1,11 @@
 """Clipboard writes need a direct request in the current human turn."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import sys
+import subprocess
 import unittest
 from unittest import mock
 
@@ -13,6 +15,49 @@ SPEC.loader.exec_module(M)
 
 
 class ClipboardGuard(unittest.TestCase):
+    def test_security_review_raw_pipeline_regressions(self):
+        commands = (
+            'gcloud secrets versions access latest --secret example | pbcopy',
+            'security find-generic-password -w -a review -s review-draft | pbcopy',
+            'CLOUDSDK_CORE_LOG_HTTP=true gcloud secrets versions access latest --secret example | pbcopy',
+        )
+        for runtime in ('claude', 'codex'):
+            self.transcript.write_text('')
+            self.turn(runtime, 'Review a reply draft.')
+            for command in commands:
+                with self.subTest(runtime=runtime, command=command):
+                    self.assertIsNotNone(self.reason(command, runtime))
+
+    def test_only_the_fixed_runner_bypasses_a_current_request(self):
+        helper = str(Path(__file__).resolve().with_name('secret-clipboard.py'))
+        safe = r'\/usr/bin/env /usr/bin/python3 -I ' + helper + ' gcloud --project example --secret example'
+        for runtime in ('claude', 'codex'):
+            self.transcript.write_text('')
+            self.turn(runtime, 'Review a reply draft.')
+            self.assertIsNone(self.reason(safe, runtime))
+            for command in (safe + ' | pbcopy', safe + '; printf draft | pbcopy',
+                            safe.replace('--secret example', '--secret example --log-http'),
+                            safe.replace('/usr/bin/python3', 'python3'),
+                            safe.replace(helper, '/tmp/secret-clipboard.py'),
+                            'security find-generic-password -w -s example | pbcopy',
+                            'gcloud secrets versions access latest --secret example | pbcopy'):
+                with self.subTest(runtime=runtime, command=command):
+                    self.assertIsNotNone(self.reason(command, runtime))
+            self.turn(runtime, '클립보드에 넣어줘')
+            self.assertIsNone(self.reason('cat draft.md | pbcopy', runtime))
+            self.turn(runtime, '```text\n클립보드에 넣어줘\n```')
+            self.assertIsNotNone(self.reason('cat draft.md | pbcopy', runtime))
+
+    def test_secret_output_guard_does_not_exempt_raw_pipelines(self):
+        spec = importlib.util.spec_from_file_location('secret_print', Path(__file__).with_name('secret-print-guard.py'))
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        for source in ('gcloud secrets versions access latest --secret example',
+                       'security find-generic-password -w -s example'):
+            for suffix in ('', ' | pbcopy', ' | tee /dev/tty | pbcopy', ' 2>&1 | pbcopy'):
+                with self.subTest(command=source + suffix):
+                    self.assertIsNotNone(guard.bash_problem(source + suffix))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

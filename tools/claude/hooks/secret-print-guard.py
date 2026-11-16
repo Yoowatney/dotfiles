@@ -13,6 +13,7 @@ and the Read/Grep tools on a secret file.
 from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
 
 import json
+from pathlib import Path
 import re
 import shlex
 import sys
