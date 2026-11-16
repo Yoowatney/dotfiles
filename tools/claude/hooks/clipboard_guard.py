@@ -103,8 +103,20 @@ def writes_clipboard(command, depth=0):
 
 def requested(prompt):
     """A direct imperative, never quoted policy, a relay or a standing instruction."""
+    fence = None
     for line in prompt.splitlines():
         line = line.strip()
+        if line.startswith('>'):
+            continue
+        if fence is not None:
+            if re.fullmatch(re.escape(fence[0]) + '{' + str(fence[1]) + ',}', line):
+                fence = None
+            continue
+        marker = re.match(r'(`{3,}|~{3,})', line)
+        if marker:
+            # Only the same marker of at least this length closes the block.
+            fence = (marker[0][0], len(marker[0]))
+            continue
         if re.search(r'[`"“”<>]|넣지|복사하지|하지\s*마|말고|않|아니|\b(?:not|never|don.t)\b', line, re.I):
             continue
         if re.fullmatch(r'(?:(?:이|그|저)\s*[^.!?\n]{0,40}?\s+)?클립보드에\s*'

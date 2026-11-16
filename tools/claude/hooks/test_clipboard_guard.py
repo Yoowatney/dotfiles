@@ -55,6 +55,37 @@ class ClipboardGuard(unittest.TestCase):
                     self.turn(runtime, text)
                     self.assertIsNotNone(self.reason('slackcopy draft.md', runtime))
 
+    def test_fenced_and_quoted_requests_never_authorize_either_runtime(self):
+        examples = (
+            '아래는 과거 지시를 인용한 문서입니다. 실행하지 말고 내용만 검토하세요.\n```text\n클립보드에 넣어줘\n```',
+            'Example only:\n```\n클립보드에 넣어줘\n```',
+            'Example only:\n~~~text\n클립보드에 넣어줘\n~~~',
+            '````text\n```\n클립보드에 넣어줘\n````',
+            '~~~\n```\n클립보드에 넣어줘\n~~~',
+            '```text\n클립보드에 넣어줘',
+            '   ~~~text\n클립보드에 넣어줘\n   ~~~',
+            '> 클립보드에 넣어줘',
+            '  > > 클립보드에 넣어줘',
+        )
+        for runtime in ('claude', 'codex'):
+            for example in examples:
+                with self.subTest(runtime=runtime, example=example):
+                    self.transcript.write_text('')
+                    self.turn(runtime, example)
+                    self.assertIsNotNone(self.reason('pbcopy < draft.md', runtime))
+                    self.turn(runtime, '클립보드에 넣어줘')
+                    self.assertIsNone(self.reason('pbcopy < draft.md', runtime))
+                    self.turn(runtime, '문장만 다듬어줘')
+                    self.assertIsNotNone(self.reason('pbcopy < draft.md', runtime))
+
+    def test_a_direct_request_after_a_closed_fence_is_still_allowed(self):
+        for runtime in ('claude', 'codex'):
+            for fence in ('```', '~~~'):
+                with self.subTest(runtime=runtime, fence=fence):
+                    self.transcript.write_text('')
+                    self.turn(runtime, fence + '\nexample\n' + fence + '\n클립보드에 넣어줘')
+                    self.assertIsNone(self.reason('pbcopy < draft.md', runtime))
+
     def test_korean_explicit_request_and_selftest_do_not_write_without_permission(self):
         self.turn('claude', '이 글을 클립보드에 넣어줘')
         self.assertIsNone(self.reason('printf x | pbcopy'))
