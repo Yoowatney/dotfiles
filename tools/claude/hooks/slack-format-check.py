@@ -34,7 +34,7 @@ INLINE_CODE = re.compile(r"`[^`\n]*`")
 
 FIX = (
     "Slack MCP는 text만 보내서 진짜 목록을 만들 수 없다. "
-    "요유 이름으로 보낼 글이면 마크다운 파일에 써서 `slackcopy`로 클립보드에 넣고, "
+    "사용자 이름으로 보낼 초안은 부탁한 대화 스레드에 적는다. 클립보드는 이번 사용자 턴에 직접 요청했을 때만 쓴다. "
     "봇으로 올려야 하면 agent-board `main/main-channel.py reply`(또는 `post`)로 보낸다: 목록 줄을 진짜 목록으로 바꾼다 "
     "(memory: reference_slack_mcp_no_real_bullets)."
 )
@@ -652,6 +652,21 @@ def selftest():
 
 
 def check(payload):
+    # This hook is already invoked for both runtimes, including open sessions.
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'clipboard_guard.py')
+    try:
+        spec = importlib.util.spec_from_file_location('clipboard_guard', path)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        refusal = guard.reason(payload)
+    except Exception:
+        # A broken clipboard module must not disable the older safety checks.
+        command = str((payload.get('tool_input') or {}).get('command') or
+                      (payload.get('tool_input') or {}).get('cmd') or '')
+        refusal = 'Clipboard guard unavailable; clipboard writes are refused.' if re.search(
+            r'\b(?:pbcopy|slackcopy|pyperclip|clipboard)\b', command, re.I) else None
+    if refusal:
+        return refusal
     tool = payload.get("tool_name") or ""
     inp = payload.get("tool_input") or {}
     if "slack" in tool.lower() and ("text" in inp or "message" in inp):  # the Slack MCP post tools

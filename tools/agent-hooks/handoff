@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Carries the next-session prompt across /clear, so 요유 never copies and pastes a handoff
 # (요유 2026-10-21: the clipboard round trip made them the bottleneck).
-#   handoff save [file]   stdin or file -> this pane's pending handoff (outside herdr: the clipboard)
+#   handoff save [file]   stdin or file -> this pane's pending handoff (requires a herdr pane)
 #   handoff session       Claude SessionStart hook (every source): remember this pane's transcript in <pane>.md.transcript.
 #                         On /clear: load, or with nothing saved, point the new session at the transcript /clear ended.
 #   handoff load          print the pending handoff once, set it aside, and start the first turn.
@@ -26,8 +26,8 @@ kick() {
 case "${1:-}" in
   save)
     if [ -z "${HERDR_PANE_ID:-}" ]; then
-      cat "${2:-/dev/stdin}" | pbcopy && echo "handoff: not in herdr, copied to the clipboard instead"
-      exit
+      echo "handoff: no herdr pane; keep the handoff file and choose its destination explicitly" >&2
+      exit 2
     fi
     python3 "$HERE/handoff-state.py" save ${2:+"$2"}
     ;;

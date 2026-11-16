@@ -201,8 +201,9 @@ check "a saved handoff still starts the turn" "$(prompts)" "w2:p1 "
 check "with the handoff kick" "$(grep -c '인수인계대로' "$SANDBOX/prompts")" 1
 check "outside herdr session prints nothing" "$(ss "" clear "$SANDBOX/e.jsonl")" ""
 
-printf 'no pane\n' | ho "" save >/dev/null
-check "outside herdr save falls back to the clipboard" "$(cat "$SANDBOX/clip")" "no pane"
+printf 'no pane\n' | ho "" save >/dev/null 2>&1
+check "outside herdr save refuses a missing destination" "$?" 2
+check "outside herdr save never writes the clipboard" "$([ -e "$SANDBOX/clip" ] && echo copied || echo untouched)" "untouched"
 check "outside herdr load prints nothing" "$(ho "" load)" ""
 
 ho w1:p1 bogus 2>/dev/null; check "unknown command exits 2" "$?" 2
