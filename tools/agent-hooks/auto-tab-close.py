@@ -768,6 +768,16 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
                 context.update(handed=True, checker_terminal=checked.get("terminal_id"), checker_address=address,
                                check_started_at=time.time())
                 write_context(context_path, context)
+                # The result reaches the main pane now, so an early answer need not wait for the check. It sets no
+                # check_delivered: post tools take the [ac-ID] only after the combined report. ponytail: one best-effort
+                # send under the lock that already stops a replayed Stop; if it is lost, the combined report still comes.
+                if not (send_immediate or send)(f"{share.PRECHECK_HEAD}{share.PRECHECK_NOTE}:\n{short_report(reply, None)}\n"
+                                                f"일 칸: {context['worker_address']} [ac-{key}]\n확인 칸: {address}\n"
+                                                f"전체 보고: {context['report']} ({context['entry']})"):
+                    # #69 review: say why the early answer never came, as for any other lost report.
+                    context["precheck_error"] = "pane-tell failed"
+                    write_context(context_path, context)
+                    relay_watch.failed(env, lead, context["report"])
                 return True
             context["spawn_error"] = error
             write_context(context_path, context)
