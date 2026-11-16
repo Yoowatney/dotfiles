@@ -563,7 +563,7 @@ def names_reason(text: str, env) -> str | None:
         parts.append(f"보고에 칸 내부 ID가 있습니다. 요유는 칸 이름만 봅니다. ID를 지우고 칸 이름으로 적으세요({listed}).")
     macs = list(dict.fromkeys(BAD_MAC.findall(GOOD_MAC.sub(" ", prose(text)))))
     if macs:
-        parts.append(f"맥은 회사맥, 회사서버맥, 집맥 가운데 하나로만 적으세요(고칠 말: {', '.join(macs)}).")
+        parts.append(f"맥은 세션맥, 휴대맥, 회사서버맥, 집맥 가운데 하나로만 적으세요(고칠 말: {', '.join(macs)}).")
     return f"yoyoo-share-guard: {' '.join(parts)} 바뀐 곳만 고쳐 보고 전체를 다시 쓰세요." if parts else None
 
 

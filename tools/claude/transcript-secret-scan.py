@@ -232,7 +232,7 @@ def report(result, nfiles, dry):
     action = "요유 할 일: 실제 사용 중인 비밀값으로 확인되면 재발급 여부를 정해 주세요."
     lines = ["[세션 기록 비밀값 검사] 비밀값 모양 %d곳을 %s. %s" % (
         total, "찾았습니다(가리지 않음)" if dry else "가렸습니다", action)]
-    lines.append("검사 대상: 회사맥에 저장된 세션 기록과 입력 기록, 보관본·위키용 사본·세션 보고서입니다 "
+    lines.append("검사 대상: 세션맥에 저장된 세션 기록과 입력 기록, 보관본·위키용 사본·세션 보고서입니다 "
                  "(파일 %d개 중 %d개에서 발견)." % (nfiles, len(result)))
     if not dry:
         lines.append("가린 것: 기록 속 문자열 본문을 같은 길이의 `*`로 덮었습니다. "
@@ -243,7 +243,7 @@ def report(result, nfiles, dry):
     lines += ["- %s: %d곳" % (k, n) for k, n in sorted(kinds.items(), key=lambda x: -x[1])]
     lines.append("위치:")
     lines += ["- `%s`: 파일 %d개" % (r, n) for r, n in sorted(roots.items(), key=lambda x: -x[1])]
-    lines.append("값과 파일 이름은 이 글에 없습니다. 가린 위치와 건수는 회사맥 "
+    lines.append("값과 파일 이름은 이 글에 없습니다. 가린 위치와 건수는 세션맥 "
                  "`~/Library/Logs/transcript-secret-scan.log`에 남깁니다.")
     return "\n".join(lines)
 

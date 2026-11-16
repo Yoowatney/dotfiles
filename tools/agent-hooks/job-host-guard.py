@@ -25,12 +25,12 @@ import sys
 sys.dont_write_bytecode = True  # no __pycache__ in the dotfiles at every tool call
 EDITORS = {"Edit", "Write", "MultiEdit"}
 LAPTOP_MODEL = "Mac16,8"  # ponytail: a new 회사맥 silently turns this off, update the model then
-ASK = ("job-host: 회사맥에 정기 잡을 올리거나 바꾸기 직전입니다. 회사맥은 덮개를 닫거나 출퇴근하면 멈추므로, 계속 돌아야 하는 회사 잡은 "
-       "회사서버맥의 launchd에 둡니다. 회사맥에는 요유의 세션이나 회사맥 도구가 꼭 필요한 잡만 둡니다. "
-       "요유가 회사맥을 지정했거나 이유가 분명하면 같은 호출을 그대로 다시 실행하고, 보고에 어느 머신에 왜 두었는지 적으세요. "
+ASK = ("job-host: 세션맥에 정기 잡을 올리거나 바꾸기 직전입니다. 세션맥은 덮개를 닫거나 출퇴근하면 멈추므로, 계속 돌아야 하는 회사 잡은 "
+       "회사서버맥의 launchd에 둡니다. 세션맥에는 요유의 세션이나 세션맥 도구가 꼭 필요한 잡만 둡니다. "
+       "요유가 세션맥을 지정했거나 이유가 분명하면 같은 호출을 그대로 다시 실행하고, 보고에 어느 머신에 왜 두었는지 적으세요. "
        "아니면 이 호출을 버리고 회사서버맥에 올리세요. 어디에 둘지 판단할 수 없으면 요유에게 물으세요.")
 # Nobody reads a job tab, so a question it can answer by repeating itself is no stop (요유 2026-11-01, api#975).
-JOB_ASK = ("job-host: 자동 세션은 회사맥의 정기 잡을 올리거나 바꾸지 않습니다. 같은 호출을 반복해도 통과하지 않습니다. 하던 일은 여기서 멈추고, "
+JOB_ASK = ("job-host: 자동 세션은 세션맥의 정기 잡을 올리거나 바꾸지 않습니다. 같은 호출을 반복해도 통과하지 않습니다. 하던 일은 여기서 멈추고, "
            "어떤 잡을 왜 어느 머신에 둘지 board.sh comment로 남긴 뒤 owner를 yoyoo로 넘기세요. 이 탭에 요유가 직접 입력하면 풀립니다.")
 NAMES = re.compile(r"launchctl|crontab|install-launchd|LaunchAgents")
 HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?([^\n]*)\n(.*?)\n[ \t]*\1\b", re.S)
