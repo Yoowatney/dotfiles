@@ -483,6 +483,8 @@ main_panes idle; pt "메인 오케" "찬 칸" >/dev/null; claude_screen "치던 
 batched; settled
 check "a main draft when the hold ends is archived and relayed" "$(prompts)|$(grep -c '찬 칸' "$SANDBOX/log")|$(grep -c '입력창 초안 보관 안내' "$SANDBOX/log")" "1|1|1"
 check "the main draft archive contains the words" "$(grep -l '치던 글' "$SANDBOX/state/pane-tell/drafts/"*.json | wc -l | tr -d ' ')" 1
+claude_screen "치던 글" > "$SANDBOX/screen-w1:pM"; pt --can-send w1:pM claude; rc=$?; claude_screen "치던 글" > "$SANDBOX/screen"; pt --can-send w1:p3 claude
+check "can-send: a main draft is sendable (nothing cleared yet), another pane's draft is not" "$rc|$?|$(grep -c '치던 글' "$SANDBOX/screen-w1:pM")" "0|1|1"
 rm -f "$SANDBOX/screen-w1:pM"
 main_panes idle; b="$SANDBOX/state/pane-tell/batch/term_pM/open"; mkdir -p "$b"; echo 1 > "$b/.t"; printf '%s' "[pane-tell: 'x' …] 묵은 글" > "$b/0000000001.000000.1"
 out=$(pt "메인 오케" "새 글"); batched
