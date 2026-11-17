@@ -346,6 +346,8 @@ if ! idle || ! request_current; then
     || skip --error "중단한 복구 기록을 완료 처리하지 못해 건너뜀"
   keep_gate=
   rm -f "$gate"
+  holding=
+  hold_delivery
   if [ -n "$now" ]; then
     log "인계 뒤에 새 대화가 있어 인계를 다시 요청함"
     QUIET=$RETRY_QUIET
