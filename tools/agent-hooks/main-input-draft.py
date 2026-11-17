@@ -151,6 +151,7 @@ def prepare(pane, kind, check=False):
 
 def ack(pane):
     pending_path(pane_record(pane)).unlink(missing_ok=True)
+    (root() / "pane-tell/drafts/last-unsafe").unlink(missing_ok=True)  # a later block with the same reason is logged again
 
 
 def notice(pane):
@@ -172,5 +173,16 @@ if __name__ == "__main__":
             notice = prepare(pane, rest[0], check=mode == "check")
             if mode != "check":
                 print(notice)
-    except (Unsafe, OSError, ValueError, KeyError, subprocess.SubprocessError):
+    except Unsafe as e:
+        # Why a relay waits, once per change (delivery polls every 5 s), so the next stuck relay has evidence in pane-tell/log.
+        try:
+            last = root() / "pane-tell/drafts/last-unsafe"
+            if not last.exists() or last.read_text() != "%s %s" % (pane, e):
+                durable(last, "%s %s" % (pane, e))
+                with open(root() / "pane-tell/log", "a") as log:
+                    log.write("%s draft-unsafe %s: %s\n" % (time.strftime("%F %T"), pane, e))
+        except OSError:
+            pass
+        sys.exit(1)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
         sys.exit(1)
