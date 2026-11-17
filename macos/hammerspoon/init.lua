@@ -43,4 +43,39 @@ hs.hotkey.bind({"cmd", "ctrl"}, "r", function()
     hs.reload()
 end)
 
+-- Keep Option+R scoped to Ego Lite and open its native Space naming dialog.
+egoSpaceRename = {}
+local egoBundleID = "com.citrolabs.ego.lite"
+
+function egoSpaceRename.open()
+    local app = hs.application.frontmostApplication()
+    if not app or app:bundleID() ~= egoBundleID then
+        return false, "Ego Lite is not the active app"
+    end
+    if not app:selectMenuItem({"창", "창 이름 지정…"}) then
+        hs.alert.show("Space 이름 변경 메뉴를 열 수 없습니다")
+        return false, "Space naming menu is unavailable"
+    end
+    return true
+end
+
+egoSpaceRename.hotkey = hs.hotkey.new({"alt"}, "r", egoSpaceRename.open)
+egoSpaceRename.watcher = hs.application.watcher.new(function(_, event, app)
+    if event == hs.application.watcher.activated then
+        if app and app:bundleID() == egoBundleID then
+            egoSpaceRename.hotkey:enable()
+        else
+            egoSpaceRename.hotkey:disable()
+        end
+    elseif event == hs.application.watcher.deactivated
+        and app and app:bundleID() == egoBundleID then
+        egoSpaceRename.hotkey:disable()
+    end
+end)
+egoSpaceRename.watcher:start()
+local activeApp = hs.application.frontmostApplication()
+if activeApp and activeApp:bundleID() == egoBundleID then
+    egoSpaceRename.hotkey:enable()
+end
+
 hs.alert.show("Hammerspoon 로드됨")
