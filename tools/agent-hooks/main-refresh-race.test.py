@@ -204,7 +204,12 @@ else: raise SystemExit(2)
             until(lambda: (self.root / "priority-inflight").exists())
             (self.root / "no-handoff").touch()
             (self.root / "status").write_text("idle")
-            time.sleep(.5)
+            lock_path = str(self.state / "pane-tell/sending/w1:p1.lock")
+            def prepare_waiting_for_send():
+                rows = subprocess.check_output(["/bin/ps", "-axo", "args="], text=True)
+                return any(lock_path in row and "main-refresh-recovery.py" in row
+                           for row in rows.splitlines())
+            until(prepare_waiting_for_send)
             self.assertFalse((self.root / "clearing").exists())
             self.assertFalse(list((self.state / "agent-handoff/refresh-recovery").glob("*/handoff.md")))
         finally:
@@ -217,6 +222,44 @@ else: raise SystemExit(2)
         self.assertEqual([sid for sid, text in self.prompts() if text.endswith(message)],
                          ["old-session"])
         self.assertFalse(list((self.state / "agent-handoff/refresh-recovery").glob("*/active")))
+
+    def test_abort_after_prepare_reholds_delivery_for_second_handoff(self):
+        (self.root / "hold-after-request").touch()
+        (self.root / "pause-priority").touch()
+        (self.root / "clear-continue").touch()
+        (self.root / "status").write_text("idle")
+        notifier = self.root / "notify"
+        notifier.write_text('#!/bin/sh\n: > "$FIXTURE/error-notice"\n')
+        notifier.chmod(0o755)
+        self.env["HERDR_ERROR_NOTIFY"] = str(notifier)
+        self.start()
+        until(lambda: (self.state / "agent-handoff/w1:p1.md").exists())
+        message = "[Slack #0-yoyooyo 요유] stop"
+        env = {key: value for key, value in self.env.items() if key != "HERDR_PANE_ID"}
+        sender = subprocess.Popen([str(HERE / "pane-tell"), "w1:p1", message], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            until(lambda: (self.root / "priority-inflight").exists())
+            (self.root / "status").write_text("idle")
+            lock_path = str(self.state / "pane-tell/sending/w1:p1.lock")
+            def prepare_waiting_for_send():
+                rows = subprocess.check_output(["/bin/ps", "-axo", "args="], text=True)
+                return any(lock_path in row and "main-refresh-recovery.py" in row
+                           for row in rows.splitlines())
+            until(prepare_waiting_for_send)
+            (self.root / "hold-after-request").unlink()
+        finally:
+            (self.root / "priority-continue").touch()
+            sender.communicate(timeout=10)
+        self.assertEqual(sender.returncode, 0)
+        self.assertEqual(self.proc.wait(timeout=30), 0)
+        prompts = [text for _, text in self.prompts()]
+        self.assertEqual(sum("[main-refresh]" in text for text in prompts), 2)
+        self.assertEqual([sid for sid, text in self.prompts() if text.endswith(message)],
+                         ["old-session"])
+        self.assertEqual(prompts.count("/clear"), 1)
+        self.assertFalse((self.root / "error-notice").exists())
+        self.assertIn("새로 시작함", (self.state / "orchestrator/refresh.log").read_text())
 
     def test_failed_handoff_releases_durable_messages_without_clear(self):
         (self.root / "no-handoff").touch()
