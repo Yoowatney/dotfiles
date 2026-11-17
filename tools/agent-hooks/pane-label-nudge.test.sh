@@ -182,6 +182,11 @@ for l in "🟢 🫡 새 세션 munice" "🔴 👑 새 세션 munice"; do
     [[ "$out" == *"no label yet"* ]] || fail "placeholder behind a role mark: $out"
 done
 
+# Staging test data is cleaned up without asking (요유 2026-11-17); the risky cases still ask.
+out=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_LABEL="api#1 일") ctx=$(printf '%s' "$out" | context)
+[[ "$ctx" == *"staging test data"*"without asking"* ]] || fail "staging test data rule missing: $ctx"
+[[ "$ctx" == *"bulk or whole-collection deletion"* ]] || fail "test data limits missing: $ctx"
+
 # Outside herdr or herdr down: nothing, exit 0.
 rm -f "$SANDBOX/rename.log"
 run_start >/dev/null
