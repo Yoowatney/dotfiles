@@ -23,7 +23,7 @@
 	<key>SUUpdateRelaunchingMarker</key>
 	<false/>
 	<key>chargeVal</key>
-	<real>100</real>
+	<real>80</real>
 	<key>clamshellDischargeMessage</key>
 	<false/>
 	<key>exitInhibitCharge</key>
