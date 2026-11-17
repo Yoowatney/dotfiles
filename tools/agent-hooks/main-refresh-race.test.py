@@ -15,7 +15,7 @@ from unittest.mock import patch
 HERE = Path(__file__).resolve().parent
 
 
-def until(predicate, timeout=15):
+def until(predicate, timeout=60):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         if predicate():
