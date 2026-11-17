@@ -86,8 +86,10 @@ def complete(gate_path):
         write(record / "completed", "Session transition confirmed.\n")
 
 
-def blocked(gate_path, pane):
+def blocked(gate_path, pane, priority="0"):
     gate = json.loads(Path(gate_path).read_text())
+    if priority == "1" and not gate.get("clearing"):
+        return False
     try:
         os.kill(gate["pid"], 0)
         alive = True
@@ -160,9 +162,13 @@ def main():
         elif command == "activate":
             activate(json.loads(Path(args[0]).read_text()))
         elif command == "blocked":
-            return 0 if blocked(args[0], json.loads(args[1])["result"]["pane"]) else 1
+            return 0 if blocked(args[0], json.loads(args[1])["result"]["pane"],
+                                args[2] if len(args) > 2 else "0") else 1
         elif command == "record":
-            record(*args)
+            # A sender started before this update may still pass its old flag.
+            if len(args) not in (4, 5):
+                raise ValueError("invalid record arguments")
+            record(*args[:4])
         else:
             raise ValueError("unknown recovery operation")
         return 0

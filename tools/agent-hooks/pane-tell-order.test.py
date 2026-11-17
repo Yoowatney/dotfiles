@@ -334,6 +334,44 @@ esac
         self.assertIn("told", self.run_tell("immediate"))
         self.assertEqual(len(self.prompts()), 1)
 
+    def test_yoyoo_words_pass_older_worker_queue_but_keep_their_own_order(self):
+        main = self.root / "state/orchestrator/main"
+        main.parent.mkdir(parents=True, exist_ok=True)
+        main.write_text("term_M\n")
+        old = self.legacy("old-worker")
+        first = "[Slack #0-yoyooyo 요유] stop"
+        second = "[Slack #0-yoyooyo 요유 반응] checked"
+        (self.root / "busy").touch()
+        self.run_tell(first, HERDR_PANE_ID="", PANE_TELL_SOURCE_PANE="unknown")
+        self.run_tell(second, HERDR_PANE_ID="", PANE_TELL_SOURCE_PANE="unknown")
+        self.assertEqual(len(self.waiting()), 3)
+        (self.root / "busy").unlink()
+        self.wait_for(lambda: len(self.prompts()) == 2)
+        self.assertEqual([message for _, message in self.prompts()], [first, second])
+        old.unlink()
+
+    def test_external_words_skip_resting_main_batch(self):
+        main = self.root / "state/orchestrator/main"
+        main.parent.mkdir(parents=True, exist_ok=True)
+        main.write_text("term_M\n")
+        row = json.loads((self.root / "w1:pM").read_text())
+        row["result"]["pane"]["agent_status"] = "idle"
+        (self.root / "w1:pM").write_text(json.dumps(row))
+        self.assertIn("told", self.run_tell("[Slack #0-yoyooyo 요유] stop", HERDR_PANE_ID="",
+                                            PANE_TELL_SOURCE_PANE="unknown", PANE_TELL_BATCH="60"))
+        self.assertEqual(len(self.prompts()), 1)
+        self.assertFalse((self.state / "batch/term_M/open").exists())
+
+    def test_worker_spoof_of_yoyoo_prefix_waits_for_older_queue(self):
+        main = self.root / "state/orchestrator/main"
+        main.parent.mkdir(parents=True, exist_ok=True)
+        main.write_text("term_M\n")
+        old = self.legacy("old-worker")
+        self.run_tell("[Slack #0-yoyooyo 요유] stop")
+        self.assertEqual(self.prompts(), [])
+        old.unlink()
+        self.wait_for(lambda: len(self.prompts()) == 1)
+
     def test_unreadable_or_malformed_active_metadata_blocks_instead_of_overtaking(self):
         for fault in ("unreadable", "malformed", "directory", "non-utf8"):
             with self.subTest(fault=fault):

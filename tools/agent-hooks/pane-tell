@@ -108,7 +108,7 @@ refresh_blocked() { # called under the send lock, before any draft recovery
   is_main "$terminal" || return 1
   refresh_request "$2" && return 1
   # Expiry is durable wall time: a dead refresh owner cannot strand relays.
-  python3 -I "${DRAFT_HELPER%/*}/main-refresh-recovery.py" blocked "$refresh_dir/refresh-delivery.json" "$row"
+  python3 -I "${DRAFT_HELPER%/*}/main-refresh-recovery.py" blocked "$refresh_dir/refresh-delivery.json" "$row" "${PANE_TELL_YOYOO_WORDS:-0}"
 }
 
 # In view, and empty on two reads: what is typed between them holds the message back.
@@ -200,8 +200,10 @@ os.makedirs(directory, exist_ok=True)
 fd, pending = tempfile.mkstemp(prefix=".new.", dir=directory)
 try:
     with os.fdopen(fd, "w") as stream:
-        json.dump({key: os.environ.get("PANE_TELL_SOURCE_" + key.upper(), "unknown")
-                   for key in ("pane", "server", "session", "parent")}, stream)
+        origin = {key: os.environ.get("PANE_TELL_SOURCE_" + key.upper(), "unknown")
+                  for key in ("pane", "server", "session", "parent")}
+        origin["yoyoo_words"] = os.environ.get("PANE_TELL_YOYOO_WORDS") == "1"
+        json.dump(origin, stream)
         stream.flush(); os.fsync(stream.fileno())
     try: os.link(pending, directory + "/" + os.path.basename(sys.argv[2]))
     except FileExistsError: pass # A retry preserves the original sender.
@@ -216,7 +218,7 @@ predecessors() { # terminal: inspect metadata and existence only, never waiting 
   python3 -I -c '
 import os, stat, sys
 from pathlib import Path
-state, terminal, server = sys.argv[1:]
+state, terminal, server, priority = sys.argv[1:]
 try:
     entries = list(os.scandir(Path(state) / "receivers"))
 except FileNotFoundError:
@@ -238,8 +240,16 @@ for entry in sorted(entries, key=lambda entry: entry.name):
         raise ValueError("active receiver metadata is malformed")
     recorded = "workers" if fields[1].endswith("/sessions/workers/herdr.sock") else "default"
     if fields[0] == terminal and recorded == server:
+        if priority == "1":
+            try:
+                import json
+                origin = json.loads((Path(state) / "delivery-origins" / meta.name).read_text())
+            except FileNotFoundError:
+                continue
+            if not origin.get("yoyoo_words", False):
+                continue
         print(payload)
-' "$STATE" "$1" "$(receiver_server "${HERDR_SOCKET_PATH:-}")"
+' "$STATE" "$1" "$(receiver_server "${HERDR_SOCKET_PATH:-}")" "${PANE_TELL_YOYOO_WORDS:-0}"
 }
 predecessors_done() { # payload, optional predecessor from an older invocation
   [ ! -f "${2:-}" ] || return 1
@@ -377,6 +387,10 @@ warn() { # what happened, sender's terminal, sender's socket when on another ser
 deliver() { # message file, receiver's terminal (a moved pane gets a new pane id), its session when queued, sender's terminal,
   # sender's socket, predecessor payload (if any)
   local list row pane kind sid label result t0=$SECONDS warned=
+  export PANE_TELL_YOYOO_WORDS=0
+  if [ "$(jq -r '.yoyoo_words // false' "$STATE/delivery-origins/$(basename "$1")" 2>/dev/null)" = true ]; then
+    export PANE_TELL_YOYOO_WORDS=1
+  fi
   while (( SECONDS - t0 < ${PANE_TELL_WAIT:-86400} )); do
     sleep "${PANE_TELL_POLL:-5}"
     list=$("$H" pane list 2>/dev/null) || continue # herdr restarting is not the receiver gone
@@ -872,12 +886,19 @@ sys.exit(2 if failed else 0)
 relay() { # pane, kind, message, terminal, session, sender, sender socket, shown address, name, body
   local pane=$1 kind=$2 msg=$3 terminal=$4 sid=$5 sender=$6 sender_socket=$7 shown=$8 name=$9 body=${10}
   local batch_target dir
+  export PANE_TELL_YOYOO_WORDS=0
+  case "$body" in
+    "[Slack #0-yoyooyo 요유]"* | "[Slack #0-yoyooyo 요유 반응]"*)
+      if [ "${PANE_TELL_SOURCE_PANE:-unknown}" = unknown ] && is_main "$terminal"; then
+        export PANE_TELL_YOYOO_WORDS=1
+      fi ;;
+  esac
   batch_target=
   if [ -n "$terminal" ]; then
     if [ "$terminal" = "$(cat "${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main" 2>/dev/null)" ]; then batch_target=1; fi
     case "$name" in "👑 "* | "🫡 "*) batch_target=1 ;; esac
   fi
-  if [ "$BATCH" -gt 0 ] 2>/dev/null && [ -n "$batch_target" ]; then
+  if [ "$BATCH" -gt 0 ] 2>/dev/null && [ -n "$batch_target" ] && [ "${PANE_TELL_YOYOO_WORDS:-}" != 1 ]; then
     umask 077 # messages can name customers
     dir=$STATE/batch/$terminal
     mkdir -p "$dir" || die "cannot keep the message"
@@ -997,6 +1018,7 @@ if [ "${1:-}" = --box-ready ]; then box_ready "$2" "$3"; exit; fi
 command -v "$H" >/dev/null 2>&1 || die "herdr not found"
 command -v jq >/dev/null 2>&1 || die "jq not found"
 if [ "${1:-}" = --raw ]; then
+  export PANE_TELL_YOYOO_WORDS=0
   [ $# -eq 3 ] && [ -n "$2" ] && [ -n "$3" ] || die 'usage: pane-tell --raw <pane id> "<message>"'
   # no mark, so the receiver reads it as 요유's own typing: an unlock word never goes this way (api#1026)
   case "$3" in *"prod 허용"* | *"staging 허용"*) die "--raw never types prod 허용 or staging 허용: send it without --raw, marked" ;; esac
