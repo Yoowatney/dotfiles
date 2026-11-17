@@ -146,7 +146,7 @@ exec /usr/bin/nohup "$@"
     def open(self, message="first"):
         result = self.call("fixture-open", message)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("held up to 120s", result.stdout)
+        self.assertIn("held up to 60s", result.stdout)
 
     def test_slow_fixture_startup_is_not_a_delivery_failure(self):
         self.assertEqual(self.call("fixture-slow-start").returncode, 0)
@@ -171,7 +171,7 @@ exec /usr/bin/nohup "$@"
         self.open()
         self.open("second")
         metadata = json.loads((self.batch / "open/.meta").read_text())
-        self.assertEqual(metadata["due"] - metadata["opened"], 120)
+        self.assertEqual(metadata["due"] - metadata["opened"], 60)
         self.assertEqual(metadata["server"], "default")
         self.assertNotIn("first", json.dumps(metadata))
         result = self.call("--flush", str(self.batch), "term_M", PANE_TELL_BATCH="0")
@@ -195,7 +195,7 @@ exec /usr/bin/nohup "$@"
         self.assertEqual(self.prompts(), [b"first"])
 
     def test_sigkilled_real_scheduler_is_recovered_once_by_watcher_tick(self):
-        # Run the actual detached 120-second --flush scheduler, rather than
+        # Run the actual detached 60-second --flush scheduler, rather than
         # the default fixture's nohup exit73. Only this private group is killed.
         (self.root / "bin/nohup").write_text("#!/bin/bash\nexec /usr/bin/nohup \"$@\"\n")
         self.env["FIXTURE_RECOVERY_START_DELAY"] = "5.2"
@@ -227,15 +227,15 @@ exec /usr/bin/nohup "$@"
                     if f" {timer} flush-start " in events and owned_timer(timer):
                         group = subprocess.run(["/bin/ps", "-g", str(timer), "-o", "command="],
                                                capture_output=True, text=True, timeout=12)
-                        if "sleep 120" in group.stdout:
+                        if "sleep 60" in group.stdout:
                             checkpoints["started_at"] = time.time()
                             break
                 time.sleep(.01)
             else:
-                self.fail("actual private 120-second scheduler did not start")
+                self.fail("actual private 60-second scheduler did not start")
             self.assertEqual(self.prompts(), [])
             self.assertEqual(json.loads((self.batch / "open/.meta").read_text())["due"]
-                             - json.loads((self.batch / "open/.meta").read_text())["opened"], 120)
+                             - json.loads((self.batch / "open/.meta").read_text())["opened"], 60)
             kill_timer()
             end = time.monotonic() + 30
             while self.timer_alive(timer) and time.monotonic() < end:
@@ -635,11 +635,11 @@ exec /bin/mv "$@"
         self.wait_prompt([b"workers"])
         self.assertEqual((self.root / "sockets").read_text().strip(), socket)
 
-    def test_default_scheduler_waits_120_before_flushing(self):
+    def test_default_scheduler_waits_60_before_flushing(self):
         self.open()
         sleeper = self.root / "bin/sleep"
         sleeper.write_text('''#!/bin/bash
-if [ "$1" = 120 ]; then
+if [ "$1" = 60 ]; then
   printf '%s' "$1" > "$FIXTURE/sleep-entered"
   while [ ! -f "$FIXTURE/release-sleep" ]; do /bin/sleep .01; done
   exit 0
@@ -653,7 +653,7 @@ exec /bin/sleep "$@"
             end = time.monotonic() + 30
             while not (self.root / "sleep-entered").exists() and time.monotonic() < end:
                 time.sleep(.01)
-            self.assertEqual((self.root / "sleep-entered").read_text(), "120")
+            self.assertEqual((self.root / "sleep-entered").read_text(), "60")
             self.assertEqual(self.prompts(), [])
         finally:
             (self.root / "release-sleep").touch()

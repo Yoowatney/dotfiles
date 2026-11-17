@@ -30,7 +30,7 @@
 #   pane-tell --can-send <pane id> <kind>       read-only: empty, or a main draft that can be archived safely
 # Batching (api#1051): a marked message for the main pane (the terminal in orchestrator/main), a lead (👑), or a worker (🫡)
 # while it rests opens a batch, and
-# all that comes for it in the next PANE_TELL_BATCH seconds (120; 0, or a file batch-off in the state folder, turns batching
+# all that comes for it in the next PANE_TELL_BATCH seconds (60; 0, or a file batch-off in the state folder, turns batching
 # off) goes as one prompt, each message with
 # its own mark, a blank line between: it prints "queued for … held …" and exits 0. The main pane read about 210k tokens a turn,
 # and in the 3 days to 11/07, 32% of the turns a relay started while it rested had another relay within 2 minutes of the
@@ -417,7 +417,7 @@ deliver() { # message file, receiver's terminal (a moved pane gets a new pane id
   echo "$(date '+%F %T') undelivered $(basename "$1") for $2" >> "$STATE/log"
   warn "다른 칸에 보낸 글을 전달하지 못해 파일로 남겼습니다: $STATE/undelivered/$(basename "$1")" "$4" "$5"
 }
-BATCH=${PANE_TELL_BATCH:-120}
+BATCH=${PANE_TELL_BATCH:-60}
 [ ! -e "$STATE/batch-off" ] || BATCH=0 # the switch for every sender at once: launchd jobs set no environment of ours
 # 0 when the message goes now even to a resting main pane
 urgent() {
