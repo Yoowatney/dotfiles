@@ -329,12 +329,21 @@ if ! request_current; then
 fi
 # Straight through herdr, never pane-tell's queue: a queued /clear would fire hours later and wipe the main pane.
 keep_gate=1
-(umask 077; /usr/bin/python3 -I "$HERE/main-refresh-recovery.py" prepare "$gate" "$hdir/$key.md" "$key" "$recovery_deadline") \
+(umask 077; /usr/bin/python3 -I - "$STATE/pane-tell/sending/$id.lock" "$HERE/main-refresh-recovery.py" "$gate" "$hdir/$key.md" "$key" "$recovery_deadline" <<'PY'
+import fcntl, subprocess, sys
+lock_path, helper, gate, memo, key, deadline = sys.argv[1:]
+with open(lock_path, "a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    sys.exit(subprocess.call([sys.executable, "-I", helper, "prepare", gate, memo, key, deadline]))
+PY
+) \
   || { keep_gate=; skip --error "복구 인계와 전달 보류 상태를 저장하지 못해 건너뜀"; }
-# A priority relay can pass the gate between the previous transcript check and
-# preparation. A relay after preparation is journaled for the next session.
-if ! request_current; then
+# A priority relay may finish while preparation waits for the send lock. Recheck
+# the pane and transcript before clearing; later relays wait for the next session.
+if ! idle || ! request_current; then
   # We have not cleared yet: release the hold before asking again or skipping.
+  /usr/bin/python3 -I "$HERE/main-refresh-recovery.py" complete "$gate" \
+    || skip --error "중단한 복구 기록을 완료 처리하지 못해 건너뜀"
   keep_gate=
   rm -f "$gate"
   if [ -n "$now" ]; then

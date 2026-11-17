@@ -49,6 +49,7 @@ if a[:2] == ["pane", "list"]: print(json.dumps(dict(result=dict(panes=[main, sen
 elif a[:2] == ["pane", "get"]:
     if a[2] not in ("w1:p1", "w1:p9"): raise SystemExit(1)
     if a[2] == "w1:p1" and (r / "get-fails").exists():
+        (r / "get-fails").unlink()
         (r / "get-failed").touch()
         raise SystemExit(1)
     print(json.dumps(dict(result=dict(pane=main if a[2] == "w1:p1" else sender))))
@@ -59,6 +60,9 @@ elif a[:2] == ["session", "list"]: print('{"sessions":[{"name":"default","runnin
 elif a[:2] == ["agent", "prompt"]:
     if a[2] != "w1:p1": raise SystemExit(0)
     text = a[3]
+    if (r / "pause-priority").exists() and "[Slack #0-yoyooyo 요유]" in text:
+        (r / "priority-inflight").touch()
+        while not (r / "priority-continue").exists(): time.sleep(.02)
     with (r / "prompts").open("a") as f: f.write(json.dumps([sid, text]) + "\\n")
     if text == "/clear":
         (r / "clearing").touch()
@@ -74,6 +78,7 @@ elif a[:2] == ["agent", "prompt"]:
             (r / "state/agent-handoff/w1:p1.md").write_text(text.split()[-1] + "\\nhandoff")
             if (r / "snapshot-fails").exists():
                 (r / "state/agent-handoff/refresh-recovery").write_text("not a directory")
+        if (r / "hold-after-request").exists(): (r / "status").write_text("working")
     else:
         with (r / "old-session.jsonl").open("a") as f: f.write(json.dumps(dict(type="user", message=dict(content=text))) + "\\n")
 elif a[:2] == ["agent", "send-keys"]: raise SystemExit("must preserve typed draft")
@@ -92,6 +97,7 @@ else: raise SystemExit(2)
 
     def tearDown(self):
         (self.root / "clear-continue").touch()
+        (self.root / "priority-continue").touch()
         (self.root / "full").unlink(missing_ok=True)
         (self.root / "status").write_text("idle")
         if self.proc and self.proc.poll() is None:
@@ -169,25 +175,48 @@ else: raise SystemExit(2)
         self.assertEqual(len(received), 1)
         self.assertEqual(received[0][0], "new-session")
 
-    def test_external_words_pass_refresh_gate_and_survive_clear_in_recovery(self):
+    def test_external_words_wait_for_new_session_without_recovery(self):
         (self.root / "status").write_text("idle")
         self.start()
         until(lambda: (self.root / "clearing").exists())
         message = "[Slack #0-yoyooyo 요유] stop"
         result = self.tell(message, external=True)
-        self.assertIn("told", result)
-        self.assertTrue(any(sid == "old-session" and text.endswith(message)
-                            for sid, text in self.prompts()))
+        self.assertIn("queued", result)
+        self.assertFalse(any(text.endswith(message) for _, text in self.prompts()))
         (self.root / "clear-continue").touch()
         self.assertEqual(self.proc.wait(timeout=10), 0)
-        records = list((self.state / "agent-handoff/refresh-recovery").glob("*/active"))
-        self.assertEqual(len(records), 1)
-        journal = [json.loads(line) for line in (records[0].parent / "relays.jsonl").read_text().splitlines()]
-        self.assertEqual(len(journal), 1)
-        self.assertTrue(journal[0]["message"].endswith(message))
-        loaded = subprocess.check_output(["python3", "-I", str(HERE / "handoff-state.py"), "load"],
-                                         env={**self.env, "HERDR_PANE_ID": "w1:p1"}, text=True)
-        self.assertIn(str(records[0].parent / "relays.jsonl"), loaded)
+        until(lambda: any(text.endswith(message) for _, text in self.prompts()))
+        self.assertEqual([sid for sid, text in self.prompts() if text.endswith(message)],
+                         ["new-session"])
+        self.assertFalse(list((self.state / "agent-handoff/refresh-recovery").glob("*/active")))
+
+    def test_inflight_priority_finishes_before_prepare_and_aborted_record_is_completed(self):
+        (self.root / "hold-after-request").touch()
+        (self.root / "pause-priority").touch()
+        (self.root / "status").write_text("idle")
+        self.start()
+        until(lambda: (self.state / "agent-handoff/w1:p1.md").exists())
+        message = "[Slack #0-yoyooyo 요유] stop"
+        env = {key: value for key, value in self.env.items() if key != "HERDR_PANE_ID"}
+        sender = subprocess.Popen([str(HERE / "pane-tell"), "w1:p1", message], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            until(lambda: (self.root / "priority-inflight").exists())
+            (self.root / "no-handoff").touch()
+            (self.root / "status").write_text("idle")
+            time.sleep(.5)
+            self.assertFalse((self.root / "clearing").exists())
+            self.assertFalse(list((self.state / "agent-handoff/refresh-recovery").glob("*/handoff.md")))
+        finally:
+            (self.root / "priority-continue").touch()
+            sender.communicate(timeout=10)
+        self.assertEqual(sender.returncode, 0)
+        until(lambda: list((self.state / "agent-handoff/refresh-recovery").glob("*/completed")))
+        self.assertEqual(self.proc.wait(timeout=10), 0)
+        self.assertNotIn("/clear", [text for _, text in self.prompts()])
+        self.assertEqual([sid for sid, text in self.prompts() if text.endswith(message)],
+                         ["old-session"])
+        self.assertFalse(list((self.state / "agent-handoff/refresh-recovery").glob("*/active")))
 
     def test_failed_handoff_releases_durable_messages_without_clear(self):
         (self.root / "no-handoff").touch()
@@ -215,7 +244,6 @@ else: raise SystemExit(2)
         self.assertFalse((self.root / "requested").exists())
         self.assertTrue(any("[main-refresh]" in path.read_text()
                             for path in (self.state / "pane-tell/waiting").glob("*")))
-        (self.root / "get-fails").unlink()
         until(lambda: (self.root / "clearing").exists())
         (self.root / "clear-continue").touch()
         self.assertEqual(self.proc.wait(timeout=10), 0)

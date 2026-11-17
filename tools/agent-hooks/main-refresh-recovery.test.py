@@ -35,6 +35,24 @@ class Recovery(unittest.TestCase):
         recovery.accept(self.gate)
         self.assertFalse(recovery.blocked(self.gate, dict(agent_session=dict(value="old"))))
 
+    def test_priority_skips_only_the_preparation_gate(self):
+        pane = dict(agent_session=dict(value="old"))
+        self.gate.write_text(json.dumps(dict(pid=os.getpid(), terminal="main", session="old")))
+        self.assertFalse(recovery.blocked(self.gate, pane, "1"))
+        recovery.prepare(self.gate, self.memo, "w1:p1", time.time() + 30)
+        self.assertTrue(recovery.blocked(self.gate, pane, "1"))
+
+    def test_old_sender_two_argument_blocked_call_still_holds(self):
+        row = json.dumps(dict(result=dict(pane=dict(agent_session=dict(value="old")))))
+        with patch.object(recovery.sys, "argv", ["main-refresh-recovery.py", "blocked", str(self.gate), row]):
+            self.assertEqual(recovery.main(), 0)
+
+    def test_old_sender_five_argument_record_call_still_delivers(self):
+        with patch.object(recovery.sys, "argv", ["main-refresh-recovery.py", "record",
+                                                 str(self.root), "main", "old", "queued relay", "1"]):
+            self.assertEqual(recovery.main(), 0)
+        self.assertIn("queued relay", (self.folder / "relays.jsonl").read_text())
+
     def test_replaced_gate_does_not_hide_recovery(self):
         self.gate.write_text('{}')
         self.memo.unlink()
@@ -55,15 +73,10 @@ class Recovery(unittest.TestCase):
         recovery.record(self.root, "main", "new", "normal relay")
         self.assertEqual((self.folder / "relays.jsonl").read_text(), "")
 
-    def test_priority_relay_activates_prepared_recovery_before_clear(self):
-        recovery.prepare(self.gate, self.memo, "w1:p1", time.time() + 30)
-        folder = Path(json.loads(self.gate.read_text())["recovery"])
-        recovery.record(self.root, "main", "old", "ordinary")
-        self.assertFalse((folder / "active").exists())
-        recovery.record(self.root, "main", "old", "priority", "1")
-        self.assertTrue((folder / "active").exists())
-        self.assertIn("priority", (folder / "relays.jsonl").read_text())
-        self.assertIn(str(folder / "relays.jsonl"), recovery.notice(self.memo))
+    def test_aborted_prepare_does_not_activate_later(self):
+        recovery.complete(self.gate)
+        self.assertTrue((self.folder / "completed").exists())
+        self.assertEqual(recovery.notice(self.memo), "")
 
     def test_late_transition_keeps_original_transcript_and_all_relays(self):
         transcript = self.root / "original-session.jsonl"

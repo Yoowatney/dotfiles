@@ -106,10 +106,9 @@ refresh_blocked() { # called under the send lock, before any draft recovery
   terminal=$(printf '%s\n' "$row" | jq -r '.result.pane.terminal_id // empty')
   [ -n "$terminal" ] || return 0
   is_main "$terminal" || return 1
-  [ "${PANE_TELL_YOYOO_WORDS:-}" != 1 ] || return 1
   refresh_request "$2" && return 1
   # Expiry is durable wall time: a dead refresh owner cannot strand relays.
-  python3 -I "${DRAFT_HELPER%/*}/main-refresh-recovery.py" blocked "$refresh_dir/refresh-delivery.json" "$row"
+  python3 -I "${DRAFT_HELPER%/*}/main-refresh-recovery.py" blocked "$refresh_dir/refresh-delivery.json" "$row" "${PANE_TELL_YOYOO_WORDS:-0}"
 }
 
 # In view, and empty on two reads: what is typed between them holds the message back.
@@ -159,7 +158,7 @@ send_unlocked() {
   recovery_terminal=$(printf '%s\n' "$recovery_row" | jq -r '.result.pane.terminal_id // empty')
   if is_main "$recovery_terminal"; then
     recovery_session=$(printf '%s\n' "$recovery_row" | jq -r '.result.pane.agent_session.value // empty')
-    python3 -I "${DRAFT_HELPER%/*}/main-refresh-recovery.py" record "$refresh_handoff" "$recovery_terminal" "$recovery_session" "$message" "${PANE_TELL_YOYOO_WORDS:-0}" || return 1
+    python3 -I "${DRAFT_HELPER%/*}/main-refresh-recovery.py" record "$refresh_handoff" "$recovery_terminal" "$recovery_session" "$message" || return 1
   fi
   "$H" agent prompt "$1" "$message" >/dev/null 2>&1 || return 1
   python3 -I "$DRAFT_HELPER" ack "$1" >/dev/null 2>&1 || :
