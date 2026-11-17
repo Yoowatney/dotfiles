@@ -47,6 +47,7 @@ main = dict(pane_id="w1:p1", terminal_id="main-terminal", agent="claude", agent_
 sender = dict(pane_id="w1:p9", terminal_id="sender-terminal", agent="codex", agent_session=dict(value="sender"), label="worker")
 if a[:2] == ["pane", "list"]: print(json.dumps(dict(result=dict(panes=[main, sender]))))
 elif a[:2] == ["pane", "get"]:
+    if a[2] not in ("w1:p1", "w1:p9"): raise SystemExit(1)
     if a[2] == "w1:p1" and (r / "get-fails").exists():
         (r / "get-failed").touch()
         raise SystemExit(1)
@@ -73,6 +74,8 @@ elif a[:2] == ["agent", "prompt"]:
             (r / "state/agent-handoff/w1:p1.md").write_text(text.split()[-1] + "\\nhandoff")
             if (r / "snapshot-fails").exists():
                 (r / "state/agent-handoff/refresh-recovery").write_text("not a directory")
+    else:
+        with (r / "old-session.jsonl").open("a") as f: f.write(json.dumps(dict(type="user", message=dict(content=text))) + "\\n")
 elif a[:2] == ["agent", "send-keys"]: raise SystemExit("must preserve typed draft")
 else: raise SystemExit(2)
 ''')
@@ -105,9 +108,11 @@ else: raise SystemExit(2)
         until(receivers_stopped, timeout=10)
         self.tmp.cleanup()
 
-    def tell(self, text, raw=False, cross=False):
+    def tell(self, text, raw=False, cross=False, external=False):
         args = [str(HERE / "pane-tell"), *(["--raw"] if raw else []), "default/w1:p1" if cross else "w1:p1", text]
         env = {**self.env, "HERDR_SOCKET_PATH": "/sessions/workers/herdr.sock"} if cross else self.env
+        if external:
+            env = {key: value for key, value in env.items() if key != "HERDR_PANE_ID"}
         return subprocess.check_output(args, env=env, text=True, timeout=10)
 
     def start(self):
@@ -154,14 +159,35 @@ else: raise SystemExit(2)
         (self.root / "status").write_text("idle")
         self.start()
         until(lambda: (self.root / "clearing").exists())
-        self.assertIn("queued", self.tell("cross-server-report", cross=True))
-        self.assertFalse(any(text.endswith("cross-server-report") for _, text in self.prompts()))
+        message = "[Slack #0-yoyooyo 요유] stop"
+        self.assertIn("queued", self.tell(message, cross=True))
+        self.assertFalse(any(text.endswith(message) for _, text in self.prompts()))
         (self.root / "clear-continue").touch()
         self.assertEqual(self.proc.wait(timeout=10), 0)
-        until(lambda: any(text.endswith("cross-server-report") for _, text in self.prompts()))
-        received = [(sid, text) for sid, text in self.prompts() if text.endswith("cross-server-report")]
+        until(lambda: any(text.endswith(message) for _, text in self.prompts()))
+        received = [(sid, text) for sid, text in self.prompts() if text.endswith(message)]
         self.assertEqual(len(received), 1)
         self.assertEqual(received[0][0], "new-session")
+
+    def test_external_words_pass_refresh_gate_and_survive_clear_in_recovery(self):
+        (self.root / "status").write_text("idle")
+        self.start()
+        until(lambda: (self.root / "clearing").exists())
+        message = "[Slack #0-yoyooyo 요유] stop"
+        result = self.tell(message, external=True)
+        self.assertIn("told", result)
+        self.assertTrue(any(sid == "old-session" and text.endswith(message)
+                            for sid, text in self.prompts()))
+        (self.root / "clear-continue").touch()
+        self.assertEqual(self.proc.wait(timeout=10), 0)
+        records = list((self.state / "agent-handoff/refresh-recovery").glob("*/active"))
+        self.assertEqual(len(records), 1)
+        journal = [json.loads(line) for line in (records[0].parent / "relays.jsonl").read_text().splitlines()]
+        self.assertEqual(len(journal), 1)
+        self.assertTrue(journal[0]["message"].endswith(message))
+        loaded = subprocess.check_output(["python3", "-I", str(HERE / "handoff-state.py"), "load"],
+                                         env={**self.env, "HERDR_PANE_ID": "w1:p1"}, text=True)
+        self.assertIn(str(records[0].parent / "relays.jsonl"), loaded)
 
     def test_failed_handoff_releases_durable_messages_without_clear(self):
         (self.root / "no-handoff").touch()
@@ -264,14 +290,16 @@ else: raise SystemExit(2)
     def test_dead_clear_owner_expires_and_record_failure_retains_queue(self):
         (self.root / "return-before-clear").touch()
         (self.root / "status").write_text("idle")
-        self.env["MAIN_REFRESH_DEADLINE"] = "5"
+        self.env["MAIN_REFRESH_DEADLINE"] = "90"
         self.start()
-        until(lambda: (self.root / "clearing").exists())
+        until(lambda: (self.root / "clearing").exists(), timeout=95)
         gate = json.loads((self.state / "orchestrator/refresh-delivery.json").read_text())
         self.proc.kill()
         self.proc.wait(timeout=5)
+        gate["expires_at"] = time.time() - 1
+        (self.state / "orchestrator/refresh-delivery.json").write_text(json.dumps(gate))
         self.tell("owner-died", raw=True)
-        until(lambda: any(text == "owner-died" for _, text in self.prompts()), timeout=7)
+        until(lambda: any(text == "owner-died" for _, text in self.prompts()), timeout=30)
         folder = Path(gate["recovery"])
         journal = folder / "relays.jsonl"
         self.assertTrue((folder / "active").exists())
@@ -286,7 +314,7 @@ else: raise SystemExit(2)
         self.assertTrue(list((self.state / "pane-tell/waiting").glob("*")))
         journal.rmdir()
         journal.write_text(first)
-        until(lambda: any(text == "must-retain-on-record-failure" for _, text in self.prompts()))
+        until(lambda: any(text == "must-retain-on-record-failure" for _, text in self.prompts()), timeout=30)
         self.assertIn("must-retain-on-record-failure", journal.read_text())
         self.assertEqual(self.prompts()[-1][0], "old-session")
 

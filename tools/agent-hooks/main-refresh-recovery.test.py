@@ -55,6 +55,16 @@ class Recovery(unittest.TestCase):
         recovery.record(self.root, "main", "new", "normal relay")
         self.assertEqual((self.folder / "relays.jsonl").read_text(), "")
 
+    def test_priority_relay_activates_prepared_recovery_before_clear(self):
+        recovery.prepare(self.gate, self.memo, "w1:p1", time.time() + 30)
+        folder = Path(json.loads(self.gate.read_text())["recovery"])
+        recovery.record(self.root, "main", "old", "ordinary")
+        self.assertFalse((folder / "active").exists())
+        recovery.record(self.root, "main", "old", "priority", "1")
+        self.assertTrue((folder / "active").exists())
+        self.assertIn("priority", (folder / "relays.jsonl").read_text())
+        self.assertIn(str(folder / "relays.jsonl"), recovery.notice(self.memo))
+
     def test_late_transition_keeps_original_transcript_and_all_relays(self):
         transcript = self.root / "original-session.jsonl"
         transcript.touch()

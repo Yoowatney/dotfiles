@@ -103,7 +103,7 @@ def blocked(gate_path, pane):
     return alive or (gate.get("clearing", False) and not changed)
 
 
-def records(root, *, terminal=None, key=None):
+def records(root, *, terminal=None, key=None, prepared_session=None):
     root = Path(root) / "refresh-recovery"
     if not root.exists():
         return
@@ -117,14 +117,17 @@ def records(root, *, terminal=None, key=None):
             continue
         active = (folder / "active").exists()
         # Each snapshot owns its expiry, independently of the replaceable gate.
-        if not active and ((folder / "completed").exists() or time.time() < metadata["expires_at"]):
+        prepared = (prepared_session is not None and metadata["session"] == prepared_session
+                    and not (folder / "completed").exists())
+        if not active and not prepared and ((folder / "completed").exists() or time.time() < metadata["expires_at"]):
             continue
         activate(dict(metadata, recovery=str(folder)))
         yield folder
 
 
-def record(root, terminal, session, message):
-    for folder in records(root, terminal=terminal):
+def record(root, terminal, session, message, priority="0"):
+    for folder in records(root, terminal=terminal,
+                          prepared_session=session if priority == "1" else None):
         item = dict(time=time.time(), session=session, message=message, status="attempt")
         with (folder / "relays.jsonl").open("a") as stream:
             stream.write(json.dumps(item, ensure_ascii=False) + "\n")

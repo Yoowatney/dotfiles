@@ -331,6 +331,19 @@ fi
 keep_gate=1
 (umask 077; /usr/bin/python3 -I "$HERE/main-refresh-recovery.py" prepare "$gate" "$hdir/$key.md" "$key" "$recovery_deadline") \
   || { keep_gate=; skip --error "복구 인계와 전달 보류 상태를 저장하지 못해 건너뜀"; }
+# A priority relay can pass the gate between the previous transcript check and
+# preparation. A relay after preparation is journaled for the next session.
+if ! request_current; then
+  # We have not cleared yet: release the hold before asking again or skipping.
+  keep_gate=
+  rm -f "$gate"
+  if [ -n "$now" ]; then
+    log "인계 뒤에 새 대화가 있어 인계를 다시 요청함"
+    QUIET=$RETRY_QUIET
+    continue
+  fi
+  skip "인계 뒤에 새 대화가 있어 건너뜀"
+fi
 back="되돌리기: 메인 칸 셸에서 CLAUDE_STARTUP_PROFILE=full claude"
 if [ -n "$restart" ]; then
   "$H" agent prompt "$id" /exit >/dev/null 2>&1 || { keep_gate=; skip --error "/exit를 보내지 못해 건너뜀"; }
