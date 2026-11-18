@@ -776,6 +776,31 @@ class RelayTests(unittest.TestCase):
                "blocked_reason: SIGNAL_DENIED\nblocked_command: python3 process.test.py -> ps -A\n"
                "retry_target: claude\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫음")
 
+    def test_all_check_launches_require_fresh_source_without_changing_checkout(self):
+        self.finish(DONE + "\nCompared source lines in the reported PR.")
+        self.finish(self.BLOCKED, check=True)
+        self.assertEqual(len(self.spawns), 2)
+        for args, _ in self.spawns:
+            with self.subTest(launcher=args[-2]):
+                prompt = args[-1]
+                self.assertIn("repository's instructed work branch", prompt)
+                self.assertIn("remote default branch", prompt)
+                self.assertIn("Fetch that branch", prompt)
+                self.assertIn("git show origin/<branch>:<file>", prompt)
+                self.assertIn("Compare local HEAD with the fetched ref", prompt)
+                self.assertIn("reported PR/commit separately", prompt)
+                self.assertIn("Do not switch branches or update working files", prompt)
+                self.assertIn("If a required code comparison cannot verify source freshness", prompt)
+                self.assertIn("report `TASK_CHECK: unknown` with the failed fetch/read and blocker", prompt)
+                self.assertIn("unless an independently verified defect requires `TASK_CHECK: fail`", prompt)
+                self.assertIn("never mark that comparison verified from local HEAD alone", prompt)
+
+    def test_investigation_check_does_not_require_unrelated_source_comparison(self):
+        self.finish(DONE + "\nRead-only investigation without code changes.")
+        prompt = self.spawns[0][0][-1]
+        self.assertIn("When comparing code lines", prompt)
+        self.assertIn("Skip source comparison when the task does not involve code lines", prompt)
+
     def test_permission_unknown_opens_scoped_claude_retry(self):
         self.env['HERDR_TASK_ID'] = 'job-test-retry'
         self.finish()
