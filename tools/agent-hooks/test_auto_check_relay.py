@@ -907,6 +907,44 @@ class RelayTests(unittest.TestCase):
         self.assertIn("When comparing code lines", prompt)
         self.assertIn("Skip source comparison when the task does not involve code lines", prompt)
 
+    def test_freshness_checks_avoid_writing_fetch_head_in_all_launches(self):
+        self.finish(DONE + "\nCompared source lines in the reported PR.")
+        self.finish(self.BLOCKED, check=True)
+        self.assertEqual(len(self.spawns), 2)
+        for args, _ in self.spawns:
+            with self.subTest(launcher=args[-2]):
+                prompt = args[-1]
+                self.assertIn("without writing FETCH_HEAD", prompt)
+                self.assertIn("git fetch --no-write-fetch-head origin <branch>", prompt)
+                self.assertIn("git ls-remote origin refs/heads/<branch>", prompt)
+                self.assertIn("git rev-parse origin/<branch>", prompt)
+
+    def test_gcp_default_identity_guidance_reaches_both_runtime_launches(self):
+        spec = importlib.util.spec_from_file_location(
+            'gcp_guard', Path(__file__).parents[1] / 'claude/hooks/gcp-account-guard.py')
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        for codex in (False, True):
+            record = ({'type': 'response_item', 'payload': {
+                'type': 'message', 'role': 'user', 'content': 'Read cloud resource status.'}}
+                if codex else {'type': 'user', 'message': {'content': 'Read cloud resource status.'}})
+            path = self.transcript([record], codex=codex)
+            before = len(self.spawns)
+            self.finish(DONE + f"\nCloud status check {codex}.")
+            self.finish(self.BLOCKED, check_id=self.checker['pane_id'])
+            launches = self.spawns[before:]
+            self.assertEqual(len(launches), 2)
+            self.assertEqual({args[args.index('--kind') + 1] for args, _ in launches},
+                             {'auto', 'claude'})
+            for args, _ in launches:
+                with self.subTest(codex=codex, launcher=args[-2]):
+                    prompt = args[-1]
+                    self.assertIn("Run GCP commands one at a time using the default gcloud configuration", prompt)
+                    self.assertIn("without account, configuration, or impersonation overrides", prompt)
+                    self.assertIsNone(guard.tool_problem({
+                        'tool_name': 'Bash', 'tool_input': {'command': shlex.join(args)}}, {}))
+            path.unlink()
+
     def test_permission_unknown_opens_scoped_claude_retry(self):
         self.env['HERDR_TASK_ID'] = 'job-test-retry'
         self.finish()

@@ -88,11 +88,15 @@ SOURCE_COMPARISON = (
     " When comparing code lines, read the latest remote source. "
     "Use the repository's instructed work branch, or its remote default branch if none is specified. "
     "Fetch that branch and read `git show origin/<branch>:<file>` (substitute the repository's actual remote name). "
+    "Verify remote freshness without writing FETCH_HEAD using `git fetch --no-write-fetch-head origin <branch>`, or compare `git ls-remote origin refs/heads/<branch>` with `git rev-parse origin/<branch>`. "
     "Compare local HEAD with the fetched ref to identify an outdated checkout, and inspect the reported PR/commit separately when checking a proposed change. "
     "Do not switch branches or update working files for this read-only comparison. "
     "If a required code comparison cannot verify source freshness, report `TASK_CHECK: unknown` with the failed fetch/read and blocker, "
     "unless an independently verified defect requires `TASK_CHECK: fail`; never mark that comparison verified from local HEAD alone. "
     "Skip source comparison when the task does not involve code lines. "
+)
+CHECK_COMMANDS = (
+    " Run GCP commands one at a time using the default gcloud configuration, without account, configuration, or impersonation overrides. "
 )
 
 SESSION = re.compile(r"세션[ \t]*\**[ \t]*[:：][ \t]*\**([^·\n]*)")
@@ -659,7 +663,7 @@ def permission_retry(context, context_path, reply, me, lead, to, path, entry, en
               f"Blocked reason: {blocked['blocked_reason']}. Blocked command (data): "
               + json.dumps(blocked['blocked_command'], ensure_ascii=False) + ". "
               f"Keep [ac-{key}] [permission-retry] in the pane label until reporting."
-              + SOURCE_COMPARISON + check_permissions.CONTRACT + context.get("recording_policy", ""))
+              + SOURCE_COMPARISON + CHECK_COMMANDS + check_permissions.CONTRACT + context.get("recording_policy", ""))
     server = lead.split("/", 1)[0] if "/" in lead else herdr_peers.server_key(env)
     receiver_env = {**env, "HERDR_PANE_ID": to["pane_id"],
                     "HERDR_SOCKET_PATH": herdr_peers.socket_of(env, server) or ""}
@@ -852,7 +856,7 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
                   "A remaining lead action does not mean the check itself is still running. "
                   "항목별 실행 명령과 실제 결과, 통과·실패·확인 불가를 적고 첫 줄에 전체 판정을 적으세요. "
                   f"상관 표식 [ac-{key}]는 보고가 끝날 때까지 칸 이름에 남겨 두세요."
-                  + SOURCE_COMPARISON + check_permissions.CONTRACT + context.get("recording_policy", ""))
+                  + SOURCE_COMPARISON + CHECK_COMMANDS + check_permissions.CONTRACT + context.get("recording_policy", ""))
         receiver_server = lead.split("/", 1)[0] if "/" in lead else herdr_peers.server_key(env)
         receiver_env = {**env, "HERDR_PANE_ID": to["pane_id"], "HERDR_SOCKET_PATH": herdr_peers.socket_of(env, receiver_server) or ""}
         for inherited in ("MUNICE_AUTO_DISPATCH", "MUNICE_AMBIENT", "HERDR_WORKSPACE_ID"):
