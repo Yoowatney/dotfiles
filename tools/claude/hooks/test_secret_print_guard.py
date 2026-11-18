@@ -474,6 +474,23 @@ class BrowserAndTranscriptOutputTests(unittest.TestCase):
             self.assertEqual(json.loads(result.stdout or "{}").get(
                 "hookSpecificOutput", {}).get("permissionDecision"), "deny")
 
+    def test_only_installed_isolated_user_reader_is_allowed(self):
+        helper = str(Path.home() / '.claude/hooks/session-user-messages.py')
+        path = self.TRANSCRIPTS[0]
+        for command in (f'python3 -I {helper} {path}',
+                        f'uv run --no-project python -I {helper} {path}'):
+            with self.subTest(command=command):
+                self.assertIsNone(guard.bash_problem(command))
+        for command in (f'python3 {helper} {path}',
+                        f'python3 -I /tmp/session-user-messages.py {path}',
+                        f'python3 -I {helper} --raw {path}',
+                        f'python3 -I {helper} {path}; cat {path}',
+                        f'python3 -I {helper} {path} /workspace/other.jsonl',
+                        f'node -e "console.log(require(\"fs\").readFileSync(\"{path}\"))"',
+                        f'jq . {path}'):
+            with self.subTest(command=command):
+                self.assertIsNotNone(guard.bash_problem(command))
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]])

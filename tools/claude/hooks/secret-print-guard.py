@@ -175,6 +175,18 @@ def is_reader(x: str) -> bool:
     return x in READERS or x.rstrip("0123456789.") in READERS  # python3.12 is python
 
 
+def safe_user_reader(w: list[str]) -> bool:
+    """Trust only the installed isolated reader, never a same-named local script."""
+    if w[:3] == ["uv", "run", "--no-project"]:
+        w = w[3:]
+    if len(w) != 4 or w[0] not in {"python", "python3"} or w[1] != "-I":
+        return False
+    helper = str(Path.home() / ".claude/hooks/session-user-messages.py")
+    if w[2] not in {helper, "~/.claude/hooks/session-user-messages.py"}:
+        return False
+    return bool(re.fullmatch(HOME + r"/(?:\.codex/(?:sessions|archived_sessions)|\.claude/projects)/[^\s'\"]+\.jsonl", w[3]))
+
+
 def git_prints_file(w: list[str]) -> str | None:
     """The git subcommand when it prints a file's lines; their quiet forms and a plain `git log` only name the file."""
     i = 1
@@ -588,6 +600,8 @@ def bash_problem(cmd: str) -> str | None:
             continue
         if problem := browser_problem(w):
             return problem
+        if safe_user_reader(w):
+            continue
         inner = shell_text(w)
         problem = bash_problem(inner) if inner else None
         if problem:
