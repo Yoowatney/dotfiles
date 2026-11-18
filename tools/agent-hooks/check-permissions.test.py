@@ -2,6 +2,8 @@
 """Evidence-based check routing and permission result contracts."""
 import importlib.util
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -11,6 +13,18 @@ SPEC.loader.exec_module(permissions)
 
 
 class PermissionTests(unittest.TestCase):
+    def test_contract_output_carries_shared_check_guidance(self):
+        # pane-spawn --check appends this output to every check, automatic or opened by hand.
+        out = subprocess.run([sys.executable, '-I', str(Path(__file__).with_name('check-permissions.py')), '--contract'],
+                             capture_output=True, text=True, check=True).stdout
+        self.assertIn(permissions.CONTRACT.strip(), out)
+        self.assertIn('Run GCP commands one at a time using the default gcloud configuration, '
+                      'without account, configuration, or impersonation overrides.', out)
+        self.assertIn('Judge only the claims the result needs to answer the original request.', out)
+        self.assertIn('verbatim onto a `제외:` line', out)
+        self.assertIn('never exclude a claim the answer relies on', out)
+        self.assertEqual(permissions.classify(out, '.')['kind'], 'auto')
+
     def test_observed_commands_require_claude(self):
         for command, reason in [('ego-browser skill', 'BROWSER_DENIED'),
                                 ('crontab -l', 'OTHER_DENIED'),

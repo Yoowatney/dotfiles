@@ -891,13 +891,13 @@ class RelayTests(unittest.TestCase):
                 prompt = args[-1]
                 self.assertIn("repository's instructed work branch", prompt)
                 self.assertIn("remote default branch", prompt)
-                self.assertIn("Fetch that branch", prompt)
+                self.assertIn("read the latest remote source without fetching", prompt)
                 self.assertIn("git show origin/<branch>:<file>", prompt)
-                self.assertIn("Compare local HEAD with the fetched ref", prompt)
+                self.assertIn("and local HEAD to identify an outdated checkout", prompt)
                 self.assertIn("reported PR/commit separately", prompt)
-                self.assertIn("Do not switch branches or update working files", prompt)
+                self.assertIn("Do not fetch, switch branches or update working files", prompt)
                 self.assertIn("If a required code comparison cannot verify source freshness", prompt)
-                self.assertIn("report `TASK_CHECK: unknown` with the failed fetch/read and blocker", prompt)
+                self.assertIn("report `TASK_CHECK: unknown` with the failed read and blocker", prompt)
                 self.assertIn("unless an independently verified defect requires `TASK_CHECK: fail`", prompt)
                 self.assertIn("never mark that comparison verified from local HEAD alone", prompt)
 
@@ -907,17 +907,20 @@ class RelayTests(unittest.TestCase):
         self.assertIn("When comparing code lines", prompt)
         self.assertIn("Skip source comparison when the task does not involve code lines", prompt)
 
-    def test_freshness_checks_avoid_writing_fetch_head_in_all_launches(self):
+    def test_freshness_checks_read_remote_without_fetching_in_all_launches(self):
+        # A check cannot write the checked repository, so any fetch (even --no-write-fetch-head) fails once
+        # the remote has new commits; ls-remote and gh api read the remote without writing.
         self.finish(DONE + "\nCompared source lines in the reported PR.")
         self.finish(self.BLOCKED, check=True)
         self.assertEqual(len(self.spawns), 2)
         for args, _ in self.spawns:
             with self.subTest(launcher=args[-2]):
                 prompt = args[-1]
-                self.assertIn("without writing FETCH_HEAD", prompt)
-                self.assertIn("git fetch --no-write-fetch-head origin <branch>", prompt)
                 self.assertIn("git ls-remote origin refs/heads/<branch>", prompt)
                 self.assertIn("git rev-parse origin/<branch>", prompt)
+                self.assertIn("gh api -H 'Accept: application/vnd.github.raw' 'repos/<owner>/<repo>/contents/<file>?ref=<branch>'", prompt)
+                self.assertNotIn("git fetch --no-write-fetch-head", prompt)
+                self.assertNotIn("Fetch that branch", prompt)
 
     def test_gcp_default_identity_guidance_reaches_both_runtime_launches(self):
         spec = importlib.util.spec_from_file_location(
