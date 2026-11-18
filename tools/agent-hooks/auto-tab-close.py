@@ -613,6 +613,11 @@ def recording_restrictions(me, env) -> str:
     return f" 원 작업의 기록 금지 제한을 이 확인 작업에도 적용합니다. 확인 내용과 결과를 {targets}에 남기지 마세요."
 
 
+def kind_line(context):
+    """The runner pane-spawn opened and its reason when recorded, else the classifier's guess."""
+    return f"{context.get('runner') or context['kind']} ({context.get('runner_reason') or context['kind_reason']})"
+
+
 def permission_retry(context, context_path, reply, me, lead, to, path, entry, env):
     """One scoped fallback; startup receipts survive Stop and delivery retries."""
     retry = context.get("permission_retry")
@@ -751,7 +756,7 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
             message = (f"{head} {context['job']}\n"
                        f"{context.get('summary') or context['first']}\n"
                        f"일 칸: {worker_address or '주소 없음: 기존 보고 참조'}\n"
-                       f"확인 종류: {context['kind']} ({context['kind_reason']})\n"
+                       f"확인 종류: {kind_line(context)}\n"
                        f"전체 보고: {context['report']} ({context['entry']})\n"
                        f"{short_report(reply)}\n"
                        f"확인 전체 보고: {path} ({entry})")
@@ -877,6 +882,8 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
                 checked = herdr(env, "pane", "get", pid, socket=herdr_peers.socket_of(env, server)).get("pane") or {}
                 context.update(handed=True, checker_terminal=checked.get("terminal_id"), checker_address=address,
                                check_started_at=time.time())
+                # pane-spawn may pick another runner than check_kind guessed (claude-first quota); record the real one.
+                context.update({k: v for k, v in context["start_attempts"][-1].items() if k in ("runner", "runner_reason")})
                 write_context(context_path, context)
                 # The result reaches the main pane now, so an early answer need not wait for the check. It sets no
                 # check_delivered: post tools take the [ac-ID] only after the combined report. ponytail: one best-effort
@@ -892,7 +899,7 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
             context["spawn_error"] = error
             write_context(context_path, context)
         message = (f"{unchecked_head(reply, '확인 칸을 열지 못했습니다')} 결과는 아직 확인하지 못했습니다. "
-                   f"확인 칸 시작 실패: {context['spawn_error']}\n확인 종류: {context['kind']} ({context['kind_reason']})\n{body}")
+                   f"확인 칸 시작 실패: {context['spawn_error']}\n확인 종류: {kind_line(context)}\n{body}")
         sent = (send_immediate or send)(message)
         if sent:
             context["fallback_delivered"] = True

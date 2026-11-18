@@ -35,6 +35,19 @@ echo workers/w2:p3
         self.assertEqual((address, error), ("workers/w2:p3", ""))
         self.assertEqual(len(self.context["start_attempts"]), 2)
 
+    def test_receipt_runner_is_recorded_on_the_confirmed_attempt(self):
+        address, _ = self.run_start('''
+echo '{"status":"started","runner":"claude","runner_reason":"claude first: within reserve"}' > "$PANE_SPAWN_CHECK_RECEIPT"
+echo workers/w2:p3
+''')
+        self.assertEqual(address, "workers/w2:p3")
+        self.assertEqual(self.context["start_attempts"][-1]["runner"], "claude")
+        self.assertEqual(self.context["start_attempts"][-1]["runner_reason"], "claude first: within reserve")
+        self.context.clear()
+        (self.root / "receipt.1.json").unlink()  # a launcher whose receipt names no runner leaves the attempt without one
+        self.run_start("echo workers/w2:p3\n")
+        self.assertNotIn("runner", self.context["start_attempts"][-1])
+
     def test_quota_failure_is_bounded_and_not_repeated_by_next_stop(self):
         source = "echo 'quota limit reached' >&2; exit 1\n"
         address, error = self.run_start(source)

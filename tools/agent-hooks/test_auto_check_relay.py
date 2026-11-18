@@ -46,6 +46,7 @@ class RelayTests(unittest.TestCase):
         self.tells, self.spawns, self.closed, self.alerts, self.prechecks = [], [], [], [], []
         self.wake_queries = []
         self.spawn_error = None
+        self.spawn_runner = None  # (runner, reason) pane-spawn's receipt reports; None leaves the receipt empty
         self.tell_exit = 0
         self.tell_out, self.on_tell = "told default/w5:p3 (👑 test receiver)\n", None
         self.tell_envs, self.finalizers = [], []
@@ -118,6 +119,9 @@ class RelayTests(unittest.TestCase):
                 if isinstance(self.spawn_error, Exception):
                     raise self.spawn_error
                 return subprocess.CompletedProcess(args, 1, "", self.spawn_error)
+            if self.spawn_runner and kwargs["env"].get("PANE_SPAWN_CHECK_RECEIPT"):
+                Path(kwargs["env"]["PANE_SPAWN_CHECK_RECEIPT"]).write_text(json.dumps(
+                    {"status": "started", "runner": self.spawn_runner[0], "runner_reason": self.spawn_runner[1]}))
             number = 9 + len(self.checkers)
             self.checker = dict(self.worker, pane_id=f"w1:p{number}", terminal_id=f"term_C{number}",
                                 label="🟢 🫡 확인 " + args[-2], agent_session={"value": f"sid-C{number}"})
@@ -472,6 +476,21 @@ class RelayTests(unittest.TestCase):
         self.finish()
         self.assertEqual(len(self.tells), 1, "duplicate Stop/sweep must not redeliver")
         self.assertEqual(len(self.spawns), 1)
+
+    def test_combined_report_names_the_runner_pane_spawn_opened_not_the_classifier_guess(self):
+        # api#1296: the classifier says auto (Codex), but claude-first routing opens Claude. The record and the line follow the receipt.
+        for runner, reason in (("claude", "claude first: within reserve"), ("codex", "claude first: Claude past reserve; Codex within reserve")):
+            with self.subTest(runner=runner):
+                self.setUp()
+                self.spawn_runner = (runner, reason)
+                self.finish()
+                self.finish(CHECKED, check=True)
+                self.assertIn(f"확인 종류: {runner} ({reason})", self.tells[-1][1])
+                self.assertNotIn("확인 종류: auto (", self.tells[-1][1])
+                (context_path,) = [p for p in (self.state / "automatic-checks").glob("*.json") if p.name.count(".") == 1]
+                context = json.loads(context_path.read_text())
+                self.assertEqual((context["runner"], context["runner_reason"]), (runner, reason))
+                self.assertEqual(context["kind"], "auto", "the requested kind stays what the classifier chose")
 
     def test_check_start_sends_main_a_precheck_report_that_is_not_check_evidence(self):
         self.finish()

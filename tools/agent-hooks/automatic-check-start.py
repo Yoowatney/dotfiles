@@ -25,6 +25,16 @@ def stop_group(process):
         return process.communicate()
 
 
+def runner_of(receipt):
+    """The runner pane-spawn actually opened and why (api#1296); empty when its receipt has none."""
+    try:
+        with open(receipt, encoding="utf-8") as stream:
+            data = json.load(stream)
+        return {k: data[k] for k in ("runner", "runner_reason") if isinstance(data.get(k), str) and data[k]}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
 def start(args, env, receipt_prefix, context, save, *, attempt_timeout=ATTEMPT_TIMEOUT):
     """Return (confirmed address, error). Persist attempts before starting, so a repeated Stop never duplicates a start."""
     attempts = context.setdefault("start_attempts", [])
@@ -51,7 +61,7 @@ def start(args, env, receipt_prefix, context, save, *, attempt_timeout=ATTEMPT_T
                 error = "check start timed out; " + error
             match = ADDRESS.search(output or "")
             if process.returncode == 0 and match:
-                attempt.update(address=match[0], finished_at=time.time())
+                attempt.update(address=match[0], finished_at=time.time(), **runner_of(receipt))
                 save()
                 return match[0], ""
             error = (error or output or f"exit {process.returncode}").strip()[:1200]
