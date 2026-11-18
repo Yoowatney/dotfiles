@@ -427,10 +427,15 @@ class BrowserAndTranscriptOutputTests(unittest.TestCase):
 
     def test_transcript_directory_search_is_denied(self):
         for path in ("~/.codex/sessions", "~/.codex/sessions/2026/01", "~/.codex/archived_sessions",
-                     "~/.claude/projects", "~/.claude/projects/-workspace"):
+                     "~/.claude/projects", "~/.claude/projects/-workspace",
+                     "~/.claude/projects/-workspace/fixture/subagents"):
             with self.subTest(path=path):
                 self.assertIsNotNone(guard.bash_problem("rg -n output " + path))
                 self.assertIsNone(guard.bash_problem("rg --files " + path))
+                self.assertIsNotNone(guard.tool_problem({"tool_name": "Grep", "tool_input": {
+                    "path": path, "output_mode": "content"}}))
+                self.assertIsNone(guard.tool_problem({"tool_name": "Grep", "tool_input": {
+                    "path": path, "output_mode": "count"}}))
 
     def test_captured_browser_response_cannot_be_echoed(self):
         command = "R=$(ego-browser nodejs -e \"const r=await page.fetch('/api/fixture'); console.log(r)\"); echo $R"

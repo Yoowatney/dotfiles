@@ -41,7 +41,9 @@ SECRET_PATH = re.compile(
 # A search of the folder that holds a secret file prints that file too (`rg -n slack ~/.codex`, `~/.codex/*.toml`).
 SECRET_DIR = re.compile(HOME + r"/(?:\.(?:codex|config|ssh|aws|gnupg)/?(?:\*[^\s'\"/]*)?"
                         r"|\.codex/(?:sessions|archived_sessions)(?:/[^\s'\"]*)?"
-                        r"|\.claude/projects(?:/[^/\s'\"]+)?/?)(?=$|[\s'\"|;&)<>])")
+                        # Project memory documents are not transcript storage.
+                        r"|\.claude/projects(?!/[^/\s'\"]+/memory(?:/|(?=$|[\s'\"])))"
+                        r"(?:/[^\s'\"]*)?)(?=$|[\s'\"|;&)<>])")
 # ponytail: after `cd ~/.codex` only `config.toml` by name is seen; `rg x .` or a bare `rg x` there is not.
 CD_CODEX = re.compile(r"\bcd\s+" + HOME + r"/\.codex/?(?=$|[\s;&|)])")
 SECRET_VAR =re.compile(r"\$\{?[A-Za-z_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE)[A-Za-z_]*\}?", re.I)
@@ -649,7 +651,8 @@ def tool_problem(payload: dict) -> str | None:
         return bash_problem(inp.get("command") or "")
     if tool == "Read" and SECRET_PATH.search(inp.get("file_path") or ""):
         return "비밀 파일을 Read로 열면 값이 전부 대화에 남음"
-    if tool == "Grep" and SECRET_PATH.search(inp.get("path") or "") and inp.get("output_mode") not in {
+    path = inp.get("path") or ""
+    if tool == "Grep" and (SECRET_PATH.search(path) or SECRET_DIR.search(path)) and inp.get("output_mode") not in {
         None, "files_with_matches", "count"
     }:
         return "비밀 파일에 Grep content 모드를 쓰면 값이 출력됨"
