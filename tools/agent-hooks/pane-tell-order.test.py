@@ -65,6 +65,7 @@ predecessors_done() {
   return "$rc"
 }
 send() {
+  : > "$FIXTURE/send-attempt"
   [ ! -f "$FIXTURE/busy" ] || return 1
   if [ "${ORDER_TAG:-}" = first ] && [ -f "$FIXTURE/hold-first" ]; then
     : > "$FIXTURE/first-held"
@@ -333,6 +334,35 @@ esac
     def test_receiver_without_legacy_can_send_immediately(self):
         self.assertIn("told", self.run_tell("immediate"))
         self.assertEqual(len(self.prompts()), 1)
+
+    def test_busy_receiver_delivers_after_alert_time_without_warning(self):
+        payload = self.legacy("busy-then-delivered")
+        (self.root / "busy").touch()
+        child = self.start("--deliver-owned", str(payload), "term_M", "sM", "", "",
+                           PANE_TELL_ALERT="0", PANE_TELL_WAIT="5")
+        self.wait_for(lambda: (self.root / "send-attempt").exists())
+        time.sleep(1)
+        self.assertTrue(payload.exists())
+        self.assertFalse((self.root / "alerts").exists())
+        (self.root / "busy").unlink()
+        child.communicate(timeout=7)
+        self.assertEqual(child.returncode, 0)
+        self.assertFalse(payload.exists())
+        self.assertEqual(self.prompts(), [("w1:pM", "legacy fixture; no worker is launched")])
+
+    def test_exhausted_delivery_warns_and_keeps_payload(self):
+        payload = self.legacy("never-ready")
+        (self.state / "undelivered").mkdir()
+        (self.root / "busy").touch()
+        child = self.start("--deliver-owned", str(payload), "term_M", "sM", "", "",
+                           PANE_TELL_ALERT="0", PANE_TELL_WAIT="1")
+        child.communicate(timeout=7)
+        self.assertEqual(child.returncode, 0)
+        saved = self.state / "undelivered" / payload.name
+        self.assertTrue(saved.exists())
+        self.assertEqual(len((self.root / "alerts").read_text().splitlines()), 1)
+        self.assertIn(str(saved), (self.root / "alerts").read_text())
+        saved.unlink()
 
     def test_yoyoo_words_pass_older_worker_queue_but_keep_their_own_order(self):
         main = self.root / "state/orchestrator/main"

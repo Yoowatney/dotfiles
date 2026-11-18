@@ -28,7 +28,7 @@ class QueueWatchTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.env = {"HOME": self.tmp.name, "XDG_STATE_HOME": self.tmp.name}
+        self.env = {"HOME": self.tmp.name, "XDG_STATE_HOME": self.tmp.name, "PANE_TELL_STUCK_ALERT": "600"}
         self.root = Path(self.tmp.name) / "pane-tell"
         self.alert = mock.patch.object(watch, "notify", return_value=True).start()
         self.addCleanup(mock.patch.stopall)
@@ -49,6 +49,27 @@ class QueueWatchTest(unittest.TestCase):
         self.payload("sending/pane.lock")
         watch.tick(self.env, 1000)
         self.alert.assert_not_called()
+
+    def test_waiting_relay_delivered_before_thirty_minutes_never_alerts(self):
+        self.env.pop("PANE_TELL_STUCK_ALERT")
+        path = self.payload("waiting/busy", age=1799)
+        watch.tick(self.env, 1000)
+        self.alert.assert_not_called()
+        path.unlink()  # The delivery worker accepted the message before the threshold.
+        watch.tick(self.env, 2000)
+        self.alert.assert_not_called()
+
+    def test_waiting_relay_alerts_once_at_thirty_minutes_while_retry_continues(self):
+        self.env.pop("PANE_TELL_STUCK_ALERT")
+        path = self.payload("waiting/busy", age=1799)
+        watch.tick(self.env, 1000)
+        self.alert.assert_not_called()
+        os.utime(path, (1000 - 1800, 1000 - 1800))
+        watch.tick(self.env, 1000)
+        watch.tick(self.env, 1100)
+        self.alert.assert_called_once()
+        self.assertTrue(path.exists())  # The 24-hour delivery worker still owns the queue.
+        self.assertIn(str(path), self.alert.call_args.args[-1])
 
     def test_waiting_alert_deduplicates_without_opening_message(self):
         path = self.payload("waiting/old")
@@ -432,7 +453,7 @@ class BaselineTest(unittest.TestCase):
     def test_unavailable_upgrade_snapshot_preserves_terminal_and_retries_main(self):
         for reason in ("corrupt", "locked"):
             with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory:
-                env = {"HOME": directory, "XDG_STATE_HOME": directory}
+                env = {"HOME": directory, "XDG_STATE_HOME": directory, "PANE_TELL_STUCK_ALERT": "600"}
                 root = Path(directory) / "pane-tell"
                 (root / "waiting").mkdir(parents=True)
                 payload = root / "waiting/synthetic"

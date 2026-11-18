@@ -17,7 +17,8 @@
 # Otherwise it prints "queued ...", exits 0, and a detached process tries again until the box is empty, which outlives the
 # sending pane and runs on the receiver's server. After PANE_TELL_WAIT seconds, or when the receiver is gone or holds another
 # session, the message stays in ~/.local/state/pane-tell/undelivered/; `log` beside it says what became of each one. A
-# message that waits PANE_TELL_ALERT seconds (10 minutes) or ends up in that folder is announced, since a one-letter leftover
+# message still waiting after 30 minutes is announced once by pane-relay-watch. Exhausting PANE_TELL_WAIT or entering that
+# folder is announced as a final failure, since a one-letter leftover
 # in a box once held a report back with nobody knowing (10/31): a durable terminal error alert for 요유, the only one who can
 # resolve a blocked editor, and a note to the sender on its own server, who would take it as delivered, unless the sender is an auto
 # session, for the reason above. A box on the workers server also queues an error alert; its note goes to the sender, or to
@@ -386,7 +387,7 @@ warn() { # what happened, sender's terminal, sender's socket when on another ser
 
 deliver() { # message file, receiver's terminal (a moved pane gets a new pane id), its session when queued, sender's terminal,
   # sender's socket, predecessor payload (if any)
-  local list row pane kind sid label result t0=$SECONDS warned=
+  local list row pane kind sid label result t0=$SECONDS
   export PANE_TELL_YOYOO_WORDS=0
   if [ "$(jq -r '.yoyoo_words // false' "$STATE/delivery-origins/$(basename "$1")" 2>/dev/null)" = true ]; then
     export PANE_TELL_YOYOO_WORDS=1
@@ -399,10 +400,9 @@ deliver() { # message file, receiver's terminal (a moved pane gets a new pane id
     pane=$(printf '%s\n' "$row" | cut -f1); kind=$(printf '%s\n' "$row" | cut -f2); sid=$(printf '%s\n' "$row" | cut -f3); label=$(printf '%s\n' "$row" | cut -f4)
     # The registered main is a stable receiver across /clear, including queues
     # created before refresh began. Other receivers retain session binding.
-    # The registered main restarting its agent (main-refresh --restart) has none for a moment: wait for the new one, up to the
-    # alert time; past it the main counts as gone, kept in a file and announced (11/13 21:28: seven reports went in seconds).
-    [ -n "$kind" ] || ! is_main "$2" || (( SECONDS - t0 >= ${PANE_TELL_ALERT:-600} )) || continue
-    [ -n "$kind" ] && { [ -z "$3" ] || [ "$sid" = "$3" ] || is_main "$2"; } || break
+    # The registered main can have no agent during main-refresh. Keep retrying until the delivery deadline.
+    [ -n "$kind" ] || { is_main "$2" && continue; break; }
+    [ -z "$3" ] || [ "$sid" = "$3" ] || is_main "$2" || break
     result=1
     if predecessors_done "$1" "${6:-}"; then
       send "$pane" "$kind" "$(cat "$1")"; result=$?
@@ -418,10 +418,6 @@ deliver() { # message file, receiver's terminal (a moved pane gets a new pane id
         echo "$(date '+%F %T') delivered $(basename "$1") to $pane" >> "$STATE/log"
       fi
       return
-    fi
-    if [ -z "$warned" ] && (( SECONDS - t0 >= ${PANE_TELL_ALERT:-600} )); then
-      warned=1
-      warn "$label 칸 입력창이 비어 있지 않거나 화면이 위로 올라가 있어 다른 칸의 글이 들어가지 못합니다. 입력창을 비우고 맨 아래로 내리면 바로 전달됩니다." "$4" "$5"
     fi
   done
   mv "$1" "$STATE/undelivered/"

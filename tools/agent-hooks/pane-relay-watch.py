@@ -252,6 +252,7 @@ def scan(env, now):
     if not os.path.isdir(root):
         return []
     limit = max(seconds(env, "PANE_TELL_ALERT", 600), seconds(env, "PANE_TELL_BATCH", 120) + 60)
+    waiting_limit = seconds(env, "PANE_TELL_STUCK_ALERT", 1800)
     patterns = ("waiting/*", "undelivered/*", "batch/*/open/[0-9]*", "batch/*/sending.*/[0-9]*", "batch/*/claimed/[0-9]*",
                 "batch/*/.joined.*", "batch/*/.new.*", "failed-reports/report.*")
     # Independent launchd ticks may overlap. Never hold up delivery on this lock.
@@ -285,7 +286,7 @@ def scan(env, now):
                         pass
                 if payload not in fresh:
                     inventory[payload] = identity
-                if failed_report or now - info.st_mtime >= limit:
+                if failed_report or now - info.st_mtime >= (waiting_limit if pattern == "waiting/*" else limit):
                     candidates[payload] = identity
         path = os.path.join(root, ".watch-alerts.json")
         try:
