@@ -84,20 +84,23 @@ _spec = importlib.util.spec_from_file_location("check_permissions", os.path.join
 check_permissions = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(check_permissions)
 
+# A check cannot write the checked repository, so a fetch (even --no-write-fetch-head) fails once the remote has new
+# commits; ls-remote and gh api read the remote without writing.
 SOURCE_COMPARISON = (
-    " When comparing code lines, read the latest remote source. "
+    " When comparing code lines, read the latest remote source without fetching: a check cannot write the repository. "
     "Use the repository's instructed work branch, or its remote default branch if none is specified. "
-    "Fetch that branch and read `git show origin/<branch>:<file>` (substitute the repository's actual remote name). "
-    "Verify remote freshness without writing FETCH_HEAD using `git fetch --no-write-fetch-head origin <branch>`, or compare `git ls-remote origin refs/heads/<branch>` with `git rev-parse origin/<branch>`. "
-    "Compare local HEAD with the fetched ref to identify an outdated checkout, and inspect the reported PR/commit separately when checking a proposed change. "
-    "Do not switch branches or update working files for this read-only comparison. "
-    "If a required code comparison cannot verify source freshness, report `TASK_CHECK: unknown` with the failed fetch/read and blocker, "
+    "Get the remote tip with `git ls-remote origin refs/heads/<branch>` (substitute the repository's actual remote name) "
+    "and compare it with `git rev-parse origin/<branch>` and local HEAD to identify an outdated checkout. "
+    "When the tips match, read `git show origin/<branch>:<file>`; otherwise read "
+    "`gh api -H 'Accept: application/vnd.github.raw' 'repos/<owner>/<repo>/contents/<file>?ref=<branch>'`. "
+    "Inspect the reported PR/commit separately (`gh pr diff`, `gh api`) when checking a proposed change. "
+    "Do not fetch, switch branches or update working files for this read-only comparison. "
+    "If a required code comparison cannot verify source freshness, report `TASK_CHECK: unknown` with the failed read and blocker, "
     "unless an independently verified defect requires `TASK_CHECK: fail`; never mark that comparison verified from local HEAD alone. "
     "Skip source comparison when the task does not involve code lines. "
 )
-CHECK_COMMANDS = (
-    " Run GCP commands one at a time using the default gcloud configuration, without account, configuration, or impersonation overrides. "
-)
+# ponytail: pane-spawn --check appends the same sentence again through check-permissions.py --contract (as it does CONTRACT).
+CHECK_COMMANDS = " " + check_permissions.CHECK_COMMANDS + " "
 
 SESSION = re.compile(r"세션[ \t]*\**[ \t]*[:：][ \t]*\**([^·\n]*)")
 LEFT = re.compile(r"남은[ \t]*것[ \t]*\**[ \t]*[:：]")

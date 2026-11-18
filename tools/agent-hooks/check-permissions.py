@@ -16,6 +16,12 @@ CONTRACT = (' When a required check is blocked by permissions, use TASK_CHECK: u
             'Use one actual reason, not the pipe-separated list. Include the original error in the full report. '
             'Use lead for shared safety hooks or account/IAM denials; never bypass them. '
             'Omit these fields when no permissions blocked a check. A permissions block is not a code failure.')
+# Shared by automatic checks and checks opened by hand (pane-spawn --check prints --contract into every check).
+CHECK_COMMANDS = ('Run GCP commands one at a time using the default gcloud configuration, '
+                  'without account, configuration, or impersonation overrides.')
+EXCLUDED = ('Judge only the claims the result needs to answer the original request. Copy each report sentence unrelated '
+            'to that answer (process narration, side remarks) verbatim onto a `제외:` line and do not check it; '
+            'never exclude a claim the answer relies on.')
 
 
 def blockage(text):
@@ -261,7 +267,7 @@ def classify(text, cwd):
 
 if __name__ == '__main__':
     if sys.argv[1:] == ['--contract']:
-        print(CONTRACT)
+        print(CONTRACT, CHECK_COMMANDS, EXCLUDED)
     elif len(sys.argv) == 2:
         print(json.dumps(classify(sys.stdin.read(1048576), sys.argv[1]), ensure_ascii=False))
     else:
