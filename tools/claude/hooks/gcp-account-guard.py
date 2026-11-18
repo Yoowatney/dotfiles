@@ -768,11 +768,7 @@ def rider(name: str, hook_input: dict) -> str | None:
 
 
 def riders(hook_input: dict) -> str | None:
-    try:
-        page = load(os.path.join(HOOKS, "yoyoo-share-guard.py")).short_page_reason(hook_input)
-    except Exception:
-        page = None  # Missing conversation context never invents a short question.
-    return (page or rider("actions-run-guard.py", hook_input) or rider("pane-fit-guard.py", hook_input)
+    return (rider("page-request-guard.py", hook_input) or rider("actions-run-guard.py", hook_input) or rider("pane-fit-guard.py", hook_input)
             or rider("job-host-guard.py", hook_input) or rider("fix-round-guard.py", hook_input))
 
 

@@ -249,7 +249,9 @@ class ReactionPolicyTests(unittest.TestCase):
     def test_slow_identity_and_max_checker_budget_fit_existing_ten_second_fixture(self):
         self.policy(timeout_seconds=5)
         start = time.monotonic()
-        self.assert_block(self.run_hook(TEST_SLEEP="6", TEST_HERDR_SLEEP="1.5"), "timed out")
+        # A slow herdr, 1 s against its 2 s timeout: 1.5 s left too little for the fake's own Python start under pre-push load, and
+        # origin/main failed there too (2026-11-18).
+        self.assert_block(self.run_hook(TEST_SLEEP="6", TEST_HERDR_SLEEP="1"), "timed out")
         self.assertLess(time.monotonic() - start, 9.5)
 
 
