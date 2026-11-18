@@ -4,7 +4,7 @@
 The global rule ends every finished report with `남은 것: 요유 몫: … · 유요 몫: … · 세션: …`. 요유 said "너가 해" /
 "알아서 해" 9 times in 6 sessions on 10/22-10/23: each new skill or report slot brought the old "shall I?" step back,
 filed under 요유 몫. This asks once, before the turn ends, whether every item there is truly 요유's, and the same of a reply that
-ends by asking leave with no such line (`머지할까요?`). In the same block it asks for the
+ends by asking leave with no such line (`머지할까요?`) is only logged, never sent back (see log_ask_back). In the same block it asks for the
 missing `무엇을:` when a reply carries more `왜:` labels than `무엇을:` labels (the rule pairs them), and for the missing line
 when `원인:`, `조치:` and `재발 방지:` do not come in equal numbers.
 Only the `요유 몫:` value counts, up to `·` or the end of its line; `없음` passes, and so does a reply without the line.
@@ -78,8 +78,6 @@ DO_REASON = ("yoyoo-share-guard: 요유 몫 가운데 유요가 지금 할 수 �
 END_QUIETLY = ("그런 일이 없으면 응답 없이 턴을 끝내세요: 다시 쓰지 말고, 다시 쓰지 않았다는 말이나 이유도 쓰지 마세요. "
                "보고는 이미 화면 맨 아래에 있습니다.")
 REASON = f"{DO_REASON} 그래서 보고가 바뀌면 바뀐 보고를 쓰세요. {END_QUIETLY}"
-ASK_REASON = ("yoyoo-share-guard: 답이 허락을 묻는 말로 끝났습니다. 뜻이 분명하고 방법만 남았으면 추천안대로 지금 하세요. "
-              f"prod에 닿는 배포·머지, 데이터, 외부 설정, 과금이거나 요청의 뜻이 모호해서 요유의 답이 꼭 필요한 경우가 아니면 묻지 않습니다. {END_QUIETLY}")
 # 요유 2026-10-28 ("왜는 쓰는데 무엇을을 왜 안쓰지, 모든 세션이 다그러네"): every `왜:` label comes with a `무엇을:` label
 WHY = re.compile(r"(?<![가-힣])왜[ \t]*\**[ \t]*[:：]")
 WHAT = re.compile(r"무엇을[ \t]*\**[ \t]*[:：]")
@@ -827,6 +825,23 @@ def asks_back(text: str) -> bool:
     return (bool(PERMIT.search(last)) and not WHICH.search(last)) or (bool(m) and ends_in_rieul(m[1]) and not CHOICE.search(last))
 
 
+def log_ask_back(payload: dict, env, text: str) -> None:
+    """Append one JSON line per ask-back ending to <state>/agent-hooks/ask-back.jsonl. A regex cannot tell a fair question (요유 only
+    asked something) from a needless one, so the rule lives in the md and this only counts how often it fires. Never blocks."""
+    home = env.get("HOME")
+    root = env.get("XDG_STATE_HOME") or (os.path.join(home, ".local", "state") if home else "")
+    if not root:  # never the real state from a test
+        return
+    last = next((l.strip() for l in reversed(prose(text).splitlines()) if l.strip() and not LABEL_LINE.match(l.strip())), "")
+    try:
+        os.makedirs(os.path.join(root, "agent-hooks"), exist_ok=True)
+        with open(os.path.join(root, "agent-hooks", "ask-back.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "session": payload.get("session_id"), "last": last[:200]},
+                               ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 def is_decision(item: str) -> bool:
     if ONLY_YOYOO.search(item):
         return True
@@ -950,7 +965,7 @@ def decide(payload: dict, env) -> str | None:
         if left and not only_decisions(text) and not asked_before(payload, text, env):
             rewrites.append(DO_REASON if rewrites else REASON)  # a rewrite that is due must not be told to stay silent
         elif not left and asks_back(text):
-            rewrites.append(DO_REASON if rewrites else ASK_REASON)
+            log_ask_back(payload, env, text)  # judged by the md rule: logged only, the reply is never held back
         return " ".join(rewrites) or None
     finally:
         _run = None
@@ -1272,7 +1287,20 @@ def selftest():
     for t in ("PR을 올렸습니다. 머지할까요?", "고쳤습니다.\n\n이대로 만들까요?", "진행해도 될까요?\n\n무엇을: 훅 수정\n왜: 막혀서",
               "스레드에 올려 둘까요？", "그렇게 할까요?\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨",
               "머지해도 되나요?", "머지해도 좋을까요?", "머지하시겠습니까?", "진행해도 괜찮을까요?"):
-        assert decide(p(t), cli) == ASK_REASON, f"should ask back: {t[:40]!r}"
+        assert decide(p(t), cli) is None, f"an ask-back ending is never sent back: {t[:40]!r}"
+        assert asks_back(t), f"but it is still detected for the log: {t[:40]!r}"
+    with tempfile.TemporaryDirectory() as d:  # logged, not blocked (the md rule judges; the log shows whether needless asks grow)
+        logged = {**cli, "XDG_STATE_HOME": d}
+        log = os.path.join(d, "agent-hooks", "ask-back.jsonl")
+        assert decide(p("고쳤습니다.\n이대로 머지할까요?", session_id="s9"), logged) is None, "logged only"
+        assert decide(p("머지했습니다.", session_id="s9"), logged) is None and decide(p("어떻게 할까요?"), logged) is None
+        rows = [json.loads(l) for l in open(log, encoding="utf-8")]
+        assert len(rows) == 1 and rows[0]["session"] == "s9" and rows[0]["last"] == "이대로 머지할까요?", f"one row per ask-back: {rows}"
+        os.chmod(d, 0o500)  # an unwritable state dir must not break the hook
+        try:
+            assert decide(p("진행해도 될까요?"), {**logged, "XDG_STATE_HOME": os.path.join(d, "nope", "x")}) is None
+        finally:
+            os.chmod(d, 0o700)
     for t in ("A로 갈까요, 아니면 B로 갈까요?", "어떻게 할까요?", "틀리거나 빠진 부분이 있을까요?", "어느 쪽이 좋을까요?",
               "`머지할까요?`라고 묻지 않습니다.", '"머지할까요?"처럼 쓰면 훅이 되묻습니다.', "머지할까요? 이 질문은 쓰지 않습니다.",
               "> 머지할까요?\n인용입니다.", "마지막 줄은 그냥 까요?", "머지했습니다.",
@@ -1282,7 +1310,7 @@ def selftest():
     assert "prod에 닿는" in REASON, "a real production step is not something to go and do"
     assert decide(p("머지할까요?\n남은 것: 요유 몫: 세 길 중 하나 고르기 · 유요 몫: 없음"), cli) is None, "a decision on the 요유 몫 line is the handoff format"
     assert decide(p("머지할까요?\n남은 것: 요유 몫: 값 넣기 · 유요 몫: 없음"), cli) == REASON, "the 요유 몫 question already covers it"
-    assert decide(p("왜: 막혀서\n머지할까요?"), cli) == f"{WHAT_REASON} {DO_REASON}", "a rewrite is due: no telling it to stay silent"
+    assert decide(p("왜: 막혀서\n머지할까요?"), cli) == WHAT_REASON, "the ask-back adds nothing to a rewrite that is due"
     assert decide(p("머지할까요?", stop_hook_active=True), cli) is None, "second stop of a turn must pass"
 
     with tempfile.TemporaryDirectory() as d:
