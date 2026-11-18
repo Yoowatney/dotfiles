@@ -7,6 +7,7 @@ SSH connection is made by these tests.
 import importlib.util
 import json
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import unittest
@@ -360,6 +361,140 @@ class SecretFileOutputTests(unittest.TestCase):
                 )
                 response = json.loads(result.stdout or "{}")
                 self.assertEqual(response.get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
+
+
+class BrowserAndTranscriptOutputTests(unittest.TestCase):
+    # These are command strings only. Never run a browser or read a transcript.
+    TRANSCRIPTS = (
+        "/Users/fixture/.codex/sessions/2026/01/01/rollout-fixture.jsonl",
+        "/Users/fixture/.codex/archived_sessions/rollout-fixture.jsonl",
+        "/Users/fixture/.claude/projects/-workspace/fixture.jsonl",
+        "/Users/fixture/.claude/projects/-workspace/fixture/subagents/agent-fixture.jsonl",
+    )
+    RAW_BROWSER = (
+        "ego-browser nodejs <<'JS'\n"
+        "const task=await taskSpace(1), page=task.page('p1');\n"
+        "const r=await page.fetch('/api/products/fixture'); "
+        "const d=JSON.parse(r.body); console.log({status:r.status,data:d});\nJS"
+    )
+
+    def test_browser_raw_fetch_output_is_denied(self):
+        for script in (
+            "const r=await page.fetch('/api/fixture'); console.log(r);",
+            "console.log(await page.fetch('/api/fixture'));",
+            "const r=await fetch('/api/fixture'); console.log(await r.json());",
+            "console.log(await page.evaluate(async()=>{const r=await fetch('/api/fixture'); return r.json()}));",
+            "const r=await page.fetch('/api/fixture'); console.dir(JSON.parse(r.body));",
+            "const r=await page.fetch('/api/fixture'); process.stdout.write(r.body);",
+        ):
+            command = "ego-browser nodejs <<'JS'\n" + script + "\nJS"
+            with self.subTest(script=script):
+                self.assertIsNotNone(guard.bash_problem(command))
+        self.assertIsNotNone(guard.tool_problem({
+            "tool_name": "Bash", "tool_input": {"command": self.RAW_BROWSER}}))
+
+    def test_inline_and_shell_wrapped_browser_output_is_denied(self):
+        script = "const r=await page.fetch('/api/fixture'); console.log(r.body)"
+        for command in (
+            "ego-browser nodejs -e " + repr(script),
+            "bash -lc " + shlex.quote("ego-browser nodejs -e " + shlex.quote(script)),
+            "/usr/local/bin/ego-browser nodejs <<'JS'\n" + script + "\nJS",
+            "ego-browser nodejs <<'JS'\nconsole.log(require('fs').readFileSync('/Users/fixture/.claude.json','utf8'))\nJS",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(guard.bash_problem(command))
+
+    def test_python_transcript_replay_is_denied(self):
+        for path in self.TRANSCRIPTS:
+            command = (
+                "uv run python - <<'PY'\nimport json\nfrom pathlib import Path\n"
+                f"p=Path('{path}');ls=p.read_text().splitlines()\n"
+                "for n in [4,8]:\n d=json.loads(ls[n-1]);o=d['payload']['output'];print(n,o)\nPY"
+            )
+            with self.subTest(path=path):
+                self.assertIsNotNone(guard.tool_problem({
+                    "tool_name": "Bash", "tool_input": {"command": command}}))
+
+    def test_other_transcript_content_readers_are_denied(self):
+        for path in self.TRANSCRIPTS:
+            for reader in ("cat", "head -2", "rg -n output", "jq .", "nodejs dump.js"):
+                with self.subTest(path=path, reader=reader):
+                    self.assertIsNotNone(guard.bash_problem(f"{reader} {path}"))
+            self.assertIsNotNone(guard.tool_problem({
+                "tool_name": "Read", "tool_input": {"file_path": path}}))
+            self.assertIsNotNone(guard.tool_problem({
+                "tool_name": "Grep", "tool_input": {"path": path, "output_mode": "content"}}))
+
+    def test_transcript_directory_search_is_denied(self):
+        for path in ("~/.codex/sessions", "~/.codex/sessions/2026/01", "~/.codex/archived_sessions",
+                     "~/.claude/projects", "~/.claude/projects/-workspace",
+                     "~/.claude/projects/-workspace/fixture/subagents"):
+            with self.subTest(path=path):
+                self.assertIsNotNone(guard.bash_problem("rg -n output " + path))
+                self.assertIsNone(guard.bash_problem("rg --files " + path))
+                self.assertIsNotNone(guard.tool_problem({"tool_name": "Grep", "tool_input": {
+                    "path": path, "output_mode": "content"}}))
+                self.assertIsNone(guard.tool_problem({"tool_name": "Grep", "tool_input": {
+                    "path": path, "output_mode": "count"}}))
+
+    def test_captured_browser_response_cannot_be_echoed(self):
+        command = "R=$(ego-browser nodejs -e \"const r=await page.fetch('/api/fixture'); console.log(r)\"); echo $R"
+        self.assertIsNotNone(guard.bash_problem(command))
+
+    def test_normal_browser_and_safe_fetch_summaries_remain_allowed(self):
+        for script in (
+            "const task=await taskSpace(1); console.log(await task.page('p1').domSnapshot());",
+            "console.log('Use fetch() to read an API response');",
+            "const r=await page.fetch('/api/fixture'); console.log({status:r.status,ok:r.ok});",
+            "const r=await page.fetch('/api/fixture'); const d=JSON.parse(r.body); console.log({count:d.items.length,present:!!d.value,type:typeof d.value});",
+            "const r=await page.fetch('/api/fixture'); await page.fill('#value', JSON.parse(r.body).value); console.log('filled');",
+        ):
+            command = "ego-browser nodejs <<'JS'\n" + script + "\nJS"
+            with self.subTest(script=script):
+                self.assertIsNone(guard.bash_problem(command))
+        self.assertIsNone(guard.bash_problem("R=$(" + self.RAW_BROWSER + "\n)"))
+
+    def test_transcript_counts_and_unrelated_files_remain_allowed(self):
+        for path in self.TRANSCRIPTS:
+            for command in (f"rg --count output {path}", f"grep -q output {path}",
+                            f"ls -l {path}", f"test -f {path}", f"wc -l {path}"):
+                with self.subTest(command=command):
+                    self.assertIsNone(guard.bash_problem(command))
+        for command in (
+            "cat /workspace/fixtures/events.jsonl",
+            "cat /Users/fixture/.claude/projects/-workspace/memory/MEMORY.md",
+            "git commit -m 'protect ~/.codex/sessions/fixture.jsonl'",
+            "cat <<'EOF'\nego-browser nodejs; console.log(await fetch('/api/fixture'))\nEOF",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(guard.bash_problem(command))
+
+    def test_hook_protocol_blocks_both_shapes_without_execution(self):
+        for command in (self.RAW_BROWSER, f"cat {self.TRANSCRIPTS[0]}"):
+            result = subprocess.run(
+                [sys.executable, "-I", str(GUARD)],
+                input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                text=True, capture_output=True, check=True,
+            )
+            self.assertEqual(json.loads(result.stdout or "{}").get(
+                "hookSpecificOutput", {}).get("permissionDecision"), "deny")
+
+    def test_only_installed_isolated_user_reader_is_allowed(self):
+        helper = str(Path.home() / '.claude/hooks/session-user-messages.py')
+        path = self.TRANSCRIPTS[0]
+        for command in (f'python3 -I {helper} {path}',
+                        f'uv run --no-project python -I {helper} {path}'):
+            with self.subTest(command=command):
+                self.assertIsNone(guard.bash_problem(command))
+        for command in (f'python3 {helper} {path}',
+                        f'python3 -I /tmp/session-user-messages.py {path}',
+                        f'python3 -I {helper} --raw {path}',
+                        f'python3 -I {helper} {path}; cat {path}',
+                        f'python3 -I {helper} {path} /workspace/other.jsonl',
+                        f'node -e "console.log(require(\"fs\").readFileSync(\"{path}\"))"',
+                        f'jq . {path}'):
+            with self.subTest(command=command):
+                self.assertIsNotNone(guard.bash_problem(command))
 
 
 if __name__ == "__main__":
