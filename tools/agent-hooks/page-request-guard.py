@@ -44,7 +44,7 @@ def unrequested(payload: dict) -> bool:
                     entry = json.loads(raw)
                 except ValueError:
                     continue
-                if not isinstance(entry, dict) or entry.get('isMeta') or entry.get('isSidechain'):
+                if not isinstance(entry, dict) or entry.get('isMeta') or entry.get('isSidechain') or entry.get('isCompactSummary'):
                     continue
                 origin = entry.get('sourceToolAssistantUUID') or entry.get('sourceToolUseID')
                 if origin:

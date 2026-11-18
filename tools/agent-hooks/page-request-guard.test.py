@@ -123,6 +123,10 @@ class PageRequestTest(unittest.TestCase):
                                                 'prompt': '설명 페이지 만들어줘'}},
         ])
         self.assertTrue(COMMON.riders(self.payload()))
+        # Claude's compaction summary is a user entry but no message from 요유; it quotes old requests ("Make HTML ...").
+        self.record('이건 어디에서 봐?', extra=[{'type': 'user', 'isCompactSummary': True, 'message': {
+            'content': 'This session is being continued from a previous conversation. Make HTML pages on request only.'}}])
+        self.assertTrue(COMMON.riders(self.payload()))
         self.record('간단하게 답해줘', extra=[{'type': 'attachment', 'attachment': {
             'type': 'queued_command', 'prompt': '설명 페이지를 만들어줘'}}])
         self.assertIsNone(COMMON.riders(self.payload()))
