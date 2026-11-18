@@ -16,9 +16,8 @@ A report whose 요유 몫 holds only decisions is not asked at all (only_decisio
 It also sends back names 요유 cannot read: a pane's herdr id (`w5:pKR`, 27 reports in 14 days; the reason carries the
 pane's name) and the machine names the global rule bans. A last report (it has `남은 것:`) also comes back while a test pane
 this session opened (`임시 …`) is open: 4 of them stayed idle after this hook's own tests (10/31). A report after an explainer
-page Claude had to write itself because Codex failed comes back unless it says so (요유 2026-10-31). In a Claude session a
-long reply with no page comes back and goes to Codex (요유 2026-11-01); a Codex session writes its own. Not in the main pane: from
-2026-11-05 21:13 요유 reads it through Slack only.
+page Claude had to write itself because Codex failed comes back unless it says so (요유 2026-10-31). A long reply stays in the
+terminal: a page is made only when 요유 asks for one (요유 2026-11-18, page-request-guard.py).
 The first last report after a pane's report reached this session (auto-tab-close's message, read from the session record)
 comes back without a `확인:` line and a command run since that is not a pane chore: a lead passing a pane's "done" on unchecked
 (요유 2026-11-04). It comes before the failure: in 53 such reports by then (tests and other leads' panes left out), a fresh
@@ -60,6 +59,7 @@ import time
 import unicodedata
 
 sys.dont_write_bytecode = True  # no __pycache__ in the dotfiles at every stop
+HERE = os.path.dirname(os.path.realpath(__file__))
 
 STRIP = [
     re.compile(r"^[ \t]*(```|~~~)[\s\S]*?(?:\1|\Z)", re.M),  # fenced code, also unclosed; a fence opens at a line's start (a sentence that says ``` swallowed the 남은 것 line, 2026-11-07)
@@ -129,10 +129,6 @@ TEST_PANE = "임시 "  # with the space: `임시저장 API 수정` is a work nam
 OPENED_BY = re.compile(r"^spawn-([0-9A-Za-z]+)-")  # pane-spawn's agent name: spawn-<caller's terminal>-<random>
 WROTE_IT = re.compile(r"(?:Claude|유요).{0,12}(?:썼|작성)")
 EXPLAIN_REASON = "yoyoo-share-guard: 이번 설명 페이지는 Codex가 실패해 Claude가 썼습니다. 보고에 'Claude가 썼습니다'와 실패 이유를 넣어 다시 쓰세요."
-# 요유 2026-11-01: most reports go to Codex, as the pages do, since they could not follow Claude's. The rule to use a page was
-# there and nothing held it: in the 14 days to 11/1, 13% of about 1,200 reports had a page and the median ran 621 characters of
-# prose outside the labeled lines. At 500 about half go to Codex, 29 to 41 a day; a conclusion, three points and a path fit under it.
-LONG_REPLY = 500
 LABEL_LINE = re.compile(r"^\W*(?:무엇을|왜|확인|남은[ \t]*것|원인|조치|재발[ \t]*방지)\W*[:：]")
 # 요유 2026-11-04: in a talk on multi-agent setups a lead passed a sub-agent's "done" on to the person unchecked, and the feature
 # did not work. Here the verification rule covered only changes, and nothing held a lead to it. auto-tab-close sends a pane's
@@ -200,7 +196,6 @@ HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1[^\n]*\n.*?^[ \t]*\2[ \t]*$", re
 CODEX_CMD = re.compile(r"\bcmd[\"']?\s*:\s*(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')")
 # A call a hook or a permission rule stopped never ran: Claude's error result, Codex's output text. A test that ran and failed counts.
 REFUSED = re.compile(r"PreToolUse:\S+ hook error|blocked by PreToolUse hook|Permission to use \S+ has been denied|doesn't want to proceed")
-PAGE = re.compile(r"/explain/\S+\.html")
 # Lead 2026-11-05: the main pane left 요유's Slack words unanswered twice that day (tf#1083's '머지 ㄱㄱ' went to a pane with no
 # reply in the thread), and done --thread, the one check, runs only when a thread is closed. So each turn of the main pane ends
 # with the threads still owed a reply, read from the relay's own state (owed_reason).
@@ -220,14 +215,11 @@ THREAD_CALL_REASON = ("yoyoo-share-guard: no posted answer was observed for this
                       "Reactions keep their existing rules. Check whether an answer already went by another route. "
                       "답할 필요 없는 잡담이면 그대로 끝내도 됩니다. "
                       "이 검사는 한 번만 돌려보내며 두 번째 종료는 통과합니다.")
-LONG_REASON = ("yoyoo-share-guard: 답이 깁니다. 긴 보고는 Codex가 씁니다. html-explainer 스킬대로 사실을 파일에 적어 explain-page로 맡기고, "
-               "터미널에는 publish가 출력한 Codex의 글과 페이지 경로, 라벨 줄(무엇을, 왜, 남은 것 등)만 남기세요.")
 
 
 def final_text(path: str) -> str:
     """Text blocks of the last assistant message in a Claude transcript (blocks of one message share message.id)."""
-    with open(path, encoding="utf-8") as f:
-        lines = f.read().splitlines()
+    lines = session_lines(path)
     msg_id, texts = None, []
     for raw in reversed(lines):
         try:
@@ -252,6 +244,30 @@ def prose(text: str) -> str:
     for pat in STRIP:
         text = pat.sub(" ", text)
     return text
+
+
+def unfenced(text: str) -> str:
+    """Without code blocks and blockquotes. Inline code and quotes stay: a 요유 몫 item may name a command."""
+    return STRIP[2].sub(" ", STRIP[0].sub(" ", unicodedata.normalize("NFC", text)))
+
+
+_run: dict | None = None  # what one decide() run has read: several checks ask for the same herdr lists and session record
+
+
+def once(key, read):
+    if _run is None:
+        return read()
+    if key not in _run:
+        _run[key] = read()
+    return _run[key]
+
+
+def session_lines(path: str) -> list:
+    """The session record's lines; an unreadable record raises, as each caller expects."""
+    def read():
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read().splitlines()
+    return once(("lines", path), read)
 
 
 def misses_what(text: str) -> bool:
@@ -279,14 +295,16 @@ def pane_ids(text: str) -> list:
 
 
 def herdr_list(env, kind: str, socket: str = "") -> list:
-    """`herdr <kind> list` of this pane's server, or of the server at `socket`. [] on any failure."""
-    herdr = env.get("HERDR_BIN_PATH") or "herdr"
-    e = {**os.environ, **env, "HERDR_SOCKET_PATH": socket} if socket else {**os.environ, **env}
-    try:
-        out = subprocess.run([herdr, kind, "list"], capture_output=True, text=True, timeout=2, env=e).stdout
-        return json.loads(out)["result"][f"{kind}s"]
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-        return []
+    """`herdr <kind> list` of this pane's server, or of the server at `socket`. [] on any failure. Read once a decide() run."""
+    def read():
+        herdr = env.get("HERDR_BIN_PATH") or "herdr"
+        e = {**os.environ, **env, "HERDR_SOCKET_PATH": socket} if socket else {**os.environ, **env}
+        try:
+            out = subprocess.run([herdr, kind, "list"], capture_output=True, text=True, timeout=2, env=e).stdout
+            return json.loads(out)["result"][f"{kind}s"]
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            return []
+    return once(("herdr", kind, socket), read)
 
 
 def pane_name(pane: dict) -> str:
@@ -326,19 +344,21 @@ def under_lead(payload: dict, env) -> bool:
     return bool(me) and "👑" not in (me.get("label") or "") and bool(OPENED_BY.match(agent_names(env).get(me.get("pane_id")) or ""))
 
 
-def peers_module():
-    spec = importlib.util.spec_from_file_location(
-        "herdr_peers", os.path.join(os.path.dirname(os.path.realpath(__file__)), "herdr_peers.py"))
-    peers = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(peers)
-    return peers
+def load(name: str):
+    """A hook file next to this one, as a module: the dashes in their names keep `import` out. Registered in sys.modules, as the
+    main-pane inbox loader always did."""
+    spec = importlib.util.spec_from_file_location(name[:-3].replace("-", "_"), os.path.join(HERE, name))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def delegates_checks(payload: dict, env) -> bool:
     """herdr_peers decides. A pane herdr cannot name, or any failure, is the ordinary rule."""
     try:
         me = my_pane(herdr_list(env, "pane"), payload, env) or {}
-        return peers_module().delegates_checks(env, me.get("terminal_id"))
+        return load("herdr_peers.py").delegates_checks(env, me.get("terminal_id"))
     except Exception:
         return False
 
@@ -348,7 +368,7 @@ def workers_socket(env, me: dict) -> str:
     try:
         if not me.get("terminal_id"):
             return ""
-        sock = peers_module().socket_of(env, "workers")
+        sock = load("herdr_peers.py").socket_of(env, "workers")
         return "" if sock == env.get("HERDR_SOCKET_PATH") else sock  # a pane on workers itself: already read
     except Exception:
         return ""
@@ -510,8 +530,7 @@ def relay_reason(payload: dict, text: str, env) -> str | None:
     if not path or not LAST_REPORT.search(prose(text)):
         return None
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            lines = f.read().splitlines()
+        lines = session_lines(path)
     except OSError:
         return None
     heads = [i for i, line in enumerate(lines) if "보고입니다(" in line]
@@ -579,13 +598,8 @@ def explain_reason(payload: dict, text: str, env) -> str | None:
 
 def stale_thread_reason(payload: dict, text: str, env) -> str | None:
     """The question for a report that says nobody answered on an old thread read: see slack-fresh-guard.py. Its own crash passes."""
-    sys.dont_write_bytecode = True
     try:
-        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "slack-fresh-guard.py")
-        spec = importlib.util.spec_from_file_location("slack_fresh", path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module.report_reason(payload, prose(text), dict(env))
+        return load("slack-fresh-guard.py").report_reason(payload, prose(text), dict(env))
     except Exception:
         return None
 
@@ -597,7 +611,7 @@ def owed_reason(payload: dict, env) -> str | None:
     if not env.get("HOME"):  # never the real state from a test
         return None
     try:
-        peers = peers_module()
+        peers = load("herdr_peers.py")
         folder = peers.state_dir(env)
         with open(os.path.join(folder, "channel.json"), encoding="utf-8") as f:
             owed = json.load(f).get("owed") or {}
@@ -770,8 +784,7 @@ def thread_call_reason(payload: dict, env) -> str | None:
     if not path:
         return None
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            lines = f.read().splitlines()
+        lines = session_lines(path)
         # Read only the latest input and the calls after it, rather than parsing the whole session on every Stop.
         for start in range(len(lines) - 1, -1, -1):
             latest = next((r for r in records(lines[start:start + 1]) if r[0] == "in"), None)
@@ -796,19 +809,6 @@ def thread_call_reason(payload: dict, env) -> str | None:
     return None
 
 
-def job_session(env) -> bool:
-    """A job's report goes to the board and Slack, and no one reads it in the terminal."""
-    return bool(env.get("MUNICE_AUTO_DISPATCH") or env.get("MUNICE_AMBIENT"))
-
-
-def too_long(text: str) -> bool:
-    """More prose than a conclusion, a few points and a path, with no page yet. The labeled closing lines stay in the terminal."""
-    if PAGE.search(text):
-        return False
-    lines = (line.strip() for line in prose(text).splitlines())
-    return sum(len(line) for line in lines if not LABEL_LINE.match(line)) > LONG_REPLY
-
-
 def ends_in_rieul(syllable: str) -> bool:
     return "가" <= syllable <= "힣" and (ord(syllable) - 0xAC00) % 28 == 8
 
@@ -830,15 +830,13 @@ def asks_back(text: str) -> bool:
 def is_decision(item: str) -> bool:
     if ONLY_YOYOO.search(item):
         return True
-    for pat in STRIP:
-        item = pat.sub(" ", item)
-    item = item.strip(" \t*_.,;")
+    item = prose(item).strip(" \t*_.,;")
     return (bool(DECISION.search(item)) or asks_which(item)) and not DELEGATED.search(item) and not STEP.search(item)
 
 
 def points_only(text: str) -> bool:
     """Some 요유 몫 item says where a question is instead of what it asks. A parenthesis that states it ends the match."""
-    text = STRIP[2].sub(" ", STRIP[0].sub(" ", unicodedata.normalize("NFC", text)))
+    text = unfenced(text)
     for m in SHARE_FULL.finditer(text):
         for item in ITEM.split(m.group(1)):
             item = item.strip(" \t*_.,;")
@@ -860,7 +858,7 @@ def only_decisions(text: str) -> bool:
 
 def share_items(text: str, aside: bool = False) -> list:
     """The items of every 요유 몫 value, each without its aside unless asked (its commas then split it, which comparing allows)."""
-    text = STRIP[2].sub(" ", STRIP[0].sub(" ", unicodedata.normalize("NFC", text)))
+    text = unfenced(text)
     values = [ADDED.sub(r", \1", m.group(1)) for m in SHARE_FULL.finditer(text)]
     values = [v if aside else ASIDE.sub(" ", v) for v in values]
     return [i.strip() for v in values if not NONE.match(v.strip(" \t*_.,;")) for i in ITEM.split(v)
@@ -903,180 +901,6 @@ def remember(payload: dict, env, keys: set) -> set:
     return new
 
 
-SHORT_REASON = ("short-question-explainer: 마지막 질문이 짧습니다. 설명 페이지를 만들지 말고 터미널에서 짧게 답하세요. "
-                "요유가 이번 질문에서 설명 페이지를 직접 요청한 경우에는 허용됩니다.")
-
-
-def short_question(payload: dict) -> bool:
-    """Use the latest human turn, never a tool argument or an assistant's summary.
-
-    The review examples are a link plus one question, and two one-line follow-ups.
-    Their lengths after stripping links were 14, 19 and 27 characters. At most
-    two nonempty lines / 40 characters covers those short follow-ups with margin.
-    Missing/unreadable context is unknown and passes. Do not reuse the GCP grant
-    parser: notifications terminate grants there but must not erase this question.
-    """
-    latest = ''
-    try:
-        with open(payload.get('transcript_path') or '', encoding='utf-8') as stream:
-            for raw in stream:
-                try:
-                    entry = json.loads(raw)
-                except ValueError:
-                    continue
-                if not isinstance(entry, dict) or entry.get('isMeta') or entry.get('isSidechain'):
-                    continue
-                origin = entry.get('sourceToolAssistantUUID') or entry.get('sourceToolUseID')
-                if origin:
-                    continue
-                attachment = entry.get('attachment') if isinstance(entry.get('attachment'), dict) else {}
-                provenance = attachment if entry.get('type') == 'attachment' else entry
-                source = provenance.get('origin')
-                if isinstance(source, dict) and source.get('kind') not in (None, 'human'):
-                    continue
-                if attachment.get('commandMode') == 'bash':
-                    continue
-                item = next(records([raw]), None)
-                if not item or item[0] != 'in':
-                    continue
-                text = item[1].strip()
-                if text.startswith(('<task-notification', '<system-reminder', '[', '# AGENTS.md', '<environment_context')):
-                    continue
-                latest = unicodedata.normalize('NFC', text)
-    except (OSError, TypeError):
-        return False
-    # Quoting a request or saying not to write HTML is not a direct request.
-    request = re.sub(r'`[^`]*`|"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’', '', latest)
-    page = r'(?:html|설명\s*페이지|웹\s*페이지|explainer\s*page|페이지)'
-    negative = re.search(page + r'[^.!?\n]{0,24}(?:말고|말아|마세요|마라|쓰지|만들지|필요\s*없)', request, re.I)
-    negative = negative or re.search(r"\b(?:do\s+not|don't|no|without)\b[^.!?\n]{0,24}" + page, request, re.I)
-    # Format particles (로/으로) fit between the page noun and request verb.
-    # Korean auxiliary verbs may be written with or without a space.
-    positive = re.search(page + r'[^.!?\n]{0,24}(?:만들어|써\s*줘|작성해|설명해|정리해|보여\s*(?:줘|주)|답해|답하|해\s*(?:줘|주)|수정해|고쳐|부탁|주세요)', request, re.I)
-    english = re.search(r'\b(?:create|write|make|show|build)\b[^.!?\n]{0,32}' + page, request, re.I)
-    english = english or re.search(r'\b(?:explain|summarize)\s+in\s+' + page, request, re.I)
-    if not negative and (positive or english):
-        return False
-    question = re.sub(r'https?://\S+', '', latest)
-    lines = [line.strip() for line in question.splitlines() if line.strip()]
-    return bool(lines) and len(lines) <= 2 and len(' '.join(' '.join(lines).split())) <= 40
-
-
-def writes_explainer(payload: dict) -> bool:
-    """Recognize the existing page CLI and ordinary direct writers, not arbitrary
-    hidden scripts. Inspect destinations, not quoted documentation or source code.
-    """
-    inp = payload.get('tool_input') or {}
-    tool = payload.get('tool_name')
-    cwd = payload.get('cwd') or os.getcwd()
-    home = os.path.expanduser('~')
-    root = os.path.realpath(os.path.join(home, 'explain'))
-
-    def page_path(path, base=cwd):
-        path = path.replace('${HOME}', home).replace('$HOME', home)
-        path = os.path.realpath(os.path.join(base, os.path.expanduser(path)))
-        return os.path.dirname(path) == root and path.lower().endswith('.html')
-
-    if tool in ('Write', 'Edit', 'MultiEdit'):
-        return page_path(str(inp.get('file_path') or ''))
-    if tool == 'apply_patch':
-        patch = str(inp.get('input') or inp.get('patch') or inp.get('command') or '')
-        return any(page_path(path) for path in re.findall(r'^\*\*\* (?:Add File|Update File|Move to): (.+)$', patch, re.M))
-    if tool != 'Bash':
-        return False
-    raw = str(inp.get('command') or '')
-    if not any(word in raw for word in ('explain', '.html')) and os.path.realpath(cwd) != root:
-        return False
-
-    def shell(command, base, depth=0):
-        if depth > 6:
-            return False
-        # Reuse the Actions guard's substitution reader so quoted documentation
-        # is not mistaken for a command. Heredoc data is removed below.
-        helper = importlib.util.spec_from_file_location('page_shell', os.path.join(os.path.dirname(__file__), 'actions-run-guard.py'))
-        parser = importlib.util.module_from_spec(helper)
-        helper.loader.exec_module(parser)
-        if any(shell(inner, base, depth + 1) for inner in parser.substitutions(command)):
-            return True
-        heredoc = re.compile(r"<<-?\s*(['\"]?)(\w+)\1([^\n]*)\n(.*?)\n[\t ]*\2\b", re.S)
-        for match in heredoc.finditer(command):
-            head = command[:match.start()].rsplit('\n', 1)[-1]
-            if re.search(r'\b(?:bash|sh|zsh)\s*$', head) and shell(match[4], base, depth + 1):
-                return True
-            if re.search(r'\b(?:python3?|node|ruby|perl)\b', head) and script(match[4], base):
-                return True
-        command = heredoc.sub(lambda match: match[3] + '\n', command)
-        lexer = shlex.shlex(command.replace('\\\n', ''), posix=True, punctuation_chars=';|&()\n<>')
-        lexer.whitespace = ' \t\r'
-        lexer.wordchars += '{}'
-        try:
-            words = list(lexer)
-        except ValueError:
-            return False
-        segments, current = [], []
-        for word in words + [';']:
-            if word and set(word) <= set(';|&()\n'):
-                segments.append(current)
-                current = []
-            else:
-                current.append(word)
-        for words in segments:
-            if not words:
-                continue
-            while words and (re.match(r'^\w+=', words[0]) or words[0] in ('env', 'command', 'exec')):
-                words = words[1:]
-            if not words:
-                continue
-            if words[:2] == ['uv', 'run']:
-                words = words[2:]
-                while words and words[0].startswith('-'):
-                    option = words.pop(0)
-                    if option in ('--project', '--directory', '--with', '--python') and words:
-                        words.pop(0)
-                if not words:
-                    continue
-            name = os.path.basename(words[0])
-            if name in ('bash', 'sh', 'zsh'):
-                for i, word in enumerate(words[:-1]):
-                    if word.startswith('-') and not word.startswith('--') and 'c' in word:
-                        if shell(words[i + 1], base, depth + 1):
-                            return True
-            if name == 'cd' and len(words) > 1:
-                base = os.path.realpath(os.path.join(base, os.path.expanduser(words[1].replace('$HOME', home))))
-            if name == 'explain-page' or name in ('python', 'python3'):
-                if any(os.path.basename(w) == 'explain-page' and i + 1 < len(words) and words[i + 1] in ('write', 'publish')
-                       for i, w in enumerate(words)):
-                    return True
-            if any(w in ('>', '>>') and i + 1 < len(words) and page_path(words[i + 1], base) for i, w in enumerate(words)):
-                return True
-            if name in ('tee', 'cp', 'mv', 'install', 'rsync', 'ln') and len(words) > 1:
-                targets = words[1:] if name == 'tee' else words[-1:]
-                if any(page_path(w, base) for w in targets):
-                    return True
-                if name != 'tee':
-                    destination = words[-1]
-                    for flag in ('-t', '--target-directory'):
-                        if flag in words and words.index(flag) + 1 < len(words):
-                            destination = words[words.index(flag) + 1]
-                    destination = destination.replace('${HOME}', home).replace('$HOME', home)
-                    if (os.path.realpath(os.path.join(base, os.path.expanduser(destination))) == root
-                            and any(w.lower().endswith('.html') for w in words[1:])):
-                        return True
-            if name in ('python', 'python3', 'node', 'ruby', 'perl') and script(' '.join(words[1:]), base):
-                return True
-        return False
-
-    def script(code, base):
-        return (bool(re.search(r'write_text|write_bytes|writeFile|open\([^\n]*[\'\"][wax][bt+]*[\'\"]', code))
-                and '.html' in code and ('explain/' in code or os.path.realpath(base) == root))
-
-    return shell(raw, cwd)
-
-
-def short_page_reason(payload: dict) -> str | None:
-    return SHORT_REASON if writes_explainer(payload) and short_question(payload) else None
-
-
 def staging_approval_reason(text: str) -> str | None:
     """Warn about redundant staging approvals; never grant execution authority."""
     stage = re.compile(r"\bstaging\b|스테이징", re.I)
@@ -1102,103 +926,86 @@ def staging_approval_reason(text: str) -> str | None:
     return None
 
 
-def decide(payload: dict, env, claude: bool = False) -> str | None:
+def decide(payload: dict, env) -> str | None:
+    global _run
     if payload.get("stop_hook_active") or env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
         return None
-    text = payload.get("last_assistant_message")
-    if text is None and payload.get("transcript_path"):
-        text = final_text(payload["transcript_path"])  # unreadable transcript raises: fail open
-    if not isinstance(text, str):
-        return None
-    # The formats 요유 reads by. 요유 2026-11-04 ("너희끼리는 그냥 편하게 주고받아"): a pane under a lead writes to the lead as it likes.
-    formats = [POINTER_REASON if points_only(text) else None, names_reason(text, env), WHAT_REASON if misses_what(text) else None,
-               PROBLEM_REASON if misses_problem_line(text) else None,
-               (SHORT_REASON if short_question(payload) else LONG_REASON if claude else None)
-               if not job_session(env) and too_long(text) else None]
-    if any(formats) and under_lead(payload, env):  # herdr is asked only when a format would send the report back
-        formats = []
-    # 요유 2026-11-05 21:13: 요유 reads the main pane through Slack only, so a page for its terminal reply is for nobody (20 rewrites that day)
-    if formats and formats[4] and delegates_checks(payload, env):
-        formats[4] = None
-    checks = (staging_approval_reason(text), *formats[:4], left_open_reason(payload, text, env), relay_reason(payload, text, env), explain_reason(payload, text, env),
-              stale_thread_reason(payload, text, env), owed_reason(payload, env), thread_call_reason(payload, env), *formats[4:])
-    rewrites = [r for r in checks if r]
-    left = leaves_yoyoo_work(text)
-    if left and not only_decisions(text) and not asked_before(payload, text, env):
-        rewrites.append(DO_REASON if rewrites else REASON)  # a rewrite that is due must not be told to stay silent
-    elif not left and asks_back(text):
-        rewrites.append(DO_REASON if rewrites else ASK_REASON)
-    return " ".join(rewrites) or None
+    _run = {}
+    try:
+        text = payload.get("last_assistant_message")
+        if text is None and payload.get("transcript_path"):
+            text = final_text(payload["transcript_path"])  # unreadable transcript raises: fail open
+        if not isinstance(text, str):
+            return None
+        # The formats 요유 reads by. 요유 2026-11-04 ("너희끼리는 그냥 편하게 주고받아"): a pane under a lead writes to the lead as it likes.
+        formats = [POINTER_REASON if points_only(text) else None, names_reason(text, env), WHAT_REASON if misses_what(text) else None,
+                   PROBLEM_REASON if misses_problem_line(text) else None]
+        if any(formats) and under_lead(payload, env):  # herdr is asked only when a format would send the report back
+            formats = []
+        checks = (staging_approval_reason(text), *formats, left_open_reason(payload, text, env), relay_reason(payload, text, env),
+                  explain_reason(payload, text, env), stale_thread_reason(payload, text, env), owed_reason(payload, env),
+                  thread_call_reason(payload, env))
+        rewrites = [r for r in checks if r]
+        left = leaves_yoyoo_work(text)
+        if left and not only_decisions(text) and not asked_before(payload, text, env):
+            rewrites.append(DO_REASON if rewrites else REASON)  # a rewrite that is due must not be told to stay silent
+        elif not left and asks_back(text):
+            rewrites.append(DO_REASON if rewrites else ASK_REASON)
+        return " ".join(rewrites) or None
+    finally:
+        _run = None
 
 
-def inbox_context(payload: dict, env) -> str | None:
-    """Offer only to the verified main agent; output never acknowledges a claim."""
-    if env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
-        return None
-    session = payload.get("session_id")
-    pane_id = env.get("HERDR_PANE_ID")
-    if not isinstance(session, str) or not session or not pane_id:
+def main_terminal(payload: dict, env) -> str | None:
+    """This session's terminal when herdr shows it in the main pane, else None: a Claude SDK run, a pane herdr cannot name and a
+    broken herdr included, so an unverifiable pane takes on no main-only duty."""
+    session, pane_id = payload.get("session_id"), env.get("HERDR_PANE_ID")
+    if env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk") or not isinstance(session, str) or not session or not pane_id:
         return None
     try:
-        peers = peers_module()
+        peers = load("herdr_peers.py")
         pane = peers.herdr(env, "pane", "get", pane_id).get("pane") or {}
         terminal = pane.get("terminal_id")
-        if (not isinstance(terminal, str) or not terminal
-                or (pane.get("agent_session") or {}).get("value") != session
-                or not peers.delegates_checks(env, terminal)):
-            return None
-        def load(name):
-            spec = importlib.util.spec_from_file_location(name.replace("-", "_"), os.path.join(os.path.dirname(__file__), name + ".py"))
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[spec.name] = module
-            spec.loader.exec_module(module)
-            return module
-
-        contexts = []
-        try:
-            priority = load("main-user-relay").drain(env, terminal, session, "Stop")
-            if isinstance(priority, str) and priority:
-                contexts.append(priority)
-        except Exception:
-            pass  # Priority inspection must not erase other pending reasons.
-        # A recursive Stop can still introduce a newly waiting user message.
-        # Ordinary claims retain their existing non-recursive behavior.
-        if not payload.get("stop_hook_active"):
-            try:
-                output = load("main-alert-inbox").drain(env, terminal, session, "Stop")
-                specific = (output or {}).get("hookSpecificOutput") or {}
-                context = specific.get("additionalContext")
-                if specific.get("hookEventName") == "Stop" and isinstance(context, str):
-                    contexts.append(context)
-            except Exception:
-                pass
-        return "\n\n".join(contexts) or None
+        if (isinstance(terminal, str) and terminal and (pane.get("agent_session") or {}).get("value") == session
+                and peers.delegates_checks(env, terminal)):
+            return terminal
     except Exception:
-        return None  # An unreadable inbox must not erase an existing Stop reason.
+        pass
+    return None
 
 
-def reaction_reason(payload: dict, env) -> str | None:
-    """Run an optional local checker on every verified-main Stop, including retries."""
-    if env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
+def inbox_context(payload: dict, env, terminal) -> str | None:
+    """Offer only to the verified main agent (`terminal`, from main_terminal); output never acknowledges a claim."""
+    if not terminal:
         return None
+    session, contexts = payload["session_id"], []
+    try:
+        priority = load("main-user-relay.py").drain(env, terminal, session, "Stop")
+        if isinstance(priority, str) and priority:
+            contexts.append(priority)
+    except Exception:
+        pass  # Priority inspection must not erase other pending reasons.
+    # A recursive Stop can still introduce a newly waiting user message.
+    # Ordinary claims retain their existing non-recursive behavior.
+    if not payload.get("stop_hook_active"):
+        try:
+            output = load("main-alert-inbox.py").drain(env, terminal, session, "Stop")
+            specific = (output or {}).get("hookSpecificOutput") or {}
+            context = specific.get("additionalContext")
+            if specific.get("hookEventName") == "Stop" and isinstance(context, str):
+                contexts.append(context)
+        except Exception:
+            pass
+    return "\n\n".join(contexts) or None
+
+
+def reaction_reason(payload: dict, env, terminal) -> str | None:
+    """Run an optional local checker on every verified-main Stop, including retries."""
     home = env.get("HOME") or os.path.expanduser("~")
     policy = os.path.join(env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"),
                           "agent-hooks", "reaction-policy.json")
-    if not os.path.lexists(policy):
+    if not terminal or not os.path.lexists(policy):
         return None
-    session, pane_id = payload.get("session_id"), env.get("HERDR_PANE_ID")
-    if not isinstance(session, str) or not session or not pane_id:
-        return None
-    try:
-        peers = peers_module()
-        pane = peers.herdr(env, "pane", "get", pane_id).get("pane") or {}
-        terminal = pane.get("terminal_id")
-        if (not isinstance(terminal, str) or not terminal
-                or (pane.get("agent_session") or {}).get("value") != session
-                or not peers.delegates_checks(env, terminal)):
-            return None
-    except Exception:
-        return None  # An unverifiable pane must not acquire main-only obligations.
     return bounded_reaction(policy, payload, env)
 
 
@@ -1330,13 +1137,15 @@ def run_reaction_check(policy, payload, env):
 
 
 def hook_output(payload: dict, env, claude: bool = False) -> dict | None:
+    # One herdr call a Stop for both main-only checks: two at once missed the 2 s herdr timeout under load (reaction-policy.test).
+    terminal = main_terminal(payload, env)
     with ThreadPoolExecutor(max_workers=1) as executor:
-        pending = executor.submit(reaction_reason, payload, env)
+        pending = executor.submit(reaction_reason, payload, env, terminal)
         try:
-            reason = decide(payload, env, claude)
+            reason = decide(payload, env)
         except Exception:
             reason = None  # Ordinary report checks fail open without suppressing waiting user context.
-        context = inbox_context(payload, env)
+        context = inbox_context(payload, env, terminal)
         try:
             reaction = pending.result()  # Join before returning; the checker owns and reaps its process group.
         except Exception:
@@ -1613,11 +1422,9 @@ def selftest():
         sub, spawned = {**me, "label": "🟢 🫡 설계"}, [{"pane_id": "w1:p1", "name": "spawn-zz-1"}]
         formats = ("변경했습니다.\n\n왜: 막혀서", "고쳤습니다.\n\n원인: 오타\n조치: 수정", "`w1:p9`에 넘겼습니다.", "상시 맥에서 돕니다.",
                    "끝.\n\n남은 것: 요유 몫: #12 질문에 답하기 · 유요 몫: 없음 · 세션: 닫아도 됨")
-        wall = "가" * (LONG_REPLY + 1)
         herdr_has([sub], spawned)
         for t in formats:
             assert ends(t) is None, f"a pane under a lead writes as it likes: {t[:40]!r}"
-        assert decide(p(wall, session_id="s1"), herdr_env, claude=True) is None, "nor is a long report sent to a page"
         assert REASON in (ends("남은 것: 요유 몫: Slack에 공지 올리기 · 유요 몫: 없음") or ""), "it still does what it can itself"
         herdr_has([sub, worker], [*spawned, *opened])
         assert "구현(w1:p3)" in (ends() or ""), "and still finishes the panes it opened"
@@ -1625,15 +1432,6 @@ def selftest():
                                      ("another pane's spawn name", [sub], [{"pane_id": "w1:p7", "name": "spawn-zz-1"}])):
             herdr_has(panes, agents)
             assert all(ends(t) for t in formats), f"{label} still reports to 요유"
-            assert decide(p(wall, session_id="s1"), herdr_env, claude=True) == LONG_REASON, f"{label}: long goes to a page"
-        # 요유 2026-11-05 21:13: the main pane's terminal is not read, 요유 gets Slack only; a page there re-read its long session 20 times
-        # that day for nobody. Its other formats stay, and Slack posts keep their own rule.
-        herdr_has([me])
-        open(f"{d}/.local/state/orchestrator/main", "w").write("term_aa")
-        assert decide(p(wall, session_id="s1"), herdr_env, claude=True) is None, "the main pane's long reply is not sent to a page"
-        assert ends(formats[0]) == WHAT_REASON, "its other formats are still asked"
-        os.unlink(f"{d}/.local/state/orchestrator/main")
-        assert decide(p(wall, session_id="s1"), herdr_env, claude=True) == LONG_REASON, "without the main-pane file: a page"
         moved = {**me, "pane_id": "w2:p9"}
         herdr_has([moved, test_pane])
         assert ends(), "a moved pane is found by its session"
@@ -2068,24 +1866,13 @@ def selftest():
     code, out = run(json.dumps(p(block[0])), args=["--claude"])
     assert code == 0 and json.loads(out) == {"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": REASON}}, out
 
-    # 요유 2026-11-01: most reports go to Codex, as the pages do. Only prose outside the labeled closing lines counts.
-    wall, under = "가" * (LONG_REPLY + 1), "가" * LONG_REPLY
-    assert decide(p(wall), cli, claude=True) == LONG_REASON, "a long reply in a Claude session goes to Codex"
-    assert decide(p(under), cli, claude=True) is None, "up to the limit stays in the terminal"
-    assert decide(p(wall), cli) is None, "a Codex session writes its own reports"
-    closing = "\n".join(f"{label}: {under}" for label in ("무엇을", "왜", "확인", "원인", "조치", "재발 방지", "남은 것"))
-    assert decide(p("끝났습니다.\n" + closing), cli, claude=True) is None, "the labeled lines stay in the terminal"
-    assert decide(p(f"**무엇을:** {wall}"), cli, claude=True) is None, "a bold label is a label"
-    assert decide(p(f"{wall}\n/Users/yoyoo/explain/2026-11-01-a.html"), cli, claude=True) is None, "a page already went to Codex"
-    assert decide(p(f"```\n{wall}\n```"), cli, claude=True) is None, "code is not prose"
-    for job in ("MUNICE_AUTO_DISPATCH", "MUNICE_AMBIENT"):
-        assert decide(p(wall), {**cli, job: "1"}, claude=True) is None, "a job's report goes to the board and Slack"
-    assert decide(p(wall, stop_hook_active=True), cli, claude=True) is None, "sent back once at most"
-    assert decide(p(f"{wall}\n남은 것: 요유 몫: 값 넣기 · 유요 몫: 없음"), cli, claude=True) == f"{LONG_REASON} {DO_REASON}", \
+    # 요유 2026-11-18 ("html은 내가 html 만들라고할때만"): a long reply stays in the terminal in both runtimes. A page is made only
+    # when 요유 asks for one, and page-request-guard.py refuses the rest.
+    wall = "가" * 2000
+    assert run(json.dumps(p(wall)), args=["--claude"]) == (0, ""), "a long reply is not sent to a page"
+    assert run(json.dumps(p(wall))) == (0, ""), "nor in Codex"
+    assert decide(p("왜: 막혀서\n남은 것: 요유 몫: 값 넣기 · 유요 몫: 없음"), cli) == f"{WHAT_REASON} {DO_REASON}", \
         "the rewrite is due, so the 요유 몫 question must not tell it to stay silent"
-    code, out = run(json.dumps(p(wall)), args=["--claude"])
-    assert json.loads(out)["hookSpecificOutput"]["additionalContext"] == LONG_REASON, out
-    assert run(json.dumps(p(wall))) == (0, ""), "without --claude the reply passes"
     print("selftest ok")
 
 
