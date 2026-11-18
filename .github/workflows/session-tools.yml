@@ -70,7 +70,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Match the workstation Bash runtime
         run: |
-          brew install bash
+          brew install bash uv
           echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
       - name: Check every pane-tell suite
         run: |
