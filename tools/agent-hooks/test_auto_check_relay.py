@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Routing contracts: run finish(), replace only external herdr/process boundaries."""
+"""Routing contracts: run finish(), replace only external herdr/process boundaries. Pre-push: --selftest."""
 import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -193,6 +195,108 @@ class RelayTests(unittest.TestCase):
                 self.assertIn("source user requests", prompt)
                 path.unlink()
 
+    def test_missing_request_file_uses_isolated_safe_reader_for_both_harnesses(self):
+        # Exercise the emitted command against the real reader, including shell quoting.
+        helper = self.root / '.claude/hooks/session-user-messages.py'
+        helper.parent.mkdir(parents=True)
+        helper.symlink_to(Path(__file__).parents[1] / 'claude/hooks/session-user-messages.py')
+        for codex in (False, True):
+            with self.subTest(codex=codex):
+                text = 'Check the change. password=private-fixture-value'
+                user = ({'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': text}}
+                        if codex else {'type': 'user', 'message': {'content': text}})
+                path = self.transcript([user, {'type': 'assistant', 'message': {'content': 'PRIVATE_TOOL_FIXTURE'}}], codex)
+                quoted_path = path.with_name("request 'with spaces'-sid-W.jsonl")
+                path.rename(quoted_path)
+                with patch.object(auto, 'source_transcripts', return_value=[str(quoted_path)]), \
+                        patch.object(auto, 'quote_requests', return_value=''):
+                    self.finish(DONE + str(codex))
+                prompt = self.spawns[-1][0][-1]
+                commands = prompt.split('Safe user-request commands (run each line):\n', 1)[1].split('\nEnd safe user-request commands.', 1)[0]
+                args = shlex.split(commands)
+                self.assertEqual(args, ['uv', 'run', '--no-project', 'python', '-I', str(helper), str(quoted_path)])
+                self.assertIn('Do not parse or print the raw transcript', prompt)
+                self.assertIn('If the reader fails or redacts required scope, report coverage as unverified', prompt)
+                self.assertNotIn('and the transcript only for what it cuts', prompt)
+                with patch.object(subprocess, 'Popen', REAL_POPEN):
+                    result = REAL_RUN(args, env={**os.environ, 'HOME': str(self.root)}, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('Check the change.', result.stdout)
+                self.assertNotIn('private-fixture-value', result.stdout)
+                self.assertNotIn('PRIVATE_TOOL_FIXTURE', result.stdout)
+                quoted_path.unlink()
+
+    def test_request_file_write_failure_keeps_safe_fallback(self):
+        self.transcript([{'type': 'user', 'message': {'content': 'Check the original request.'}}])
+        original = os.open
+
+        def open_file(path, *args, **kwargs):
+            if str(path).endswith('.requests.txt'):
+                raise OSError('fixture request-file write failure')
+            return original(path, *args, **kwargs)
+
+        with patch.object(os, 'open', side_effect=open_file):
+            self.finish()
+        prompt = self.spawns[-1][0][-1]
+        self.assertNotIn('The source user requests are collected in', prompt)
+        self.assertIn('Safe user-request commands (run each line):', prompt)
+        self.assertIn('Do not parse or print the raw transcript', prompt)
+
+    def test_emitted_reader_passes_guard_while_raw_transcript_print_is_blocked(self):
+        spec = importlib.util.spec_from_file_location('secret_guard',
+            Path(__file__).parents[1] / 'claude/hooks/secret-print-guard.py')
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        for relative in ('.codex/sessions/2026/01/01/fixture.jsonl', '.claude/projects/-fixture/fixture.jsonl'):
+            with self.subTest(relative=relative):
+                path = str(Path.home() / relative)
+                with patch.dict(self.env, HOME=str(Path.home())), \
+                        patch.object(auto, 'source_transcripts', return_value=[path]), \
+                        patch.object(auto, 'quote_requests', return_value=''):
+                    self.finish(DONE + relative)
+                prompt = self.spawns[-1][0][-1]
+                command = prompt.split('Safe user-request commands (run each line):\n', 1)[1].split('\nEnd safe user-request commands.', 1)[0]
+                problem = lambda cmd: guard.tool_problem({'tool_name': 'Bash', 'tool_input': {'command': cmd}})
+                self.assertIsNone(problem(command))
+                self.assertTrue(problem(shlex.join(['cat', path])))
+                raw = 'from pathlib import Path; print(Path(' + repr(path) + ').read_text())'
+                self.assertTrue(problem("uv run --no-project python - <<'PY'\n" + raw + '\nPY'))
+
+    def test_report_format_directives_do_not_disable_request_collection(self):
+        for codex in (False, True):
+            for style in ('형식(설명 페이지, `what`/`why`)은', '형식은', '양식을', '서식은', '말투는', '표현을'):
+                with self.subTest(codex=codex, style=style):
+                    text = f'보고는 리드가 읽으니 이 {style} 쓰지 말고, 확인할 결과와 근거를 적으세요.'
+                    record = lambda body: ({'type': 'response_item', 'payload': {
+                        'type': 'message', 'role': 'user', 'content': body}} if codex else
+                        {'type': 'user', 'message': {'content': body}})
+                    path = self.transcript([record(text)], codex)
+                    self.finish(DONE + style + str(codex))
+                    prompt = self.spawns[-1][0][-1]
+                    self.assertNotIn('원 작업의 기록 금지 제한', prompt)
+                    self.assertIn(text, self.requests_file(prompt).read_text())
+                    # The same open session receives a follow-up: collect both requests again.
+                    with path.open('a') as stream:
+                        stream.write(json.dumps(record('Include the follow-up request.')) + '\n')
+                    self.finish(DONE + style + str(codex) + ' follow-up')
+                    quoted = self.requests_file(self.spawns[-1][0][-1]).read_text()
+                    self.assertIn(text, quoted)
+                    self.assertIn('Include the follow-up request.', quoted)
+                    path.unlink()
+
+    def test_report_format_exception_preserves_real_storage_bans(self):
+        for text in ('이 형식은 쓰지 말고, 분석 결과는 남기지 마세요.',
+                     '이 형식은 쓰지 말고, 결과를 work-log에 저장하지 마세요.',
+                     '이 형식으로 조사 결과를 기록하지 마세요.',
+                     '분석 결과를 쓰지 마세요.'):
+            with self.subTest(text=text):
+                self.transcript([{'type': 'user', 'message': {'content': text}}])
+                self.finish(DONE + text)
+                prompt = self.spawns[-1][0][-1]
+                self.assertIn('원 작업의 기록 금지 제한', prompt)
+                self.assertNotIn('The source user requests are collected in', prompt)
+                self.assertIn('Safe user-request commands (run each line):', prompt)
+
     def test_checker_prompt_batches_commands_and_quotes_source_requests(self):
         # 11/16, 127 checks: time rose with tool calls (r=0.63), and ~16% went to finding the source request.
         self.transcript([
@@ -232,7 +336,9 @@ class RelayTests(unittest.TestCase):
         self.assertIn("Z" * half, quoted)
         self.assertNotIn("Y" * 100, quoted)
         self.assertNotIn("X" * (half + 1), quoted)
-        self.assertIn("가운데는 원 대화 기록에서", quoted)
+        self.assertIn("가운데는 전용 요청 읽기 명령으로", quoted)
+        self.assertIn('Safe user-request commands (run each line):', prompt)
+        self.assertIn('Do not parse or print the raw transcript', prompt)
         self.assertIn(str(path), prompt)
 
     def test_claude_recording_restrictions_follow_the_check_without_copying_subject(self):
@@ -1153,4 +1259,4 @@ class RelayTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(argv=[__file__] if sys.argv[1:] == ['--selftest'] else None)
