@@ -6,7 +6,7 @@ Using a secret stays allowed: read it into a variable (`T=$(...)`), `source` an
 `cat`/`grep -n`/`head`/`python print` on a secret file, `echo $..._TOKEN`,
 `printenv`, `curl -v` with credentials, commands that answer with a stored
 credential outside `$()`, BigQuery transfer configs read with their `params`,
-and the Read/Grep tools on a secret file.
+agent transcript contents, raw browser fetch output, and Read/Grep on a secret file.
 
     secret-print-guard.py --selftest
 """
@@ -22,6 +22,9 @@ from urllib.parse import unquote
 HOME = r"(?:~|\$HOME|\$\{HOME\}|/Users/[^/\s'\"]+)"
 SECRET_PATH = re.compile(
     HOME + r"/(?:\.codex/config\.toml|\.claude\.json"
+    # Tool results in agent transcripts can retain secrets from earlier calls.
+    r"|\.codex/(?:sessions|archived_sessions)/[^\s'\"]+\.jsonl"
+    r"|\.claude/projects/[^\s'\"]+\.jsonl"
     # Claude's deny list (settings.json) keeps these from Claude; Codex reads through the shell only, so this guard covers both.
     r"|\.(?:ssh|aws|gnupg)/[^\s'\"]+(?<!\.pub)(?=$|[\s'\"|;&)<>])|\.config/gh/hosts\.yml"
     r"|\.config/[^\s'\"]*?(?:\.env|token|secret|key|cred)[^\s'\"/]*)"
@@ -36,7 +39,9 @@ SECRET_PATH = re.compile(
     re.I,
 )
 # A search of the folder that holds a secret file prints that file too (`rg -n slack ~/.codex`, `~/.codex/*.toml`).
-SECRET_DIR = re.compile(HOME + r"/\.(?:codex|config|ssh|aws|gnupg)/?(?:\*[^\s'\"/]*)?(?=$|[\s'\"|;&)<>])")
+SECRET_DIR = re.compile(HOME + r"/(?:\.(?:codex|config|ssh|aws|gnupg)/?(?:\*[^\s'\"/]*)?"
+                        r"|\.codex/(?:sessions|archived_sessions)(?:/[^\s'\"]*)?"
+                        r"|\.claude/projects(?:/[^/\s'\"]+)?/?)(?=$|[\s'\"|;&)<>])")
 # ponytail: after `cd ~/.codex` only `config.toml` by name is seen; `rg x .` or a bare `rg x` there is not.
 CD_CODEX = re.compile(r"\bcd\s+" + HOME + r"/\.codex/?(?=$|[\s;&|)])")
 SECRET_VAR =re.compile(r"\$\{?[A-Za-z_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE)[A-Za-z_]*\}?", re.I)
@@ -152,7 +157,7 @@ SHELL_C = re.compile(r"-[a-zA-Z]*c[a-zA-Z]*")
 READERS = {
     "cat", "bat", "less", "more", "head", "tail", "sed", "awk", "gawk", "jq", "yq", "cut", "tr",
     "sort", "uniq", "nl", "column", "strings", "xxd", "od", "hexdump", "base64", "tee", "cp",
-    "diff", "python", "python3", "node", "ruby", "perl", "deno", "bun", "grep", "rg", "egrep",
+    "diff", "python", "python3", "node", "nodejs", "ruby", "perl", "deno", "bun", "grep", "rg", "egrep",
 }
 GREPS = {"grep", "rg", "egrep"}
 QUIET_GREP = {"--files-with-matches", "--files-without-match", "--count", "--quiet", "--files"}
@@ -161,7 +166,9 @@ GIT_PATCH = re.compile(r"^(?:-p|-u|-U\d*|-c|--cc|--patch.*|--unified.*)$")
 SPLIT =re.compile(r"\|\||&&|[;|\n]")
 HEREDOC = re.compile(r"<<-?\s*['\"]?([\w.-]+)['\"]?([^\n]*)\n(.*?)\n\s*\1\s*(?=\n|$)", re.S)
 # ponytail: a heredoc handed to bash/sh is still read as text; check its body like a command if one leaks that way.
-INTERPRETER = re.compile(r"(?:^|[\s(/])(?:python[\d.]*|node|ruby|perl|deno|bun)(?=[\s;&|)]|$)")
+INTERPRETER = re.compile(r"(?:^|[\s(/])(?:python[\d.]*|node(?:js)?|ruby|perl|deno|bun)(?=[\s;&|)]|$)")
+JS_LITERAL = re.compile(r"'[^'\\]*(?:\\.[^'\\]*)*'|\"[^\"\\]*(?:\\.[^\"\\]*)*\"|`[^`$]*`")
+JS_OUTPUT = re.compile(r"\b(?:console\s*\.\s*(?:log|dir|table|info|debug|warn|error)|process\s*\.\s*stdout\s*\.\s*write)\s*\(")
 
 
 def is_reader(x: str) -> bool:
@@ -199,10 +206,52 @@ def heredoc(m: re.Match, text: str) -> str:
     line = prefix + m[2]
     if any(heredoc_shell(seg) for seg in heredoc_receivers(prefix, m[2])):
         return m[2] + "\n" + m[3]  # A shell executes even a quoted heredoc body.
+    if any(is_browser_script(seg) for seg in heredoc_receivers(prefix, m[2])):
+        # Keep JavaScript as one argument so the browser output policy sees it.
+        # Shell captures still remove it when its output is retained for use.
+        return "<<heredoc " + shlex.quote(m[3]) + m[2]
     paths = SECRET_PATH.findall(m[3]) if INTERPRETER.search(line) else []
     # An unquoted delimiter expands substitutions even when cat consumes the body.
     captures = [] if re.match(r"<<-?\s*['\"]", m[0]) else [c[0] for c in CAPTURE.finditer(m[3])]
     return " ".join(["<<heredoc", *paths]) + m[2] + "\n" + "\n".join(captures)
+
+
+def is_browser_script(w: list[str]) -> bool:
+    n = names(words(w))
+    return any(n[i:i + 2] == ["ego-browser", "nodejs"] for i in range(len(n) - 1))
+
+
+def browser_problem(w: list[str]) -> str | None:
+    """Browser fetches may contain credentials; only simple output summaries are reviewed.
+
+    This is a conservative inline-script check, not a JavaScript dataflow engine.
+    Custom redaction helpers are not trusted merely because of their names.
+    """
+    if not is_browser_script(w):
+        return None
+    n = names(w)
+    script = " ".join(w[n.index("nodejs") + 1:])
+    # Preserve positions when hiding literals. A quoted mention of fetch is inert.
+    masked = JS_LITERAL.sub(lambda m: " " * len(m[0]), script)
+    masked = re.sub(r"//[^\n]*|/\*.*?\*/", lambda m: " " * len(m[0]), masked, flags=re.S)
+    if not re.search(r"\bfetch\s*\(", masked):
+        return None
+    for call in JS_OUTPUT.finditer(masked):
+        depth, end = 1, call.end()
+        while end < len(masked) and depth:
+            depth += (masked[end] == "(") - (masked[end] == ")")
+            end += 1
+        expr = JS_LITERAL.sub("0", script[call.end():end - 1])
+        # Literal labels and values, response status, counts, presence and types
+        # reveal no response body. Arbitrary fields and helper calls stay denied.
+        expr = re.sub(r"\b[A-Za-z_$][\w$]*\s*:", "", expr)
+        expr = re.sub(r"(?<![\w$.])(?:typeof\s+|!!\s*)[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*", "0", expr)
+        expr = re.sub(r"(?<![\w$.])[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*\.\s*(?:status|ok|length)\b", "0", expr)
+        expr = re.sub(r"\b(?:true|false|null)\b", "0", expr)
+        if depth or not re.fullmatch(r"[\s\d{},\[\].:+-]*", expr):
+            return ("Browser fetch output may contain credentials. Print only status, counts, "
+                    "presence or types; keep response bodies out of tool output.")
+    return None
 
 
 def strip_captures(cmd: str) -> str:
@@ -465,7 +514,7 @@ def reads_secret(body: str) -> bool:
     for seg in segments(body):
         w = words(seg)
         n = names(w)
-        if PRINTS_SECRET.match(" ".join(w)) or reads_credential(n) or dumps_gcloud_config(seg) or (
+        if browser_problem(w) or PRINTS_SECRET.match(" ".join(w)) or reads_credential(n) or dumps_gcloud_config(seg) or (
             any(map(is_reader, n)) and SECRET_PATH.search(" ".join(w))
         ):
             return True
@@ -537,6 +586,8 @@ def bash_problem(cmd: str) -> str | None:
         w = words(seg_words)
         if not w:
             continue
+        if problem := browser_problem(w):
+            return problem
         inner = shell_text(w)
         problem = bash_problem(inner) if inner else None
         if problem:
