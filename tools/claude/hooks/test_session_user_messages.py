@@ -74,6 +74,24 @@ class SafeUserMessagesTests(unittest.TestCase):
         self.assertNotIn('PRIVATE_', result.stdout)
         self.assertIn('Keep ordinary requests.', result.stdout)
 
+    def test_claude_queued_instruction_sent_mid_turn_is_returned_and_nonhuman_ones_are_not(self):
+        # api#1355: a pane-tell typed while a turn runs is stored as a queued_command attachment, not a user record.
+        queued = lambda prompt, kind: {'type': 'attachment', 'attachment': {
+            'type': 'queued_command', 'prompt': prompt, 'commandMode': 'prompt', 'origin': {'kind': kind}}}
+        result = self.run_reader([
+            {'type': 'user', 'message': {'role': 'user', 'content': 'First request.'}},
+            queued('Lead follow-up sent mid-turn.', 'human'),
+            queued('PRIVATE_TASK_NOTIFICATION_FIXTURE', 'task-notification'),
+            {'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': 'PRIVATE_NO_ORIGIN_FIXTURE'}},
+            {'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': 'PRIVATE_SHELL_FIXTURE',
+                                                  'commandMode': 'bash', 'origin': {'kind': 'human'}}},
+            {'type': 'attachment', 'attachment': {'type': 'hook_success', 'content': 'PRIVATE_HOOK_FIXTURE'}},
+            queued([{'type': 'text', 'text': 'Block-form follow-up.'}], 'human'),
+        ], '.claude/projects/-fixture/fixture.jsonl')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['messages'],
+                         ['First request.', 'Lead follow-up sent mid-turn.', 'Block-form follow-up.'])
+
     def test_nontranscript_and_symlink_escape_are_refused_without_content(self):
         outside = self.home / 'private.txt'
         outside.write_text('PRIVATE_OUTSIDE_FIXTURE')
