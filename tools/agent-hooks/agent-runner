@@ -1,0 +1,28 @@
+#!/bin/bash
+# agent-runner [show|claude|codex|auto]: which agent opens work and check sessions first.
+#   claude = Claude first, Codex once Claude's measured usage passes its reserve (policy claude-first)
+#   codex  = Codex only, the previous routing, no quota lookup (policy codex-only)
+#   auto   = pick by measured subscription usage and weekly pace (policy quota-aware)
+# It only writes the local policy file that pane-spawn and agent-quota read; sessions already running keep their agent.
+# Delete that file to fall back to the installed default (agent-quota-policy). Details: docs/worker-quota-routing.md.
+set -eu
+dir=${XDG_STATE_HOME:-$HOME/.local/state}/agent-quota
+file=$dir/policy
+default=$(cat "$(dirname "$0")/agent-quota-policy" 2>/dev/null || echo quota-aware)
+name_of() { case "$1" in claude-first) echo claude ;; codex-only) echo codex ;; quota-aware) echo auto ;; *) echo "invalid ($1)" ;; esac; }
+show() {
+  if [ -e "$file" ]; then value=$(tr -d '[:space:]' < "$file") src="local file $file"; else value=$default src="installed default"; fi
+  echo "runner: $(name_of "$value")"
+  echo "policy: $value"
+  echo "source: $src"
+}
+case "${1:-show}" in
+  show) [ $# -le 1 ] || { echo 'usage: agent-runner [show|claude|codex|auto]' >&2; exit 2; }; show ;;
+  claude | codex | auto)
+    [ $# -eq 1 ] || { echo 'usage: agent-runner [show|claude|codex|auto]' >&2; exit 2; }
+    case "$1" in claude) value=claude-first ;; codex) value=codex-only ;; auto) value=quota-aware ;; esac
+    mkdir -p "$dir"; chmod 700 "$dir"
+    tmp=$(mktemp "$dir/.policy.XXXXXX"); printf '%s\n' "$value" > "$tmp"; mv -f "$tmp" "$file"
+    show ;;
+  *) echo 'usage: agent-runner [show|claude|codex|auto]  (claude|codex|auto sets, show is the default)' >&2; exit 2 ;;
+esac

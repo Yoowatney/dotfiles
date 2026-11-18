@@ -21,14 +21,18 @@
 # --check opens a check pane: a fresh pane, not the one that did the job, runs the test or command, or looks at the changed behavior
 # or data, and changes nothing (요유 2026-11-05, api#1002). The agent name carries `chk`, which a rename does not change, so its
 # report asks for no other check (auto-tab-close.py). Only a pane herdr_peers.delegates_checks says yes to may open one (the main
-# pane today); any other lead checks results itself, so there it is bad usage and opens nothing. Checks use Codex unless the
+# pane today); any other lead checks results itself, so there it is bad usage and opens nothing. Checks use Codex (Claude first under the
+# claude-first quota policy) unless the
 # instruction or named test requires an observed browser/process/sandbox permission, in which case they use Claude.
 # A Codex check runs in its
 # sandbox, which writes only in a fixed empty folder, temp and gcloud's folder, with the network on: it reads GitHub, GCP and
 # the board itself, Slack through agent-board's slack-read.py with its state in temp (the Slack MCP is gone since
 # 2026-11-17), and processes with ps (요유 2026-11-07). With --kind claude it is
 # Claude Sonnet, with the checked folder protected by Seatbelt.
-# --kind auto selects a normal worker using fresh local subscription quota (agent-quota); the local policy codex-only
+# --kind auto selects a normal worker using fresh local subscription quota (agent-quota); tools/agent-hooks/agent-runner shows or
+# switches the policy (claude | codex | auto). Policy quota-aware keeps Codex unless its week
+# runs ahead of pace; claude-first (one local policy value, e.g. while Codex quota is short) picks Claude first, for default checks too,
+# and returns to Codex once Claude's measured usage passes its reserve. The local policy codex-only
 # restores the previous Codex-only routing before Python runs. Forwarded arguments and ambient-runner stay on Codex.
 # A quota lookup exceeding six seconds warns once and retains the previous Codex routing.
 # Startup/readiness responses provide no verified current quota-block signal: failures never switch runners.
@@ -54,13 +58,14 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] 
     same caller and folder is reused for ten minutes. Checks always start fresh.
   --kind auto: choose a normal worker from fresh subscription quota and weekly pace; unknown/paid usage is excluded.
     If neither runner qualifies, no pane opens. Set the agent-quota policy to codex-only for the previous routing.
+    Policy claude-first: Claude while its measured usage is within reserve, else Codex; it also routes default checks (never refusing one).
     A lookup exceeding six seconds warns once and retains Codex. Forwarded arguments and ambient-runner retain Codex.
     Startup, readiness and delivery errors never switch runners. Checks use permission preflight; explicit work model/effort keeps its runner.
   --why: in the main pane, why a pane that does the job must be Claude, in one line. A Claude pane without one, or with a
     reason mentioning Slack, 슬랙, GCP, gcloud, bq or BigQuery (any case), is refused there: Codex runs GCP commands too.
     Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요
   --check: a fresh check (main pane only): neither agent can write the checked folder.
-    Codex by default regardless of weekly usage; observed permission requirements or --kind claude select Claude.
+    Codex by default (Claude first under the claude-first policy, until its reserve is reached); observed permission requirements or --kind claude select Claude.
   --artifact: keep the Artifact tool in a Claude pane (a job that publishes a page); every Claude pane starts without it otherwise.
   --skills: keep the design (taste-skill), office-file (docx/pdf/pptx/xlsx) and Claude-API skills in a Claude pane (UI or office-file job).
   --opus: opt out of the main pane Claude work trial (Sonnet 5.5/high); use global model/effort defaults for heavy work.
@@ -103,6 +108,8 @@ esac
 asked=${kind:-claude} # what the caller chose, before auto resolves to Codex
 # Checks default to Codex; observed permission requirements select Claude below. Both protect the checked folder.
 [ -z "$check" ] || [ -n "$kind" ] || kind=auto
+check_auto= # a default (or --kind auto) check: only the claude-first policy may route it to Claude
+[ -z "$check" ] || [ "$kind" != auto ] || check_auto=1
 [ "$kind" != auto ] || kind=codex
 kind=${kind:-claude}
 name=$1 prompt=$2 request_prompt=$2
@@ -149,9 +156,10 @@ auto_claude=
 if [ -n "$request_child" ]; then
   # Retain the first routing decision; rechecking can change runners or warn twice.
   kind=$request_kind auto_claude=$request_auto_claude
-elif [ "$asked" = auto ] && [ -z "$check" ]; then
+elif { [ "$asked" = auto ] && [ -z "$check" ]; } || [ -n "$check_auto" ]; then
   # All forwarded arguments belong to the historical auto runner, Codex: even shared short flags differ in meaning.
   pinned=$opus
+  [ -z "$check" ] || pinned= # --opus leaves a check's runner alone
   [ $# -eq 0 ] || pinned=1
   [ "$(head -1 "$HOME/.config/munice/host-role" 2>/dev/null)" != ambient-runner ] || pinned=1
   quota_dir=$helper_dir
@@ -159,7 +167,8 @@ elif [ "$asked" = auto ] && [ -z "$check" ]; then
   [ -e "$quota_policy_file" ] || quota_policy_file=$quota_dir/agent-quota-policy
   quota_policy=$(cat "$quota_policy_file" 2>/dev/null)
   # Recovery must work with a broken Python installation, quota script, or decision-log destination.
-  if [ -z "$pinned" ] && [ "$quota_policy" != codex-only ]; then
+  # A check consults the quota only under claude-first: every other policy keeps checks on Codex, as before.
+  if [ -z "$pinned" ] && [ "$quota_policy" != codex-only ] && { [ -z "$check" ] || [ "$quota_policy" = claude-first ]; }; then
     quota_limit=${PANE_SPAWN_QUOTA_LIMIT:-6}
     [[ "$quota_limit" =~ ^[1-9][0-9]*$ ]] || quota_limit=6
     # The lookup has no children. Reap it on timeout so slow reads cannot outlive the routing decision.
@@ -179,8 +188,9 @@ elif [ "$asked" = auto ] && [ -z "$check" ]; then
       quota_reason=$(printf '%s' "$quota" | jq -r '.reason // "quota unavailable"' 2>/dev/null)
       [ -n "$quota_reason" ] || quota_reason='quota unavailable'
       echo "pane-spawn: auto ${quota_kind:-refused}: $quota_reason" >&2
-      if [ "$quota_rc" != 0 ]; then exit 1; fi
-      case "$quota_kind" in claude) kind=claude auto_claude=1 ;; codex) kind=codex ;; *) exit 1 ;; esac
+      # A check never fails for quota: with no usable answer it stays on Codex.
+      if [ "$quota_rc" != 0 ] && [ -z "$check" ]; then exit 1; fi
+      case "$quota_kind" in claude) kind=claude auto_claude=1 ;; codex) kind=codex ;; *) [ -n "$check" ] || exit 1 ;; esac
     fi
   fi
 fi
@@ -366,7 +376,7 @@ workers_help="start it with: launchctl kickstart gui/$(id -u)/com.yoyoo.herdr-wo
 if [ -z "$opener" ] && [ "term_$term" = "$(cat "$mainfile" 2>/dev/null)" ]; then
   [ -z "$same" ] || die "the main pane does no work, so it never adds a pane to its own tab"
   if [ -z "$check" ] && [ "$asked" = claude ]; then
-    [[ "$why" == *[![:space:]]* ]] || die "the main pane opens a Claude pane only with --why \"<one line>\", the reason Codex cannot do the job. Any other pane: --kind auto (Codex regardless of weekly usage)."
+    [[ "$why" == *[![:space:]]* ]] || die "the main pane opens a Claude pane only with --why \"<one line>\", the reason Codex cannot do the job. Any other pane: --kind auto (the agent-quota policy picks the runner)."
     case "$(printf '%s\n' "$why" | tr '[:upper:]' '[:lower:]')" in
       *slack* | *슬랙*) die "Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요" ;;
       # ponytail: words, so a reason that names gcloud to say why Codex failed is refused too; it says what failed instead.
