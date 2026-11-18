@@ -134,6 +134,62 @@ class RoutingTests(unittest.TestCase):
         self.event(65)
         self.assertEqual(self.select()["kind"], "claude")
 
+    def claude_extra(self, value=True):
+        self.write(".claude.json", {"oauthAccount": {"accountUuid": "test-claude", "hasExtraUsageEnabled": value}})
+
+    def test_claude_first_prefers_claude_within_reserve(self):
+        self.event(10)  # Codex has far more room; Claude is still first.
+        self.capture(50, tick=101)
+        result = self.select("claude-first")
+        self.assertEqual(result["kind"], "claude")
+        self.assertTrue(result["claude"]["eligible"])
+
+    def test_claude_first_accepts_known_extra_usage_but_keeps_reserve(self):
+        self.claude_extra(True)
+        self.capture(50, tick=101)
+        self.assertEqual(self.select("claude-first")["kind"], "claude")
+        self.assertIsNone(self.select("quota-aware")["claude"].get("week"), "quota-aware still excludes paid Claude")
+        self.capture(80.5, tick=102)  # past the weekly reserve: back to Codex
+        result = self.select("claude-first")
+        self.assertEqual(result["kind"], "codex")
+        self.assertIn("reserve", result["reason"])
+        self.capture(50, short=80, tick=103)  # five-hour reserve reached
+        self.assertEqual(self.select("claude-first")["kind"], "codex")
+
+    def test_claude_first_still_requires_known_extra_usage_and_subscription(self):
+        self.write(".claude.json", {"oauthAccount": {"accountUuid": "test-claude"}})
+        self.assertEqual(self.select("claude-first")["kind"], "codex")
+        self.claude_extra(True)
+        os.environ["ANTHROPIC_API_KEY"] = "fake"
+        self.assertEqual(self.select("claude-first")["kind"], "codex")
+        del os.environ["ANTHROPIC_API_KEY"]
+        self.write(".claude/settings.json", {"env": {"ANTHROPIC_API_KEY": "synthetic"}})
+        self.assertEqual(self.select("claude-first")["kind"], "codex")
+
+    def test_claude_first_stale_or_missing_usage_falls_back_to_codex(self):
+        snap = self.q.read_json(self.q.state_dir() / "claude.json")
+        snap["observed_at"] = self.now - 601
+        self.write("state/agent-quota/claude.json", snap)
+        self.assertEqual(self.select("claude-first")["kind"], "codex")
+        (self.q.state_dir() / "claude.json").unlink()
+        self.assertEqual(self.select("claude-first")["kind"], "codex")
+
+    def test_claude_first_without_a_five_hour_window(self):
+        # Claude Code reports no five-hour window when none is active.
+        snap = self.q.read_json(self.q.state_dir() / "claude.json")
+        snap["five_hour"] = None
+        self.write("state/agent-quota/claude.json", snap)
+        self.assertEqual(self.select("claude-first")["kind"], "claude")
+        self.assertEqual(self.select("quota-aware")["claude"]["reason"], "missing limit window")
+
+    def test_claude_first_neither_runner_refuses(self):
+        self.event(99)
+        self.capture(90, tick=101)
+        self.assertIsNone(self.select("claude-first")["kind"])
+        self.event(99, credits=True)
+        self.capture(10, tick=102)
+        self.assertEqual(self.select("claude-first")["kind"], "claude")
+
     def test_both_near_limit_block(self):
         self.event(99)
         self.capture(90, tick=101)

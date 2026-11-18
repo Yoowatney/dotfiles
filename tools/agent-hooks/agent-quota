@@ -248,31 +248,41 @@ def codex_quota(now, cwd):
     return normalize(at, short, week, now, "used_percent", "used_percent", 95, optional_short=True)
 
 
-def claude_quota(now, cwd):
+def claude_quota(now, cwd, first=False):
+    # first: the claude-first policy. A known extra-usage setting (true or false) passes and a missing five-hour window
+    # is accepted; every other guard and the 80% reserve still apply.
     snap = read_json(state_dir() / "claude.json")
     account = claude_account()
     current = identity(account.get("accountUuid"))
     if not current or snap.get("account") != current or snap.get("machine") != machine():
         return invalid("observation account/machine mismatch")
-    if account.get("hasExtraUsageEnabled") is not False:
+    extra = account.get("hasExtraUsageEnabled")
+    if not (isinstance(extra, bool) if first else extra is False):
         return invalid("extra usage unknown/enabled")
     if any(os.environ.get(k) for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")):
         return invalid("API environment override")
     root = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
     if not subscription_settings("claude", root, cwd):
         return invalid("subscription settings unknown/overridden")
-    return normalize(epoch(snap.get("observed_at")), snap.get("five_hour"), snap.get("seven_day"), now, "used_percentage", "used_percentage", 80)
+    return normalize(epoch(snap.get("observed_at")), snap.get("five_hour"), snap.get("seven_day"), now, "used_percentage", "used_percentage", 80, optional_short=first)
 
 
 def select(now, policy, cwd=None):
     result = {"kind": None, "policy": policy, "reason": "invalid policy"}
     if policy == "codex-only":
         return dict(result, kind="codex", reason="legacy policy; quota routing bypassed")
-    if policy != "quota-aware":
+    if policy not in ("quota-aware", "claude-first"):
         return result
     cwd = Path(cwd or Path.cwd()).resolve()
-    codex, claude = codex_quota(now, cwd), claude_quota(now, cwd)
+    codex, claude = codex_quota(now, cwd), claude_quota(now, cwd, first=policy == "claude-first")
     result.update(codex=codex, claude=claude)
+    if policy == "claude-first":
+        # Claude while its measured usage is inside the reserve; otherwise Codex if it is too, else refuse.
+        if claude["eligible"]:
+            return dict(result, kind="claude", reason="claude first: within reserve")
+        if codex["eligible"]:
+            return dict(result, kind="codex", reason="claude first: Claude unavailable (" + claude["reason"] + "); Codex within reserve")
+        return dict(result, reason="claude first: neither subscription within reserve (Claude: " + claude["reason"] + ")")
     # Unknown Codex usage is not evidence for switching. The legacy default can run only when its own safety is known.
     if "week" not in codex:
         return dict(result, reason="Codex subscription usage/safety unknown; no automatic switch")

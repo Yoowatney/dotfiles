@@ -71,6 +71,57 @@ echo typo > "$SANDBOX/home/.local/state/agent-quota/policy"
 if ps --kind auto "bad policy" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "invalid policy must refuse"; fi
 [ ! -e "$SANDBOX/log" ] || fail "invalid policy opens no pane"
 
+# claude-first: one policy value makes Claude the first choice for work and check panes (paid-extra account included).
+echo claude-first > "$SANDBOX/home/.local/state/agent-quota/policy"
+quota_fixture 10 40 true
+not_main
+CALLER_LABEL="🟢 🫡 lead worker" ps --kind auto "first" "instruction" >/dev/null 2>"$SANDBOX/err"
+has "--kind claude" "claude-first: a worker picks Claude although Codex has more room"
+has "--model claude-sonnet-5-5 --effort high" "claude-first: auto Claude defaults to Sonnet/high"
+grep -q 'claude first' "$SANDBOX/err" || fail "claude-first selection has a reason"
+is_main
+ps --kind auto "first" "instruction" >/dev/null 2>"$SANDBOX/err"
+has "--kind claude" "claude-first: the main pane's auto choice is Claude without --why"
+ps --check "first" "instruction" >/dev/null 2>"$SANDBOX/err"
+has "--kind claude" "claude-first: a default check is Claude"
+has "--env CLAUDE_CHECK_TARGET=$PWD" "claude-first: the Claude check still protects its checked folder"
+has "--model claude-sonnet-5-5 --effort high" "claude-first: a Claude check keeps Sonnet/high"
+hasnt "--sandbox" "claude-first: no Codex sandbox flags reach a Claude check"
+ps --check --kind auto "first" "instruction" >/dev/null 2>"$SANDBOX/err"
+has "--env CLAUDE_CHECK_TARGET=$PWD" "claude-first: an explicit --kind auto check is Claude too"
+ps --check --kind codex "first" "instruction" >/dev/null 2>"$SANDBOX/err"
+has "--kind codex" "claude-first: an explicit --kind codex check stays Codex"
+hasnt "CLAUDE_CHECK_TARGET" "claude-first: an explicit Codex check has no Claude target"
+ps --check "first" "instruction" -- --model x >/dev/null 2>"$SANDBOX/err"
+has "--kind codex" "claude-first: forwarded Codex arguments keep a check on Codex"
+quota_fixture 10 85 true
+not_main
+ps --kind auto "over" "instruction" >/dev/null 2>"$SANDBOX/err"
+has "--kind codex" "claude-first: Claude past its reserve returns to Codex"
+grep -q 'reserve' "$SANDBOX/err" || fail "the fallback names its reason"
+is_main
+ps --check "over" "instruction" >/dev/null 2>"$SANDBOX/err"
+has "--kind codex" "claude-first: a check returns to Codex past the Claude reserve"
+hasnt "CLAUDE_CHECK_TARGET" "claude-first: a Codex check has no Claude target"
+rm -f "$SANDBOX/home/.local/state/agent-quota/claude.json"
+quota_fixture 99 90 true
+if ps --kind auto "none" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "claude-first refuses when neither runner has room"; fi
+[ ! -e "$SANDBOX/log" ] || fail "claude-first refusal opens no work pane"
+ps --check "none" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "a check with no quota data still opens (Codex, as before)"
+has "--kind codex" "claude-first: a check never refuses for quota"
+rm -rf "$SANDBOX/home/.codex/sessions" "$SANDBOX/home/.local/state/agent-quota/claude.json"
+ps --check "unknown" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "a check with unknown usage still opens"
+has "--kind codex" "claude-first: unknown usage keeps a check on Codex"
+not_main
+echo quota-aware > "$SANDBOX/home/.local/state/agent-quota/policy"
+quota_fixture 10 40 true
+if ps --kind auto "paid" "instruction" >/dev/null 2>"$SANDBOX/err"; then :; fi
+hasnt "--kind claude" "quota-aware still excludes a paid-extra Claude account"
+is_main
+ps --check "legacy" "instruction" >/dev/null 2>"$SANDBOX/err"
+has "--kind codex" "quota-aware checks stay on Codex"
+not_main
+
 # Each regression runs independently so one broken contract does not hide the rest.
 regression_failures=0
 regression() {
