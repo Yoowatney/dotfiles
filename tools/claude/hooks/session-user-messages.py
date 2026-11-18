@@ -61,6 +61,14 @@ def user_text(record: object) -> str | None:
         message = record.get("message")
         if not isinstance(message, dict) or message.get("role", "user") != "user":
             return None
+    elif record.get("type") == "attachment":
+        # A turn in progress stores what arrives meanwhile (a pane-tell, typed input) as a queued_command attachment.
+        queued = record.get("attachment")
+        origin = queued.get("origin") if isinstance(queued, dict) else None
+        if (not isinstance(origin, dict) or queued.get("type") != "queued_command" or origin.get("kind") != "human"
+                or queued.get("commandMode", "prompt") != "prompt"):  # a `!` shell command typed mid-turn is no request
+            return None
+        message = {"content": queued.get("prompt")}
     else:
         return None
     content = message.get("content")
