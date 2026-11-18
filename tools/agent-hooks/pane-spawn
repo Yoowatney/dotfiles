@@ -106,6 +106,7 @@ case "$1" in
 esac
 [ -z "$opener" ] || [ -z "$check$same$new_tab" ] || die "--opener opens a moved pane's own tab: no --check, --same-tab or --new-tab"
 asked=${kind:-claude} # what the caller chose, before auto resolves to Codex
+kind_arg=$kind runner_reason= # the receipt of an automatic check records the runner actually opened and why (api#1296)
 # Checks default to Codex; observed permission requirements select Claude below. Both protect the checked folder.
 [ -z "$check" ] || [ -n "$kind" ] || kind=auto
 check_auto= # a default (or --kind auto) check: only the claude-first policy may route it to Claude
@@ -183,6 +184,7 @@ elif { [ "$asked" = auto ] && [ -z "$check" ]; } || [ -n "$check_auto" ]; then
     quota_rc=$?
     if [ "$quota_rc" = 124 ]; then
       echo 'pane-spawn: quota lookup timed out; using legacy Codex' >&2
+      runner_reason='quota lookup timed out; legacy Codex'
     else
       quota_kind=$(printf '%s' "$quota" | jq -r '.kind // empty' 2>/dev/null)
       quota_reason=$(printf '%s' "$quota" | jq -r '.reason // "quota unavailable"' 2>/dev/null)
@@ -191,6 +193,7 @@ elif { [ "$asked" = auto ] && [ -z "$check" ]; } || [ -n "$check_auto" ]; then
       # A check never fails for quota: with no usable answer it stays on Codex.
       if [ "$quota_rc" != 0 ] && [ -z "$check" ]; then exit 1; fi
       case "$quota_kind" in claude) kind=claude auto_claude=1 ;; codex) kind=codex ;; *) [ -n "$check" ] || exit 1 ;; esac
+      runner_reason=$quota_reason
     fi
   fi
 fi
@@ -199,8 +202,13 @@ if [ -n "$check" ] && [ "$kind" = codex ]; then
   if [ "$(printf '%s' "$permission_route" | jq -r '.kind')" = claude ]; then
     [ $# -eq 0 ] || die "check requires Claude permissions; omit forwarded Codex arguments"
     kind=claude
-    echo "pane-spawn: check uses Claude: $(printf '%s' "$permission_route" | jq -r '.reason')" >&2
+    runner_reason=$(printf '%s' "$permission_route" | jq -r '.reason')
+    echo "pane-spawn: check uses Claude: $runner_reason" >&2
   fi
+fi
+if [ -z "$runner_reason" ]; then
+  if [ -n "$kind_arg" ] && [ "$kind_arg" != auto ]; then runner_reason="requested --kind $kind"
+  else runner_reason='default: no Claude requirement or quota choice'; fi
 fi
 env_args=()
 case "$kind" in
@@ -450,7 +458,8 @@ pane=
 # A timeout terminates this process group; EXIT closes its failed check before the caller retries.
 check_receipt() {
   [ -n "${PANE_SPAWN_CHECK_RECEIPT:-}" ] && [ -n "$check" ] || return 0
-  jq -n --arg status "$1" --arg address "$addr$pane" '{status:$status,address:$address}' > "$PANE_SPAWN_CHECK_RECEIPT.tmp" &&
+  jq -n --arg status "$1" --arg address "$addr$pane" --arg runner "$kind" --arg reason "$runner_reason" \
+    '{status:$status,address:$address,runner:$runner,runner_reason:$reason}' > "$PANE_SPAWN_CHECK_RECEIPT.tmp" &&
     mv "$PANE_SPAWN_CHECK_RECEIPT.tmp" "$PANE_SPAWN_CHECK_RECEIPT"
 }
 check_cleanup() {

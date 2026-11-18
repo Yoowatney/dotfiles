@@ -112,6 +112,19 @@ has "--kind codex" "claude-first: a check never refuses for quota"
 rm -rf "$SANDBOX/home/.codex/sessions" "$SANDBOX/home/.local/state/agent-quota/claude.json"
 ps --check "unknown" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "a check with unknown usage still opens"
 has "--kind codex" "claude-first: unknown usage keeps a check on Codex"
+# api#1296: an automatic check's receipt names the runner actually opened and why, for each policy.
+quota_fixture 10 40 true
+receipt="$SANDBOX/runner-receipt.json"
+PANE_SPAWN_CHECK_RECEIPT="$receipt" ps --check "first" "instruction" >/dev/null 2>"$SANDBOX/err"
+[ "$(jq -r .runner "$receipt")" = claude ] || fail "claude-first: the receipt records Claude"
+[ "$(jq -r .runner_reason "$receipt")" = "claude first: within reserve" ] || fail "claude-first: the receipt records why"
+echo codex-only > "$SANDBOX/home/.local/state/agent-quota/policy"
+PANE_SPAWN_CHECK_RECEIPT="$receipt" ps --check "first" "instruction" >/dev/null 2>"$SANDBOX/err"
+[ "$(jq -r .runner "$receipt")" = codex ] || fail "codex policy: the receipt records Codex"
+[ -n "$(jq -r '.runner_reason // empty' "$receipt")" ] || fail "codex policy: the receipt records why"
+echo claude-first > "$SANDBOX/home/.local/state/agent-quota/policy"
+PANE_SPAWN_CHECK_RECEIPT="$receipt" ps --check --kind codex "first" "instruction" >/dev/null 2>"$SANDBOX/err"
+[ "$(jq -r .runner_reason "$receipt")" = "requested --kind codex" ] || fail "an explicit kind is recorded as requested"
 not_main
 echo quota-aware > "$SANDBOX/home/.local/state/agent-quota/policy"
 quota_fixture 10 40 true
