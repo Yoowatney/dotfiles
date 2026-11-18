@@ -218,7 +218,7 @@ if __name__ == "__main__":
     def test_stop_preserves_existing_reason_for_both_clients(self):
         for claude in (False, True):
             with self.subTest(claude=claude):
-                result = self.run_hook("Stop", claude=claude, last_assistant_message="머지할까요?")
+                result = self.run_hook("Stop", claude=claude, last_assistant_message="왜: 막혀서")
                 self.assertIn("CLAIM alert-1", self.context(result))
                 self.assertIn("다시", self.context(result))
                 if claude:
@@ -259,13 +259,13 @@ if __name__ == "__main__":
         self.env["USER_RELAY_CONTEXT"] = "[priority-user-relay] full fixture"
         for claude in (False, True):
             with self.subTest(claude=claude):
-                result = self.run_hook("Stop", claude=claude, last_assistant_message="머지할까요?")
+                result = self.run_hook("Stop", claude=claude, last_assistant_message="왜: 막혀서")
                 self.assertTrue(self.context(result).startswith(self.env["USER_RELAY_CONTEXT"]))
                 self.assertIn("CLAIM alert-1", self.context(result))
 
     def test_priority_failure_does_not_hide_existing_reason_or_inbox(self):
         self.env["USER_RELAY_FAIL"] = "1"
-        result = self.run_hook("Stop", last_assistant_message="머지할까요?")
+        result = self.run_hook("Stop", last_assistant_message="왜: 막혀서")
         self.assertIn("CLAIM alert-1", self.context(result))
         self.assertIn("다시", self.context(result))
 
@@ -317,7 +317,7 @@ if __name__ == "__main__":
 
     def test_inbox_failure_keeps_existing_stop_reason(self):
         self.env["INBOX_FAIL"] = "1"
-        result = self.run_hook("Stop", last_assistant_message="머지할까요?")
+        result = self.run_hook("Stop", last_assistant_message="왜: 막혀서")
         self.assertIsNotNone(result)
         self.assertNotIn("CLAIM", self.context(result))
 

@@ -187,7 +187,7 @@ class ReactionPolicyTests(unittest.TestCase):
         self.assertIsNone(self.run_hook(TEST_EXIT="1"))
         self.assertIn("state", (self.root / ".local/state/next-prompt/test-session").read_text())
         result = self.run_hook(payload={"session_id": "test-session", "stop_hook_active": False,
-                                       "last_assistant_message": "머지할까요?"}, TEST_EXIT="1")
+                                       "last_assistant_message": "왜: 막혀서"}, TEST_EXIT="1")
         self.assert_block(result, "yoyoo-share-guard")
 
     def test_reaction_runs_in_parallel_and_keeps_decide_inbox_order_and_reasons(self):
@@ -226,7 +226,7 @@ class ReactionPolicyTests(unittest.TestCase):
         payload = {"session_id": "test-session", "turn_id": "same-turn", "stop_hook_active": True}
         for _ in range(3):
             self.assert_block(self.run_hook(payload=payload, TEST_EXIT="1"), "reaction-policy")
-        payload.update(stop_hook_active=False, last_assistant_message="머지할까요?")
+        payload.update(stop_hook_active=False, last_assistant_message="왜: 막혀서")
         result = self.run_hook(payload=payload, TEST_EXIT="1")
         self.assert_block(result, "yoyoo-share-guard")
         self.assertNotIn("reaction-policy", result["reason"])
