@@ -242,17 +242,19 @@ panes "w1:p1|🟢 👑 리드|s1|w1:t1|-" "w1:p9|🟢 일|s9"; rm -f "$SANDBOX/r
 check "main restarting its agent: the message keeps waiting" "$(ls "$SANDBOX"/state/pane-tell/waiting | wc -l | tr -d ' ')|$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')|$(sent)" "1|0|"
 panes "w1:p1|🟢 👑 리드|s2" "w1:p9|🟢 일|s9"; settled
 check "main's new agent: delivered" "$(sent)|$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')" "w1:p1 |0"
-# Past the alert time a main with no agent is gone, as before: the message is kept in a file and announced.
+# A main-refresh gap can outlast the old alert threshold but still recover before the retry deadline.
 touch "$SANDBOX/refuse"; PANE_TELL_ALERT=0 pt "리드" "보고" >/dev/null; rm -f "$SANDBOX/alerts"
-panes "w1:p1|🟢 👑 리드|s2|w1:t1|-" "w1:p9|🟢 일|s9"; rm -f "$SANDBOX/refuse"; settled
-check "main with no agent past the alert time: kept in a file and announced" "$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')|$(grep -c 'undelivered/' "$SANDBOX/alerts" 2>/dev/null)" "1|1"
-rm -f "$SANDBOX"/state/pane-tell/undelivered/* "$SANDBOX/alerts" "$SANDBOX/state/orchestrator/main"
+panes "w1:p1|🟢 👑 리드|s2|w1:t1|-" "w1:p9|🟢 일|s9"; rm -f "$SANDBOX/refuse"; sleep 0.3
+check "main with no agent past the old alert time: still waiting" "$(ls "$SANDBOX"/state/pane-tell/waiting | wc -l | tr -d ' ')|$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')|$(test -e "$SANDBOX/alerts" && echo 1 || echo 0)" "1|0|0"
+panes "w1:p1|🟢 👑 리드|s3" "w1:p9|🟢 일|s9"; settled
+check "main restored after old alert time: delivered" "$(sent)|$(ls "$SANDBOX"/state/pane-tell/undelivered | wc -l | tr -d ' ')" "w1:p1 |0"
+rm -f "$SANDBOX/state/orchestrator/main"
 panes "w1:p1|🟢 빈 칸|s1|w1:t1|-" "w1:p9|🟢 일|s9"
 pt "빈 칸" "x" 2>/dev/null; check "no agent in the pane refuses" "$?|$(sent)" "2|"
 panes "w1:p1|🟢 다른 도구|s1|w1:t1|gemini" "w1:p9|🟢 일|s9"
 pt "다른 도구" "x" 2>/dev/null; check "an agent whose box cannot be read refuses" "$?|$(sent)" "2|"
 
-# A box that stays full: 요유 hears about it once, the sender learns it did not arrive, and the words in the box stay.
+# A busy box can clear; only an exhausted delivery is announced.
 alerted() {
   local i attempts=60
   # Positive sender checks must wait for both asynchronous effects. Cases that
@@ -268,34 +270,39 @@ alerted() {
 }
 panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9"; rm -f "$SANDBOX/alerts"
 claude_screen "E" > "$SANDBOX/screen"; claude_screen > "$SANDBOX/screen-w1:p9"
-PANE_TELL_ALERT=0 pt "리드" "보고" >/dev/null; alerted sender
-check "a stuck box reaches 요유" "$(grep -c '리드 칸 입력창' "$SANDBOX/alerts")" 1
+PANE_TELL_ALERT=0 pt "리드" "보고" >/dev/null; sleep 0.3
+check "a busy box stays queued without an alert" "$(test -e "$SANDBOX/alerts" && echo alert || echo quiet)|$(ls "$SANDBOX"/state/pane-tell/waiting | wc -l | tr -d ' ')" "quiet|1"
+rm -f "$SANDBOX/screen-w1:p9"; claude_screen > "$SANDBOX/screen"; settled
+check "the queued message goes in once the box is empty" "$(sent)" "w1:p1 "
+claude_screen "E" > "$SANDBOX/screen"; claude_screen > "$SANDBOX/screen-w1:p9"
+PANE_TELL_WAIT=0 pt "리드" "보고" >/dev/null; alerted sender
+check "an expired delivery reaches 요유" "$(grep -c 'undelivered/' "$SANDBOX/alerts")" 1
 check "and the sender" "$(sent)" "w1:p9 "
 check "the note to the sender is not 요유's" "$(cut -d'|' -f2 "$SANDBOX/log" | grep -c '^\[pane-tell: 자동 안내입니다')" 1
 sleep 0.2; check "announced once, not on every try" "$(wc -l < "$SANDBOX/alerts" | tr -d ' ')" 1
-rm -f "$SANDBOX/screen-w1:p9"; claude_screen > "$SANDBOX/screen"; settled
-check "the message still goes in once the box is empty" "$(sent)" "w1:p9 w1:p1 "
-rm -f "$SANDBOX/alerts"; claude_screen "E" > "$SANDBOX/screen"; claude_screen > "$SANDBOX/screen-w1:p9"
+rm -f "$SANDBOX"/state/pane-tell/undelivered/* "$SANDBOX/alerts"
+claude_screen "E" > "$SANDBOX/screen"; claude_screen > "$SANDBOX/screen-w1:p9"
 PANE_TELL_WAIT=0 pt "리드" "보고" >/dev/null; alerted sender; settled
 check "kept in a file: announced with where it is" "$(grep -c 'undelivered/' "$SANDBOX/alerts")" 1
 rm -f "$SANDBOX"/state/pane-tell/undelivered/* "$SANDBOX/screen-w1:p9" "$SANDBOX/alerts"
-panes "w1:p1|🟢 👑 리드|s1"; PANE_TELL_ALERT=0 pt "w1:p1" "보고" >/dev/null; alerted
+panes "w1:p1|🟢 👑 리드|s1"; PANE_TELL_WAIT=0 pt "w1:p1" "보고" >/dev/null; alerted
 check "a sender already closed: the notification alone" "$(wc -l < "$SANDBOX/alerts" | tr -d ' ')|$(sent)" "1|"
 claude_screen > "$SANDBOX/screen"; settled
 # A note typed into an auto pane counts as 요유 speaking and lifts its guard, so an auto sender gets the notification alone.
 rm -f "$SANDBOX/alerts"; echo '{"result":{"tabs":[{"tab_id":"w1:t7","label":"자동 api#8"},{"tab_id":"w1:t9","label":"알아서 #1-dev 전환"}]}}' > "$SANDBOX/tabs"
 panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9|w1:t7"; claude_screen "E" > "$SANDBOX/screen"; claude_screen > "$SANDBOX/screen-w1:p9"
-PANE_TELL_ALERT=0 pt "w1:p1" "보고" >/dev/null; alerted; sleep 0.2
+PANE_TELL_WAIT=0 pt "w1:p1" "보고" >/dev/null; alerted; sleep 0.2
 check "an auto-tab sender gets no note" "$(wc -l < "$SANDBOX/alerts" | tr -d ' ')|$(sent)" "1|"
-claude_screen > "$SANDBOX/screen"; settled; check "and its message still goes in" "$(sent)" "w1:p1 "
-rm -f "$SANDBOX/alerts"; panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9|w1:t9"; claude_screen "E" > "$SANDBOX/screen"
-PANE_TELL_ALERT=0 pt "w1:p1" "보고" >/dev/null; alerted; sleep 0.2
+rm -f "$SANDBOX"/state/pane-tell/undelivered/* "$SANDBOX/alerts"
+panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s9|w1:t9"; claude_screen "E" > "$SANDBOX/screen"
+PANE_TELL_WAIT=0 pt "w1:p1" "보고" >/dev/null; alerted; sleep 0.2
 check "an ambient-tab sender gets no note" "$(wc -l < "$SANDBOX/alerts" | tr -d ' ')|$(sent)" "1|"
 claude_screen > "$SANDBOX/screen"; settled
-rm -f "$SANDBOX/alerts"; panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s5|w1:t1"; claude_screen "E" > "$SANDBOX/screen"
-PANE_TELL_ALERT=0 pt "w1:p1" "보고" >/dev/null; alerted; sleep 0.2
+rm -f "$SANDBOX"/state/pane-tell/undelivered/* "$SANDBOX/alerts"
+panes "w1:p1|🟢 👑 리드|s1" "w1:p9|🟢 일|s5|w1:t1"; claude_screen "E" > "$SANDBOX/screen"
+PANE_TELL_WAIT=0 pt "w1:p1" "보고" >/dev/null; alerted; sleep 0.2
 check "an auto session moved out of its tab gets no note" "$(wc -l < "$SANDBOX/alerts" | tr -d ' ')|$(sent)" "1|"
-claude_screen > "$SANDBOX/screen"; settled; rm -f "$SANDBOX/screen-w1:p9" "$SANDBOX/alerts" "$SANDBOX/tabs"
+claude_screen > "$SANDBOX/screen"; settled; rm -f "$SANDBOX"/state/pane-tell/undelivered/* "$SANDBOX/screen-w1:p9" "$SANDBOX/alerts" "$SANDBOX/tabs"
 
 # --raw is the same door for a machine's own prompt: no sender line, and it may be its own pane.
 panes "w1:p1|🟢 일|s1" "w1:p9|🟢 일 둘|s9"
