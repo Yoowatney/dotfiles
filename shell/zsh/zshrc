@@ -341,4 +341,3 @@ export PATH="$BUN_INSTALL/bin:$PATH"
 # Claude Code Bash 툴은 init 이후 PATH를 덧붙여 오탐을 일으키므로 doctor 비활성화
 export _ZO_DOCTOR=0
 eval "$(zoxide init zsh)"
-set -a; source ~/.config/notion/.env; set +a
