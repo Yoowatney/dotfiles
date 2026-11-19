@@ -72,6 +72,11 @@ also appears when a long memo is loaded by path. A missing policy file keeps the
 existing behavior; a broken symlink is an error. Remove the policy file to undo
 only this optional validation, leaving ordinary handoff validation intact.
 
+A save larger than 16 KiB (16384 bytes, counted after the saver adds its Git snapshot) is refused with exit 1:
+nothing is cut, the previous memo stays, and the error tells the saver to shorten it. Refusing rather than
+truncating keeps the open-items tail intact, and a main-pane refresh that never gets a saved memo skips the `/clear`
+instead of wiping the session. Keep long detail in a file and write its absolute path in the memo.
+
 Outside herdr, saving refuses with exit 2 and never copies the prompt. Keep the file and choose its destination explicitly. The current
 implementation retains handoffs for 24 hours and consumes a memo once by renaming
 it to `.loaded`. Do not rely on a handoff as permanent storage.
