@@ -224,10 +224,10 @@ class SlackRelayTest(unittest.TestCase):
         return 'https://example.slack.com/archives/%s/p%s' % (channel, self.stamp.replace('.', ''))
 
     def check(self, posts, seen=None):
-        def fake(refs):
+        def fake(refs, wait=None):
             if seen is not None:
                 seen.extend(refs)
-            return posts
+            return posts(refs) if callable(posts) else posts
         with patch.object(PAGE, 'slack_posts', side_effect=fake):
             return PAGE.check(self.payload())
 
@@ -269,6 +269,26 @@ class SlackRelayTest(unittest.TestCase):
     def test_a_relay_without_a_slack_place_is_still_skipped(self):
         self.record('이건 어디에서 봐?', extra=[{'type': 'user', 'message': {'content': '[Slack #0-yoyooyo 요유] ' + ASK}}])
         self.assertIn('page-on-request', self.check([ASK]) or '')
+
+    def test_typed_words_count_alone_whatever_links_they_hold(self):
+        for typed, post, denied in (('이 요청은 처리됐어? ' + self.link(), [ASK], True),
+                                    ('HTML로 만들어줘 ' + self.link(), ['HTML 만들지 말고 답해줘'], False)):
+            seen = []
+            self.record(typed)
+            with self.subTest(typed=typed):
+                self.assertEqual(bool(self.check(post, seen)), denied)
+                self.assertEqual(seen, [])
+
+    def test_a_report_that_links_a_bot_post_does_not_erase_the_earlier_request(self):
+        later = '%.6f' % (time.time() - 30)
+        report = self.told('https://example.slack.com/archives/%s/p%s' % (MAIN, later.replace('.', '')))
+        self.record('이건 어디에서 봐?', extra=[self.relay(), report])
+        self.assertIsNone(self.check(lambda refs: [ASK] if refs[0][1] == self.stamp else []))
+
+    def test_a_pane_tell_wrapped_as_pasted_content_is_a_relay(self):
+        wrapped = {'type': 'user', 'message': {'content': '<pasted_content id="x">\n' + self.told(self.link())['message']['content']}}
+        self.record('이건 어디에서 봐?', extra=[wrapped])
+        self.assertIsNone(self.check([ASK]))
 
     def test_what_reads_slack_keeps_only_요유s_recent_app_posts(self):
         now = time.time()

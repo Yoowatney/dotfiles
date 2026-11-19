@@ -26,6 +26,7 @@ REASON = ("page-on-request: 요유가 이번 메시지에서 HTML이나 설명 �
 # api#1373: a Slack relay (#0, 요유's DM, a thread call) or a main pane's pane-tell with a Slack link is no typed message, so
 # its words count only once Slack itself says 요유 wrote them. The relayed text is never read: a session can type anything.
 SLACK = os.path.expanduser('~/work/munice/.agents/skills/agent-board/main/slack_approval.py')
+PASTED = re.compile(r'^<pasted_content[^>]*>\s*')
 RELAY = ('[Slack #0-yoyooyo 요유]', '[Slack DM 요유]', '[Slack 스레드 요유 부름]', '[pane-tell: ')
 PLACE = re.compile(r'글 ([CDG][A-Z0-9]{6,})/(\d{10}\.\d{6})|slack\.com/archives/([CDG][A-Z0-9]{6,})/p(\d{10})(\d{6})')
 WINDOW = 6 * 3600  # from the post; ponytail: a longer job whose page comes later is refused once and 요유 says 페이지
@@ -37,7 +38,7 @@ def places(text: str) -> list:
     return list(dict.fromkeys(found))[:5]
 
 
-def slack_posts(found: list) -> list:
+def slack_posts(found: list, wait: float = READ_SECONDS) -> list:
     """The words of the posts at `found` (channel, ts) that 요유 typed in the Slack app within WINDOW, as 요유 reads them.
     Anything else, an unreadable Slack included, gives no words. slack_approval.py is the module the GCP guard trusts."""
     box = []
@@ -55,7 +56,7 @@ def slack_posts(found: list) -> list:
             pass
     worker = threading.Thread(target=read, daemon=True)
     worker.start()
-    worker.join(READ_SECONDS)
+    worker.join(wait)
     return list(box)
 
 
@@ -74,7 +75,7 @@ def unrequested(payload: dict) -> bool:
     parser: notifications terminate grants there but must not erase this request.
     """
     records = load('yoyoo-share-guard.py').records  # only once a page write is seen: most calls never load it
-    latest, fallback, found, relayed = '', '', [], False
+    latest, chain = '', []  # chain: the places each relay since the last typed message names, oldest first
     try:
         with open(payload.get('transcript_path') or '', encoding='utf-8') as stream:
             for raw in stream:
@@ -98,20 +99,24 @@ def unrequested(payload: dict) -> bool:
                 if not item or item[0] != 'in':
                     continue
                 text = item[1].strip()
-                if text.startswith(RELAY) and places(text):
-                    fallback, latest, found, relayed = (fallback if relayed else latest), '', places(text), True
+                relay = PASTED.sub('', text, 1)
+                if relay.startswith(RELAY) and places(relay):
+                    chain.append(places(relay))
                     continue
                 if text.startswith(('<task-notification', '<system-reminder', '[', '# AGENTS.md', '<environment_context')):
                     continue
-                latest, found, relayed = unicodedata.normalize('NFC', text), places(text), False
+                latest, chain = unicodedata.normalize('NFC', text), []  # words 요유 typed count alone, whatever links they hold
     except (OSError, TypeError):
         return False
-    posts = slack_posts(found) if found else []
-    if relayed and not posts:
-        if not fallback:
-            return True  # a relay Slack does not confirm, and no typed message before it: no request
-        latest = fallback
-    latest = unicodedata.normalize('NFC', '\n'.join(filter(None, [latest, *posts])))
+    deadline = time.monotonic() + READ_SECONDS
+    for found in reversed(chain[-3:]):  # the latest relay Slack confirms wins; a report that links a bot's post does not erase an earlier request
+        posts = slack_posts(found, max(deadline - time.monotonic(), 0))
+        if posts:
+            latest = unicodedata.normalize('NFC', '\n'.join(posts))
+            break
+    else:
+        if chain and not latest:
+            return True  # relays Slack does not confirm, and no typed message before them: no request
     # Quoting a request or saying not to write HTML is not a direct request.
     request = re.sub(r'`[^`]*`|"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’', '', latest)
     page = r'(?:html|설명\s*페이지|웹\s*페이지|explainer\s*page|페이지)'
