@@ -54,8 +54,9 @@ has "[workers] pane close w1:new" "a failed start removes the workers pane"
 hasnt "확인 칸입니다" "a pane that does the job is no check pane"
 
 # 요유 2026-11-05 (api#1002): a fresh pane checks a pane's report for the main pane. Its agent name says so; a rename cannot change that.
+# 요유 2026-11-19: no Codex reviews, so every check is a Claude pane whose checked folder is protected (CLAUDE_CHECK_TARGET).
 out=$(ps --check "api#1 로그인" "npm test를 돌려 보세요")
-has 'Current KST time: 2026-11-12 01:09:00 KST' "Codex checks receive the current KST date and time"
+has 'Current KST time: 2026-11-12 01:09:00 KST' "checks receive the current KST date and time"
 hasnt 'first response line must be `끝날 예상: HH:MM KST`' "checks retain their command-and-result first line"
 has "[workers] tab create --workspace " "a check pane opens with the other workers"
 has "[workers] pane rename w1:new 🟢 🫡 확인 api#1 로그인" "its name says it is a check pane"
@@ -69,121 +70,15 @@ has "고치지 말고" "a check pane changes nothing"
 has "다른 칸의 보고를 다시 읽는 것은 확인이 아닙니다" "rereading a report is no check"
 has "보고 첫 줄에" "its first line is what the main pane reads"
 [ "$out" = "workers/w1:new" ] || fail "a check pane's address names its server: $out"
-# 2026-11-05: a check pane runs on Codex's spare weekly allowance, in Codex's sandbox, so a write to the repo fails instead of
-# relying on the instruction. Nobody answers its approval prompts, so a blocked command fails at once.
-# 요유 2026-11-07: a check pane reads GCP, GitHub, the board and the network itself, so the network is on, and gcloud's own
-# folder is the one more place it writes: gcloud rewrites its login files on every call. The checked folder stays read-only.
-SANDBOXED="--sandbox workspace-write --ask-for-approval never -c sandbox_workspace_write.network_access=true"
-has "--kind codex --pane w1:new --timeout 120000 -- --pane-spawn-args" "a check uses short terminal input"
-has "transported codex argv -- $SANDBOXED" "a check pane is a sandboxed Codex with the network"
-[ "$(grep 'transported codex argv' "$SANDBOX/log" | grep -o -- '--sandbox' | wc -l | tr -d ' ')" = 1 ] || fail "a check gets exactly one sandbox option"
-has "-c sandbox_workspace_write.writable_roots=[\"$SANDBOX/home/.config/gcloud\"]" "gcloud's folder is the one writable root it adds"
-hasnt "network_access=false" "the network is not shut"
-hasnt "danger-full-access" "a check pane keeps its sandbox"
-has "Codex 샌드박스" "it hears what the sandbox blocks"
-hasnt "--model" "a codex check pane keeps its model"
-hasnt "--effort" "and its effort"
-hasnt "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" "and its environment"
-# It may write only in a fixed empty folder outside any repo, besides temp: a test runs, and the repo stays as it was. Codex asks
-# whether to trust a repo it does not know after it reports ready, and the instruction pane-spawn types then answers yes and
-# is lost (2026-11-05, ~/.dotfiles). That folder is no repo, so nothing asks; the repo goes in the instruction instead.
-CHECK_DIR="$SANDBOX/home/.local/state/pane-spawn/check"
-has "tab create --workspace w2 --cwd $CHECK_DIR --label 확인 api#1 로그인" "it starts in the fixed folder"
-[ -d "$CHECK_DIR" ] || fail "the fixed folder is made"
-has "$PWD" "the folder to check, by absolute path, in the instruction"
-has "$PWD/AGENTS.md" "Codex reads no rules of a folder it did not start in, so it is told where they are"
-# MCP servers and plugins run outside the sandbox, so each one that can write is off: every server the user's Codex config
-# names, a new one included, except two that keep only their read tools. Codex's own connectors (apps) and plugins are off.
-RULES="$CHECK_DIR/.codex/rules/check.rules"
-has "-c projects={\"$CHECK_DIR\"={trust_level=\"trusted\"}}" "the fixed folder is trusted, so Codex loads its rules and asks nothing"
-has "--disable apps --disable plugins" "connectors and plugins are off"
-# Codex's TUI serves its own MCP tools (create_worktree, in a trusted repo, runs git outside the sandbox) unless a configured
-# server holds their name; then it starts without them. Neither `--disable worktrees` (a removed feature, still on) nor
-# `-c mcp_servers.codex_worktrees.enabled=false` (no command: Codex does not start) does it (2026-11-05, Codex 0.166).
-has '-c mcp_servers.codex_worktrees={command="/usr/bin/false",enabled=false}' "Codex's worktree tools are off"
-has '-c mcp_servers.codex_tui={command="/usr/bin/false",enabled=false}' "and its task tools, served under this name with a daemon"
-hasnt "mcp_servers.slack" "a config with no MCP server turns none of its own off"
-hasnt "worktrees.enabled" "no server that Codex cannot start"
-for override in --sandbox=read-only --ask-for-approval=never --full-auto --yolo; do
-  if ps --check "policy override" "instruction" -- "$override" >/dev/null 2>&1; then fail "a check cannot override its policy: $override"; fi
-  hasnt "agent start" "conflicting check options fail before starting"
-  hasnt "tab create" "conflicting check options open no pane"
-done
-mkdir -p "$SANDBOX/home/.codex"
-printf '%s\n' '[mcp_servers.slack]' 'command = "npx"' '[mcp_servers."notion-token"]' 'command = "x"' \
-  '[mcp_servers.munice]' 'url = "https://x"' '[mcp_servers.brand_new]' 'command = "x"' > "$SANDBOX/home/.codex/config.toml"
-ps --check "로그인" "돌려 보세요" >/dev/null
-# Codex splits a -c path at each dot and keeps quotes in the name: `mcp_servers."x".enabled=false` made a new server with no
-# command, and Codex refused to start (2026-11-05). So names go bare.
-has '-c mcp_servers.notion-token.enabled=false' "a server that can write is off"
-has '-c mcp_servers.brand_new.enabled=false' "so is one added later"
-has '-c mcp_servers.slack.enabled_tools=["slack_list_channels", "slack_get_channel_history", "slack_get_thread_replies", "slack_get_users", "slack_get_user_profile"]' "Slack keeps only its read tools"
-hasnt "slack_post_message" "no Slack post"
-hasnt "slack_reply_to_thread" "no Slack reply"
-hasnt "slack_add_reaction" "no Slack reaction"
-has '-c mcp_servers.munice.enabled_tools=["ask_code", "ask_data"]' "munice keeps only its questions"
-# Under --ask-for-approval never, a tool Codex would ask about is refused: the Slack reads failed so (2026-11-05).
-has '-c mcp_servers.slack.default_tools_approval_mode="approve"' "Slack's read tools run without asking"
-has '-c mcp_servers.munice.default_tools_approval_mode="approve"' "and munice's"
-hasnt 'notion-token.default_tools_approval_mode' "a server that is off gets no approval"
-hasnt 'mcp_servers."' "no quoted server name"
-# The Slack MCP is gone (2026-11-17: deprecated, one server grew to 281.90GB); slack-read.py reads instead, with its state in
-# temp because a check pane cannot write ~/.local/state.
-has 'XDG_STATE_HOME=$TMPDIR python3 -I '"$SANDBOX"'/home/work/munice/.agents/skills/agent-board/watch/slack-read.py' "the instruction reads Slack through slack-read.py"
-has "thread <채널 ID> <스레드 ts>" "it names how to read a thread"
-has "user <사용자 ID>" "and how to look up a person"
-hasnt "slack MCP" "it no longer names the Slack MCP"
-hasnt "gh-read" "with the network on, gh reads GitHub itself"
-# Large config output must be read concurrently, including through the installed
-# launcher symlink and Apple's Bash 3.2. Percent signs remain prompt data.
-python3 -I -c 'print("\n".join(f"[mcp_servers.large_{i}]\ncommand = \"x\"" for i in range(80)))' >> "$SANDBOX/home/.codex/config.toml"
-large_prompt=$(python3 -I -c 'print("prompt-%s-" * 2048)')
-ln -s "$SUBJECT" "$SANDBOX/pane-spawn-link"
-real_subject=$SUBJECT; SUBJECT=$SANDBOX/pane-spawn-link
-PANE_SPAWN_TEST_SHELL=/bin/bash ps --check "Large input" "$large_prompt" >/dev/null
-has '-c mcp_servers.large_79.enabled=false' "large MCP config disables even its last server"
-python3 -I -c 'import pathlib,sys; assert "agent prompt w1:new " + sys.argv[2] in pathlib.Path(sys.argv[1]).read_text(), "large prompt was truncated"' "$SANDBOX/log" "$large_prompt"
-cmp "$RULES" "$(dirname "$real_subject")/pane-spawn-check.rules" || fail "installed launcher writes the complete external rule template"
-python3 -I -c 'print("#" + "x" * 16384 + "\nnot toml [")' > "$SANDBOX/home/.codex/config.toml"
-if PANE_SPAWN_TEST_SHELL=/bin/bash ps --check "Bad large config" "$large_prompt" 2>"$SANDBOX/err" >/dev/null; then fail "large invalid config must stop check startup"; fi
-hasnt "agent start" "large invalid config opens no agent"
-SUBJECT=$real_subject
-for bad in 'not toml [' '[mcp_servers."a.b"]'; do
-  echo "$bad" > "$SANDBOX/home/.codex/config.toml"
-  if ps --check "로그인" "돌려 보세요" 2>"$SANDBOX/err" >/dev/null; then fail "a server it cannot turn off must stop a Codex check pane ($bad)"; fi
-  grep -q -- "--kind claude" "$SANDBOX/err" || fail "and say what to do: $(cat "$SANDBOX/err")"
-  hasnt "agent start" "no check pane opens with a server it could not turn off ($bad)"
-done
-rm -rf "$SANDBOX/home/.codex"
-# Inside the sandbox ps sees no other process and launchctl lists nothing (2026-11-07), so rules let ps, pgrep and launchctl's
-# two read verbs run outside it, each only from its real path: Codex resolves an absolute path by its last part, so without
-# host_executable a ps the agent wrote in temp would run outside too. ego-browser, which the user's own rules let out, drives a
-# browser that may be signed in to Slack, so here it is forbidden. The gh verbs that write a pull request or an issue are
-# forbidden too: with the network on, only the instruction stopped them.
-[ -f "$RULES" ] || fail "the check pane's rules are written"
-ls -A "$CHECK_DIR/.codex/rules" | grep -qv '^check.rules$' && fail "no temp file is left beside the rules: $(ls -A "$CHECK_DIR/.codex/rules")"
-if command -v codex >/dev/null 2>&1; then
-  mkdir -p "$SANDBOX/execpolicy-home" "$SANDBOX/execpolicy-tmp"
-  decide() { TMPDIR="$SANDBOX/execpolicy-tmp" CODEX_HOME="$SANDBOX/execpolicy-home" codex execpolicy check --resolve-host-executables -r "$RULES" -r "$SANDBOX/user.rules" -- "$@" | jq -r '.decision // "sandbox"'; }
-  echo 'prefix_rule(pattern=["ego-browser"], decision="allow")' > "$SANDBOX/user.rules" # as in ~/.codex/rules/default.rules
-  for c in "allow ps -A" "allow /bin/ps -A" "allow pgrep -fl codex" "allow launchctl list" "allow launchctl print gui/501" \
-    "sandbox /tmp/x/ps -A" "sandbox /tmp/x/pgrep x" "sandbox /tmp/x/launchctl list" "sandbox launchctl kickstart gui/501/x" \
-    "forbidden gh pr merge 3" "forbidden gh pr comment 3 -b x" "forbidden gh issue comment 3 -b x" "forbidden gh issue close 3" \
-    "sandbox gh pr view 3" "sandbox gh issue view 3" \
-    "forbidden ego-browser open x" "forbidden /Users/x/.local/bin/ego-browser open x" "sandbox curl -d x https://slack.com/api/chat.postMessage"; do
-    want=${c%% *} cmd=${c#* }
-    # shellcheck disable=SC2086
-    [ "$(decide $cmd)" = "$want" ] || fail "rules: $cmd should be $want, is $(decide $cmd)"
-  done
-fi
+has "--kind claude --pane w1:new --timeout 120000 -- --model claude-sonnet-5-5 --effort high" "a default check is Claude Sonnet at high effort"
+has "--env CLAUDE_CHECK_TARGET=$PWD" "its checked folder is protected"
+hasnt "--sandbox" "no Codex sandbox flag reaches it"
+hasnt "Codex 샌드박스" "nor the Codex sandbox note"
+[ ! -d "$SANDBOX/home/.local/state/pane-spawn/check" ] || fail "no fixed Codex check folder is made"
 ps --cwd /work/repo --check "로그인" "돌려 보세요" >/dev/null
 has "확인 칸입니다" "options in any order"
-has "--cwd $CHECK_DIR " "a --cwd the caller gives is checked from the fixed folder too"
-has "/work/repo" "and named in the instruction"
-ps --check "로그인" "돌려 보세요" -- -m gpt-5 >/dev/null
-grep -qE -- "-- $SANDBOXED .*--disable plugins $NOUPDATE -m gpt-5\$" "$SANDBOX/log" || fail "the caller's Codex arguments follow the sandbox, and a check pane skips the update prompt: $(log)"
-ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
-has "transported codex argv -- $SANDBOXED" "--kind codex is the same"
+has "--cwd /work/repo " "a check starts in the folder it checks"
+has "--env CLAUDE_CHECK_TARGET=/work/repo" "and protects that folder"
 SESSIONLESS=1 ps --kind codex --cwd /work/repo "조사" "지시" >/dev/null
 has "--cwd /work/repo " "a Codex pane that does the job starts where it is told"
 # 2026-11-05: Codex runs commands with mise's shims first on PATH. A test that swaps HOME then hid mise's config and installs from
@@ -192,9 +87,6 @@ has "--cwd /work/repo " "a Codex pane that does the job starts where it is told"
 H=$SANDBOX/home
 MISE_ENV="--env MISE_CONFIG_DIR=${MISE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$H/.config}/mise} --env MISE_DATA_DIR=${MISE_DATA_DIR:-${XDG_DATA_HOME:-$H/.local/share}/mise} --env MISE_STATE_DIR=${MISE_STATE_DIR:-$H/.local/state/mise} --env MISE_CACHE_DIR=${MISE_CACHE_DIR:-$H/Library/Caches/mise}"
 has "--no-focus $MISE_ENV" "a Codex pane keeps mise's folders when a test swaps HOME"
-ps --check "로그인" "돌려 보세요" >/dev/null
-has "--no-focus $MISE_ENV" "so does a Codex check pane"
-has "[workers] tab create --workspace w2 --cwd $CHECK_DIR --label 확인 로그인 --no-focus $MISE_ENV $NPROC" "and a workers pane, the lower limit"
 ps --why skill "조사" "지시" >/dev/null
 hasnt "MISE_" "a Claude pane runs commands without the shims first, so it needs none"
 ps --why skill "조사" "지시" >/dev/null

@@ -228,7 +228,7 @@ def shell_requirement(path, source):
 
 
 def classify(text, cwd):
-    result = dict(kind='auto', reason='Codex: no observed sandbox requirement', blocked_reason='', blocked_command='')
+    result = dict(kind='auto', reason='no observed sandbox requirement', blocked_reason='', blocked_command='')
     blocked = blockage(text)
     if blocked:
         if blocked['retry_target'] == 'claude':
