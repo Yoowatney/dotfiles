@@ -13,12 +13,86 @@ import os
 import re
 import shlex
 import sys
+import threading
+import time
 import unicodedata
 
 sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.realpath(__file__))
 REASON = ("page-on-request: 요유가 이번 메시지에서 HTML이나 설명 페이지를 요청하지 않았습니다. 페이지를 만들지 말고 터미널에서 답하세요. "
           "페이지는 요유가 그 메시지에서 HTML이나 설명 페이지를 직접 요청했을 때만 만듭니다.")
+
+
+# api#1373: a Slack relay (#0, 요유's DM, a thread call) or a main pane's pane-tell with a Slack link is no typed message, so
+# its words count only once Slack itself says 요유 wrote them. The relayed text is never read: a session can type anything.
+SLACK = os.path.expanduser('~/work/munice/.agents/skills/agent-board/main/slack_approval.py')
+PASTED = re.compile(r'^<pasted_content[^>]*>\s*')
+RELAY = ('[Slack #0-yoyooyo 요유]', '[Slack DM 요유]', '[Slack 스레드 요유 부름]', '[pane-tell: ')
+PLACE = re.compile(r'글 ([CDG][A-Z0-9]{6,})/(\d{10}\.\d{6})|slack\.com/archives/([CDG][A-Z0-9]{6,})/p(\d{10})(\d{6})')
+WINDOW = 6 * 3600  # from the post; ponytail: a longer job whose page comes later is refused once and 요유 says 페이지
+READ_SECONDS = 4  # the hook has 10 s and a late answer would let the write through
+
+
+ID, STAMP = r'[CDG][A-Z0-9]{6,}', r'\d{10}\.\d{6}'
+CALL = '[Slack 스레드 요유 부름]'
+CALL_SHAPE = re.compile(r'\(스레드 %s/%s, 글 (%s)/(%s)\) 요유 글:' % (ID, STAMP, ID, STAMP))
+# The tails main-channel.py puts after 요유's words. Words and quoted parents are free text and may hold a look-alike, so
+# every candidate is a claim that slack_posts checks against the post itself.
+TAILS = (re.compile(r'(?=\(ts %s, 글 (%s)/(%s)\)\s*$)' % (STAMP, ID, STAMP)),
+         re.compile(r"(?=\(글 (%s)/(%s), 스레드 %s: '[^\n]*'\)\s*$)" % (ID, STAMP, STAMP)))
+MARK = re.compile(r'\[pane-tell: [^\n]*?확인하세요\]\s*')  # the mark pane-tell puts before every message it types
+
+
+def places(text: str) -> list:
+    """One list of Slack places (channel, ts, claim) per post a prompt names, oldest first. pane-tell may carry several
+    messages in one prompt, and one message several links; only the latest post Slack confirms counts. A link claims nothing.
+    A Slack relay claims that its text before the tail is its label and the post's words."""
+    groups = []
+    for part in re.split(r'\n\n(?=\[pane-tell: )', PASTED.sub('', text, 1)):
+        mark = MARK.match(part)
+        body = part[mark.end():] if mark else part
+        if body.startswith('[Slack') and not body.startswith(CALL):
+            found = [(m[1], m[2], body[:m.start()].rstrip()) for shape in TAILS for m in shape.finditer(body)]
+            groups += [sorted(set(found), key=lambda place: place[1])] if found else []  # one relay: the candidates are one group
+            continue
+        if body.startswith(CALL):
+            m = CALL_SHAPE.search(body)
+            found = [(m[1], m[2], None)] if m else []
+        elif mark:
+            found = [(m[1] or m[3], m[2] or '%s.%s' % (m[4], m[5]), None) for m in PLACE.finditer(body)]
+        else:
+            found = []
+        groups += [[place] for place in sorted(set(found), key=lambda place: place[1])]  # one post each, the newest last
+    return groups
+
+
+def slack_posts(found: list, wait: float = READ_SECONDS) -> list:
+    """The words of the posts at `found` (channel, ts, claim) that 요유 typed in the Slack app within WINDOW, as 요유 reads them.
+    Anything else, an unreadable Slack included, gives no words. slack_approval.py is the module the GCP guard trusts."""
+    box = []
+
+    def read():
+        try:
+            module = load(SLACK)
+            slack, now = module.slack_mod.Slack(), time.time()
+            for channel, ts, claim in found:
+                try:
+                    m = module.read_one(slack, channel, ts)
+                except Exception:
+                    continue  # one post the bot cannot read does not hide the others
+                # A look-alike tail inside the words or the quoted parent names a post whose words the relay does not start with.
+                # ponytail: a post edited after it was relayed fails this too, and an earlier typed request then stands.
+                if claim is not None and m and not claim.startswith(claim.split('] ', 1)[0] + '] ' + module.relay_body(dict(m, files=None))):
+                    continue  # (attachments add lines after the words, so the claim only has to start with them)
+                if (m and m.get('user') == module.YOYOO and not m.get('bot_id') and m.get('subtype') in (None, 'thread_broadcast', 'file_share')
+                        and m.get('client_msg_id') and -module.SKEW <= now - float(m['ts']) <= WINDOW):
+                    box.append(module.displayed(m.get('text') or ''))
+        except BaseException:
+            pass
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    worker.join(wait)
+    return list(box)
 
 
 def load(name: str):
@@ -36,7 +110,7 @@ def unrequested(payload: dict) -> bool:
     parser: notifications terminate grants there but must not erase this request.
     """
     records = load('yoyoo-share-guard.py').records  # only once a page write is seen: most calls never load it
-    latest = ''
+    latest, chain = '', []  # chain: the places each relay since the last typed message names, oldest first
     try:
         with open(payload.get('transcript_path') or '', encoding='utf-8') as stream:
             for raw in stream:
@@ -60,11 +134,25 @@ def unrequested(payload: dict) -> bool:
                 if not item or item[0] != 'in':
                     continue
                 text = item[1].strip()
+                relay = PASTED.sub('', text, 1)
+                if relay.startswith(RELAY) and places(relay):
+                    chain += places(relay)
+                    continue
                 if text.startswith(('<task-notification', '<system-reminder', '[', '# AGENTS.md', '<environment_context')):
                     continue
-                latest = unicodedata.normalize('NFC', text)
+                latest, chain = unicodedata.normalize('NFC', text), []  # words 요유 typed count alone, whatever links they hold
     except (OSError, TypeError):
         return False
+    deadline = time.monotonic() + READ_SECONDS
+    for found in reversed(chain[-8:]):  # the latest relay Slack confirms wins; a report that links a bot's post does not erase an earlier request
+        # ponytail: eight reports after the request push it out, and the shared 4 s read budget ends first anyway
+        posts = slack_posts(found, max(deadline - time.monotonic(), 0))
+        if posts:
+            latest = unicodedata.normalize('NFC', '\n'.join(posts))
+            break
+    else:
+        if chain and not latest:
+            return True  # relays Slack does not confirm, and no typed message before them: no request
     # Quoting a request or saying not to write HTML is not a direct request.
     request = re.sub(r'`[^`]*`|"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’', '', latest)
     page = r'(?:html|설명\s*페이지|웹\s*페이지|explainer\s*page|페이지)'
