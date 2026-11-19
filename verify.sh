@@ -21,6 +21,7 @@ NC='\033[0m'
 PASS=0
 FAIL=0
 WARN=0
+FAILED=()
 
 check() {
     local name="$1"
@@ -32,6 +33,7 @@ check() {
     else
         echo -e "  ${RED}❌${NC} $name"
         ((FAIL++))
+        FAILED+=("$name")
     fi
 }
 
@@ -65,10 +67,12 @@ check_symlink() {
         else
             echo -e "  ${RED}❌${NC} $name (wrong path: $actual)"
             ((FAIL++))
+            FAILED+=("$name")
         fi
     else
         echo -e "  ${RED}❌${NC} $name (not a symlink)"
         ((FAIL++))
+        FAILED+=("$name")
     fi
 }
 
@@ -217,7 +221,19 @@ for app_info in "${apps[@]}"; do
 done
 
 # ===========================================
-# 13. System Permissions (informational)
+# 13. Settings (must match this checkout on every Mac)
+# ===========================================
+echo ""
+echo "🧭 Settings"
+check "input sources match enabled.txt" "bash '$DOTFILES/scripts/input-sources.sh' check &>/dev/null"
+settings=$(/usr/bin/python3 -I "$DOTFILES/macos/settings-check.py")
+check "settings-check.py ran" "[[ $? -eq 0 ]]"
+while IFS=$'\t' read -r result name; do
+    [[ -n "$name" ]] && check "$name" "[[ $result == ok ]]"
+done <<< "$settings"
+
+# ===========================================
+# 14. System Permissions (informational)
 # ===========================================
 echo ""
 echo "🔐 System Permissions Required"
@@ -239,10 +255,9 @@ echo -e "  ${RED}❌ Failed:${NC}  $FAIL"
 echo -e "  ${YELLOW}⚠️  Warnings:${NC} $WARN"
 echo ""
 
-if [[ $FAIL -eq 0 ]]; then
-    echo -e "${GREEN}All checks passed!${NC}"
-    exit 0
-else
-    echo -e "${YELLOW}Some checks failed. Review the output above.${NC}"
-    exit 1
-fi
+[[ $FAIL -eq 0 ]] && echo -e "${GREEN}All checks passed!${NC}" || echo -e "${YELLOW}Some checks failed. Review the output above.${NC}"
+
+# Machine-readable tail for settings-drift.py: failed check names, then a completion marker.
+for name in "${FAILED[@]}"; do echo "VERIFY-FAIL $name"; done
+echo "VERIFY-DONE"
+[[ $FAIL -eq 0 ]]
