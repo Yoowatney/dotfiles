@@ -102,7 +102,79 @@
       ]
     },
     "main": {
-      "enableArtifact": false
+      "enableArtifact": false,
+      "deniedMcpServers": [
+        {
+          "serverName": "rea"
+        },
+        {
+          "serverName": "Amplitude"
+        },
+        {
+          "serverName": "notion-token"
+        },
+        {
+          "serverName": "obsidian"
+        },
+        {
+          "serverName": "plugin:figma:figma"
+        },
+        {
+          "serverName": "plugin:discord:discord"
+        },
+        {
+          "serverName": "honeycomb"
+        },
+        {
+          "serverName": "plugin:stripe:stripe"
+        },
+        {
+          "serverName": "plugin:core:munice"
+        }
+      ],
+      "enabledPlugins": {
+        "taste-skill@taste-skill": false,
+        "core-skills@hyperframes": false,
+        "watch@claude-video": false,
+        "ralph-loop@claude-plugins-official": false,
+        "skill-creator@claude-plugins-official": false,
+        "stripe@anthropic-plugin-directory": false
+      },
+      "skillOverrides": {
+        "closing-household-ledger": "off",
+        "hiring-panel": "off",
+        "asciinema-subtitles": "off",
+        "article-summary": "off",
+        "reverse-engineer-anything": "off",
+        "stripe-projects": "off",
+        "stripe-best-practices": "off",
+        "upgrade-stripe": "off",
+        "hyperframes": "off",
+        "hyperframes-cli": "off",
+        "hyperframes-registry": "off",
+        "media-use": "off",
+        "chrome-browser": "off",
+        "computer-use": "off",
+        "built-in-browser": "off",
+        "google-workspace": "off",
+        "docs": "off",
+        "deep-research": "off",
+        "morning": "off",
+        "import-memory": "off",
+        "keybindings-help": "off",
+        "fewer-permission-prompts": "off",
+        "schedule": "off",
+        "docx": "off",
+        "pdf": "off",
+        "pptx": "off",
+        "xlsx": "off",
+        "code-review": "off",
+        "claude-api": "off",
+        "update-config": "off",
+        "run": "off",
+        "loop": "off",
+        "init": "off"
+      }
     }
   }
 }
