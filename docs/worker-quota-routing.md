@@ -88,7 +88,7 @@ Claude 상태줄은 공식 `rate_limits` 입력을 현재 계정과 기기에 �
 Codex 사용량이 부족하고 Claude에 여유가 있을 때 `agent-runner claude`로 켠다.
 
 - 작업 세션(`--kind auto`)은 Claude의 측정 사용량이 여유분(주간 80%, 5시간 창이 있으면 80%) 안이면 Claude로 열린다. 여유분을 넘기거나 측정이 오래됐으면 Codex로 돌아가고, Codex도 여유분을 넘기면 시작을 거부한다.
-- 확인 세션(`--check`, 자동 확인 포함)도 같은 순서로 고른다. 확인 세션은 사용량 때문에 열리지 않는 일이 없다. 측정값이 없거나 선택이 거부되면 이전처럼 Codex로 연다.
+- 확인 세션(`--check`, 자동 확인 포함)은 이 정책을 따르지 않고 늘 Claude로 연다. 사용량을 조회하지 않으므로 사용량 때문에 열리지 않는 일도 없다. `--check --kind codex`는 거절한다(요유 2026-11-19, Codex 리뷰를 받지 않기로 함. 그날 자동 확인이 Codex로 열린 것은 사용량 조회가 6초를 넘겨서였다).
 - Claude 확인 세션도 대상 폴더를 쓰지 못한다. `CLAUDE_CHECK_TARGET`을 넘기고 `claude-online`의 Seatbelt가 막는다. `pane-spawn-quota.test.sh`가 환경변수 전달을, `claude-online.test.sh`가 쓰기 거부를 확인한다.
 - `--kind codex`로 명시한 확인, `--` 뒤 실행기 인자, `ambient-runner`는 Codex를 유지한다.
 - 메인 세션의 `--why` 규칙(api#1036)은 `--kind claude`나 `--kind` 생략에만 걸린다. `--kind auto`는 `--why` 없이 정책을 따른다.

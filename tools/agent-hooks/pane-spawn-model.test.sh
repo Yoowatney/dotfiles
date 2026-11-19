@@ -61,7 +61,7 @@ has "--env CLAUDE_STARTUP_SKILLS=1" "a main-pane work pane can opt back in"
 model_cases=$((model_cases + 1))
 model_case claude-sonnet-5-5 high --check --kind claude "Model defaults" "Run the task"
 model_case claude-sonnet-5-5 high --opus --check --kind claude "Model defaults" "Run the task"
-model_case '' '' --check "Model defaults" "Run the task"
+model_case claude-sonnet-5-5 high --check "Model defaults" "Run the task"
 model_case '' '' --kind codex "Model defaults" "Run the task"
 model_case '' '' --kind codex --opus "Model defaults" "Run the task"
 model_case '' '' --kind auto "Model defaults" "Run the task"

@@ -19,9 +19,8 @@ for percent in 0 69 70 71 99 100; do
   for window in primary secondary; do
     usage "$percent" 3600 "$([ "$window" != secondary ] || echo secondary)"
     ps --check "로그인" "돌려 보세요" 2>"$SANDBOX/err" >/dev/null
-    has "--kind codex" "$percent ($window): a Codex check pane"
-    has "--sandbox workspace-write --ask-for-approval never" "$percent ($window): check restrictions remain"
-    hasnt "--kind claude" "$percent ($window): no automatic Claude fallback"
+    has "--kind claude" "$percent ($window): a check is Claude whatever the usage (요유 2026-11-19)"
+    hasnt "--kind codex" "$percent ($window): no Codex check"
     SESSIONLESS=1 ps --kind auto "구현" "지시" 2>"$SANDBOX/err" >/dev/null
     has "--kind codex" "$percent ($window): an auto work pane runs Codex"
     hasnt "--sandbox workspace-write" "a work pane is no check pane"
@@ -30,18 +29,18 @@ for percent in 0 69 70 71 99 100; do
   done
 done
 usage 100 -60
-ps --check "로그인" "돌려 보세요" >/dev/null
+SESSIONLESS=1 ps --kind auto "구현" "지시" >/dev/null
 has "--kind codex" "a reset week still runs Codex"
 usage 100 3600; echo '{"type":"event_msg","payload":{"type":"token_count","rate_limits":null}}' >> "$SANDBOX/home/.codex/sessions/2026/11/05/rollout-a.jsonl"
 mkdir -p "$SANDBOX/home/.codex/sessions/2026/11/06"; echo '{"type":"session_meta","payload":{}}' > "$SANDBOX/home/.codex/sessions/2026/11/06/rollout-b.jsonl"
 touch -t "$(date -v-1H +%Y%m%d%H%M)" "$SANDBOX/home/.codex/sessions/2026/11/05/rollout-a.jsonl"
-ps --check "로그인" "돌려 보세요" >/dev/null
+SESSIONLESS=1 ps --kind auto "구현" "지시" >/dev/null
 has "--kind codex" "stale recorded exhaustion does not prove a current block"
 echo 'not JSON' > "$SANDBOX/home/.codex/sessions/2026/11/06/rollout-b.jsonl"
 SESSIONLESS=1 ps --kind auto "구현" "지시" >/dev/null
 has "--kind codex" "unreadable usage does not select Claude"
 rm -rf "$SANDBOX/home/.codex/sessions"
-ps --check "로그인" "돌려 보세요" >/dev/null
+SESSIONLESS=1 ps --kind auto "구현" "지시" >/dev/null
 has "--kind codex" "missing usage does not select Claude"
 
 # Startup failures are not proof of exhausted quota. Do not silently start another agent or send the job twice.
@@ -54,7 +53,7 @@ has "pane close w1:new" "a failed start removes its empty pane"
 hasnt "agent prompt" "a failed start delivers no job"
 grep -q "codex start was not confirmed; command was not resent" "$SANDBOX/err" || fail "reports the startup error"
 rc=0
-BLOCKED_START=1 SCREEN='You have hit your usage limit' ps --check "막힘" "지시" 2>"$SANDBOX/err" >/dev/null || rc=$?
+BLOCKED_START=1 SCREEN='You have hit your usage limit' ps --kind auto "막힘" "지시" 2>"$SANDBOX/err" >/dev/null || rc=$?
 [ "$rc" = 1 ] || fail "an unstructured dialog must fail, got $rc"
 hasnt "--kind claude" "dialog text alone cannot prove a current quota block"
 grep -qF 'You have hit your usage limit' "$SANDBOX/err" || fail "reports the actual dialog"
@@ -82,23 +81,22 @@ hasnt "--kind claude" "ambiguous delivery never starts a duplicate Claude job"
 hasnt "pane close" "an accepted job may still be running"
 [ "$(grep -c 'agent prompt w1:new 지시' "$SANDBOX/log")" = 1 ] || fail "auto delivers only once"
 usage 71 3600
-ps --check --kind codex "로그인" "돌려 보세요" >/dev/null
-has "--kind codex" "a kind the caller names wins"
+if ps --check --kind codex "로그인" "돌려 보세요" >/dev/null 2>&1; then fail "a Codex check is refused (요유 2026-11-19)"; fi
 # Automatic checks may be safely restarted only after the failed pane is closed.
 receipt="$SANDBOX/check-receipt.json"
-PANE_SPAWN_CHECK_RECEIPT="$receipt" ps --check --kind codex "receipt" "instruction" >/dev/null
+PANE_SPAWN_CHECK_RECEIPT="$receipt" ps --check "receipt" "instruction" >/dev/null
 [ "$(jq -r .status "$receipt")" = started ] || fail "confirmed work records a started receipt"
-if PANE_SPAWN_CHECK_RECEIPT="$receipt" EXIT_START=1 ps --check --kind codex "receipt failure" "instruction" >/dev/null 2>&1; then fail "failed check must exit nonzero"; fi
+if PANE_SPAWN_CHECK_RECEIPT="$receipt" EXIT_START=1 ps --check "receipt failure" "instruction" >/dev/null 2>&1; then fail "failed check must exit nonzero"; fi
 [ "$(jq -r .status "$receipt")" = closed ] || [ "$(jq -r .status "$receipt")" = not-opened ] || fail "failed startup leaves cleanup evidence"
-if PANE_SPAWN_CHECK_RECEIPT="$receipt" WAIT_STATUS=blocked ps --check --kind codex "receipt blocked" "instruction" >/dev/null 2>&1; then fail "blocked check must fail"; fi
+if PANE_SPAWN_CHECK_RECEIPT="$receipt" WAIT_STATUS=blocked ps --check "receipt blocked" "instruction" >/dev/null 2>&1; then fail "blocked check must fail"; fi
 has "pane close w1:new" "opt-in read-only check cleanup precedes retry after ambiguous delivery"
 [ "$(jq -r .status "$receipt")" = closed ] || fail "ambiguous check delivery has a confirmed cancellation receipt"
-if PANE_SPAWN_CHECK_RECEIPT="$receipt" FAIL_WORKERS_TAB=1 ps --check --kind codex "missing creation response" "instruction" >/dev/null 2>&1; then fail "missing creation response must fail"; fi
+if PANE_SPAWN_CHECK_RECEIPT="$receipt" FAIL_WORKERS_TAB=1 ps --check "missing creation response" "instruction" >/dev/null 2>&1; then fail "missing creation response must fail"; fi
 [ "$(jq -r .status "$receipt")" = creating ] || fail "missing creation response must remain uncertain"
 hasnt "pane close" "an unknown created address cannot be guessed for cleanup"
 workers_up false
 rm -f "$receipt"
-if PANE_SPAWN_CHECK_RECEIPT="$receipt" ps --check --kind codex "workers down" "instruction" >/dev/null 2>&1; then fail "unavailable workers must fail"; fi
+if PANE_SPAWN_CHECK_RECEIPT="$receipt" ps --check "workers down" "instruction" >/dev/null 2>&1; then fail "unavailable workers must fail"; fi
 [ ! -e "$receipt" ] || fail "failure before launcher setup creates no receipt"
 workers_up
 ps --why skill "조사" "지시" >/dev/null

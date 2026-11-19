@@ -43,7 +43,7 @@ is_main
 ps --kind auto "quota" "instruction" >/dev/null 2>"$SANDBOX/err"
 has "--kind claude" "the main pane's auto Claude choice needs no explicit --why"
 ps --check "quota" "instruction" >/dev/null
-has "--kind codex" "checks ignore normal worker routing"
+has "--kind claude" "checks ignore normal worker routing: always Claude"
 not_main
 for args in '--model=gpt-example' '--effort=high' '-m gpt-example' '-c model_reasoning_effort=xhigh' '-c model="gpt-example"'; do
   # Intentional splitting of this fixed list simulates the original argument tokens.
@@ -89,11 +89,9 @@ has "--model claude-sonnet-5-5 --effort high" "claude-first: a Claude check keep
 hasnt "--sandbox" "claude-first: no Codex sandbox flags reach a Claude check"
 ps --check --kind auto "first" "instruction" >/dev/null 2>"$SANDBOX/err"
 has "--env CLAUDE_CHECK_TARGET=$PWD" "claude-first: an explicit --kind auto check is Claude too"
-ps --check --kind codex "first" "instruction" >/dev/null 2>"$SANDBOX/err"
-has "--kind codex" "claude-first: an explicit --kind codex check stays Codex"
-hasnt "CLAUDE_CHECK_TARGET" "claude-first: an explicit Codex check has no Claude target"
+if ps --check --kind codex "first" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "an explicit --kind codex check is refused"; fi
 ps --check "first" "instruction" -- --model x >/dev/null 2>"$SANDBOX/err"
-has "--kind codex" "claude-first: forwarded Codex arguments keep a check on Codex"
+has "--kind claude" "forwarded arguments go to a Claude check"
 quota_fixture 10 85 true
 not_main
 ps --kind auto "over" "instruction" >/dev/null 2>"$SANDBOX/err"
@@ -101,30 +99,27 @@ has "--kind codex" "claude-first: Claude past its reserve returns to Codex"
 grep -q 'reserve' "$SANDBOX/err" || fail "the fallback names its reason"
 is_main
 ps --check "over" "instruction" >/dev/null 2>"$SANDBOX/err"
-has "--kind codex" "claude-first: a check returns to Codex past the Claude reserve"
-hasnt "CLAUDE_CHECK_TARGET" "claude-first: a Codex check has no Claude target"
+has "--kind claude" "a check stays Claude past the Claude reserve (요유 2026-11-19: no Codex reviews)"
 rm -f "$SANDBOX/home/.local/state/agent-quota/claude.json"
 quota_fixture 99 90 true
 if ps --kind auto "none" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "claude-first refuses when neither runner has room"; fi
 [ ! -e "$SANDBOX/log" ] || fail "claude-first refusal opens no work pane"
-ps --check "none" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "a check with no quota data still opens (Codex, as before)"
-has "--kind codex" "claude-first: a check never refuses for quota"
+ps --check "none" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "a check with no quota data still opens"
+has "--kind claude" "a check never refuses for quota and stays Claude"
 rm -rf "$SANDBOX/home/.codex/sessions" "$SANDBOX/home/.local/state/agent-quota/claude.json"
 ps --check "unknown" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "a check with unknown usage still opens"
-has "--kind codex" "claude-first: unknown usage keeps a check on Codex"
+has "--kind claude" "unknown usage keeps a check on Claude"
 # api#1296: an automatic check's receipt names the runner actually opened and why, for each policy.
 quota_fixture 10 40 true
 receipt="$SANDBOX/runner-receipt.json"
 PANE_SPAWN_CHECK_RECEIPT="$receipt" ps --check "first" "instruction" >/dev/null 2>"$SANDBOX/err"
 [ "$(jq -r .runner "$receipt")" = claude ] || fail "claude-first: the receipt records Claude"
-[ "$(jq -r .runner_reason "$receipt")" = "claude first: within reserve" ] || fail "claude-first: the receipt records why"
+[ "$(jq -r .runner_reason "$receipt")" = "checks open only on Claude" ] || fail "claude-first: the receipt records why"
 echo codex-only > "$SANDBOX/home/.local/state/agent-quota/policy"
 PANE_SPAWN_CHECK_RECEIPT="$receipt" ps --check "first" "instruction" >/dev/null 2>"$SANDBOX/err"
-[ "$(jq -r .runner "$receipt")" = codex ] || fail "codex policy: the receipt records Codex"
-[ -n "$(jq -r '.runner_reason // empty' "$receipt")" ] || fail "codex policy: the receipt records why"
+[ "$(jq -r .runner "$receipt")" = claude ] || fail "codex policy: the receipt records Claude too"
+[ "$(jq -r .runner_reason "$receipt")" = "checks open only on Claude" ] || fail "codex policy: the receipt records why"
 echo claude-first > "$SANDBOX/home/.local/state/agent-quota/policy"
-PANE_SPAWN_CHECK_RECEIPT="$receipt" ps --check --kind codex "first" "instruction" >/dev/null 2>"$SANDBOX/err"
-[ "$(jq -r .runner_reason "$receipt")" = "requested --kind codex" ] || fail "an explicit kind is recorded as requested"
 not_main
 echo quota-aware > "$SANDBOX/home/.local/state/agent-quota/policy"
 quota_fixture 10 40 true
@@ -132,7 +127,7 @@ if ps --kind auto "paid" "instruction" >/dev/null 2>"$SANDBOX/err"; then :; fi
 hasnt "--kind claude" "quota-aware still excludes a paid-extra Claude account"
 is_main
 ps --check "legacy" "instruction" >/dev/null 2>"$SANDBOX/err"
-has "--kind codex" "quota-aware checks stay on Codex"
+has "--kind claude" "quota-aware checks are Claude too"
 not_main
 
 # Each regression runs independently so one broken contract does not hide the rest.
