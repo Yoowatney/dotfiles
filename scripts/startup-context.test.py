@@ -45,8 +45,16 @@ class StartupContextTest(unittest.TestCase):
                              'unchanged settings must reuse their file')
             return json.loads(settings_path.read_text())
 
+    def test_main_also_denies_the_servers_it_only_delegates(self):
+        settings = self.launch_settings('main')
+        self.assertEqual({s['serverName'] for s in settings['deniedMcpServers']},
+                         {'rea', 'Amplitude', 'notion-token', 'obsidian', 'plugin:figma:figma',
+                          'plugin:discord:discord', 'honeycomb', 'plugin:stripe:stripe', 'plugin:core:munice'})
+        self.assertEqual(settings['skillOverrides'].get('hiring-panel'), 'off')
+        self.assertNotIn('main-orchestrator', settings['skillOverrides'])
+
     def test_general_roles_exclude_six_connections_without_overriding_safety_hooks(self):
-        for role in ('main', 'general', 'check'):
+        for role in ('general', 'check'):
             with self.subTest(role=role):
                 settings = self.launch_settings(role)
                 self.assertLessEqual(settings['skillListingBudgetFraction'], .0015)

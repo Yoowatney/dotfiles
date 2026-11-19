@@ -61,7 +61,9 @@ jq -e '.enabledPlugins as $p | ["superpowers@claude-plugins-official","commit-co
 # pane-spawn --skills opts back in: only the api#1066 cut returns; every earlier cut and the rest of the worker profile stay.
 skills_in=$(cd "$box/home/work/munice/sub" && ROLE=worker SKILLS=1 run)
 jq -e '(.enabledPlugins | has("taste-skill@taste-skill") | not) and (.skillOverrides | has("docx") or has("claude-api") | not) and .skillOverrides["hiring-panel"] == "off" and .enabledPlugins["core-skills@hyperframes"] == false and .enableArtifact == false and (has("dietSkills") | not) and (.claudeMdExcludes | length) == 2' <<<"$(settings_json <<<"$skills_in")" >/dev/null || fail '--skills brings back only the api#1066 cut'
-jq -e '(has("dietSkills") | not) and (.skillOverrides // {} | has("docx") | not) and (.enabledPlugins // {} | has("taste-skill@taste-skill") | not)' <<<"$(cd "$box/home/work/munice/sub" && ROLE=main run | settings_json)" >/dev/null || fail 'the main pane keeps every skill'
+main_json=$(cd "$box/home/work/munice/sub" && ROLE=main run | settings_json)
+# The main pane only hands work out (api#1370): it drops unused plugins, skills and MCP servers, but keeps its own skill and the dev process skills.
+jq -e '(has("dietSkills") | not) and .skillOverrides["hiring-panel"] == "off" and (.skillOverrides | has("main-orchestrator") | not) and .enabledPlugins["taste-skill@taste-skill"] == false and (.enabledPlugins | has("superpowers@claude-plugins-official") | not) and (.deniedMcpServers | index({serverName: "honeycomb"}))' <<<"$main_json" >/dev/null || fail 'the main pane drops what it never calls and keeps the rest'
 # Deny rules merge with every other source, so they only narrow; nothing here may allow, ask or change the mode.
 jq -e '(.permissions | keys) == ["deny"] and (.permissions.deny | index("AskUserQuestion"))' <<<"$settings" >/dev/null || fail 'worker permissions only deny: a pane never asks 요유'
 jq -e '.enabledPlugins["core-skills@hyperframes"] == false and (.deniedMcpServers | index({serverName: "rea"})) and .env.ENABLE_CLAUDEAI_MCP_SERVERS == "false" and .skillOverrides["hiring-panel"] == "off" and (has("paneRules") | not)' <<<"$settings" >/dev/null || fail 'worker drops unused plugins, MCP servers, claude.ai connectors and skills'
@@ -101,7 +103,7 @@ rm -f "$record"; (cd "$box/home/work/munice/sub" && ROLE=worker run >/dev/null)
 out=$(cd "$box/home/work/munice/sub" && ROLE=main run)
 [ -n "$(sed -n 1p "$record")" ] && [ "$(sed -n 2p "$record")" = "$box/home/work/munice/sub" ] || fail 'the main pane records its start and folder'
 ! startup changed || fail 'what the main pane just started with counts as changed'
-jq -e '.enableArtifact == false and .enableWorkflows == false and (has("claudeMdExcludes") | not) and (.deniedMcpServers | length) == 6 and .skillListingBudgetFraction == 0.0015 and (has("bashOutputMaxChars") | not)' <<<"$(settings_json <<<"$out")" >/dev/null || fail 'main profile changed'
+jq -e '.enableArtifact == false and .enableWorkflows == false and (has("claudeMdExcludes") | not) and (.deniedMcpServers | length) == 9 and .skillListingBudgetFraction == 0.0015 and (has("bashOutputMaxChars") | not)' <<<"$(settings_json <<<"$out")" >/dev/null || fail 'main profile changed'
 ! grep -qx -- --append-system-prompt-file <<<"$out" || fail 'main pane gets filtered rules'
 printf 'term_test\n' >"$box/state/orchestrator/main"
 rm "$record"
