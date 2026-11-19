@@ -174,6 +174,26 @@ class RoutingTests(unittest.TestCase):
         (self.q.state_dir() / "claude.json").unlink()
         self.assertEqual(self.select("claude-first")["kind"], "codex")
 
+    def test_claude_reserve_for_checks(self):
+        # pane-spawn --check opens no check only for a measured reading past the reserve (exit 3); unknown is exit 1.
+        def run():
+            with patch.object(sys, "argv", [str(SCRIPT), "claude-reserve", str(self.home)]), patch.object(self.q.time, "time", return_value=self.now), patch("sys.stdout", new_callable=io.StringIO) as output:
+                code = self.q.main()
+            return code, json.loads(output.getvalue())
+        self.capture(50, tick=101)
+        self.assertEqual(run()[0], 0)
+        self.capture(80.5, tick=102)
+        code, result = run()
+        self.assertEqual((code, result["reason"], result["week"]), (3, "reserve reached", 80.5))
+        self.capture(50, short=80, tick=103)
+        self.assertEqual(run()[0], 3, "the five-hour reserve counts too")
+        self.claude_extra(True)
+        self.assertEqual(run()[0], 3, "a paid-extra account keeps the reserve")
+        (self.q.state_dir() / "claude.json").unlink()
+        code, result = run()
+        self.assertEqual((code, result["eligible"]), (1, False), "no reading is unknown, never past the reserve")
+        self.assertNotEqual(result["reason"], "reserve reached")
+
     def test_claude_first_without_a_five_hour_window(self):
         # Claude Code reports no five-hour window when none is active.
         snap = self.q.read_json(self.q.state_dir() / "claude.json")

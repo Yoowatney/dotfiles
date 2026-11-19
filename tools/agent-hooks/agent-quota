@@ -340,6 +340,12 @@ def main():
         record_decision(result, now)
         print(json.dumps(result, allow_nan=False))
         return 0 if result["kind"] else 1
+    if command == "claude-reserve":
+        # pane-spawn --check (lead decision 2026-11-19): only a measured Claude reading past the reserve, which keeps room
+        # for the main pane on the same account, stops a check (exit 3). An unknown reading (exit 1) opens it on Claude.
+        result = claude_quota(now, Path(sys.argv[2] if len(sys.argv) == 3 else Path.cwd()).resolve(), first=True)
+        print(json.dumps(result, allow_nan=False))
+        return 0 if result["eligible"] else 3 if result["reason"] == "reserve reached" else 1
     if command == "codex-week":
         # The display wrapper supplies its clock, also used by its reset wording.
         if len(sys.argv) == 3:
@@ -355,7 +361,7 @@ def main():
                         print(f"{0 if reset <= now else used:g}\t{int(reset)}\t{int(at)}")
                         return 0
         return 1
-    print("usage: agent-quota select|capture-claude|codex-week", file=sys.stderr)
+    print("usage: agent-quota select|capture-claude|claude-reserve|codex-week", file=sys.stderr)
     return 2
 
 
