@@ -1267,6 +1267,11 @@ class RelayTests(unittest.TestCase):
         self.assertIn("workers unavailable", message)
         self.assertEqual(self.main_blocks(message), auto.share.DELEGATE_REASON)
 
+    def test_job_note_leaves_decisions_on_the_board_not_in_a_collected_list(self):
+        # 요유 2026-11-19: no decision list is kept or shown any more; the board and the work thread carry the question once.
+        self.assertNotIn("모아 둔 결정", auto.share.JOB_NOTE)
+        self.assertIn("보드", auto.share.JOB_NOTE)
+
     def test_deliverable_from_a_waiting_job_tab_asks_for_a_check(self):
         self.env["MUNICE_AUTO_DISPATCH"] = "1"
         self.finish(self.DRAFT)

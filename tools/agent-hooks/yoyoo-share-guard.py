@@ -165,7 +165,7 @@ PRECHECK_REASON = ("yoyoo-share-guard: 확인 전 보고를 받은 뒤 쓰는 �
 # done, so it asks for no check pane: this head stays out of RELAYED, and it keeps the main pane's turn short, since 요유's next
 # words wait behind it. Nothing can be typed into that pane, and it has closed by then, so the board and a new pane carry the rest.
 JOB_NOTE = ("자동 칸이 요유의 결정이나 손을 기다립니다. 결과 보고가 아니니 확인 칸을 열지 마세요. 질문은 그 칸의 보드 항목에도 있습니다. "
-            "바로 처리할 일이 아니면 모아 둔 결정에 더하고 턴을 짧게 끝내세요. 그 칸은 입력을 받지 않으니 이어 갈 일은 새 칸에 맡기고, "
+            "바로 처리할 일이 아니면 그 일의 보드 항목에 남기고 그 스레드에서 한 번만 묻고 턴을 짧게 끝내세요. 그 칸은 입력을 받지 않으니 이어 갈 일은 새 칸에 맡기고, "
             "production 단계는 메인 칸에서 직접 하세요")
 CHECK_AGENT = re.compile(r"^spawn-[0-9A-Za-z]+-chk")  # pane-spawn --check's agent name, which a pane rename does not change
 BY_CHECK_PANE = re.compile(r"확인[ \t]*(?:칸|세션)")  # 세션 is the main pane skill's own word for it
