@@ -52,6 +52,15 @@ g checkout -q feat >/dev/null
 out=$(g merge --no-edit main); rc=$?
 check "a merge commit on a branch is allowed" "$rc" 0
 
+# a tag named main makes `symbolic-ref --short` answer heads/main: the guard must still see the branch
+g checkout -q main >/dev/null
+git -C "$W" tag main feat
+put f 6; g add f >/dev/null
+out=$(g commit -m "tag named main"); rc=$?
+check "a commit on main is refused even with a tag named main" "$([ "$rc" != 0 ] && echo refused)" refused
+git -C "$W" tag -d main >/dev/null
+g checkout -q feat >/dev/null
+
 g checkout -q --detach >/dev/null
 put e 5; g add e >/dev/null
 out=$(g commit -m "detached"); rc=$?

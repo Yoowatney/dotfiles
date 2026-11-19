@@ -5,7 +5,7 @@
 # fails, and the portable Mac's sync broke on 2026-11-19 (31 such merge commits, one duplicated commit).
 # Same setup and limit as pre-push: core.hooksPath is per clone, and `--no-verify` skips it (agents are refused that by
 # the shared Bash hook). A detached HEAD or any other branch passes.
-branch=$(git symbolic-ref -q --short HEAD) || exit 0
-[ "$branch" = main ] || exit 0
+# Not --short: a tag named main would make that answer heads/main.
+[ "$(git symbolic-ref -q HEAD)" = refs/heads/main ] || exit 0
 echo "refused: main takes changes only through a PR (branch, push, PR, then git pull --ff-only). Switch to a branch first." >&2
 exit 1
