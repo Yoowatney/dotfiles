@@ -279,6 +279,17 @@ class SlackRelayTest(unittest.TestCase):
                 self.assertEqual(bool(self.check(post, seen)), denied)
                 self.assertEqual(seen, [])
 
+    def test_a_slack_relay_stands_on_its_own_post_not_on_links_in_its_words(self):
+        old = self.link().replace(self.stamp.replace('.', '')[-6:], '000001')
+        seen = []
+        self.record('이건 어디에서 봐?', extra=[self.relay(body='이 글 처리됐어? ' + old)])
+        self.assertIsNone(self.check([ASK], seen))
+        self.assertEqual(seen, [(MAIN, self.stamp)])
+        reply = "[Slack #0-yoyooyo 요유] 답글 %s (글 %s/%s, 스레드 %s: '원글 %s')" % (old, MAIN, self.stamp, '1795077000.000100', old)
+        call = '[Slack 스레드 요유 부름] #dev %s (스레드 %s/%s, 글 %s/%s) 요유 글: 해줘 %s' % (old, MAIN, '1795077000.000100', MAIN, self.stamp, old)
+        self.assertEqual(PAGE.places(reply), [(MAIN, self.stamp)])
+        self.assertEqual(PAGE.places(call), [(MAIN, self.stamp)])
+
     def test_a_report_that_links_a_bot_post_does_not_erase_the_earlier_request(self):
         later = '%.6f' % (time.time() - 30)
         report = self.told('https://example.slack.com/archives/%s/p%s' % (MAIN, later.replace('.', '')))

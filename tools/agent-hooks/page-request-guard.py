@@ -33,7 +33,17 @@ WINDOW = 6 * 3600  # from the post; ponytail: a longer job whose page comes late
 READ_SECONDS = 4  # the hook has 10 s and a late answer would let the write through
 
 
+ID, STAMP = r'[CDG][A-Z0-9]{6,}', r'\d{10}\.\d{6}'
+OWN = (re.compile(r'\(ts %s, 글 (%s)/(%s)\)\s*$' % (STAMP, ID, STAMP)),  # a post (#0 or DM)
+       re.compile(r"\(글 (%s)/(%s), 스레드 [^\n]*\)\s*$" % (ID, STAMP)),  # a thread reply
+       re.compile(r'\(스레드 %s/%s, 글 (%s)/(%s)\) 요유 글:' % (ID, STAMP, ID, STAMP)))  # a thread call
+
+
 def places(text: str) -> list:
+    """Where the Slack posts a relay stands on are. A Slack relay stands on its own post only: its body is 요유's words and may
+    link older posts. A pane-tell stands on every link it names."""
+    if text.startswith('[Slack'):
+        return next(([(m[1], m[2])] for m in (shape.search(text) for shape in OWN) if m), [])
     found = [(m[1] or m[3], m[2] or '%s.%s' % (m[4], m[5])) for m in PLACE.finditer(text)]
     return list(dict.fromkeys(found))[:5]
 
