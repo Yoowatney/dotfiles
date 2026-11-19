@@ -239,6 +239,7 @@ echo ""
 echo "🔐 System Permissions Required"
 echo -e "  ${YELLOW}ℹ️${NC}  Grant in System Settings > Privacy & Security > Accessibility:"
 echo "      - Karabiner-Elements (Input Monitoring + Accessibility)"
+echo "      - Gureum (Input Monitoring: right Command switches 한/영)"
 echo "      - Hammerspoon"
 echo "      - Rectangle"
 

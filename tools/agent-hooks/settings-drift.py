@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 
-COMMAND = 'scutil --get ComputerName; bash ~/.dotfiles/verify.sh'
+COMMAND = '/usr/sbin/scutil --get ComputerName; bash ~/.dotfiles/verify.sh'  # the launchd PATH has no /usr/sbin
 HOST_FILES = ('.config/herdr/remote-host', '.config/munice/portable-host')
 STALE_SECONDS = 7 * 86400
 RUN_FAILED = '점검 실행 실패'

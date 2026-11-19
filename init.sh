@@ -625,6 +625,7 @@ show_secrets_guide() {
     echo -e "${GREEN}2. System Permissions${NC}"
     echo "   시스템 설정 > 개인정보 보호 및 보안 > 입력 모니터링:"
     echo "   - karabiner_grabber, karabiner_observer"
+    echo "   - 구름 (없으면 오른쪽 Command 한영 전환과 iTerm2 Caps Lock 영문 전환이 안 됨)"
     echo "   손쉬운 사용: Karabiner, Hammerspoon, Rectangle, Snap"
     echo ""
 

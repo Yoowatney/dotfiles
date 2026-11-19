@@ -68,9 +68,17 @@ func apply(_ want: [String]) -> Bool {
     enable(want)
     if !want.contains(current()), let first = want.first {
         // Right after enabling, TISSelectInputSource returns -50 (paramErr) for a few seconds.
+        var selected = false
         for _ in 0..<10 {
-            if let s = sources(includeAll: false).first(where: { sourceID($0) == first }), TISSelectInputSource(s) == noErr { break }
+            if let s = sources(includeAll: false).first(where: { sourceID($0) == first }), TISSelectInputSource(s) == noErr {
+                selected = true
+                break
+            }
             Thread.sleep(forTimeInterval: 0.5)
+        }
+        if !selected {
+            print("select failed \(first)")
+            return false
         }
     }
     return true
