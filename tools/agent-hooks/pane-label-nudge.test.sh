@@ -88,6 +88,10 @@ ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_LABEL="cf#543 미국 확장" FAKE_TERM=t
 [[ "$ctx" == *'pane-label "'* ]] || fail "other panes are nudged as before: $ctx"
 ctx=$(run_hook HERDR_PANE_ID=w1:p1 FAKE_LABEL="🟢 👑 메인 오케스트레이터" FAKE_TERM=term_M HOME="$SANDBOX/home" | context)
 [[ "$ctx" == *"lookups"* && "$ctx" == *"check"* ]] || fail "the main pane hears that lookups and checks go to panes too: $ctx"
+# 요유 2026-11-19 (#0-yoyooyo): no decision list at the end of an answer. What 요유 must decide stays on the board
+# and is asked once, in that work's thread. Both Claude and Codex run this hook, so open sessions drop the list at their next message.
+[[ "$ctx" != *"collected decisions"* && "$ctx" != *"end each answer"* ]] || fail "the main pane is never told to end answers with a decision list: $ctx"
+[[ "$ctx" == *"board"* && "$ctx" == *"thread"* && "$ctx" == *"never end an answer"* ]] || fail "the main pane keeps decisions on the board and asks once in the work thread: $ctx"
 
 # 요유 2026-11-05 (#0-yoyooyo token thread): pane-fit never refuses the main pane. Each refusal is one more model call over the
 # whole long session (240 that day); the main pane's line above carries the same guidance. A file left from before goes.
