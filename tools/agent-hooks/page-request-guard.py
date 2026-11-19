@@ -34,27 +34,32 @@ READ_SECONDS = 4  # the hook has 10 s and a late answer would let the write thro
 
 
 ID, STAMP = r'[CDG][A-Z0-9]{6,}', r'\d{10}\.\d{6}'
-OWN = (re.compile(r'\(ts %s, 글 (%s)/(%s)\)\s*$' % (STAMP, ID, STAMP)),  # a post (#0 or DM)
-       re.compile(r"^.*\(글 (%s)/(%s), 스레드 [^\n]*\)\s*$" % (ID, STAMP), re.S),  # a thread reply: the last such tail, not one quoted in its words
-       re.compile(r'\(스레드 %s/%s, 글 (%s)/(%s)\) 요유 글:' % (ID, STAMP, ID, STAMP)))  # a thread call
-
-
+CALL = '[Slack 스레드 요유 부름]'
+CALL_SHAPE = re.compile(r'\(스레드 %s/%s, 글 (%s)/(%s)\) 요유 글:' % (ID, STAMP, ID, STAMP))
+# The tails main-channel.py puts after 요유's words. Words and quoted parents are free text and may hold a look-alike, so
+# every candidate is a claim that slack_posts checks against the post itself.
+TAILS = (re.compile(r'(?=\(ts %s, 글 (%s)/(%s)\)\s*$)' % (STAMP, ID, STAMP)),
+         re.compile(r"(?=\(글 (%s)/(%s), 스레드 %s: '[^\n]*'\)\s*$)" % (ID, STAMP, STAMP)))
 MARK = re.compile(r'\[pane-tell: [^\n]*?확인하세요\]\s*')  # the mark pane-tell puts before every message it types
 
 
 def places(text: str) -> list:
-    """One list of Slack places per post a prompt names, oldest first. pane-tell may carry several messages in one prompt, and
-    one message several links; only the latest post Slack confirms counts.
-    A Slack relay stands on its own post only: its body is 요유's words and may link older posts. A pane-tell message
-    stands on every link it names."""
+    """One list of Slack places (channel, ts, claim) per post a prompt names, oldest first. pane-tell may carry several
+    messages in one prompt, and one message several links; only the latest post Slack confirms counts. A link claims nothing.
+    A Slack relay claims that its text before the tail is its label and the post's words."""
     groups = []
     for part in re.split(r'\n\n(?=\[pane-tell: )', PASTED.sub('', text, 1)):
         mark = MARK.match(part)
         body = part[mark.end():] if mark else part
-        if body.startswith('[Slack'):
-            found = next(([(m[1], m[2])] for m in (shape.search(body) for shape in OWN) if m), [])
+        if body.startswith('[Slack') and not body.startswith(CALL):
+            found = [(m[1], m[2], body[:m.start()].rstrip()) for shape in TAILS for m in shape.finditer(body)]
+            groups += [sorted(set(found), key=lambda place: place[1])] if found else []  # one relay: the candidates are one group
+            continue
+        if body.startswith(CALL):
+            m = CALL_SHAPE.search(body)
+            found = [(m[1], m[2], None)] if m else []
         elif mark:
-            found = [(m[1] or m[3], m[2] or '%s.%s' % (m[4], m[5])) for m in PLACE.finditer(body)]
+            found = [(m[1] or m[3], m[2] or '%s.%s' % (m[4], m[5]), None) for m in PLACE.finditer(body)]
         else:
             found = []
         groups += [[place] for place in sorted(set(found), key=lambda place: place[1])]  # one post each, the newest last
@@ -62,7 +67,7 @@ def places(text: str) -> list:
 
 
 def slack_posts(found: list, wait: float = READ_SECONDS) -> list:
-    """The words of the posts at `found` (channel, ts) that 요유 typed in the Slack app within WINDOW, as 요유 reads them.
+    """The words of the posts at `found` (channel, ts, claim) that 요유 typed in the Slack app within WINDOW, as 요유 reads them.
     Anything else, an unreadable Slack included, gives no words. slack_approval.py is the module the GCP guard trusts."""
     box = []
 
@@ -70,11 +75,15 @@ def slack_posts(found: list, wait: float = READ_SECONDS) -> list:
         try:
             module = load(SLACK)
             slack, now = module.slack_mod.Slack(), time.time()
-            for channel, ts in found:
+            for channel, ts, claim in found:
                 try:
                     m = module.read_one(slack, channel, ts)
                 except Exception:
                     continue  # one post the bot cannot read does not hide the others
+                # A look-alike tail inside the words or the quoted parent names a post whose words the relay does not start with.
+                # ponytail: a post edited after it was relayed fails this too, and an earlier typed request then stands.
+                if claim is not None and m and not claim.startswith(claim.split('] ', 1)[0] + '] ' + module.relay_body(dict(m, files=None))):
+                    continue  # (attachments add lines after the words, so the claim only has to start with them)
                 if (m and m.get('user') == module.YOYOO and not m.get('bot_id') and m.get('subtype') in (None, 'thread_broadcast')
                         and m.get('client_msg_id') and -module.SKEW <= now - float(m['ts']) <= WINDOW):
                     box.append(module.displayed(m.get('text') or ''))

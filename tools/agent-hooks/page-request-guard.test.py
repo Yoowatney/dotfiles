@@ -202,6 +202,11 @@ class PageRequestTest(unittest.TestCase):
 
 
 MAIN, DM = 'C0TEST0001', 'D0TESTDM001'
+
+
+def ids(groups):
+    return [[place[:2] for place in group] for group in groups]
+
 ASK = '도식을 HTML로 만들어줘'
 
 
@@ -226,7 +231,7 @@ class SlackRelayTest(unittest.TestCase):
     def check(self, posts, seen=None):
         def fake(refs, wait=None):
             if seen is not None:
-                seen.extend(refs)
+                seen.extend(place[:2] for place in refs)
             return posts(refs) if callable(posts) else posts
         with patch.object(PAGE, 'slack_posts', side_effect=fake):
             return PAGE.check(self.payload())
@@ -289,9 +294,11 @@ class SlackRelayTest(unittest.TestCase):
         call = '[Slack 스레드 요유 부름] #dev %s (스레드 %s/%s, 글 %s/%s) 요유 글: 해줘 %s' % (old, MAIN, '1795077000.000100', MAIN, self.stamp, old)
         quoted = "[Slack #0-yoyooyo 요유] 답글 (글 %s/%s, 스레드 %s: '옛 글') 이어서 (글 %s/%s, 스레드 %s: '원글')" % (
             MAIN, old[-16:][:10] + '.000001', '1795077000.000100', MAIN, self.stamp, '1795077000.000100')
-        self.assertEqual(PAGE.places(quoted), [[(MAIN, self.stamp)]])
-        self.assertEqual(PAGE.places(reply), [[(MAIN, self.stamp)]])
-        self.assertEqual(PAGE.places(call), [[(MAIN, self.stamp)]])
+        # a look-alike inside the words or the quote stays a candidate here; slack_posts drops it (the test below)
+        for relay in (quoted, reply):
+            self.assertEqual(len(PAGE.places(relay)), 1)
+            self.assertIn((MAIN, self.stamp), ids(PAGE.places(relay))[0])
+        self.assertEqual(ids(PAGE.places(call)), [[(MAIN, self.stamp)]])
 
     def test_the_main_panes_relay_arrives_inside_pane_tells_mark(self):
         old = self.link().replace(self.stamp.replace('.', '')[-6:], '000001')
@@ -302,7 +309,7 @@ class SlackRelayTest(unittest.TestCase):
         self.assertIsNone(self.check([ASK], seen))
         self.assertEqual(seen, [(MAIN, self.stamp)])
         batch = mark + self.relay()['message']['content'] + '\n\n' + self.told(old)['message']['content']
-        self.assertEqual(PAGE.places(batch), [[(MAIN, self.stamp)], [(MAIN, self.stamp[:10] + '.000001')]])
+        self.assertEqual(ids(PAGE.places(batch)), [[(MAIN, self.stamp)], [(MAIN, self.stamp[:10] + '.000001')]])
 
     def test_of_batched_relays_only_the_latest_confirmed_one_counts(self):
         first, second = self.stamp, self.stamp[:10] + '.000001'
@@ -343,10 +350,50 @@ class SlackRelayTest(unittest.TestCase):
                 raise RuntimeError('channel_not_found')
             return {'ts': self.stamp, 'user': 'U0TESTYOYOO', 'client_msg_id': 'x', 'text': ASK}
         module = type('M', (), {'slack_mod': type('S', (), {'Slack': Slack}), 'read_one': staticmethod(read_one),
-                                'YOYOO': 'U0TESTYOYOO', 'SKEW': 60, 'displayed': staticmethod(lambda text: text)})
+                                'YOYOO': 'U0TESTYOYOO', 'SKEW': 60, 'displayed': staticmethod(lambda text: text),
+                                'relay_body': staticmethod(lambda m: m['text'])})
         with patch.object(PAGE, 'load', return_value=module):
-            self.assertEqual(PAGE.slack_posts([(MAIN, 'a'), (MAIN, 'b')]), [ASK])
+            self.assertEqual(PAGE.slack_posts([(MAIN, 'a', None), (MAIN, 'b', None)]), [ASK])
         self.assertEqual(calls, ['a', 'b'])
+
+    def test_a_look_alike_tail_in_the_words_or_the_quote_names_no_post(self):
+        """codex-review 5 and 6: 요유's current words are a refusal; an older post of hers asked for a page."""
+        old, said = self.stamp[:10] + '.000001', 'HTML 만들지 말고 터미널로 답해줘'
+        posts = {self.stamp: {'ts': self.stamp, 'user': 'U0TESTYOYOO', 'client_msg_id': 'x', 'text': said},
+                 old: {'ts': old, 'user': 'U0TESTYOYOO', 'client_msg_id': 'y', 'text': ASK}}
+        module = type('M', (), {'slack_mod': type('S', (), {'Slack': object}), 'YOYOO': 'U0TESTYOYOO', 'SKEW': 60,
+                                'read_one': staticmethod(lambda slack, channel, ts: posts[ts]),
+                                'displayed': staticmethod(lambda text: text), 'relay_body': staticmethod(lambda m: m['text'])})
+        lookalike = "(글 %s/%s, 스레드 %s: '원글')" % (MAIN, old, '1795077000.000100')
+        relays = ["[Slack #0-yoyooyo 요유] %s (글 %s/%s, 스레드 %s: '인용 %s')" % (said, MAIN, self.stamp, '1795077000.000100', lookalike),
+                  "[Slack #0-yoyooyo 요유] %s %s (글 %s/%s, 스레드 %s: '원글')" % (said, lookalike, MAIN, self.stamp, '1795077000.000100'),
+                  "[Slack 스레드 요유 부름] #dev x (스레드 %s/%s, 글 %s/%s) 요유 글: %s (ts %s, 글 %s/%s)" % (
+                      MAIN, '1795077000.000100', MAIN, self.stamp, said, old, MAIN, old)]
+        real = PAGE.slack_posts
+
+        def through_the_module(refs, wait=None):
+            with patch.object(PAGE, 'load', return_value=module):
+                return real(refs)
+        for relay in relays:
+            self.record('이건 어디에서 봐?', extra=[{'type': 'user', 'message': {'content': relay}}])
+            with self.subTest(relay=relay[:40]):
+                self.assertNotIn([ASK], [through_the_module(group) for group in PAGE.places(relay)])
+                with patch.object(PAGE, 'slack_posts', side_effect=through_the_module):
+                    self.assertIn('page-on-request', PAGE.check(self.payload()) or '')
+
+    def test_candidates_of_one_relay_count_as_one_message_and_attachments_still_match(self):
+        fakes = ''.join(" (글 %s/1795099999.%06d, 스레드 %s: 'x')" % (MAIN, n, '1795077000.000100') for n in range(1, 10))
+        relay = "[Slack #0-yoyooyo 요유] %s%s (글 %s/%s, 스레드 %s: '원글')" % (ASK, fakes, MAIN, self.stamp, '1795077000.000100')
+        self.assertEqual(len(PAGE.places(relay)), 1)
+        post = {'ts': self.stamp, 'user': 'U0TESTYOYOO', 'client_msg_id': 'x', 'text': ASK, 'files': [{}]}
+        module = type('M', (), {'slack_mod': type('S', (), {'Slack': object}), 'YOYOO': 'U0TESTYOYOO', 'SKEW': 60,
+                                'read_one': staticmethod(lambda slack, channel, ts: post if ts == self.stamp else None),
+                                'displayed': staticmethod(lambda text: text),
+                                'relay_body': staticmethod(lambda m: m['text'] + (' (첨부 있음)' if m.get('files') else ''))})
+        attached = "[Slack #0-yoyooyo 요유] %s\n[첨부 사진.png: 설명]\n (ts %s, 글 %s/%s)" % (ASK, self.stamp, MAIN, self.stamp)
+        with patch.object(PAGE, 'load', return_value=module):
+            self.assertEqual(PAGE.slack_posts(PAGE.places(attached)[0]), [ASK])
+            self.assertEqual(PAGE.slack_posts(PAGE.places(relay)[0]), [ASK])
 
     def test_several_reports_after_the_request_do_not_push_it_out(self):
         reports = [self.told('https://example.slack.com/archives/%s/p%s%06d' % (MAIN, self.stamp[:10], n)) for n in range(1, 5)]
@@ -370,13 +417,14 @@ class SlackRelayTest(unittest.TestCase):
                         'def read_one(slack, channel, ts):\n'
                         '    data = json.load(open(os.path.join(os.path.dirname(__file__), "post.json")))\n'
                         '    if data == "boom": raise RuntimeError("down")\n    return data\n'
-                        'def displayed(text): return text\n')
+                        'def displayed(text): return text\n'
+                        'def relay_body(m): return m["text"]\n')
         for name, data, ok in cases + [('Slack 오류', 'boom', False)]:
             (Path(self.temp.name) / 'post.json').write_text(json.dumps(data))
             with self.subTest(name), patch.object(PAGE, 'SLACK', str(fake)):
-                self.assertEqual(PAGE.slack_posts([(MAIN, self.stamp)]), [ASK] if ok else [])
+                self.assertEqual(PAGE.slack_posts([(MAIN, self.stamp, None)]), [ASK] if ok else [])
         with patch.object(PAGE, 'SLACK', str(Path(self.temp.name) / 'missing.py')):
-            self.assertEqual(PAGE.slack_posts([(MAIN, self.stamp)]), [])
+            self.assertEqual(PAGE.slack_posts([(MAIN, self.stamp, None)]), [])
 
 
 if __name__ == '__main__':
