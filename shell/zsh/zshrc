@@ -42,6 +42,10 @@ plugins=(
 autoload -U compinit && compinit
 set -o vi
 source $ZSH/oh-my-zsh.sh
+# Vi mode stays, but ctrl+a / ctrl+e still jump to the line's start and end while typing.
+# Inside herdr, ctrl+a is the prefix and never reaches the shell (terminal/herdr/config.toml).
+bindkey -M viins '^A' beginning-of-line
+bindkey -M viins '^E' end-of-line
 
 # ============================================
 # 3. Environment Variables
