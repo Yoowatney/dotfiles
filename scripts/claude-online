@@ -33,6 +33,24 @@ fi
 # A full session remains available for jobs needing an excluded integration:
 # CLAUDE_STARTUP_PROFILE=full claude ...
 profile_args=()
+# Keep profile values out of argv: broad process-name queries also inspect argv.
+# Files survive /clear and concurrent launches; a content hash keeps them stable.
+settings_file() (
+  umask 077
+  local dir="${XDG_STATE_HOME:-$HOME/.local/state}/claude-startup" sum temporary path
+  if ! mkdir -p "$dir" 2>/dev/null || [ ! -w "$dir" ]; then
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/claude-startup.XXXXXX") || return 1
+  fi
+  sum=$(printf '%s' "$settings" | shasum -a 256 | cut -d ' ' -f1) || return 1
+  path="$dir/settings-$sum.json"
+  # Reuse unchanged content without touching mtime or triggering config reloads.
+  if [ -f "$path" ] && [ ! -L "$path" ] && cmp -s "$path" <(printf '%s\n' "$settings"); then
+    printf '%s\n' "$path"; return
+  fi
+  temporary=$(mktemp "$dir/settings.XXXXXX") || return 1
+  printf '%s\n' "$settings" >"$temporary" && mv -f "$temporary" "$path" || return 1
+  printf '%s\n' "$path"
+)
 role=${CLAUDE_STARTUP_ROLE:-}
 main_file="${XDG_STATE_HOME:-$HOME/.local/state}/orchestrator/main"
 if [ -z "$role" ] && [ -n "${HERDR_PANE_ID:-}" ] && [ -f "$main_file" ]; then
@@ -88,7 +106,8 @@ case "$role" in
       rules_file=""
       # A pane that cannot get the filtered copy starts with the full rule files rather than not at all.
       pane_rules || { rules_file=""; settings=$(jq -c 'del(.paneRules)' <<<"$settings") || exit 1; }
-      profile_args=(--settings "$settings")
+      settings_path=$(settings_file) || { echo 'claude-online: cannot save startup settings' >&2; exit 1; }
+      profile_args=(--settings "$settings_path")
       [ -z "$rules_file" ] || profile_args+=(--append-system-prompt-file "$rules_file")
     fi ;;
 esac

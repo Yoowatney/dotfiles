@@ -48,6 +48,22 @@ _spec = importlib.util.spec_from_file_location(
 assert _spec and _spec.loader
 _guard = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_guard)
+_process_guard = None
+
+
+def process_target_problem(cmd):
+    # Ordinary commands must not load another module or inspect processes.
+    if 'kill' not in cmd:
+        return None
+    global _process_guard
+    if _process_guard is None:
+        spec = importlib.util.spec_from_file_location(
+            'process_target_guard', os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                                'process-target-guard.py'))
+        assert spec and spec.loader
+        _process_guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_process_guard)
+    return _process_guard.problem(cmd, _guard)
 
 
 # In-place flags. sed: a short cluster of no-argument switches ending in i (-i, -Ei, -i.bak) or
@@ -290,6 +306,9 @@ def worker_claude_problem(cmd: str, env=None) -> str | None:
 
 
 def bash_problem(cmd: str) -> str | None:
+    process_reason = process_target_problem(cmd)
+    if process_reason:
+        return process_reason
     cmd = HERDR_BIN.sub("herdr", cmd)
     code = code_only(cmd)
     if SPAWN.search(code) or (TYPES.search(code) and LAUNCH.search(_guard.HEREDOC.sub("<<heredoc", cmd))):
