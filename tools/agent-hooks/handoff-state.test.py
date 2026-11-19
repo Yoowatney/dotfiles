@@ -103,6 +103,40 @@ class HandoffTest(unittest.TestCase):
         self.assertNotEqual(rejected.returncode, 0)
         self.assertEqual(self.file.read_bytes(), before)
 
+    def main_pane(self):
+        (self.root / "orchestrator").mkdir()
+        (self.root / "orchestrator/main").write_text("main-terminal")
+        herdr = self.root / "herdr"
+        herdr.write_text('#!/bin/sh\nprintf \'%s\\n\' \'{"result":{"pane":{"terminal_id":"main-terminal"}}}\'\n')
+        herdr.chmod(0o755)
+        self.env["HERDR_BIN_PATH"] = str(herdr)
+
+    def test_oversize_main_handoff_is_rejected_and_keeps_previous_memo(self):
+        self.main_pane()
+        self.assertEqual(self.runho("save", "Open request: continue here\n").returncode, 0)
+        before = self.file.read_bytes()
+        rejected = self.runho("save", "x" * 16385)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("16384", rejected.stderr)
+        self.assertIn("Nothing was saved", rejected.stderr)
+        self.assertEqual(self.file.read_bytes(), before)
+
+    def test_size_limit_counts_bytes_and_allows_exactly_the_limit(self):
+        self.main_pane()
+        self.assertEqual(self.runho("save", "x" * 16384).returncode, 0)
+        self.assertEqual(self.file.stat().st_size, 16384)
+        # 5462 Korean characters are 16386 bytes: the limit is bytes, not characters.
+        rejected = self.runho("save", "가" * 5462)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(self.file.stat().st_size, 16384)
+
+    def test_oversize_ordinary_handoff_is_rejected_after_metadata_is_added(self):
+        self.assertEqual(self.runho("save", self.memo()).returncode, 0)
+        before = self.file.read_bytes()
+        rejected = self.runho("save", self.memo() + "x" * 16384)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(self.file.read_bytes(), before)
+
     def test_policy_checks_decoded_metadata_before_replacing_memo(self):
         path = self.policy()
         data = json.loads(path.read_text())

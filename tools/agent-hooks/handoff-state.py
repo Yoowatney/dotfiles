@@ -12,6 +12,9 @@ import time
 
 FENCE = re.compile(r"^```handoff\s*\n(.*?)\n```[ \t]*$", re.M | re.S)
 FIELDS = ("task", "completed", "remaining", "verification", "resume", "code", "repositories")
+# A save over this many bytes is refused, never cut: the tail holds the open items and the rest of the day's requests,
+# and refusing leaves the old memo and the old session untouched (main-refresh then keeps the pane instead of /clear).
+MAX_BYTES = 16 * 1024
 TYPED = "Any text before the [handoff: marker in that message is 요유's own, typed while the prompt was on its way: answer it first."
 
 
@@ -146,6 +149,11 @@ def save(text):
         findings = policy_findings(text)
         if findings:
             raise ValueError("handoff policy rejected this memo: " + "; ".join(findings))
+    size = len(text.encode("utf-8"))
+    if size > MAX_BYTES:
+        raise ValueError(f"handoff too large: {size} bytes, limit {MAX_BYTES}. Nothing was saved and the previous memo is kept. "
+                         "Keep only open items; move long detail (full commands, logs, quoted requests) to a file "
+                         "and write its absolute path in the memo, then run handoff save again.")
     atomic_write(pending(), text)
     return "handoff: saved for the next session; Claude: /clear; Codex: /new, then a first regular message to load it"
 
