@@ -287,8 +287,8 @@ class SlackRelayTest(unittest.TestCase):
         self.assertEqual(seen, [(MAIN, self.stamp)])
         reply = "[Slack #0-yoyooyo 요유] 답글 %s (글 %s/%s, 스레드 %s: '원글 %s')" % (old, MAIN, self.stamp, '1795077000.000100', old)
         call = '[Slack 스레드 요유 부름] #dev %s (스레드 %s/%s, 글 %s/%s) 요유 글: 해줘 %s' % (old, MAIN, '1795077000.000100', MAIN, self.stamp, old)
-        self.assertEqual(PAGE.places(reply), [(MAIN, self.stamp)])
-        self.assertEqual(PAGE.places(call), [(MAIN, self.stamp)])
+        self.assertEqual(PAGE.places(reply), [[(MAIN, self.stamp)]])
+        self.assertEqual(PAGE.places(call), [[(MAIN, self.stamp)]])
 
     def test_the_main_panes_relay_arrives_inside_pane_tells_mark(self):
         old = self.link().replace(self.stamp.replace('.', '')[-6:], '000001')
@@ -299,7 +299,18 @@ class SlackRelayTest(unittest.TestCase):
         self.assertIsNone(self.check([ASK], seen))
         self.assertEqual(seen, [(MAIN, self.stamp)])
         batch = mark + self.relay()['message']['content'] + '\n\n' + self.told(old)['message']['content']
-        self.assertEqual(PAGE.places(batch), [(MAIN, self.stamp), (MAIN, self.stamp[:10] + '.000001')])
+        self.assertEqual(PAGE.places(batch), [[(MAIN, self.stamp)], [(MAIN, self.stamp[:10] + '.000001')]])
+
+    def test_of_batched_relays_only_the_latest_confirmed_one_counts(self):
+        first, second = self.stamp, self.stamp[:10] + '.000001'
+        mark = self.told('x')['message']['content'].split(' 요유 요청')[0] + ' '
+        said = {first: ASK, second: '두 수치의 차이가 뭐야?'}
+        relays = ['[Slack #0-yoyooyo 요유] 글 (ts %s, 글 %s/%s)' % (ts, MAIN, ts) for ts in (first, second)]
+        for order, denied in (((first, second), True), ((second, first), False)):
+            batch = '\n\n'.join(mark + relays[[first, second].index(ts)] for ts in order)
+            self.record('이건 어디에서 봐?', extra=[{'type': 'user', 'message': {'content': batch}}])
+            with self.subTest(order=order):
+                self.assertEqual(bool(self.check(lambda refs: [said[refs[0][1]]])), denied)
 
     def test_a_report_that_links_a_bot_post_does_not_erase_the_earlier_request(self):
         later = '%.6f' % (time.time() - 30)

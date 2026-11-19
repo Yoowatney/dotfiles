@@ -43,18 +43,23 @@ MARK = re.compile(r'\[pane-tell: [^\n]*?확인하세요\]\s*')  # the mark pane-
 
 
 def places(text: str) -> list:
-    """Where the Slack posts a prompt stands on are. pane-tell may carry several messages in one prompt, each with its mark.
+    """One list of Slack places per message of a prompt, oldest first. pane-tell may carry several messages in one prompt,
+    each with its mark, and only the latest one Slack confirms counts.
     A Slack relay stands on its own post only: its body is 요유's words and may link older posts. A pane-tell message
     stands on every link it names."""
-    found = []
+    groups = []
     for part in re.split(r'\n\n(?=\[pane-tell: )', PASTED.sub('', text, 1)):
         mark = MARK.match(part)
         body = part[mark.end():] if mark else part
         if body.startswith('[Slack'):
-            found += next(([(m[1], m[2])] for m in (shape.search(body) for shape in OWN) if m), [])
+            found = next(([(m[1], m[2])] for m in (shape.search(body) for shape in OWN) if m), [])
         elif mark:
-            found += [(m[1] or m[3], m[2] or '%s.%s' % (m[4], m[5])) for m in PLACE.finditer(body)]
-    return list(dict.fromkeys(found))[:5]
+            found = [(m[1] or m[3], m[2] or '%s.%s' % (m[4], m[5])) for m in PLACE.finditer(body)]
+        else:
+            found = []
+        if found:
+            groups.append(list(dict.fromkeys(found))[:5])
+    return groups
 
 
 def slack_posts(found: list, wait: float = READ_SECONDS) -> list:
@@ -120,7 +125,7 @@ def unrequested(payload: dict) -> bool:
                 text = item[1].strip()
                 relay = PASTED.sub('', text, 1)
                 if relay.startswith(RELAY) and places(relay):
-                    chain.append(places(relay))
+                    chain += places(relay)
                     continue
                 if text.startswith(('<task-notification', '<system-reminder', '[', '# AGENTS.md', '<environment_context')):
                     continue
