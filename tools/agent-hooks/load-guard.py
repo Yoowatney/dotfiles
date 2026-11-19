@@ -121,6 +121,11 @@ def segments(command: str):
             tokens = part.split()
         while tokens and (re.match(r"^[A-Za-z_]\w*=", tokens[0]) or tokens[0] in WRAPPERS or tokens[0].startswith("-")):
             tokens = tokens[1:]
+        if tokens and tokens[0].lstrip("({") != tokens[0]:  # a subshell or group: (cd repo && npm test)
+            tokens[0] = tokens[0].lstrip("({")
+            tokens = tokens if tokens[0] else tokens[1:]
+        if tokens and tokens[-1].count(")") > tokens[-1].count("("):  # the end of a subshell: npm test)
+            tokens[-1] = tokens[-1].rstrip(")") or "true"
         if tokens:
             yield tokens
 
@@ -193,11 +198,25 @@ def check(payload: dict, env, counts: dict | None = None, mem: tuple | None = No
     if not re.search(r"jest|vitest|docker|build|test|gradle|xcode|\bt\b", command):
         return None  # the usual case, and it must stay cheap: every Bash call lands here
     cwd = str(payload.get("cwd") or env.get("PWD") or os.getcwd())
-    found = [k for k in (start_kind(t, cwd) for t in segments(command)) if k]
+    found = []
+    for tokens in segments(command):
+        # The command's own cd (or npm --prefix, yarn --cwd) decides whose package.json counts, not the session's folder.
+        if os.path.basename(tokens[0]) in ("cd", "pushd") and len(tokens) > 1:
+            cwd = os.path.normpath(os.path.join(cwd, os.path.expanduser(tokens[1])))
+            continue
+        here = cwd
+        for flag in ("--prefix", "--cwd"):
+            if flag in tokens and tokens.index(flag) + 1 < len(tokens):
+                i = tokens.index(flag)
+                here = os.path.normpath(os.path.join(cwd, os.path.expanduser(tokens[i + 1])))
+                tokens = tokens[:i] + tokens[i + 2:]
+        kind = start_kind(tokens, here)
+        if kind:
+            found.append((*kind, here))
     if not found:
         return None
-    for kind, args in found:
-        if kind == "jest" and not any(FLAGS.match(a) or TEST_FILE.search(a) for a in args) and not config_sets_workers(cwd):
+    for kind, args, here in found:
+        if kind == "jest" and not any(FLAGS.match(a) or TEST_FILE.search(a) for a in args) and not config_sets_workers(here):
             return FLAG_MSG
     level, free = mem if mem is not None else memory(env)
     why = {"warn": "메모리 압박 경고", "critical": "메모리 압박 위험"}.get(status(level, free), "")
@@ -252,6 +271,17 @@ def selftest():
             return check({"tool_name": tool, "tool_input": {"command": cmd}, "cwd": cwd}, {}, counts or {"runs": 0, "workers": []}, mem)
 
         pkg(test="jest", **{"test:cov": "jest --coverage", "test:smoke": "jest --runInBand", "build": "nest build", "lint": "eslint ."})
+        # the command's own cd decides which package.json counts, not the session's folder (found live: "cd repo && npm test" passed)
+        elsewhere = os.path.join(d, "elsewhere")
+        os.makedirs(elsewhere, exist_ok=True)
+        for cmd in (f"cd {d} && npm test", f"(cd {d} && npm test)", f"cd {d}; npx jest", "cd .. && npm test",
+                    f"npm --prefix {d} test", f"npm test --prefix {d}", f"yarn --cwd {d} test", f"cd {d} && cd . && npm run test:cov"):
+            assert run(cmd, cwd=elsewhere) == FLAG_MSG, cmd
+        assert run(f"cd {d} && npm test", cwd=elsewhere) == FLAG_MSG
+        assert run(f"cd {d} && npm test", cwd="/nonexistent") == FLAG_MSG, "the cd target is read, not the session folder"
+        assert run("cd ~/nowhere-at-all && npm test", cwd=d) is None, "a target with no package.json is no known runner"
+        assert run(f"cd {d} && npm test -- --maxWorkers=2", cwd=elsewhere) is None
+        assert run("npm test", cwd=elsewhere) is None, "no cd and no package.json here"
         for cmd in ("npx jest", "jest", "npm test", "npm run test:cov", "yarn test", "node node_modules/.bin/jest", "cd x && npx jest --coverage", "npx -y jest",
                     "FOO=1 npx jest src", "bash -c 'npx jest'", "npm test -- --coverage", "pnpm exec jest", "npx jest --watch"):
             assert run(cmd) == FLAG_MSG, cmd
