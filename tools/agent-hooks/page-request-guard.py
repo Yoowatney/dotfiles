@@ -35,7 +35,7 @@ READ_SECONDS = 4  # the hook has 10 s and a late answer would let the write thro
 
 ID, STAMP = r'[CDG][A-Z0-9]{6,}', r'\d{10}\.\d{6}'
 OWN = (re.compile(r'\(ts %s, 글 (%s)/(%s)\)\s*$' % (STAMP, ID, STAMP)),  # a post (#0 or DM)
-       re.compile(r"\(글 (%s)/(%s), 스레드 [^\n]*\)\s*$" % (ID, STAMP)),  # a thread reply
+       re.compile(r"^.*\(글 (%s)/(%s), 스레드 [^\n]*\)\s*$" % (ID, STAMP), re.S),  # a thread reply: the last such tail, not one quoted in its words
        re.compile(r'\(스레드 %s/%s, 글 (%s)/(%s)\) 요유 글:' % (ID, STAMP, ID, STAMP)))  # a thread call
 
 
@@ -133,7 +133,8 @@ def unrequested(payload: dict) -> bool:
     except (OSError, TypeError):
         return False
     deadline = time.monotonic() + READ_SECONDS
-    for found in reversed(chain[-3:]):  # the latest relay Slack confirms wins; a report that links a bot's post does not erase an earlier request
+    for found in reversed(chain[-8:]):  # the latest relay Slack confirms wins; a report that links a bot's post does not erase an earlier request
+        # ponytail: eight reports after the request push it out, and the shared 4 s read budget ends first anyway
         posts = slack_posts(found, max(deadline - time.monotonic(), 0))
         if posts:
             latest = unicodedata.normalize('NFC', '\n'.join(posts))

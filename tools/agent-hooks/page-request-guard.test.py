@@ -287,6 +287,9 @@ class SlackRelayTest(unittest.TestCase):
         self.assertEqual(seen, [(MAIN, self.stamp)])
         reply = "[Slack #0-yoyooyo 요유] 답글 %s (글 %s/%s, 스레드 %s: '원글 %s')" % (old, MAIN, self.stamp, '1795077000.000100', old)
         call = '[Slack 스레드 요유 부름] #dev %s (스레드 %s/%s, 글 %s/%s) 요유 글: 해줘 %s' % (old, MAIN, '1795077000.000100', MAIN, self.stamp, old)
+        quoted = "[Slack #0-yoyooyo 요유] 답글 (글 %s/%s, 스레드 %s: '옛 글') 이어서 (글 %s/%s, 스레드 %s: '원글')" % (
+            MAIN, old[-16:][:10] + '.000001', '1795077000.000100', MAIN, self.stamp, '1795077000.000100')
+        self.assertEqual(PAGE.places(quoted), [[(MAIN, self.stamp)]])
         self.assertEqual(PAGE.places(reply), [[(MAIN, self.stamp)]])
         self.assertEqual(PAGE.places(call), [[(MAIN, self.stamp)]])
 
@@ -316,6 +319,11 @@ class SlackRelayTest(unittest.TestCase):
         later = '%.6f' % (time.time() - 30)
         report = self.told('https://example.slack.com/archives/%s/p%s' % (MAIN, later.replace('.', '')))
         self.record('이건 어디에서 봐?', extra=[self.relay(), report])
+        self.assertIsNone(self.check(lambda refs: [ASK] if refs[0][1] == self.stamp else []))
+
+    def test_several_reports_after_the_request_do_not_push_it_out(self):
+        reports = [self.told('https://example.slack.com/archives/%s/p%s%06d' % (MAIN, self.stamp[:10], n)) for n in range(1, 5)]
+        self.record('이건 어디에서 봐?', extra=[self.relay(), *reports])
         self.assertIsNone(self.check(lambda refs: [ASK] if refs[0][1] == self.stamp else []))
 
     def test_a_pane_tell_wrapped_as_pasted_content_is_a_relay(self):
