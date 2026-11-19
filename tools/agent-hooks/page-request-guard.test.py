@@ -290,6 +290,17 @@ class SlackRelayTest(unittest.TestCase):
         self.assertEqual(PAGE.places(reply), [(MAIN, self.stamp)])
         self.assertEqual(PAGE.places(call), [(MAIN, self.stamp)])
 
+    def test_the_main_panes_relay_arrives_inside_pane_tells_mark(self):
+        old = self.link().replace(self.stamp.replace('.', '')[-6:], '000001')
+        mark = self.told('x')['message']['content'].split(' 요유 요청')[0] + ' '
+        wrapped = {'type': 'user', 'message': {'content': mark + self.relay(body='이 글 처리됐어? ' + old)['message']['content']}}
+        seen = []
+        self.record('이건 어디에서 봐?', extra=[wrapped])
+        self.assertIsNone(self.check([ASK], seen))
+        self.assertEqual(seen, [(MAIN, self.stamp)])
+        batch = mark + self.relay()['message']['content'] + '\n\n' + self.told(old)['message']['content']
+        self.assertEqual(PAGE.places(batch), [(MAIN, self.stamp), (MAIN, self.stamp[:10] + '.000001')])
+
     def test_a_report_that_links_a_bot_post_does_not_erase_the_earlier_request(self):
         later = '%.6f' % (time.time() - 30)
         report = self.told('https://example.slack.com/archives/%s/p%s' % (MAIN, later.replace('.', '')))

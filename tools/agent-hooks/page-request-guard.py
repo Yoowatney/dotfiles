@@ -39,12 +39,21 @@ OWN = (re.compile(r'\(ts %s, 글 (%s)/(%s)\)\s*$' % (STAMP, ID, STAMP)),  # a po
        re.compile(r'\(스레드 %s/%s, 글 (%s)/(%s)\) 요유 글:' % (ID, STAMP, ID, STAMP)))  # a thread call
 
 
+MARK = re.compile(r'\[pane-tell: [^\n]*?확인하세요\]\s*')  # the mark pane-tell puts before every message it types
+
+
 def places(text: str) -> list:
-    """Where the Slack posts a relay stands on are. A Slack relay stands on its own post only: its body is 요유's words and may
-    link older posts. A pane-tell stands on every link it names."""
-    if text.startswith('[Slack'):
-        return next(([(m[1], m[2])] for m in (shape.search(text) for shape in OWN) if m), [])
-    found = [(m[1] or m[3], m[2] or '%s.%s' % (m[4], m[5])) for m in PLACE.finditer(text)]
+    """Where the Slack posts a prompt stands on are. pane-tell may carry several messages in one prompt, each with its mark.
+    A Slack relay stands on its own post only: its body is 요유's words and may link older posts. A pane-tell message
+    stands on every link it names."""
+    found = []
+    for part in re.split(r'\n\n(?=\[pane-tell: )', PASTED.sub('', text, 1)):
+        mark = MARK.match(part)
+        body = part[mark.end():] if mark else part
+        if body.startswith('[Slack'):
+            found += next(([(m[1], m[2])] for m in (shape.search(body) for shape in OWN) if m), [])
+        elif mark:
+            found += [(m[1] or m[3], m[2] or '%s.%s' % (m[4], m[5])) for m in PLACE.finditer(body)]
     return list(dict.fromkeys(found))[:5]
 
 
