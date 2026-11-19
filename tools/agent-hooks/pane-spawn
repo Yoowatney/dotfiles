@@ -22,8 +22,10 @@
 # or data, and changes nothing (요유 2026-11-05, api#1002). The agent name carries `chk`, which a rename does not change, so its
 # report asks for no other check (auto-tab-close.py). Only a pane herdr_peers.delegates_checks says yes to may open one (the main
 # pane today); any other lead checks results itself, so there it is bad usage and opens nothing. Every check is Claude Sonnet,
-# with the checked folder protected by Seatbelt, whatever the runner policy or quota say, and --check --kind codex is refused
+# with the checked folder protected by Seatbelt, whatever the runner policy says, and --check --kind codex is refused
 # (요유 2026-11-19: no Codex reviews; that day a quota lookup past its six seconds sent automatic checks to Codex).
+# Past Claude's measured usage reserve no check opens and the caller sends its report on unchecked (lead decision
+# 2026-11-19); an unknown, stale or slow reading opens the check on Claude.
 # --kind auto selects a normal worker using fresh local subscription quota (agent-quota); tools/agent-hooks/agent-runner shows or
 # switches the policy (claude | codex | auto). Policy quota-aware keeps Codex unless its week
 # runs ahead of pace; claude-first (one local policy value, e.g. while Codex quota is short) picks Claude first
@@ -60,7 +62,8 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] 
     reason mentioning Slack, 슬랙, GCP, gcloud, bq or BigQuery (any case), is refused there: Codex runs GCP commands too.
     Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요
   --check: a fresh check (main pane only) on Claude, which cannot write the checked folder.
-    Always Claude, whatever the policy or quota (요유 2026-11-19: no Codex reviews); --kind codex is refused.
+    Always Claude, whatever the policy (요유 2026-11-19: no Codex reviews); --kind codex is refused. Past the measured Claude
+    usage reserve it opens nothing and exits 2: send the report on unchecked. An unknown usage reading still opens it.
   --artifact: keep the Artifact tool in a Claude pane (a job that publishes a page); every Claude pane starts without it otherwise.
   --skills: keep the design (taste-skill), office-file (docx/pdf/pptx/xlsx) and Claude-API skills in a Claude pane (UI or office-file job).
   --opus: opt out of the main pane Claude work trial (Sonnet 5.5/high); use global model/effort defaults for heavy work.
@@ -102,7 +105,7 @@ esac
 [ -z "$opener" ] || [ -z "$check$same$new_tab" ] || die "--opener opens a moved pane's own tab: no --check, --same-tab or --new-tab"
 asked=${kind:-claude} # what the caller chose, before auto resolves to Codex
 kind_arg=$kind runner_reason= # the receipt of an automatic check records the runner actually opened and why (api#1296)
-# 요유 2026-11-19 stopped Codex reviews: every check is Claude and skips the quota lookup. auto-tab-close asks for
+# 요유 2026-11-19 stopped Codex reviews: every check is Claude whatever the runner policy. auto-tab-close asks for
 # --kind auto, which is Claude here too.
 if [ -n "$check" ]; then
   [ "$kind" != codex ] || die "checks open only on Claude (요유 2026-11-19: no Codex reviews); omit --kind codex"
@@ -151,6 +154,19 @@ prompt+=" Task accounting ID: $job_id. Reuse it for a check or reassignment."
 shift 2
 [ "${1:-}" != -- ] || shift
 auto_claude=
+quota_limit=${PANE_SPAWN_QUOTA_LIMIT:-6}
+[[ "$quota_limit" =~ ^[1-9][0-9]*$ ]] || quota_limit=6
+# The lookup has no children. Reap it on timeout so slow reads cannot outlive the routing decision.
+bounded() { # <seconds> <command...>: its exit code, 124 past the limit
+  perl -e '
+    my $limit = shift; my $pid = fork();
+    defined $pid or exit 125;
+    if (!$pid) { exec @ARGV; exit 125; }
+    $SIG{ALRM} = sub { kill "KILL", $pid; waitpid($pid, 0); exit 124; };
+    alarm $limit; waitpid($pid, 0); my $rc = $?; alarm 0;
+    exit($rc & 127 ? 128 + ($rc & 127) : $rc >> 8);
+  ' "$@"
+}
 if [ -n "$request_child" ]; then
   # Retain the first routing decision; rechecking can change runners or warn twice.
   kind=$request_kind auto_claude=$request_auto_claude
@@ -165,17 +181,7 @@ elif [ "$asked" = auto ] && [ -z "$check" ]; then
   quota_policy=$(cat "$quota_policy_file" 2>/dev/null)
   # Recovery must work with a broken Python installation, quota script, or decision-log destination.
   if [ -z "$pinned" ] && [ "$quota_policy" != codex-only ]; then
-    quota_limit=${PANE_SPAWN_QUOTA_LIMIT:-6}
-    [[ "$quota_limit" =~ ^[1-9][0-9]*$ ]] || quota_limit=6
-    # The lookup has no children. Reap it on timeout so slow reads cannot outlive the routing decision.
-    quota=$(perl -e '
-      my $limit = shift; my $pid = fork();
-      defined $pid or exit 125;
-      if (!$pid) { exec @ARGV; exit 125; }
-      $SIG{ALRM} = sub { kill "KILL", $pid; waitpid($pid, 0); exit 124; };
-      alarm $limit; waitpid($pid, 0); my $rc = $?; alarm 0;
-      exit($rc & 127 ? 128 + ($rc & 127) : $rc >> 8);
-    ' "$quota_limit" python3 -I "$quota_dir/agent-quota" select "$cwd")
+    quota=$(bounded "$quota_limit" python3 -I "$quota_dir/agent-quota" select "$cwd")
     quota_rc=$?
     if [ "$quota_rc" = 124 ]; then
       echo 'pane-spawn: quota lookup timed out; using legacy Codex' >&2
@@ -190,6 +196,18 @@ elif [ "$asked" = auto ] && [ -z "$check" ]; then
       runner_reason=$quota_reason
     fi
   fi
+fi
+# Lead decision 2026-11-19: Claude's usage reserve keeps room for the main pane on the same account, so past a measured
+# reading over it no check opens; auto-tab-close then sends the report on unchecked with this reason, and so does the main
+# pane by hand. An unknown, stale or slow reading is not past the reserve: the check opens on Claude.
+if [ -n "$check" ] && [ -z "$request_child" ]; then
+  reserve=$(bounded "$quota_limit" python3 -I "$helper_dir/agent-quota" claude-reserve "$cwd")
+  case $? in
+    0) ;;
+    3) read -r week five < <(printf '%s' "$reserve" | jq -r 'def p: if . == floor then floor else . end; "\(.week | p)% \(if .short == null then "none" else "\(.short | p)%" end)"' 2>/dev/null)
+       die "Claude is past its usage reserve (week ${week:-?}, five-hour ${five:-?}), kept for the main pane: no check opened. Send the report on unchecked, with this reason." ;;
+    *) echo 'pane-spawn: Claude usage unknown; the check opens on Claude' >&2 ;;
+  esac
 fi
 if [ -z "$runner_reason" ]; then
   if [ -n "$kind_arg" ] && [ "$kind_arg" != auto ]; then runner_reason="requested --kind $kind"

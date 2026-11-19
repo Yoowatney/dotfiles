@@ -98,14 +98,20 @@ ps --kind auto "over" "instruction" >/dev/null 2>"$SANDBOX/err"
 has "--kind codex" "claude-first: Claude past its reserve returns to Codex"
 grep -q 'reserve' "$SANDBOX/err" || fail "the fallback names its reason"
 is_main
-ps --check "over" "instruction" >/dev/null 2>"$SANDBOX/err"
-has "--kind claude" "a check stays Claude past the Claude reserve (요유 2026-11-19: no Codex reviews)"
+# Lead decision 2026-11-19: past Claude's measured reserve, kept for the main pane on the same account, no check opens;
+# the caller sends the report on unchecked with the reason. Codex never stands in.
+if PANE_SPAWN_CHECK_RECEIPT="$SANDBOX/over-receipt.json" ps --check "over" "instruction" >/dev/null 2>"$SANDBOX/err"; then
+  fail "a check past the Claude reserve must not open"
+fi
+grep -q 'past its usage reserve (week 85%, five-hour 20%)' "$SANDBOX/err" || fail "the refusal names the reserve and the reading"
+grep -q 'unchecked' "$SANDBOX/err" || fail "the refusal tells the caller to send the report on unchecked"
+[ ! -e "$SANDBOX/log" ] || fail "a check past the reserve must not even query herdr"
 rm -f "$SANDBOX/home/.local/state/agent-quota/claude.json"
 quota_fixture 99 90 true
 if ps --kind auto "none" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "claude-first refuses when neither runner has room"; fi
 [ ! -e "$SANDBOX/log" ] || fail "claude-first refusal opens no work pane"
-ps --check "none" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "a check with no quota data still opens"
-has "--kind claude" "a check never refuses for quota and stays Claude"
+if ps --check "none" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "a check past the Claude reserve (week 90%) must not open"; fi
+grep -q 'week 90%' "$SANDBOX/err" || fail "the refusal names the reading"
 rm -rf "$SANDBOX/home/.codex/sessions" "$SANDBOX/home/.local/state/agent-quota/claude.json"
 ps --check "unknown" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "a check with unknown usage still opens"
 has "--kind claude" "unknown usage keeps a check on Claude"
@@ -195,6 +201,19 @@ regression_quota_timeout() {
   grep -qi 'timed out' "$SANDBOX/err" || fail "timeout warning explains fallback"
   ! kill -0 "$(cat "$SANDBOX/quota-pid")" 2>/dev/null || fail "timed-out lookup still runs"
 }
+regression_check_usage_timeout() {
+  rm -f "$SANDBOX/home/.config/munice/host-role"
+  echo claude-first > "$SANDBOX/home/.local/state/agent-quota/policy"
+  mkdir -p "$SANDBOX/slow-python"
+  printf '#!/bin/bash\ncase "$2" in */agent-quota) exec /bin/sleep 30;; esac\nexec "%s" "$@"\n' "$(command -v python3)" > "$SANDBOX/slow-python/python3"
+  chmod +x "$SANDBOX/slow-python/python3"
+  is_main
+  SECONDS=0
+  PATH="$SANDBOX/slow-python:$PATH" PANE_SPAWN_QUOTA_LIMIT=1 ps --check "slow" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "a check whose usage lookup timed out still opens"
+  [ "$SECONDS" -lt 30 ] || fail "the check's usage lookup is bounded"
+  has "--kind claude" "a timed-out lookup opens the check on Claude"
+  grep -q 'usage unknown' "$SANDBOX/err" || fail "the check says its usage reading was unknown"
+}
 regression regression_codex_arguments
 regression regression_ambient_auto
 regression regression_shell_rollback missing
@@ -202,6 +221,7 @@ regression regression_shell_rollback syntax
 regression regression_shell_rollback system
 regression regression_shell_rollback unwritable
 regression regression_quota_timeout
+regression regression_check_usage_timeout
 [ "$regression_failures" = 0 ] || fail "$regression_failures quota regressions"
 
 echo "ok: pane-spawn"
