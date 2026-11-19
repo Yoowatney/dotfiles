@@ -113,8 +113,39 @@ def busy(counts: dict) -> str:
     return ""
 
 
+HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n.*?\n[ \t]*\1\b", re.S)
+
+
+def split_commands(command: str) -> list[str]:
+    """Split on ; & | and newlines outside quotes, with heredoc bodies dropped: quoted text is no command."""
+    command, parts, buf, quote, i = HEREDOC.sub(" ", command), [], [], "", 0
+    while i < len(command):
+        c = command[i]
+        if quote:
+            if c == "\\" and quote == '"' and i + 1 < len(command):
+                buf.append(c)
+                i += 1
+                c = command[i]
+            elif c == quote:
+                quote = ""
+        elif c in "'\"":
+            quote = c
+        elif c == "\\" and i + 1 < len(command):
+            buf.append(c)
+            i += 1
+            c = command[i]
+        elif c in ";|&\n":
+            parts.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    return parts + ["".join(buf)]
+
+
 def segments(command: str):
-    for part in re.split(r"&&|\|\||[;|&\n]", command):
+    for part in split_commands(command):
         try:
             tokens = shlex.split(part)
         except ValueError:
@@ -271,6 +302,13 @@ def selftest():
             return check({"tool_name": tool, "tool_input": {"command": cmd}, "cwd": cwd}, {}, counts or {"runs": 0, "workers": []}, mem)
 
         pkg(test="jest", **{"test:cov": "jest --coverage", "test:smoke": "jest --runInBand", "build": "nest build", "lint": "eslint ."})
+        # quoted or heredoc text is not a command (found live: a pane-tell message that quoted "cd x && npm test" was refused)
+        for cmd in ('pane-tell p "cd ' + d + ' && npm test"', 'git commit -m "fix; npx jest"', 'gh pr create --body "run npm test && npm run build"',
+                    "echo 'npm test' && echo done", 'cat <<EOF\nnpm test\nnpx jest\nEOF', 'git commit -m "$(cat <<\'EOF\'\nnpm test\nEOF\n)"',
+                    'pane-spawn "a" "cd ' + d + ' && npx jest"', "echo x | grep 'npm test'"):
+            assert run(cmd, mem=crit, cwd=d) is None, cmd
+        assert run('echo "hi" && npm test', cwd=d) == FLAG_MSG, "a real command after a quoted one still counts"
+        assert run('echo "a;b" ; npx jest', cwd=d) == FLAG_MSG and run("cat <<EOF\nx\nEOF\nnpx jest", cwd=d) == FLAG_MSG
         # the command's own cd decides which package.json counts, not the session's folder (found live: "cd repo && npm test" passed)
         elsewhere = os.path.join(d, "elsewhere")
         os.makedirs(elsewhere, exist_ok=True)
