@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Git pre-commit and pre-merge-commit (the second is a link to this file): refuse a commit or merge commit made while
+# main is checked out. main takes changes only through a PR and a fast-forward `git pull --ff-only`.
+# Why: a direct commit or a local `git merge origin/main` makes main diverge from origin, every later pull --ff-only
+# fails, and the portable Mac's sync broke on 2026-11-19 (31 such merge commits, one duplicated commit).
+# Same setup and limit as pre-push: core.hooksPath is per clone, and `--no-verify` skips it (agents are refused that by
+# the shared Bash hook). A detached HEAD or any other branch passes.
+branch=$(git symbolic-ref -q --short HEAD) || exit 0
+[ "$branch" = main ] || exit 0
+echo "refused: main takes changes only through a PR (branch, push, PR, then git pull --ff-only). Switch to a branch first." >&2
+exit 1
