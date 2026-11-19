@@ -14,8 +14,8 @@
 	<integer>0</integer>
 	<key>OverridingKeyboardName</key>
 	<string>com.apple.keylayout.ABC</string>
-	<key>SwitchLanguageForRightGui</key>
-	<true/>
+	<key>RightToggleKey</key>
+	<integer>231</integer>
 	<key>UpdateNotification</key>
 	<false/>
 </dict>
