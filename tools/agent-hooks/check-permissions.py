@@ -23,6 +23,8 @@ EXCLUDED = ('Judge only the claims the result needs to answer the original reque
             'to that answer (process narration, side remarks) verbatim onto a `제외:` line and do not check it; '
             'never exclude a claim the answer relies on.')
 
+FULL_SCAN = ('A full scan of a production collection is run once by the work session, which leaves the result in a file; a check session compares against that result file and re-queries a sample instead of repeating the full scan.')
+
 
 def blockage(text):
     """Only a complete, unambiguous result outside code fences and quotes."""
@@ -267,7 +269,7 @@ def classify(text, cwd):
 
 if __name__ == '__main__':
     if sys.argv[1:] == ['--contract']:
-        print(CONTRACT, CHECK_COMMANDS, EXCLUDED)
+        print(CONTRACT, CHECK_COMMANDS, EXCLUDED, FULL_SCAN)
     elif len(sys.argv) == 2:
         print(json.dumps(classify(sys.stdin.read(1048576), sys.argv[1]), ensure_ascii=False))
     else:
