@@ -124,6 +124,7 @@ EOF
 chmod +x "$SANDBOX/date"
 
 run_on() { local sock=$1; shift; [ -n "${PANE_SPAWN_TEST_KEEP_LOG:-}" ] || rm -f "$SANDBOX/log" "$SANDBOX/starts" "$SANDBOX/waits" "$SANDBOX/prompted"; [ -n "${PANE_SPAWN_TEST_KEEP_REQUESTS:-}" ] || rm -rf "$SANDBOX/home/.local/state/pane-spawn/requests"; env -u HERDR_SOCKET_PATH -u XDG_STATE_HOME ${sock:+HERDR_SOCKET_PATH="$sock"} HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" CLAUDE_CONFIG_DIR="$SANDBOX/home/.claude" PATH="$SANDBOX:$PATH" HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$SANDBOX/herdr" PANE_SPAWN_POLL=0 PANE_SPAWN_START_POLL=0.01 PANE_SPAWN_READY_SETTLE=0 PANE_SPAWN_RETRY_WAIT=0 "${PANE_SPAWN_TEST_SHELL:-bash}" "$SUBJECT" "$@"; }
+export LOAD_GUARD_MEM=${LOAD_GUARD_MEM:-1,80} # the real Mac's memory must not decide a launcher test (load-guard.py)
 ps() { run_on "" "$@"; }
 log() { cat "$SANDBOX/log" 2>/dev/null || true; }
 has() { grep -qF -- "$1" "$SANDBOX/log" || fail "$2: no [$1] in: $(log)"; }

@@ -769,7 +769,7 @@ def rider(name: str, hook_input: dict) -> str | None:
 
 def riders(hook_input: dict) -> str | None:
     return (rider("page-request-guard.py", hook_input) or rider("actions-run-guard.py", hook_input) or rider("pane-fit-guard.py", hook_input)
-            or rider("job-host-guard.py", hook_input) or rider("fix-round-guard.py", hook_input))
+            or rider("job-host-guard.py", hook_input) or rider("fix-round-guard.py", hook_input) or rider("load-guard.py", hook_input))
 
 
 def main_pane(env: dict) -> bool:

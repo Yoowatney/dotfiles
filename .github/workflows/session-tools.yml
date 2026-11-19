@@ -11,6 +11,8 @@ on:
       - 'tools/agent-hooks/herdr_peers.py'
       - 'tools/agent-hooks/workers-watch.py'
       - 'tools/agent-hooks/pane-spawn*'
+      - 'tools/agent-hooks/load-guard.py'
+      - 'tools/agent-hooks/load-watch.py'
       - 'shell/zsh/codex-fn.test.sh'
       - 'shell/zsh/zshrc'
       - 'tools/agent-hooks/codex-startup*'
@@ -41,6 +43,8 @@ on:
       - 'tools/agent-hooks/herdr_peers.py'
       - 'tools/agent-hooks/workers-watch.py'
       - 'tools/agent-hooks/pane-spawn*'
+      - 'tools/agent-hooks/load-guard.py'
+      - 'tools/agent-hooks/load-watch.py'
       - 'shell/zsh/codex-fn.test.sh'
       - 'shell/zsh/zshrc'
       - 'tools/agent-hooks/codex-startup*'
@@ -79,6 +83,8 @@ jobs:
             bash "$test"
           done
       - run: python3 tools/agent-hooks/workers-watch.py --selftest
+      - run: python3 tools/agent-hooks/load-guard.py --selftest
+      - run: python3 tools/agent-hooks/load-watch.py --selftest
       - run: python3 tools/agent-hooks/pane-tell-order.test.py --selftest
       - run: bash tools/agent-hooks/pane-relay-watch.test.sh
       - run: bash tools/agent-hooks/main-alert-inbox.test.sh
