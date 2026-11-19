@@ -513,11 +513,8 @@ post_install() {
         /opt/homebrew/opt/fzf/install --key-bindings --completion --no-update-rc --no-bash --no-fish
     fi
 
-    # 구름 입력기 등록 (시스템 입력 소스에 표시되도록)
-    if [[ -d "/Library/Input Methods/Gureum.app" ]]; then
-        open "/Library/Input Methods/Gureum.app"
-        info "구름 입력기 실행됨 (시스템 설정 > 키보드 > 입력 소스에서 추가)"
-    fi
+    # 입력 소스를 macos/input-sources/enabled.txt(구름 두벌식·로마자)로 맞춘다. TIS로 바로 적용되어 로그아웃이 필요 없다.
+    bash "$DOTFILES/scripts/input-sources.sh" apply || warn "입력 소스 적용 실패: bash $DOTFILES/scripts/input-sources.sh apply"
 
     # Brewfile에서 cask 앱들 추출해서 전부 실행 (Gatekeeper 경고 처리)
     info "Opening all cask apps (Gatekeeper 경고 처리)..."
@@ -586,7 +583,6 @@ post_install() {
 
     echo ""
     echo -e "${YELLOW}  💡 권한 설정: 시스템 설정 > 개인정보 보호 및 보안 > 입력 모니터링 / 손쉬운 사용${NC}"
-    echo -e "${YELLOW}  💡 구름 설정: 시스템 설정 > 키보드 > 입력 소스 > 구름 추가${NC}"
     echo ""
 }
 
