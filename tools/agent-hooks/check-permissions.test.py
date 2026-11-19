@@ -23,6 +23,7 @@ class PermissionTests(unittest.TestCase):
         self.assertIn('Judge only the claims the result needs to answer the original request.', out)
         self.assertIn('verbatim onto a `제외:` line', out)
         self.assertIn('never exclude a claim the answer relies on', out)
+        self.assertIn('A full scan of a production collection is run once by the work session, which leaves the result in a file; a check session compares against that result file and re-queries a sample instead of repeating the full scan.', out)
         self.assertEqual(permissions.classify(out, '.')['kind'], 'auto')
 
     def test_observed_commands_require_claude(self):
