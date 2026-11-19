@@ -23,7 +23,7 @@
 # report asks for no other check (auto-tab-close.py). Only a pane herdr_peers.delegates_checks says yes to may open one (the main
 # pane today); any other lead checks results itself, so there it is bad usage and opens nothing. Every check is Claude Sonnet,
 # with the checked folder protected by Seatbelt, whatever the runner policy or quota say, and --check --kind codex is refused
-# (요유 2026-11-19, "앞으로는 코덱스 리뷰 받지말아줘": that day a quota lookup past its six seconds sent automatic checks to Codex).
+# (요유 2026-11-19: no Codex reviews; that day a quota lookup past its six seconds sent automatic checks to Codex).
 # --kind auto selects a normal worker using fresh local subscription quota (agent-quota); tools/agent-hooks/agent-runner shows or
 # switches the policy (claude | codex | auto). Policy quota-aware keeps Codex unless its week
 # runs ahead of pace; claude-first (one local policy value, e.g. while Codex quota is short) picks Claude first
@@ -102,7 +102,7 @@ esac
 [ -z "$opener" ] || [ -z "$check$same$new_tab" ] || die "--opener opens a moved pane's own tab: no --check, --same-tab or --new-tab"
 asked=${kind:-claude} # what the caller chose, before auto resolves to Codex
 kind_arg=$kind runner_reason= # the receipt of an automatic check records the runner actually opened and why (api#1296)
-# 요유 2026-11-19, "앞으로는 코덱스 리뷰 받지말아줘": every check is Claude and skips the quota lookup. auto-tab-close asks for
+# 요유 2026-11-19 stopped Codex reviews: every check is Claude and skips the quota lookup. auto-tab-close asks for
 # --kind auto, which is Claude here too.
 if [ -n "$check" ]; then
   [ "$kind" != codex ] || die "checks open only on Claude (요유 2026-11-19: no Codex reviews); omit --kind codex"
