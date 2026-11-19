@@ -38,10 +38,11 @@ MD
 run() { env -u CLAUDECODE PATH="$box/bin:$PATH" CLAUDE_BIN="$box/bin/claude" HOME="$box/home" XDG_STATE_HOME="${STATE:-$box/state}" HERDR_PANE_ID=w1:p1 CLAUDE_STARTUP_ROLE="${ROLE:-}" CLAUDE_STARTUP_PROFILE="${PROFILE:-}" CLAUDE_STARTUP_ARTIFACT="${ARTIFACT:-}" CLAUDE_STARTUP_SKILLS="${SKILLS:-}" bash "$ROOT/scripts/claude-online" "$@"; }
 fail() { echo "FAIL: $1"; exit 1; }
 arg_after() { awk -v f="$1" 'p { print; exit } $0 == f { p = 1 }'; }
+settings_json() { local path; path=$(arg_after --settings); [ -f "$path" ] || fail 'settings is not a path'; cat "$path"; }
 
 out=$(cd "$box/home/work/munice/sub" && ROLE=worker run 'literal argument $()')
 [[ "$out" == --settings$'\n'* ]] || fail 'worker has no startup settings'
-settings=$(sed -n '2p' <<<"$out")
+settings=$(settings_json <<<"$out")
 jq -e '.enableWorkflows == false and .enabledPlugins["context7@claude-plugins-official"] == false and (has("hooks") | not)' <<<"$settings" >/dev/null || fail 'worker keeps the common profile and no safety settings'
 # api#1065: the Artifact tool's schema (~9k tokens) is resent on every call, so a pane under a lead starts without it.
 jq -e '.enableArtifact == false' <<<"$settings" >/dev/null || fail 'worker starts without the Artifact tool'
@@ -49,8 +50,8 @@ jq -e '.enableArtifact == false' <<<"$settings" >/dev/null || fail 'worker start
 jq -e 'has("bashOutputMaxChars") | not' <<<"$settings" >/dev/null || fail 'worker leaves Bash output at the default limit'
 # A job that publishes a page opts back in (pane-spawn --artifact): the key goes, every other worker setting stays.
 opt_in=$(cd "$box/home/work/munice/sub" && ROLE=worker ARTIFACT=1 run)
-jq -e '(has("enableArtifact") | not) and .enableWorkflows == false and .env.ENABLE_CLAUDEAI_MCP_SERVERS == "false" and (.claudeMdExcludes | length) == 2' <<<"$(sed -n '2p' <<<"$opt_in")" >/dev/null || fail 'opt-in keeps Artifact and the rest of the worker profile'
-jq -e '(has("enableArtifact") | not)' <<<"$(cd "$box/home/work/munice/sub" && ROLE=main ARTIFACT=1 run | sed -n '2p')" >/dev/null || fail 'opt-in works for the main role too'
+jq -e '(has("enableArtifact") | not) and .enableWorkflows == false and .env.ENABLE_CLAUDEAI_MCP_SERVERS == "false" and (.claudeMdExcludes | length) == 2' <<<"$(settings_json <<<"$opt_in")" >/dev/null || fail 'opt-in keeps Artifact and the rest of the worker profile'
+jq -e '(has("enableArtifact") | not)' <<<"$(cd "$box/home/work/munice/sub" && ROLE=main ARTIFACT=1 run | settings_json)" >/dev/null || fail 'opt-in works for the main role too'
 # api#1066: a pane under a lead starts without the skills its work never calls (design, office-file and Claude-API skills), so the
 # listing sent on every call shrinks. Plugin skills cannot be switched off one by one, so taste-skill goes as a plugin.
 jq -e '.skillOverrides as $o | .enabledPlugins["taste-skill@taste-skill"] == false and (["docx","pdf","pptx","xlsx","code-review","claude-api","update-config","run","loop","init"] | all($o[.] == "off")) and (has("dietSkills") | not)' <<<"$settings" >/dev/null || fail 'worker starts without the unrelated skills'
@@ -59,8 +60,8 @@ jq -e '.skillOverrides as $o | ["codex-review","agent-board","writing-plain-kore
 jq -e '.enabledPlugins as $p | ["superpowers@claude-plugins-official","commit-commands@claude-plugins-official","ponytail@ponytail","fluent-korean@fluent-korean","core@munice","compliance@munice","ux-writing@munice"] | all($p[.] != false)' <<<"$settings" >/dev/null || fail 'worker keeps the plugins whose skills or hooks instructions call'
 # pane-spawn --skills opts back in: only the api#1066 cut returns; every earlier cut and the rest of the worker profile stay.
 skills_in=$(cd "$box/home/work/munice/sub" && ROLE=worker SKILLS=1 run)
-jq -e '(.enabledPlugins | has("taste-skill@taste-skill") | not) and (.skillOverrides | has("docx") or has("claude-api") | not) and .skillOverrides["hiring-panel"] == "off" and .enabledPlugins["core-skills@hyperframes"] == false and .enableArtifact == false and (has("dietSkills") | not) and (.claudeMdExcludes | length) == 2' <<<"$(sed -n '2p' <<<"$skills_in")" >/dev/null || fail '--skills brings back only the api#1066 cut'
-jq -e '(has("dietSkills") | not) and (.skillOverrides // {} | has("docx") | not) and (.enabledPlugins // {} | has("taste-skill@taste-skill") | not)' <<<"$(cd "$box/home/work/munice/sub" && ROLE=main run | sed -n '2p')" >/dev/null || fail 'the main pane keeps every skill'
+jq -e '(.enabledPlugins | has("taste-skill@taste-skill") | not) and (.skillOverrides | has("docx") or has("claude-api") | not) and .skillOverrides["hiring-panel"] == "off" and .enabledPlugins["core-skills@hyperframes"] == false and .enableArtifact == false and (has("dietSkills") | not) and (.claudeMdExcludes | length) == 2' <<<"$(settings_json <<<"$skills_in")" >/dev/null || fail '--skills brings back only the api#1066 cut'
+jq -e '(has("dietSkills") | not) and (.skillOverrides // {} | has("docx") | not) and (.enabledPlugins // {} | has("taste-skill@taste-skill") | not)' <<<"$(cd "$box/home/work/munice/sub" && ROLE=main run | settings_json)" >/dev/null || fail 'the main pane keeps every skill'
 # Deny rules merge with every other source, so they only narrow; nothing here may allow, ask or change the mode.
 jq -e '(.permissions | keys) == ["deny"] and (.permissions.deny | index("AskUserQuestion"))' <<<"$settings" >/dev/null || fail 'worker permissions only deny: a pane never asks 요유'
 jq -e '.enabledPlugins["core-skills@hyperframes"] == false and (.deniedMcpServers | index({serverName: "rea"})) and .env.ENABLE_CLAUDEAI_MCP_SERVERS == "false" and .skillOverrides["hiring-panel"] == "off" and (has("paneRules") | not)' <<<"$settings" >/dev/null || fail 'worker drops unused plugins, MCP servers, claude.ai connectors and skills'
@@ -74,18 +75,18 @@ for unwanted in SKIP_GLOBAL SKIP_LOCAL 'pane:skip' '<!--'; do ! grep -qF -- "$un
 
 # Outside munice the munice rules are not loaded at all, so they are neither excluded nor appended.
 out=$(cd "$box/other" && ROLE=worker run)
-jq -e --arg g "$box/home/.codex/AGENTS.md" '.claudeMdExcludes == [$g]' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'outside munice only the global rules are filtered'
+jq -e --arg g "$box/home/.codex/AGENTS.md" '.claudeMdExcludes == [$g]' <<<"$(settings_json <<<"$out")" >/dev/null || fail 'outside munice only the global rules are filtered'
 ! grep -qF KEEP_LOCAL "$(arg_after --append-system-prompt-file <<<"$out")" || fail 'munice rules leak outside munice'
 # A rule file that is missing is skipped, not excluded.
 mv "$box/home/.codex/AGENTS.md" "$box/agents.bak"
 out=$(cd "$box/other" && ROLE=worker run)
-jq -e '(.claudeMdExcludes // []) == []' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'a missing rule file is excluded'
+jq -e '(.claudeMdExcludes // []) == []' <<<"$(settings_json <<<"$out")" >/dev/null || fail 'a missing rule file is excluded'
 ! grep -qx -- --append-system-prompt-file <<<"$out" || fail 'no rule file means no appended file'
 mv "$box/agents.bak" "$box/home/.codex/AGENTS.md"
 
 # When the filtered copy cannot be written the pane still starts, with every rule file whole.
 out=$(cd "$box/home/work/munice/sub" && ROLE=worker STATE=/dev/null/nowhere run 'still runs' 2>/dev/null) || fail 'an unwritable state dir stops the pane'
-jq -e '(has("claudeMdExcludes") | not) and (has("paneRules") | not) and .env.ENABLE_CLAUDEAI_MCP_SERVERS == "false"' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'unwritable state dir: full rules, rest of the profile kept'
+jq -e '(has("claudeMdExcludes") | not) and (has("paneRules") | not) and .env.ENABLE_CLAUDEAI_MCP_SERVERS == "false"' <<<"$(settings_json <<<"$out")" >/dev/null || fail 'unwritable state dir: full rules, rest of the profile kept'
 ! grep -qx -- --append-system-prompt-file <<<"$out" || fail 'unwritable state dir: no appended file'
 [[ "$(tail -1 <<<"$out")" == 'still runs' ]] || fail 'unwritable state dir: arguments pass through'
 
@@ -100,22 +101,22 @@ rm -f "$record"; (cd "$box/home/work/munice/sub" && ROLE=worker run >/dev/null)
 out=$(cd "$box/home/work/munice/sub" && ROLE=main run)
 [ -n "$(sed -n 1p "$record")" ] && [ "$(sed -n 2p "$record")" = "$box/home/work/munice/sub" ] || fail 'the main pane records its start and folder'
 ! startup changed || fail 'what the main pane just started with counts as changed'
-jq -e '.enableArtifact == false and .enableWorkflows == false and (has("claudeMdExcludes") | not) and (.deniedMcpServers | length) == 6 and .skillListingBudgetFraction == 0.0015 and (has("bashOutputMaxChars") | not)' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'main profile changed'
+jq -e '.enableArtifact == false and .enableWorkflows == false and (has("claudeMdExcludes") | not) and (.deniedMcpServers | length) == 6 and .skillListingBudgetFraction == 0.0015 and (has("bashOutputMaxChars") | not)' <<<"$(settings_json <<<"$out")" >/dev/null || fail 'main profile changed'
 ! grep -qx -- --append-system-prompt-file <<<"$out" || fail 'main pane gets filtered rules'
 printf 'term_test\n' >"$box/state/orchestrator/main"
 rm "$record"
 out=$(run)
-jq -e '.enableArtifact == false' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'main detection'
+jq -e '.enableArtifact == false' <<<"$(settings_json <<<"$out")" >/dev/null || fail 'main detection'
 [ -s "$record" ] || fail 'a detected main pane records its start'
 [[ "$(ROLE=worker PROFILE=full run --version)" == --version ]] || fail 'full opt-out'
 rm "$box/state/orchestrator/main"
 # New ordinary munice sessions get the shared budget/connection profile; other
 # folders and the explicit full opt-out retain their installed defaults.
 out=$(cd "$box/home/work/munice/sub" && run --version)
-jq -e '.skillListingBudgetFraction == 0.0015 and .skillListingMaxDescChars == 160 and (.deniedMcpServers | length) == 6 and (has("enableArtifact") | not) and (has("claudeMdExcludes") | not)' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'ordinary munice session has no common-only profile'
+jq -e '.skillListingBudgetFraction == 0.0015 and .skillListingMaxDescChars == 160 and (.deniedMcpServers | length) == 6 and (has("enableArtifact") | not) and (has("claudeMdExcludes") | not)' <<<"$(settings_json <<<"$out")" >/dev/null || fail 'ordinary munice session has no common-only profile'
 [[ "$(cd "$box/home/work/munice/sub" && PROFILE=full run --version)" == --version ]] || fail 'ordinary session cannot restore installed connections'
 out=$(cd "$box/home/work/munice/sub" && ROLE=check run)
-jq -e '.skillListingBudgetFraction == 0.0015 and (.deniedMcpServers | length) == 6' <<<"$(sed -n '2p' <<<"$out")" >/dev/null || fail 'check role misses shared limits'
+jq -e '.skillListingBudgetFraction == 0.0015 and (.deniedMcpServers | length) == 6' <<<"$(settings_json <<<"$out")" >/dev/null || fail 'check role misses shared limits'
 [[ "$(run --version)" == --version ]] || fail 'a session opened by hand gets no profile'
 # A check's whole child tree may inspect processes/network, but cannot write its
 # target, even through a symlink. The executable is a local probe, never Claude.

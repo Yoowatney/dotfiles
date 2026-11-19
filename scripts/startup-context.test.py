@@ -31,7 +31,19 @@ class StartupContextTest(unittest.TestCase):
                        CLAUDE_CHECK_TARGET='')
             args = subprocess.check_output(['bash', str(ROOT / 'scripts/claude-online')],
                                            cwd=home, env=env, text=True).splitlines()
-            return json.loads(args[args.index('--settings') + 1])
+            value = args[args.index('--settings') + 1]
+            self.assertFalse(value.startswith('{'), 'settings must not contain inline JSON')
+            settings_path = Path(value)
+            self.assertTrue(settings_path.is_file(), 'settings must be a file path')
+            self.assertEqual(settings_path.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn('obsidian', '\n'.join(args))
+            inode = settings_path.stat().st_ino
+            repeated = subprocess.check_output(['bash', str(ROOT / 'scripts/claude-online')],
+                                               cwd=home, env=env, text=True).splitlines()
+            self.assertEqual(repeated[repeated.index('--settings') + 1], str(settings_path))
+            self.assertEqual(settings_path.stat().st_ino, inode,
+                             'unchanged settings must reuse their file')
+            return json.loads(settings_path.read_text())
 
     def test_general_roles_exclude_six_connections_without_overriding_safety_hooks(self):
         for role in ('main', 'general', 'check'):
