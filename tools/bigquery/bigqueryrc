@@ -1,0 +1,7 @@
+# bq CLI defaults, linked to ~/.bigqueryrc by init.sh.
+# Cap on bytes billed per query job (20GB). A larger scan fails before it runs
+# and bills nothing. To go over it for one command, pass
+# --maximum_bytes_billed=<bytes> on that bq query; the flag wins over this file.
+# Check the scan size first with: bq query --dry_run '<sql>'
+[query]
+--maximum_bytes_billed=20000000000

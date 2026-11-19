@@ -251,6 +251,9 @@ create_symlinks() {
     # Gemini
     create_symlink "$DOTFILES/tools/gemini" "$CONFIG/gemini" "gemini"
 
+    # bq CLI: per-job scan cap (agents run bq in every session)
+    create_symlink "$DOTFILES/tools/bigquery/bigqueryrc" "$HOME/.bigqueryrc" "bigqueryrc"
+
     # Karabiner
     create_symlink "$DOTFILES/macos/karabiner" "$CONFIG/karabiner" "karabiner"
 
