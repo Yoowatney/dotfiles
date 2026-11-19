@@ -2,6 +2,7 @@
 """Parsers of settings-check.py. The live checks run inside verify.sh on each Mac."""
 import importlib.util
 from pathlib import Path
+import tempfile
 import unittest
 
 spec = importlib.util.spec_from_file_location('settings_check', Path(__file__).with_name('settings-check.py'))
@@ -36,6 +37,19 @@ sudo defaults write /Library/Preferences/x key -bool true
         self.assertFalse(sc.same_value('int', '2', '3'))
         self.assertFalse(sc.same_value('bool', 'true', None))
         self.assertFalse(sc.same_value('float', '3', 'abc'))
+
+    def test_hotkey_parameters_come_from_defaults_sh(self):
+        text = ("defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 60 '\n<dict>\n"
+                "  <key>enabled</key><true/>\n  <key>value</key>\n  <dict>\n    <key>parameters</key>\n    <array>\n"
+                "      <integer>65535</integer>\n      <integer>79</integer>\n      <integer>0</integer>\n"
+                "    </array>\n  </dict>\n</dict>'\ndefaults write com.apple.x y -int 7\n")
+        self.assertEqual(sc.hotkey_parameters(text), [65535, 79, 0])
+
+    def test_sandboxed_domains_are_left_out(self):
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / 'Library/Containers/org.example.sandboxed').mkdir(parents=True)
+            self.assertTrue(sc.in_container('org.example.sandboxed', Path(home)))
+            self.assertFalse(sc.in_container('com.apple.dock', Path(home)))
 
     def test_brewfile_casks_and_mas(self):
         text = 'brew "git"\ncask "aldente"  # 충전 한도\n# cask "old"\ncask "user/tap/tool"\nmas "Snap", id: 418073146\n'

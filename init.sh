@@ -515,6 +515,14 @@ post_install() {
 
     # 입력 소스를 macos/input-sources/enabled.txt(구름 두벌식·로마자)로 맞춘다. TIS로 바로 적용되어 로그아웃이 필요 없다.
     bash "$DOTFILES/scripts/input-sources.sh" apply || warn "입력 소스 적용 실패: bash $DOTFILES/scripts/input-sources.sh apply"
+    # 구름은 샌드박스 앱이라 컨테이너 안의 설정만 읽는다(오른쪽 Command 한영 전환 등). ~/Library/Preferences 복원만으로는 적용되지 않는다.
+    local gureum_prefs="$HOME/Library/Containers/org.youknowone.inputmethod.Gureum/Data/Library/Preferences"
+    if [[ -d "$gureum_prefs" ]]; then
+        defaults import "$gureum_prefs/org.youknowone.Gureum" "$DOTFILES/macos/gureum/gureum.xml" && killall Gureum 2>/dev/null
+        info "구름 설정을 컨테이너에 적용함"
+    else
+        warn "구름 컨테이너가 아직 없음: 구름으로 한 번 입력한 뒤 init.sh를 다시 실행"
+    fi
 
     # Brewfile에서 cask 앱들 추출해서 전부 실행 (Gatekeeper 경고 처리)
     info "Opening all cask apps (Gatekeeper 경고 처리)..."

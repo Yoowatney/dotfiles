@@ -3,6 +3,7 @@
 
 Targets: this Mac, plus the first line of ~/.config/herdr/remote-host and ~/.config/munice/portable-host.
 A failure is alerted once, when it first appears; it alerts again only after a run where it passed.
+Runs only on 세션맥, the Mac with portable-host: init.sh links this job's plist on every Mac.
 """
 import hashlib
 import importlib.util
@@ -76,7 +77,7 @@ def check(host, target, now):
     return new
 
 
-def alert(new, now):
+def alert(new, now, prior):
     body = ''
     for i, line in enumerate(new):
         if len((body + line).encode()) > BODY_BYTES:
@@ -84,14 +85,19 @@ def alert(new, now):
             break
         body += line + '\n'
     body += '\n그 맥에서 bash ~/.dotfiles/verify.sh 로 확인합니다.'
-    digest = hashlib.sha256('\n'.join(sorted(new)).encode()).hexdigest()[:16]
+    # The saved state is part of the ID: a retry after an unsaved run reuses it, a failure back after a fix gets a new one.
+    digest = hashlib.sha256((prior + '\n'.join(sorted(new))).encode()).hexdigest()[:16]
     load_inbox().enqueue(os.environ, event_id=f"settings-drift-{digest}-{time.strftime('%Y%m%d', time.localtime(now))}",
                          title=f'맥 설정 차이 {len(new)}개', body=body)
 
 
 def main():
+    if not (Path.home() / HOST_FILES[1]).exists():
+        print('skip: no ~/' + HOST_FILES[1] + ', so this is not 세션맥')
+        return 0
     path = Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local/state') / 'settings-drift/state.json'
-    state = json.loads(path.read_text()) if path.exists() else {}
+    prior = path.read_text() if path.exists() else ''
+    state = json.loads(prior) if prior else {}
     now = int(time.time())
     new = []
     for host in targets():
@@ -101,7 +107,7 @@ def main():
         new += found
     if new:
         try:
-            alert(new, now)
+            alert(new, now, prior)
         except Exception as error:  # leave the state unsaved so the next run alerts again
             print(f'alert inbox write failed: {error}', file=sys.stderr)
             return 1

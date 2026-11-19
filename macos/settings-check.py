@@ -25,6 +25,17 @@ def parse_defaults(text):
     return rows
 
 
+def hotkey_parameters(text):
+    """The F18 input-source hotkey defaults.sh writes, as AppleSymbolicHotKeys stores it."""
+    block = re.search(r"-dict-add 60 '(.*?)'", text, re.S)
+    return [int(n) for n in re.findall(r'<integer>(\d+)</integer>', block.group(1))] if block else []
+
+
+def in_container(domain, home=Path.home()):
+    """A sandboxed app keeps this domain in its container, which macOS hides from ssh and launchd (App Data)."""
+    return (home / 'Library/Containers' / domain).is_dir()
+
+
 def same_value(kind, want, have):
     if have is None:
         return False
@@ -80,11 +91,14 @@ def main():
     def emit(ok, name):
         print(('ok' if ok else 'fail') + '\t' + name)
 
-    for host, domain, key, kind, want in parse_defaults((ROOT / 'macos/defaults.sh').read_text(encoding='utf-8')):
+    defaults_sh = (ROOT / 'macos/defaults.sh').read_text(encoding='utf-8')
+    for host, domain, key, kind, want in parse_defaults(defaults_sh):
+        if in_container(domain):  # shortcut: no check for sandboxed apps (구름), until the checker gets App Data access
+            continue
         emit(same_value(kind, want, run('defaults', *(['-currentHost'] if host else []), 'read', domain, key)),
              f'defaults {domain} {key}')
     hotkey = export('com.apple.symbolichotkeys').get('AppleSymbolicHotKeys', {}).get('60', {})
-    emit(hotkey.get('enabled') and hotkey.get('value', {}).get('parameters', [])[1:2] == [79], 'hotkey 60 F18')
+    emit(hotkey.get('enabled') and hotkey.get('value', {}).get('parameters') == hotkey_parameters(defaults_sh), 'hotkey 60 F18')
 
     casks, mas = parse_brewfile((ROOT / 'Brewfile').read_text(encoding='utf-8'))
     installed = set((run('brew', 'list', '--cask', '-1') or '').split())

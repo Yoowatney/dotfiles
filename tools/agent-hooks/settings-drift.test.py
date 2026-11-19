@@ -17,8 +17,11 @@ class DriftTests(unittest.TestCase):
         root = Path(self.tmp.name)
         home, self.fake = root / 'home', root / 'fake'
         (home / '.config/herdr').mkdir(parents=True)
+        (home / '.config/munice').mkdir(parents=True)
         self.fake.mkdir()
         (home / '.config/herdr/remote-host').write_text('homehost\n')
+        self.portable = home / '.config/munice/portable-host'
+        self.portable.write_text('homehost\n')
         for name, body in (('ssh', 'cat "$FAKE/ssh.out"; exit "$(cat "$FAKE/ssh.code")"'), ('bash', 'cat "$FAKE/local.out"')):
             (self.fake / name).write_text('#!/bin/bash\n' + body + '\n')
             (self.fake / name).chmod(0o755)
@@ -56,6 +59,23 @@ class DriftTests(unittest.TestCase):
         self.remote('집맥\n' + DONE)
         self.drift()
         self.assertEqual(self.target()['fails'], [])
+
+    def test_failure_back_after_a_fix_alerts_again_the_same_day(self):
+        failing = '집맥\nVERIFY-FAIL snap apps\n' + DONE
+        self.remote(failing, 1)
+        self.drift()
+        self.remote('집맥\n' + DONE)
+        self.drift()
+        self.remote(failing, 1)
+        self.drift()
+        self.assertEqual(len(self.alerts()), 2)
+
+    def test_runs_only_on_the_mac_with_portable_host(self):
+        self.portable.unlink()
+        self.remote('집맥\nVERIFY-FAIL snap apps\n' + DONE, 1)
+        self.assertEqual(self.drift().returncode, 0)
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.alerts(), [])
 
     def test_unreachable_host_keeps_last_ok_and_stays_quiet(self):
         self.drift()

@@ -43,10 +43,17 @@ func enable(_ want: [String]) {
 
 // Run from scripts/input-sources.sh, which checks the result in a fresh process: inside this one, TIS keeps
 // reporting stale entries (even sources that were never enabled) after the calls below.
-func apply(_ want: [String]) {
+func apply(_ want: [String]) -> Bool {
     let dir = "/Library/Input Methods"
     for app in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] where app.hasSuffix(".app") {
         TISRegisterInputSource(URL(fileURLWithPath: dir + "/" + app) as CFURL)
+    }
+    let installed = Set(sources(includeAll: true).map { sourceID($0) })
+    let absent = want.filter { !installed.contains($0) }
+    if !absent.isEmpty {
+        // Stop before disabling anything: with 구름 not installed, the steps below would leave no keyboard layout.
+        absent.forEach { print("not installed \($0)") }
+        return false
     }
     enable(want)
     for s in sources(includeAll: false) where !want.contains(sourceID(s)) && enabledKeyboards().contains(sourceID(s)) {
@@ -66,6 +73,7 @@ func apply(_ want: [String]) {
             Thread.sleep(forTimeInterval: 0.5)
         }
     }
+    return true
 }
 
 let args = CommandLine.arguments
@@ -83,5 +91,5 @@ case "list":
 case "check":
     exit(check(want) ? 0 : 1)
 default:
-    apply(want)
+    exit(apply(want) ? 0 : 1)
 }
