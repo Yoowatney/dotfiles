@@ -321,6 +321,33 @@ class SlackRelayTest(unittest.TestCase):
         self.record('이건 어디에서 봐?', extra=[self.relay(), report])
         self.assertIsNone(self.check(lambda refs: [ASK] if refs[0][1] == self.stamp else []))
 
+    def test_one_message_with_several_links_counts_its_newest_confirmed_post(self):
+        older, newer = self.stamp[:10] + '.000001', self.stamp
+        said = {older: ASK, newer: '두 수치가 왜 달라?'}
+        for links, denied in (((older, newer), True), ((newer, older), True)):  # the newer post decides, wherever it stands
+            text = ' '.join('https://example.slack.com/archives/%s/p%s' % (MAIN, ts.replace('.', '')) for ts in links)
+            self.record('이건 어디에서 봐?', extra=[self.told(text)])
+            with self.subTest(links=links):
+                self.assertEqual(bool(self.check(lambda refs: [said[refs[0][1]]])), denied)
+        said[newer] = ASK
+        self.assertIsNone(self.check(lambda refs: [said[refs[0][1]]]))
+
+    def test_a_post_the_bot_cannot_read_does_not_hide_the_others(self):
+        class Slack:
+            pass
+        calls = []
+
+        def read_one(slack, channel, ts):
+            calls.append(ts)
+            if ts == 'a':
+                raise RuntimeError('channel_not_found')
+            return {'ts': self.stamp, 'user': 'U0TESTYOYOO', 'client_msg_id': 'x', 'text': ASK}
+        module = type('M', (), {'slack_mod': type('S', (), {'Slack': Slack}), 'read_one': staticmethod(read_one),
+                                'YOYOO': 'U0TESTYOYOO', 'SKEW': 60, 'displayed': staticmethod(lambda text: text)})
+        with patch.object(PAGE, 'load', return_value=module):
+            self.assertEqual(PAGE.slack_posts([(MAIN, 'a'), (MAIN, 'b')]), [ASK])
+        self.assertEqual(calls, ['a', 'b'])
+
     def test_several_reports_after_the_request_do_not_push_it_out(self):
         reports = [self.told('https://example.slack.com/archives/%s/p%s%06d' % (MAIN, self.stamp[:10], n)) for n in range(1, 5)]
         self.record('이건 어디에서 봐?', extra=[self.relay(), *reports])

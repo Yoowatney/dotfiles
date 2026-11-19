@@ -43,8 +43,8 @@ MARK = re.compile(r'\[pane-tell: [^\n]*?확인하세요\]\s*')  # the mark pane-
 
 
 def places(text: str) -> list:
-    """One list of Slack places per message of a prompt, oldest first. pane-tell may carry several messages in one prompt,
-    each with its mark, and only the latest one Slack confirms counts.
+    """One list of Slack places per post a prompt names, oldest first. pane-tell may carry several messages in one prompt, and
+    one message several links; only the latest post Slack confirms counts.
     A Slack relay stands on its own post only: its body is 요유's words and may link older posts. A pane-tell message
     stands on every link it names."""
     groups = []
@@ -57,8 +57,7 @@ def places(text: str) -> list:
             found = [(m[1] or m[3], m[2] or '%s.%s' % (m[4], m[5])) for m in PLACE.finditer(body)]
         else:
             found = []
-        if found:
-            groups.append(list(dict.fromkeys(found))[:5])
+        groups += [[place] for place in sorted(set(found), key=lambda place: place[1])]  # one post each, the newest last
     return groups
 
 
@@ -72,7 +71,10 @@ def slack_posts(found: list, wait: float = READ_SECONDS) -> list:
             module = load(SLACK)
             slack, now = module.slack_mod.Slack(), time.time()
             for channel, ts in found:
-                m = module.read_one(slack, channel, ts)
+                try:
+                    m = module.read_one(slack, channel, ts)
+                except Exception:
+                    continue  # one post the bot cannot read does not hide the others
                 if (m and m.get('user') == module.YOYOO and not m.get('bot_id') and m.get('subtype') in (None, 'thread_broadcast')
                         and m.get('client_msg_id') and -module.SKEW <= now - float(m['ts']) <= WINDOW):
                     box.append(module.displayed(m.get('text') or ''))
