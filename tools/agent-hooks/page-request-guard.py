@@ -84,7 +84,7 @@ def slack_posts(found: list, wait: float = READ_SECONDS) -> list:
                 # ponytail: a post edited after it was relayed fails this too, and an earlier typed request then stands.
                 if claim is not None and m and not claim.startswith(claim.split('] ', 1)[0] + '] ' + module.relay_body(dict(m, files=None))):
                     continue  # (attachments add lines after the words, so the claim only has to start with them)
-                if (m and m.get('user') == module.YOYOO and not m.get('bot_id') and m.get('subtype') in (None, 'thread_broadcast')
+                if (m and m.get('user') == module.YOYOO and not m.get('bot_id') and m.get('subtype') in (None, 'thread_broadcast', 'file_share')
                         and m.get('client_msg_id') and -module.SKEW <= now - float(m['ts']) <= WINDOW):
                     box.append(module.displayed(m.get('text') or ''))
         except BaseException:

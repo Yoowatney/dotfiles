@@ -408,7 +408,7 @@ class SlackRelayTest(unittest.TestCase):
     def test_what_reads_slack_keeps_only_요유s_recent_app_posts(self):
         now = time.time()
         post = {'ts': self.stamp, 'user': 'U0TESTYOYOO', 'client_msg_id': 'x', 'text': ASK}
-        cases = [('요유', post, True), ('봇 글', dict(post, bot_id='B1'), False), ('다른 사람', dict(post, user='U1'), False),
+        cases = [('요유', post, True), ('스크린샷 첨부', dict(post, subtype='file_share'), True), ('입장 글', dict(post, subtype='channel_join'), False), ('봇 글', dict(post, bot_id='B1'), False), ('다른 사람', dict(post, user='U1'), False),
                  ('API로 쓴 글', {k: v for k, v in post.items() if k != 'client_msg_id'}, False),
                  ('오래된 글', dict(post, ts='%.6f' % (now - 7 * 3600)), False), ('없는 글', None, False)]
         fake = Path(self.temp.name) / 'fake_slack.py'
