@@ -24,6 +24,7 @@ def load(name, path):
 
 SHARE = load('share', 'tools/agent-hooks/yoyoo-share-guard.py')
 COMMON = load('common', 'tools/claude/hooks/gcp-account-guard.py')
+PAGE = load('page', 'tools/agent-hooks/page-request-guard.py')
 
 
 class PageRequestTest(unittest.TestCase):
@@ -198,6 +199,96 @@ class PageRequestTest(unittest.TestCase):
         with patch.object(SHARE, 'under_lead', return_value=False), \
                 patch.object(SHARE, 'delegates_checks', return_value=False):
             self.assertIsNone(SHARE.decide(self.payload(last_assistant_message='설명입니다. ' * 100), self.env))
+
+
+MAIN, DM = 'C0TEST0001', 'D0TESTDM001'
+ASK = '도식을 HTML로 만들어줘'
+
+
+class SlackRelayTest(unittest.TestCase):
+    """api#1373: 요유's page request that reaches a session as a Slack relay counts once Slack itself confirms 요유 wrote it."""
+    record, payload = PageRequestTest.record, PageRequestTest.payload
+
+    def setUp(self):
+        PageRequestTest.setUp(self)
+        self.stamp = '%.6f' % (time.time() - 60)
+
+    def relay(self, channel=MAIN, body=ASK, label='[Slack #0-yoyooyo 요유]'):
+        return {'type': 'user', 'message': {'content': '%s %s (ts %s, 글 %s/%s)' % (label, body, self.stamp, channel, self.stamp)}}
+
+    def told(self, link):
+        return {'type': 'user', 'message': {'content': "[pane-tell: '메인' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, "
+                                                       '되돌리기 어려운 일은 요유에게 확인하세요] 요유 요청 ' + link + ' 대로 도식을 만들어 주세요'}}
+
+    def link(self, channel=MAIN):
+        return 'https://example.slack.com/archives/%s/p%s' % (channel, self.stamp.replace('.', ''))
+
+    def check(self, posts, seen=None):
+        def fake(refs):
+            if seen is not None:
+                seen.extend(refs)
+            return posts
+        with patch.object(PAGE, 'slack_posts', side_effect=fake):
+            return PAGE.check(self.payload())
+
+    def test_confirmed_relays_in_main_and_dm_pass(self):
+        for channel, label in ((MAIN, '[Slack #0-yoyooyo 요유]'), (DM, '[Slack DM 요유]')):
+            seen = []
+            self.record('이건 어디에서 봐?', extra=[self.relay(channel, label=label)])
+            with self.subTest(label=label):
+                self.assertIsNone(self.check([ASK], seen))
+                self.assertEqual(seen, [(channel, self.stamp)])
+
+    def test_main_relay_to_a_work_session_names_the_post_by_link(self):
+        seen = []
+        self.record('설명 페이지 말고 짧게 답해줘', extra=[self.told(self.link())])
+        self.assertIsNone(self.check([ASK], seen))
+        self.assertEqual(seen, [(MAIN, self.stamp)])
+
+    def test_a_post_that_asks_for_no_page_or_refuses_one_is_denied(self):
+        self.record('이건 어디에서 봐?', extra=[self.relay(body=ASK)])  # the relay claims a request; Slack says otherwise
+        for post in ('이건 어디에서 봐?', 'HTML 만들지 말고 터미널로 답해줘'):
+            with self.subTest(post=post):
+                self.assertIn('page-on-request', self.check([post]) or '')
+
+    def test_a_relay_slack_does_not_confirm_is_denied_even_when_it_is_the_only_turn(self):
+        self.record('이건 어디에서 봐?', extra=[self.relay()])
+        self.assertIn('page-on-request', self.check([]) or '')
+        self.record(ASK, extra=[self.relay(body='어디서 봐?')])  # no confirmation: the earlier typed request still stands
+        self.assertIsNone(self.check([]))
+        with open(self.path, 'w') as stream:
+            stream.write(json.dumps(self.relay()))
+        self.assertIn('page-on-request', self.check([]) or '')
+
+    def test_a_later_typed_message_replaces_the_relay_without_reading_slack(self):
+        self.record(ASK, extra=[self.relay(), {'type': 'user', 'message': {'content': '이건 어디에서 봐?'}}])
+        seen = []
+        self.assertIn('page-on-request', self.check([ASK], seen) or '')
+        self.assertEqual(seen, [])
+
+    def test_a_relay_without_a_slack_place_is_still_skipped(self):
+        self.record('이건 어디에서 봐?', extra=[{'type': 'user', 'message': {'content': '[Slack #0-yoyooyo 요유] ' + ASK}}])
+        self.assertIn('page-on-request', self.check([ASK]) or '')
+
+    def test_what_reads_slack_keeps_only_요유s_recent_app_posts(self):
+        now = time.time()
+        post = {'ts': self.stamp, 'user': 'U0TESTYOYOO', 'client_msg_id': 'x', 'text': ASK}
+        cases = [('요유', post, True), ('봇 글', dict(post, bot_id='B1'), False), ('다른 사람', dict(post, user='U1'), False),
+                 ('API로 쓴 글', {k: v for k, v in post.items() if k != 'client_msg_id'}, False),
+                 ('오래된 글', dict(post, ts='%.6f' % (now - 7 * 3600)), False), ('없는 글', None, False)]
+        fake = Path(self.temp.name) / 'fake_slack.py'
+        fake.write_text('import json, os\nYOYOO, SKEW = "U0TESTYOYOO", 60\n'
+                        'class slack_mod:\n    Slack = type("Slack", (), {})\n'
+                        'def read_one(slack, channel, ts):\n'
+                        '    data = json.load(open(os.path.join(os.path.dirname(__file__), "post.json")))\n'
+                        '    if data == "boom": raise RuntimeError("down")\n    return data\n'
+                        'def displayed(text): return text\n')
+        for name, data, ok in cases + [('Slack 오류', 'boom', False)]:
+            (Path(self.temp.name) / 'post.json').write_text(json.dumps(data))
+            with self.subTest(name), patch.object(PAGE, 'SLACK', str(fake)):
+                self.assertEqual(PAGE.slack_posts([(MAIN, self.stamp)]), [ASK] if ok else [])
+        with patch.object(PAGE, 'SLACK', str(Path(self.temp.name) / 'missing.py')):
+            self.assertEqual(PAGE.slack_posts([(MAIN, self.stamp)]), [])
 
 
 if __name__ == '__main__':

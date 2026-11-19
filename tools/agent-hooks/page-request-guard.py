@@ -13,12 +13,50 @@ import os
 import re
 import shlex
 import sys
+import threading
+import time
 import unicodedata
 
 sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.realpath(__file__))
 REASON = ("page-on-request: 요유가 이번 메시지에서 HTML이나 설명 페이지를 요청하지 않았습니다. 페이지를 만들지 말고 터미널에서 답하세요. "
           "페이지는 요유가 그 메시지에서 HTML이나 설명 페이지를 직접 요청했을 때만 만듭니다.")
+
+
+# api#1373: a Slack relay (#0, 요유's DM, a thread call) or a main pane's pane-tell with a Slack link is no typed message, so
+# its words count only once Slack itself says 요유 wrote them. The relayed text is never read: a session can type anything.
+SLACK = os.path.expanduser('~/work/munice/.agents/skills/agent-board/main/slack_approval.py')
+RELAY = ('[Slack #0-yoyooyo 요유]', '[Slack DM 요유]', '[Slack 스레드 요유 부름]', '[pane-tell: ')
+PLACE = re.compile(r'글 ([CDG][A-Z0-9]{6,})/(\d{10}\.\d{6})|slack\.com/archives/([CDG][A-Z0-9]{6,})/p(\d{10})(\d{6})')
+WINDOW = 6 * 3600  # from the post; ponytail: a longer job whose page comes later is refused once and 요유 says 페이지
+READ_SECONDS = 4  # the hook has 10 s and a late answer would let the write through
+
+
+def places(text: str) -> list:
+    found = [(m[1] or m[3], m[2] or '%s.%s' % (m[4], m[5])) for m in PLACE.finditer(text)]
+    return list(dict.fromkeys(found))[:5]
+
+
+def slack_posts(found: list) -> list:
+    """The words of the posts at `found` (channel, ts) that 요유 typed in the Slack app within WINDOW, as 요유 reads them.
+    Anything else, an unreadable Slack included, gives no words. slack_approval.py is the module the GCP guard trusts."""
+    box = []
+
+    def read():
+        try:
+            module = load(SLACK)
+            slack, now = module.slack_mod.Slack(), time.time()
+            for channel, ts in found:
+                m = module.read_one(slack, channel, ts)
+                if (m and m.get('user') == module.YOYOO and not m.get('bot_id') and m.get('subtype') in (None, 'thread_broadcast')
+                        and m.get('client_msg_id') and -module.SKEW <= now - float(m['ts']) <= WINDOW):
+                    box.append(module.displayed(m.get('text') or ''))
+        except BaseException:
+            pass
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    worker.join(READ_SECONDS)
+    return list(box)
 
 
 def load(name: str):
@@ -36,7 +74,7 @@ def unrequested(payload: dict) -> bool:
     parser: notifications terminate grants there but must not erase this request.
     """
     records = load('yoyoo-share-guard.py').records  # only once a page write is seen: most calls never load it
-    latest = ''
+    latest, fallback, found, relayed = '', '', [], False
     try:
         with open(payload.get('transcript_path') or '', encoding='utf-8') as stream:
             for raw in stream:
@@ -60,11 +98,20 @@ def unrequested(payload: dict) -> bool:
                 if not item or item[0] != 'in':
                     continue
                 text = item[1].strip()
+                if text.startswith(RELAY) and places(text):
+                    fallback, latest, found, relayed = (fallback if relayed else latest), '', places(text), True
+                    continue
                 if text.startswith(('<task-notification', '<system-reminder', '[', '# AGENTS.md', '<environment_context')):
                     continue
-                latest = unicodedata.normalize('NFC', text)
+                latest, found, relayed = unicodedata.normalize('NFC', text), places(text), False
     except (OSError, TypeError):
         return False
+    posts = slack_posts(found) if found else []
+    if relayed and not posts:
+        if not fallback:
+            return True  # a relay Slack does not confirm, and no typed message before it: no request
+        latest = fallback
+    latest = unicodedata.normalize('NFC', '\n'.join(filter(None, [latest, *posts])))
     # Quoting a request or saying not to write HTML is not a direct request.
     request = re.sub(r'`[^`]*`|"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’', '', latest)
     page = r'(?:html|설명\s*페이지|웹\s*페이지|explainer\s*page|페이지)'
