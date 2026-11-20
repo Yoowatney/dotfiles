@@ -156,19 +156,23 @@ CHECK_REPORT_REASON = ("yoyoo-share-guard: 확인 칸의 보고를 받은 뒤 �
 # for the check. It is the pane's claim alone: no `확인:` line may rest on it, and the combined report still comes after the check.
 PRECHECK_HEAD = "확인 전 보고입니다(확인 칸이 아직 확인하고 있으며, 끝나면 합친 보고가 따로 옵니다). "
 PRECHECK_NOTE = ("아래는 일 칸의 주장이며 아직 확인되지 않았습니다. 확인 칸이 이미 돌고 있으니 새 확인 칸을 열지 마세요. "
-                 "#0에서 요유에게만 하는 답은 '확인 중:'으로 시작해 먼저 올리고, 합친 보고가 오면 같은 글을 고치세요. "
+                 "#0에서 요유에게만 하는 답은 '작업 중(확인 중):'으로 시작해(요유에게 할 일을 부탁하면 '요유 차례(확인 중):') 먼저 올리고, "
+                 "합친 보고가 오면 같은 글을 '끝남:'이나 '요유 차례:'로 고치세요. "
                  "요유 이름의 초안(--yoyoo-draft), reply, 팀 전달, decide, 운영·돈·보안 글은 이 예외가 아니니 합친 보고를 기다리세요. "
                  "이 보고는 '확인:' 줄의 근거가 아닙니다")
 # 요유 2026-11-20: a deliverable whose check could not open (usage reserve, workers down) waited two days because nothing here named the
-# early `확인 중:` route that main-orchestrator's "Early #0 answers" allows. UNOPENED_WHY is the head's reason text for that case.
+# early `작업 중(확인 중):` route (older posts: `확인 중:`) that main-orchestrator's "Early #0 answers" allows. UNOPENED_WHY is the head's reason text for that case.
 UNOPENED_WHY = "확인 칸을 열지 못했습니다"
+# main-channel refuses the old `확인 중:` head since 요유 2026-11-20 (a post to 요유 starts with its state), so only the new ones count.
+EARLY_HEAD = r"[\s*_>]*(?:작업 중|요유 차례)\(확인 중\)[ \t]*:"
 LINK_FAILED_WHY = "확인 자동 연결 실패"  # the check pane did not open either; "자동 칸이 요유를 기다립니다" never tried, so it keeps its demand
 EARLY_WHYS = (UNOPENED_WHY, LINK_FAILED_WHY)
 UNCHECKED_EARLY_NOTE = ("확인 칸이 열리지 않으면 기다리지 마세요. 이 보고가 #0이나 요유 DM에서 요유에게만 하는 답이고 운영·돈·보안 표시가 없으면, "
-                        "그림과 숫자를 '확인 중:'으로 시작해 바로 올리고 확인 칸이 열려 합친 보고가 오면 같은 글을 고치세요(main-orchestrator의 Early #0 answers). "
+                        "그림과 숫자를 '작업 중(확인 중):'으로 시작해(요유에게 할 일을 부탁하면 '요유 차례(확인 중):') '끝날 예상: HH:MM' 줄과 함께 바로 올리고, "
+                        "확인 칸이 열려 합친 보고가 오면 같은 글을 '끝남:'이나 '요유 차례:'로 고치세요(main-orchestrator의 Early #0 answers). "
                         "운영·돈·보안 글, 팀 전달, reply, decide, 요유 이름의 초안(--yoyoo-draft)이면 지금처럼 확인 칸을 기다리세요")
 PRECHECK_REASON = ("yoyoo-share-guard: 확인 전 보고를 받은 뒤 쓰는 보고인데, 아직 끝나지 않은 확인 칸을 '확인:' 줄의 근거로 적었습니다. "
-                   "합친 보고가 오기 전에는 '확인:' 줄을 빼고, 먼저 올린 답은 '확인 중:'으로 두세요.")
+                   "합친 보고가 오기 전에는 '확인:' 줄을 빼고, 먼저 올린 답은 '작업 중(확인 중):'으로 두세요.")
 # 요유 2026-11-05: dispatch tabs run on the hidden workers server, and only what needs 요유 reaches the main pane. It is no claim of work
 # done, so it asks for no check pane: this head stays out of RELAYED, and it keeps the main pane's turn short, since 요유's next
 # words wait behind it. Nothing can be typed into that pane, and it has closed by then, so the board and a new pane carry the rest.
@@ -557,7 +561,7 @@ def early_body(command: str, args: list) -> str | None:
 
 
 def early_post_ok(command: str, tool: str, output: str) -> bool:
-    """A completed `main-channel.py post` to #0 or 요유's DM that starts with `확인 중:`, no draft in her name, no broadcast, no mark of
+    """A completed `main-channel.py post` to #0 or 요유's DM that starts with `작업 중(확인 중):` or `요유 차례(확인 중):`, no draft in her name, no broadcast, no mark of
     operations, money or security. reply (team channels) and decide are other subcommands: posting_command does not read them."""
     post = posting_command(command)
     if not post or post[0] != "main-channel.py" or post[1][0] != "post" or not posted_reply(command, tool, output, {("", "")}, set()):
@@ -567,7 +571,7 @@ def early_post_ok(command: str, tool: str, output: str) -> bool:
     if "--yoyoo-draft" in flags or "--broadcast" in flags or not flags.get("--channel", "D").startswith("D"):
         return False
     body = early_body(command, args)
-    return body is not None and re.match(r"[\s*_>]*확인 중:", unicodedata.normalize("NFC", body)) is not None and not EARLY_MARK.search(body)
+    return body is not None and re.match(EARLY_HEAD, unicodedata.normalize("NFC", body)) is not None and not EARLY_MARK.search(body)
 
 
 def early_posted(after: list) -> bool:
@@ -621,7 +625,7 @@ def relay_reason(payload: dict, text: str, env) -> str | None:
     stated = [v for v in (m.group(1).strip(" \t*_.,;") for m in CHECK_LINE.finditer(prose(text))) if v and not NONE.match(v)]
     if delegates_checks(payload, env):
         if kind == "이" and unopened_heads(lines[start]) and early_posted(after):
-            return None  # its check could not open, and the answer to 요유 alone already went up as `확인 중:` (a real post, not words)
+            return None  # its check could not open, and the answer to 요유 alone already went up as `작업 중(확인 중):` (a real post, not words)
         if kind == "바로 전달하는":
             return None  # questions, decisions, no result, or a failed automatic spawn: do not ask for a check again
         if kind == "확인":
