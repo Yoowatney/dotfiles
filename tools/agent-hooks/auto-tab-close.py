@@ -393,6 +393,17 @@ CHECK_TOKEN = re.compile(r"\[ac-([0-9a-f]{16})\]")
 RECHECK_TOKEN = re.compile(share.RECHECK_TOKEN)  # the name of a read-only recheck worker that main opened because a check could not open
 
 
+def unopened_recheck(label: str, env) -> bool:
+    """The pane's name holds [rc-<id>] of a check that really could not open (its fallback context, never handed to a check pane)."""
+    token = RECHECK_TOKEN.search(label)
+    try:
+        with open(os.path.join(herdr_peers.state_dir(env), "automatic-checks", token[1] + ".json"), encoding="utf-8") as f:
+            context = json.load(f)
+    except (TypeError, OSError, ValueError):
+        return False
+    return isinstance(context, dict) and context.get("fallback_delivered") is True and not context.get("handed")
+
+
 def check_key(me: dict, reply: str) -> str:
     return hashlib.sha256((str(me.get("terminal_id")) + str(me.get("agent_session")) + reply).encode()).hexdigest()[:16]
 # api#1218 (2026-11-13): a figure a pane drew went to 요유 unchecked and was wrong, since a report with 요유 몫, a question
@@ -805,7 +816,7 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
     if opener(name) != to.get("terminal_id"):
         return None  # an absent ordinary lead's pane still reaches main as before
     # a read-only recheck of a check that could not open is the way out, so its report comes straight back and gets no check of its own
-    recheck = RECHECK_TOKEN.search(me.get("label") or "")
+    recheck = unopened_recheck(me.get("label") or "", env)
     reason = "읽기 전용 재확인 보고" if recheck else direct_reason(reply)
     body = (f"{short_report(reply, None)}\n칸: {herdr_peers.address(env, me['pane_id'])} {me.get('label') or ''}\n"
             f"전체 보고: {path} ({entry})")
@@ -1111,8 +1122,9 @@ def finish(reply: str, env):
                 try:
                     folder = os.path.join(herdr_peers.state_dir(env), "automatic-checks")
                     os.makedirs(folder, exist_ok=True)
-                    write_context(os.path.join(folder, key + ".json"), dict(report=path, entry=f"{now:%H:%M:%S} 항목", worker_address=address,
-                                                                            spawn_error=str(error), fallback_delivered=True))
+                    if not os.path.exists(os.path.join(folder, key + ".json")):  # never over a context a check pane may already hold
+                        write_context(os.path.join(folder, key + ".json"), dict(report=path, entry=f"{now:%H:%M:%S} 항목", worker_address=address,
+                                                                                spawn_error=str(error), fallback_delivered=True))
                 except OSError:
                     pass
                 return send(f"{unchecked_head(reply, share.LINK_FAILED_WHY)} {error}\n{short_report(reply, None)}\n전체 보고: {path} ({now:%H:%M:%S} 항목)\n"

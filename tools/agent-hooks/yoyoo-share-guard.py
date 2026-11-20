@@ -166,11 +166,11 @@ PRECHECK_NOTE = ("아래는 일 칸의 주장이며 아직 확인되지 않았�
 UNOPENED_WHY = "확인 칸을 열지 못했습니다"
 LINK_FAILED_WHY = "확인 자동 연결 실패"  # the check pane did not open either; "자동 칸이 요유를 기다립니다" never tried, so it keeps its demand
 EARLY_WHYS = (UNOPENED_WHY, LINK_FAILED_WHY)
-RECHECK_TOKEN = r"\[rc-[0-9a-f]{16}\]"
-UNOPENED_NOTE = ("확인 칸이 열리지 않았으니 결과를 묶어 두지 말고 바로 다시 보세요. 확인 칸은 다시 열지 마세요. "
+RECHECK_TOKEN = r"\[rc-([0-9a-f]{16})\]"  # one group: the ac id of the check that could not open
+UNOPENED_NOTE = ("확인 칸이 열리지 않았으니 결과를 묶어 두지 말고 바로 다시 보세요. "
                  "명령 하나로 다시 볼 수 있으면 이 칸이 직접 실행해 결과를 보고, 아니면 "
                  "`pane-spawn --kind auto \"<일 이름> [rc-<아래 [ac-] 뒤 번호>]\" \"<읽기 전용으로 다시 볼 것, 전체 보고 파일>\"`로 "
-                 "보통 부하 세션에게 읽기 전용 재확인을 맡기세요(확인 칸이 아닌 보통 세션입니다). 그 세션의 보고는 바로 오며, 그 보고로 올립니다. "
+                 "보통 부하 세션에게 읽기 전용 재확인을 맡기세요(확인 칸이 아닌 보통 세션입니다). 칸 이름의 [rc-번호]는 이름을 바꿔도 남겨 두라고 지시문에 쓰세요. 그 세션의 보고는 바로 오며, 그 보고로 올립니다. "
                  "팀 스레드·돈·운영 글과 요유 이름의 초안도 같습니다. 운영 쓰기 승인 같은 다른 관문은 그대로 둡니다. "
                  "Slack 글의 '확인:' 줄에는 누가 무엇을 보고 어땠는지만 적고(직접 본 뒤에는 [ac-번호]를, 재확인 세션의 끝난 보고에 기대면 그 보고 항목 시각을 [재확인 HH:MM:SS]로 붙입니다), 확인 칸을 열지 못했다는 말은 쓰지 마세요. "
                  "재확인이 도는 동안 요유에게만 하는 답이면 '작업 중(확인 중):'으로 먼저 올려도 됩니다")
@@ -551,7 +551,8 @@ def spawns_recheck(command: str) -> bool:
     """A `pane-spawn` that is no check and names `[rc-<ac id>]` in the pane's name: the read-only recheck of a check that could not open.
     ponytail: a regex reading of shell, as spawns_check."""
     plain = HEREDOC.sub("", command)
-    return bool(re.search(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?pane-spawn\b[^\n;&|]*" + RECHECK_TOKEN, plain)) and not spawns_check(command)
+    # the token sits in the pane's name (the first quoted word after the options), not in the instruction
+    return bool(re.search(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:\S*/)?pane-spawn\b(?:\s+--[\w-]+(?:\s+[^\s\"'-]\S*)?)*\s+[\"'][^\"'\n]*" + RECHECK_TOKEN, plain)) and not spawns_check(command)
 
 
 def relay_reason(payload: dict, text: str, env) -> str | None:
@@ -595,7 +596,7 @@ def relay_reason(payload: dict, text: str, env) -> str | None:
             # its check could not open: look again here (a command ran and a `확인:` line says what it saw), or hand a read-only recheck out
             looked = any(kind == "call" and i not in refused and not chore(name, command) for kind, command, name, i in after) and stated
             opened = {i for kind, _, _, i in after if kind == "opened"}
-            handed = any(kind == "call" and i in opened and spawns_recheck(command) for kind, command, _, i in after)
+            handed = any(kind == "call" and i in opened and (spawns_recheck(command) or spawns_check(command)) for kind, command, _, i in after)
             return None if looked or handed else UNOPENED_REASON
         if kind == "바로 전달하는":
             return None  # questions, decisions, no result, or a failed automatic spawn: do not ask for a check again

@@ -1330,7 +1330,6 @@ class RelayTests(unittest.TestCase):
         self.assertIsNone(self.after_blocks(message, spawn, output="default/w1:p4\n", said=waiting))
         self.assertIsNone(self.after_blocks(message, f"cd /tmp && {spawn}", output="default/w1:p4\n", said=waiting))
         for name, command, output in (("no rc name", 'pane-spawn --kind auto "그림 재확인" "다시 볼 것"', "default/w1:p4\n"),
-                                      ("a check pane", f'pane-spawn --check "그림 [rc-{key}]" "다시 볼 것"', "default/w1:p4\n"),
                                       ("spawn failed", spawn, "pane-spawn: usage\n"),
                                       ("an echo", f"echo {spawn}", "")):
             with self.subTest(name):
@@ -1353,12 +1352,60 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(self.after_blocks(batch, "gh api x"), auto.share.DELEGATE_REASON)
 
     def test_a_recheck_worker_report_comes_straight_back(self):
-        self.worker["label"] = "🟢 🫡 그림 재확인 [rc-0123456789abcdef]"
-        self.finish(self.FIGURE)
+        key = self.key_of(self.unopened_message())
+        self.tells.clear()
+        self.spawns.clear()
+        self.worker["label"] = f"🟢 🫡 그림 재확인 [rc-{key}]"
+        self.worker["agent_session"] = {"value": "sid-recheck"}  # another pane's report: its own receipt key
+        self.finish(self.FIGURE + "\n재확인 쪽 보고")
         self.assertEqual(self.spawns, [], "a recheck of a check is no check: no loop")
         message = self.tells[0][1]
         self.assertTrue(message.startswith("바로 전달하는 칸의 보고입니다(읽기 전용 재확인입니다)"), message)
         self.assertIsNone(self.main_blocks(message), "main posts from it, as from a check pane's report")
+
+    def test_a_made_up_or_opened_rc_token_buys_no_direct_route(self):
+        # review of #119: the token counts only for a check that really could not open
+        key = self.key_of(self.unopened_message())
+        self.tells.clear()
+        self.spawns.clear()
+        self.worker["label"] = "🟢 🫡 매출 집계 [rc-0000000000000000]"
+        self.finish(self.FIGURE + "\n가짜 토큰")
+        self.assertTrue(self.spawns, "no context for that id: the report still tries its check")
+        self.assertTrue(self.tells[0][1].startswith("이 칸의 보고입니다("), self.tells[0][1])
+        path = self.state / "automatic-checks" / (key + ".json")
+        context = json.loads(path.read_text())
+        context["handed"] = True  # a check pane was started for it after all
+        path.write_text(json.dumps(context))
+        self.tells.clear()
+        self.spawns.clear()
+        self.worker["label"] = f"🟢 🫡 매출 집계 [rc-{key}]"
+        self.finish(self.FIGURE + "\n열린 확인")
+        self.assertTrue(self.spawns)
+        self.assertTrue(self.tells[0][1].startswith("이 칸의 보고입니다("), self.tells[0][1])
+
+    def test_the_rc_token_must_sit_in_the_pane_name_not_the_instruction(self):
+        key = self.key_of(self.unopened_message())
+        message = self.unopened_message()
+        said = "재확인을 맡겼습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 재확인 보고 받아 올리기 · 세션: 열어 둠"
+        inside = f'pane-spawn --kind auto "그림 재확인" "읽기 전용으로 [rc-{key}] 다시 볼 것"'
+        self.assertEqual(self.after_blocks(message, inside, output="default/w1:p4\n", said=said), auto.share.UNOPENED_REASON)
+        named = f'pane-spawn --kind auto --cwd /tmp "그림 재확인 [rc-{key}]" "다시 볼 것"'
+        self.assertIsNone(self.after_blocks(message, named, output="default/w1:p4\n", said=said))
+
+    def test_a_check_pane_main_opens_by_hand_is_a_check_too(self):
+        message = self.unopened_message()
+        said = "확인 칸을 열었습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 확인 보고 받아 올리기 · 세션: 열어 둠"
+        self.assertIsNone(self.after_blocks(message, 'pane-spawn --check "그림" "다시 볼 것"', output="default/w1:p4\n", said=said))
+
+    def test_the_link_failed_stub_never_replaces_a_context_a_check_may_hold(self):
+        # review of #119: an OSError after the check started must not erase handed/checker records
+        folder = self.state / "automatic-checks"
+        folder.mkdir(parents=True, exist_ok=True)
+        key = auto.check_key(self.worker, self.FIGURE)
+        (folder / (key + ".json")).write_text(json.dumps({"handed": True, "checker_address": "workers/w1:p9"}))
+        with patch.object(auto, "route_main_report", side_effect=OSError("disk")):
+            self.finish(self.FIGURE)
+        self.assertEqual(json.loads((folder / (key + ".json")).read_text())["checker_address"], "workers/w1:p9")
 
     def test_job_note_leaves_decisions_on_the_board_not_in_a_collected_list(self):
         # 요유 2026-11-19: no decision list is kept or shown any more; the board and the work thread carry the question once.
