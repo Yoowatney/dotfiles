@@ -206,7 +206,7 @@ if [ -n "$check" ] && [ -z "$request_child" ]; then
   case $? in
     0) ;;
     3) read -r week five < <(printf '%s' "$reserve" | jq -r 'def p: if . == floor then floor else . end; "\(.week | p)% \(if .short == null then "none" else "\(.short | p)%" end)"' 2>/dev/null)
-       die "Claude is past its usage reserve (week ${week:-?}, five-hour ${five:-?}), kept for the main pane: no check opened. Send the report on unchecked, with this reason." ;;
+       die "Claude is past its usage reserve (week ${week:-?}, five-hour ${five:-?}), kept for the main pane: no check opened. Send the report on unchecked, with this reason. If it only answers 요유 in #0 or her DM and is not operations, money or security, post it at once with '확인 중:' (main-orchestrator Early #0 answers); otherwise wait." ;;
     *) echo 'pane-spawn: Claude usage unknown; the check opens on Claude' >&2 ;;
   esac
 fi

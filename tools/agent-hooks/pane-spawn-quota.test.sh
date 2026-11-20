@@ -105,6 +105,8 @@ if PANE_SPAWN_CHECK_RECEIPT="$SANDBOX/over-receipt.json" ps --check "over" "inst
 fi
 grep -q 'past its usage reserve (week 85%, five-hour 20%)' "$SANDBOX/err" || fail "the refusal names the reserve and the reading"
 grep -q 'unchecked' "$SANDBOX/err" || fail "the refusal tells the caller to send the report on unchecked"
+grep -q "'확인 중:'" "$SANDBOX/err" || fail "the refusal names the early 확인 중: route for an answer to 요유 alone in #0 or her DM"
+grep -q 'operations, money or security' "$SANDBOX/err" || fail "the refusal keeps operations, money and security waiting"
 [ ! -e "$SANDBOX/log" ] || fail "a check past the reserve must not even query herdr"
 rm -f "$SANDBOX/home/.local/state/agent-quota/claude.json"
 quota_fixture 99 90 true
