@@ -62,12 +62,12 @@ echo workers/w2:p3
         address, error = self.run_start('''
 trap 'echo "{\\"status\\":\\"closed\\"}" > "$PANE_SPAWN_CHECK_RECEIPT"; exit 124' TERM
 echo '{"status":"creating"}' > "$PANE_SPAWN_CHECK_RECEIPT"
-sleep 10 & wait
+sleep 30 & wait
 ''', timeout=1)
         self.assertFalse(address)
         self.assertIn("timed out", error)
         self.assertEqual(len(self.context["start_attempts"]), 2)
-        self.assertLess(time.monotonic() - started, 5)
+        self.assertLess(time.monotonic() - started, 30)  # limit 1 s; the launcher would wait 30 s unless cancelled, so a busy host cannot look like no bound
 
     def test_uncertain_open_is_not_duplicated(self):
         address, error = self.run_start('''

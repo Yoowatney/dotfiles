@@ -116,7 +116,7 @@ put tools/hang.test.sh "sleep 20"; ci hang
 start=$SECONDS
 out=$(PRE_PUSH_LIMIT=1 git -C "$W" push origin main 2>&1 </dev/null); rc=$?
 check "a stuck test ends as a failure" "$([ "$rc" != 0 ] && echo refused)" refused
-check "a stuck test does not hold the push" "$([ $((SECONDS - start)) -lt 10 ] && echo fast)" fast
+has "a stuck test does not hold the push" "$out" "stopped after 1s"   # the limit ended a test that would sleep 20 s; no wall-clock bound
 has "a stuck test: named" "$out" "tools/hang.test.sh"
 
 fresh

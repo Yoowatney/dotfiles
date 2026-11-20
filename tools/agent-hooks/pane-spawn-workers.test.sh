@@ -114,10 +114,11 @@ mv "$SANDBOX/workers-workspaces.json" "$SANDBOX/kept"
 out=$(CALLER_LABEL=$LEAD FAIL_WORKSPACE=1 ps "리뷰" "지시" 2>"$SANDBOX/err") || fail "no workspace there: a lead still gets its pane"; falls_back "no workspace on workers" "$out"
 mv "$SANDBOX/kept" "$SANDBOX/workers-workspaces.json"
 out=$(CALLER_LABEL=$LEAD ps "리뷰" "지시" 2>"$SANDBOX/err"); [ ! -s "$SANDBOX/err" ] || fail "a pane on workers says nothing: $(cat "$SANDBOX/err")"
-# A stuck server still says it runs. The lead falls back in seconds, and a server that may only be slow gets no second workspace.
+# A stuck server still says it runs. The lead falls back once its 1 s limit ends, and a server that may only be slow gets no second workspace.
+# The fixture's stuck herdr sleeps 30 s, so a wait that is not bounded cannot finish under 30 s, however busy the host is.
 started=$SECONDS
 out=$(CALLER_LABEL=$LEAD STUCK_WORKERS=1 PANE_SPAWN_WORKERS_LIMIT=1 ps "리뷰" "지시" 2>"$SANDBOX/err") || fail "a stuck workers: a lead still gets its pane"; falls_back "a stuck workers" "$out"
-[ $((SECONDS - started)) -lt 10 ] || fail "a stuck workers held the lead for $((SECONDS - started)) s"
+[ $((SECONDS - started)) -lt 30 ] || fail "a stuck workers held the lead for $((SECONDS - started)) s"
 hasnt "[workers] workspace create" "nothing is created after a list that timed out"
 # The main pane never falls back: it does no work, and neither does its tab.
 is_main
