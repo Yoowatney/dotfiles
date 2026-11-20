@@ -26,6 +26,8 @@
 # (요유 2026-11-19: no Codex reviews; that day a quota lookup past its six seconds sent automatic checks to Codex).
 # Past Claude's measured usage reserve no check opens, and nothing waits for one (lead decision 2026-11-19, 요유 2026-11-20): the caller
 # looks again with one command or hands a read-only recheck to an ordinary worker; an unknown, stale or slow reading opens the check on Claude.
+# A refusal for usage never means "wait for the reset": USAGE_BLOCK_NOTE tells the main pane to ask 요유 to switch the account or spend a
+# reset ticket and reopen at once, and a pane under a lead to report that this request is needed (요유 2026-11-20).
 # --kind auto selects a normal worker using fresh local subscription quota (agent-quota); tools/agent-hooks/agent-runner shows or
 # switches the policy (claude | codex | auto). Policy quota-aware keeps Codex unless its week
 # runs ahead of pace; claude-first (one local policy value, e.g. while Codex quota is short) picks Claude first
@@ -56,6 +58,7 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] 
     same caller and folder is reused for ten minutes. Checks always start fresh.
   --kind auto: choose a normal worker from fresh subscription quota and weekly pace; unknown/paid usage is excluded.
     If neither runner qualifies, no pane opens. Set the agent-quota policy to codex-only for the previous routing.
+    When that is for usage, the refusal asks the main pane to have 요유 switch the account or spend a reset ticket, never to wait for the reset.
     Policy claude-first: Claude while its measured usage is within reserve, else Codex. Checks never follow the policy.
     A lookup exceeding six seconds warns once and retains Codex. Forwarded arguments and ambient-runner retain Codex.
     Startup, readiness and delivery errors never switch runners. Explicit work model/effort keeps its runner.
@@ -65,13 +68,16 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] 
   --check: a fresh check (main pane only) on Claude, which cannot write the checked folder.
     Always Claude, whatever the policy (요유 2026-11-19: no Codex reviews); --kind codex is refused. Past the measured Claude
     usage reserve it opens nothing and exits 2: look again with one command, or open an ordinary read-only recheck pane (no --check;
-    name it "<work name> [rc-<ac id>]" so its report comes straight back). An unknown usage reading still opens it.
+    name it "<work name> [rc-<ac id>]" so its report comes straight back; if no session can open for usage, ask 요유 to switch the account
+    or spend a reset ticket instead of waiting for the reset). An unknown usage reading still opens it.
   --artifact: keep the Artifact tool in a Claude pane (a job that publishes a page); every Claude pane starts without it otherwise.
   --skills: keep the design (taste-skill), office-file (docx/pdf/pptx/xlsx) and Claude-API skills in a Claude pane (UI or office-file job).
   --opus: opt out of the main pane Claude work trial (Sonnet 5.5/high); use global model/effort defaults for heavy work.
     Checks, Codex, dispatch, ambient and other callers keep their existing model policy. Explicit agent arguments win.'
 MIN_ROWS=${PANE_SPAWN_MIN_ROWS:-16} # a 46-row window holds 4 panes of 11-12 rows, which still show about 5 lines of work (2026-11-04); a fifth would leave 5-6
 die() { echo "pane-spawn: $*" >&2; exit 2; }
+# 요유 2026-11-20: a usage refusal once sent the main pane to put several jobs off to the next reset; the way out is a request, never a wait.
+USAGE_BLOCK_NOTE="Never put the work off until the usage reset (요유 2026-11-20). Main pane: ask 요유, in that work's thread or in #0, to switch the account or spend a reset ticket, and open the session again as soon as they say it is done. A pane under a lead: report to the lead that this request is needed."
 # Every reader takes a tab named "자동 …" or "알아서 …" for a job's: pane-tell refuses its panes, and no mark goes on it. A work name that
 # starts that way made an ordinary pane unreachable (요유 2026-11-05), so no tab it names starts that way.
 tab_name() { case "$1" in "자동 "* | "알아서 "*) echo "일 $1" ;; *) echo "$1" ;; esac; }
@@ -193,6 +199,7 @@ elif [ "$asked" = auto ] && [ -z "$check" ]; then
       quota_reason=$(printf '%s' "$quota" | jq -r '.reason // "quota unavailable"' 2>/dev/null)
       [ -n "$quota_reason" ] || quota_reason='quota unavailable'
       echo "pane-spawn: auto ${quota_kind:-refused}: $quota_reason" >&2
+      if [ "$quota_rc" != 0 ] && [[ "$quota_reason" == *reserve* ]]; then echo "pane-spawn: no session opened for usage. $USAGE_BLOCK_NOTE" >&2; fi
       [ "$quota_rc" = 0 ] || exit 1
       case "$quota_kind" in claude) kind=claude auto_claude=1 ;; codex) kind=codex ;; *) exit 1 ;; esac
       runner_reason=$quota_reason
@@ -207,7 +214,7 @@ if [ -n "$check" ] && [ -z "$request_child" ]; then
   case $? in
     0) ;;
     3) read -r week five < <(printf '%s' "$reserve" | jq -r 'def p: if . == floor then floor else . end; "\(.week | p)% \(if .short == null then "none" else "\(.short | p)%" end)"' 2>/dev/null)
-       die "Claude is past its usage reserve (week ${week:-?}, five-hour ${five:-?}), kept for the main pane: no check opened, and nothing waits for one. If one command can show the claims again, run it yourself; otherwise open a read-only recheck pane that is no check: pane-spawn --kind auto \"<work name> [rc-<the [ac-] id of the report>]\" \"<what to re-read, the full report file>\". Its report comes straight back; post from it, citing its report entry time in the 확인: line as [재확인 HH:MM:SS]. Team threads, money and operations posts are the same. Other gates, such as production write approval, stay." ;;
+       die "Claude is past its usage reserve (week ${week:-?}, five-hour ${five:-?}), kept for the main pane: no check opened, and nothing waits for one. If one command can show the claims again, run it yourself; otherwise open a read-only recheck pane that is no check: pane-spawn --kind auto \"<work name> [rc-<the [ac-] id of the report>]\" \"<what to re-read, the full report file>\". Its report comes straight back; post from it, citing its report entry time in the 확인: line as [재확인 HH:MM:SS]. Team threads, money and operations posts are the same. Other gates, such as production write approval, stay. If no session at all can open for usage: $USAGE_BLOCK_NOTE" ;;
     *) echo 'pane-spawn: Claude usage unknown; the check opens on Claude' >&2 ;;
   esac
 fi
