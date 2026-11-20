@@ -156,11 +156,12 @@ CHECK_REPORT_REASON = ("yoyoo-share-guard: 확인 칸의 보고를 받은 뒤 �
 # for the check. It is the pane's claim alone: no `확인:` line may rest on it, and the combined report still comes after the check.
 PRECHECK_HEAD = "확인 전 보고입니다(확인 칸이 아직 확인하고 있으며, 끝나면 합친 보고가 따로 옵니다). "
 PRECHECK_NOTE = ("아래는 일 칸의 주장이며 아직 확인되지 않았습니다. 확인 칸이 이미 돌고 있으니 새 확인 칸을 열지 마세요. "
-                 "#0에서 요유에게만 하는 답은 '확인 중:'으로 시작해 먼저 올리고, 합친 보고가 오면 같은 글을 고치세요. "
+                 "#0에서 요유에게만 하는 답은 '작업 중(확인 중):'으로 시작해(요유에게 할 일을 부탁하면 '요유 차례(확인 중):') 먼저 올리고, "
+                 "합친 보고가 오면 같은 글을 '끝남:'이나 '요유 차례:'로 고치세요. "
                  "요유 이름의 초안(--yoyoo-draft), reply, 팀 전달, decide, 운영·돈·보안 글은 이 예외가 아니니 합친 보고를 기다리세요. "
                  "이 보고는 '확인:' 줄의 근거가 아닙니다")
 PRECHECK_REASON = ("yoyoo-share-guard: 확인 전 보고를 받은 뒤 쓰는 보고인데, 아직 끝나지 않은 확인 칸을 '확인:' 줄의 근거로 적었습니다. "
-                   "합친 보고가 오기 전에는 '확인:' 줄을 빼고, 먼저 올린 답은 '확인 중:'으로 두세요.")
+                   "합친 보고가 오기 전에는 '확인:' 줄을 빼고, 먼저 올린 답은 '작업 중(확인 중):'으로 두세요.")
 # 요유 2026-11-05: dispatch tabs run on the hidden workers server, and only what needs 요유 reaches the main pane. It is no claim of work
 # done, so it asks for no check pane: this head stays out of RELAYED, and it keeps the main pane's turn short, since 요유's next
 # words wait behind it. Nothing can be typed into that pane, and it has closed by then, so the board and a new pane carry the rest.

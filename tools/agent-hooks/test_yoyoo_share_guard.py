@@ -31,6 +31,14 @@ def result(text="1794000002.000300\n", error=False, ident="post"):
         {"type": "tool_result", "tool_use_id": ident, "is_error": error, "content": text}]}}
 
 
+class EarlyAnswerHeadTests(unittest.TestCase):
+    def test_the_precheck_hint_names_the_state_head_main_channel_takes(self):
+        # 요유 2026-11-20: a #0 post starts with its state; main-channel refuses the old 확인 중: head
+        for text in (guard.PRECHECK_NOTE, guard.PRECHECK_REASON):
+            self.assertIn("'작업 중(확인 중):'", text)
+            self.assertNotIn("'확인 중:'", text)
+
+
 class ProseTests(unittest.TestCase):
     """A report that mentions a fence in a sentence still has its `남은 것:` line (19:03 report of 2026-11-07 was dropped)."""
     LEFT = "남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 닫아도 됨"
