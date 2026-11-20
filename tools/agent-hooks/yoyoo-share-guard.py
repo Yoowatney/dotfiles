@@ -160,6 +160,14 @@ PRECHECK_NOTE = ("아래는 일 칸의 주장이며 아직 확인되지 않았�
                  "합친 보고가 오면 같은 글을 '끝남:'이나 '요유 차례:'로 고치세요. "
                  "요유 이름의 초안(--yoyoo-draft), reply, 팀 전달, decide, 운영·돈·보안 글은 이 예외가 아니니 합친 보고를 기다리세요. "
                  "이 보고는 '확인:' 줄의 근거가 아닙니다")
+# 요유 2026-11-20: a deliverable whose check could not open (usage reserve, workers down) waited two days because nothing here named the
+# early `확인 중:` route that main-orchestrator's "Early #0 answers" allows. UNOPENED_WHY is the head's reason text for that case.
+UNOPENED_WHY = "확인 칸을 열지 못했습니다"
+LINK_FAILED_WHY = "확인 자동 연결 실패"  # the check pane did not open either; "자동 칸이 요유를 기다립니다" never tried, so it keeps its demand
+EARLY_WHYS = (UNOPENED_WHY, LINK_FAILED_WHY)
+UNCHECKED_EARLY_NOTE = ("확인 칸이 열리지 않으면 기다리지 마세요. 이 보고가 #0이나 요유 DM에서 요유에게만 하는 답이고 운영·돈·보안 표시가 없으면, "
+                        "그림과 숫자를 '확인 중:'으로 시작해 바로 올리고 확인 칸이 열려 합친 보고가 오면 같은 글을 고치세요(main-orchestrator의 Early #0 answers). "
+                        "운영·돈·보안 글, 팀 전달, reply, decide, 요유 이름의 초안(--yoyoo-draft)이면 지금처럼 확인 칸을 기다리세요")
 PRECHECK_REASON = ("yoyoo-share-guard: 확인 전 보고를 받은 뒤 쓰는 보고인데, 아직 끝나지 않은 확인 칸을 '확인:' 줄의 근거로 적었습니다. "
                    "합친 보고가 오기 전에는 '확인:' 줄을 빼고, 먼저 올린 답은 '작업 중(확인 중):'으로 두세요.")
 # 요유 2026-11-05: dispatch tabs run on the hidden workers server, and only what needs 요유 reaches the main pane. It is no claim of work
@@ -521,6 +529,61 @@ def relayed_kind(line: str) -> str | None:
     return relayed and (relayed[1] or relayed[2])
 
 
+UNOPENED_HEAD = re.compile(r"(?:^|\] )이 칸의 (?:마지막 )?보고입니다\(([^)]*)\)", re.M)
+EARLY_FLAG_VALUE = {"--thread", "--as-file", "--reply-to", "--seen-latest", "--fulfills", "--board", "--topic-ok", "--channel", "--yoyoo-draft"}
+# What the early route may never carry: operations, money, security (situational-rules.md). ponytail: words, so a body that names one
+# of them without meaning it goes to a check pane, which is the ordinary path.
+EARLY_MARK = re.compile(r"운영|\bprod(?:uction)?\b|결제|금액|과금|비용|요금|예산|청구|매출|환불|카드|\b(?:billing|payment|cost|budget|price|revenue|refund)\b|"
+                        r"보안|취약|비밀|시크릿|토큰|자격 증명|\b(?:secrets?|tokens?|credentials?|passwords?|IAM)\b|권한|배포|\bdeploy\w*", re.I)
+
+
+def unopened_heads(line: str) -> bool:
+    """Every `이 칸의 보고` head in this relayed prompt names a check that could not open. Only the head counts, not the report's words."""
+    first = next(records([line]), None)  # the decoded prompt: the raw line is JSON, its heads sit after a quote
+    whys = UNOPENED_HEAD.findall(unicodedata.normalize("NFC", first[1])) if first and first[0] == "in" else []
+    return bool(whys) and all(why in EARLY_WHYS for why in whys)
+
+
+def early_body(command: str, args: list) -> str | None:
+    """The text a `main-channel.py post` sent: its heredoc, or else the file it names (read now). None when it cannot be read."""
+    document = HEREDOC.search(command)
+    positional = [a for i, a in enumerate(args) if not a.startswith("--") and not (i and args[i - 1] in EARLY_FLAG_VALUE)] or [""]
+    if positional[0] == "-":
+        return document[0].split("\n", 1)[1].rsplit("\n", 1)[0] if document else None
+    try:
+        with open(positional[0], encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def early_post_ok(command: str, tool: str, output: str) -> bool:
+    """A completed `main-channel.py post` to #0 or 요유's DM that starts with `확인 중:`, no draft in her name, no broadcast, no mark of
+    operations, money or security. reply (team channels) and decide are other subcommands: posting_command does not read them."""
+    post = posting_command(command)
+    if not post or post[0] != "main-channel.py" or post[1][0] != "post" or not posted_reply(command, tool, output, {("", "")}, set()):
+        return False
+    args = post[1][1:]
+    flags = {a.partition("=")[0]: a.partition("=")[2] or (args[i + 1] if i + 1 < len(args) else "") for i, a in enumerate(args) if a.startswith("--")}
+    if "--yoyoo-draft" in flags or "--broadcast" in flags or not flags.get("--channel", "D").startswith("D"):
+        return False
+    body = early_body(command, args)
+    return body is not None and re.match(r"[\s*_>]*확인 중:", unicodedata.normalize("NFC", body)) is not None and not EARLY_MARK.search(body)
+
+
+def early_posted(after: list) -> bool:
+    """This turn made a real early post (see early_post_ok), after the relayed report arrived."""
+    calls = {}
+    for kind, body, name, ident in after:
+        if kind == "call" and ident:
+            calls[ident] = (body, name)
+        elif kind == "result" and ident in calls:
+            command, tool = calls.pop(ident)
+            if early_post_ok(command, tool, body):
+                return True
+    return False
+
+
 def relay_reason(payload: dict, text: str, env) -> str | None:
     """The rewrite for the first last report after a pane's report arrived, when it shows no check of its own, or None.
     A report answered in a turn that has ended is not asked again. A pane that hands checks out shows a check pane instead: it
@@ -558,6 +621,8 @@ def relay_reason(payload: dict, text: str, env) -> str | None:
     refused = {i for kind, _, _, i in after if kind == "refused"}
     stated = [v for v in (m.group(1).strip(" \t*_.,;") for m in CHECK_LINE.finditer(prose(text))) if v and not NONE.match(v)]
     if delegates_checks(payload, env):
+        if kind == "이" and unopened_heads(lines[start]) and early_posted(after):
+            return None  # its check could not open, and the answer to 요유 alone already went up as `확인 중:` (a real post, not words)
         if kind == "바로 전달하는":
             return None  # questions, decisions, no result, or a failed automatic spawn: do not ask for a check again
         if kind == "확인":
