@@ -109,11 +109,18 @@ grep -q 'run it yourself' "$SANDBOX/err" || fail "the refusal names the direct l
 grep -q 'pane-spawn --kind auto .*\[rc-' "$SANDBOX/err" || fail "the refusal names the read-only recheck pane"
 grep -q 'Team threads, money and operations posts are the same' "$SANDBOX/err" || fail "the way out covers team, money and operations posts"
 grep -q 'production write approval' "$SANDBOX/err" || fail "the other gates stay"
+# 요유 2026-11-20: a usage refusal asks for an account switch or a reset ticket and never tells the caller to wait for the reset.
+grep -q 'switch the account or spend a reset ticket' "$SANDBOX/err" || fail "the check refusal asks 요유 to switch the account or spend a reset ticket"
+grep -q "ask 요유, in that work's thread or in #0" "$SANDBOX/err" || fail "the check refusal tells the main pane where to ask"
+grep -q 'report to the lead that this request is needed' "$SANDBOX/err" || fail "the check refusal tells a pane under a lead to report it"
 ! grep -q 'unchecked' "$SANDBOX/err" || fail "the refusal no longer sends the report on unchecked"
 [ ! -e "$SANDBOX/log" ] || fail "a check past the reserve must not even query herdr"
 rm -f "$SANDBOX/home/.local/state/agent-quota/claude.json"
 quota_fixture 99 90 true
 if ps --kind auto "none" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "claude-first refuses when neither runner has room"; fi
+grep -q 'no session opened for usage' "$SANDBOX/err" || fail "the auto refusal says it was for usage"
+grep -q 'switch the account or spend a reset ticket' "$SANDBOX/err" || fail "the auto refusal asks 요유 to switch the account or spend a reset ticket"
+grep -q "Never put the work off until the usage reset" "$SANDBOX/err" || fail "the auto refusal forbids waiting for the reset"
 [ ! -e "$SANDBOX/log" ] || fail "claude-first refusal opens no work pane"
 if ps --check "none" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "a check past the Claude reserve (week 90%) must not open"; fi
 grep -q 'week 90%' "$SANDBOX/err" || fail "the refusal names the reading"
