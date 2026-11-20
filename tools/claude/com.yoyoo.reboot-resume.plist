@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.yoyoo.reboot-resume</string>
+
+    <!-- 세션맥 only (load it there by hand). Runs once at login; the script tells a sudden reboot from a planned one and is once per boot. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>-I</string>
+        <string>/Users/yoyoo/.dotfiles/tools/agent-hooks/reboot-resume.py</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/yoyoo</string>
+        <key>PATH</key>
+        <string>/Users/yoyoo/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
