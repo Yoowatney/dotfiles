@@ -584,6 +584,13 @@ def bash_problem(cmd: str) -> str | None:
     runs = re.sub(r"\0(\d+)\0", lambda m: captures[int(m[1])], runs)
     http_logging = re.search(r"(?:^|[;\n&|])\s*(?:(?:export|declare|typeset|local|readonly)(?:\s+-[a-zA-Z]+)*\s+)?CLOUDSDK_CORE_LOG_HTTP=(?!(?:false|0)\b)", runs, re.I)
     captured = [s for pair in CAPTURE.findall(runs) for s in segments("".join(pair))]
+    # ego-browser nodejs prints the script's console output on stderr, so `$(...)` alone captures nothing and the
+    # value meant for the variable reaches the chat (2026-11-20, a Slack bot token). Only a capture of stderr keeps it.
+    for pair in CAPTURE.findall(runs):
+        body = "".join(pair)
+        if any(is_browser_script(seg) for seg in segments(body)) and not re.search(r"2>&1|\|&|&>", body):
+            return ("`ego-browser nodejs`는 스크립트 출력을 stderr로 냄. `$(...)` 안에 `2>&1`이 없으면 값이 변수에 "
+                    "담기지 않고 그대로 출력됨: `T=$(ego-browser nodejs 2>&1 <<'EOF' | sed -n 's/^KEY=//p'`처럼 쓸 것")
     if any(dumps_gcloud_config(seg + (["--log-http"] if http_logging else [])) for seg in captured):
         return "gcloud 구성 응답은 명령 치환에서도 비밀 필드를 뺀 명시적인 --format이 필요함"
     # `${#S}` prints only the length; every other expansion of S prints some of the value.
