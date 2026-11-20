@@ -34,7 +34,7 @@ def result(text="1794000002.000300\n", error=False, ident="post"):
 class EarlyAnswerHeadTests(unittest.TestCase):
     def test_the_precheck_hint_names_the_state_head_main_channel_takes(self):
         # 요유 2026-11-20: a #0 post starts with its state; main-channel refuses the old 확인 중: head
-        for text in (guard.PRECHECK_NOTE, guard.PRECHECK_REASON):
+        for text in (guard.PRECHECK_NOTE, guard.PRECHECK_REASON, guard.UNCHECKED_EARLY_NOTE):
             self.assertIn("'작업 중(확인 중):'", text)
             self.assertNotIn("'확인 중:'", text)
 

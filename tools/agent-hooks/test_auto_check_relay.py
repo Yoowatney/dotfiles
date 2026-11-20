@@ -513,7 +513,7 @@ class RelayTests(unittest.TestCase):
         own = "확인: 테스트 통과를 봤습니다.\n남은 것: 요유 몫: 없음 · 세션: 닫아도 됨"  # Codex review: no pane named
         self.assertEqual(self.main_blocks(message, own), auto.share.PRECHECK_REASON)
         self.assertIsNone(self.main_blocks(message, "확인: 없음\n남은 것: 요유 몫: 없음 · 세션: 열어 둠"))
-        self.assertIsNone(self.main_blocks(message, "먼저 올릴 답을 '확인 중:'으로 올렸습니다.\n남은 것: 요유 몫: 없음 · 세션: 열어 둠"))
+        self.assertIsNone(self.main_blocks(message, "먼저 올릴 답을 '작업 중(확인 중):'으로 올렸습니다.\n남은 것: 요유 몫: 없음 · 세션: 열어 둠"))
         self.finish()
         self.assertEqual(len(self.prechecks), 1, "a replayed Stop does not resend it")
         self.finish(CHECKED, check=True)
@@ -1268,9 +1268,10 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(self.main_blocks(message), auto.share.DELEGATE_REASON)
 
     # 요유 2026-11-20 (#0 1795152945.468919): the figure waited two days because the failed-start message never named the early
-    # `확인 중:` route that situational-rules.md allows for an answer to 요유 alone in #0 or her DM. The guard lets that route pass only
-    # on a real post: a completed `main-channel.py post` of this turn that starts with `확인 중:`.
-    EARLY_BODY = "확인 중: 그림을 올립니다. 합친 보고가 오면 고칩니다."
+    # route that situational-rules.md allows for an answer to 요유 alone in #0 or her DM. The guard lets that route pass only on a
+    # real post: a completed `main-channel.py post` of this turn that starts with `작업 중(확인 중):` (`요유 차례(확인 중):` when it
+    # asks 요유 to act). Since 요유 2026-11-20 a post to 요유 starts with its state and main-channel refuses the old `확인 중:` head.
+    EARLY_BODY = "작업 중(확인 중): 그림을 올립니다. 합친 보고가 오면 고칩니다.\n끝날 예상: 16:00 KST"
     EARLY_SAID = "그림을 올렸습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 확인 칸이 열리면 글 고치기 · 세션: 열어 둠"
     POST_CHANNEL = "/Users/yoyoo/work/munice/munice-claude/.agents/skills/agent-board/main/main-channel.py"
 
@@ -1293,8 +1294,10 @@ class RelayTests(unittest.TestCase):
 
     def test_unopened_check_tells_main_it_may_post_an_early_answer(self):
         message = self.unopened_message()
-        for part in ("'확인 중:'", "#0", "DM", "운영·돈·보안", "reply", "decide", "Early #0 answers"):
+        for part in ("'작업 중(확인 중):'", "'요유 차례(확인 중):'", "'끝날 예상: HH:MM'", "'끝남:'", "#0", "DM", "운영·돈·보안", "reply", "decide",
+                     "Early #0 answers"):
             self.assertIn(part, message)
+        self.assertNotIn("'확인 중:'", message, "main-channel refuses the old head")
         self.assertIn(auto.share.UNCHECKED_EARLY_NOTE, message)
         self.assertEqual(self.main_blocks(message), auto.share.DELEGATE_REASON, "no early post and no check pane: still asked")
 
@@ -1302,7 +1305,7 @@ class RelayTests(unittest.TestCase):
         for why in (auto.share.UNOPENED_WHY, auto.share.LINK_FAILED_WHY):
             self.assertIn(auto.share.UNCHECKED_EARLY_NOTE, auto.unchecked_head(self.FIGURE, why))
         waiting = auto.unchecked_head(self.FIGURE, "자동 칸이 요유를 기다립니다")
-        self.assertNotIn("확인 중:", waiting, "an automatic pane that waits for 요유 keeps its check: no early route")
+        self.assertNotIn("(확인 중):", waiting, "an automatic pane that waits for 요유 keeps its check: no early route")
         self.assertIn(auto.share.DELEGATE_NOTE, waiting)
 
     def test_early_post_passes_only_as_a_completed_post_that_starts_with_the_prefix(self):
@@ -1316,12 +1319,14 @@ class RelayTests(unittest.TestCase):
             draft.write_text(self.EARLY_BODY)
             self.assertIsNone(self.early_blocks(message, command=f"python3 {self.POST_CHANNEL} post --thread 1794000000.000100 {draft}"))
             self.assertIsNone(self.early_blocks(message, command=f"python3 {self.POST_CHANNEL} post {draft} --as-file 그림.md"))
+            self.assertIsNone(self.early_blocks(message, body="요유 차례(확인 중): 그림을 올립니다.\n요유 할 일: 숫자가 맞는지 봐 주세요."),
+                              "an early answer that asks 요유 to act")
 
     def test_saying_the_prefix_is_no_post(self):
         message = self.unopened_message()
-        self.assertEqual(self.main_blocks(message, "그림을 '확인 중:'으로 올렸습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠"),
+        self.assertEqual(self.main_blocks(message, "그림을 '작업 중(확인 중):'으로 올렸습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠"),
                          auto.share.DELEGATE_REASON, "words in the report are not a post")
-        self.assertEqual(self.main_blocks(message, "확인 중: 으로 올릴 수 있지만 아직 올리지 않았습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠"),
+        self.assertEqual(self.main_blocks(message, "작업 중(확인 중): 으로 올릴 수 있지만 아직 올리지 않았습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠"),
                          auto.share.DELEGATE_REASON)
         for output in (None, "", "post exit 1", "ok: false", "1794000002.000300\npost exit 1"):
             with self.subTest(output=output):
@@ -1333,9 +1338,11 @@ class RelayTests(unittest.TestCase):
     def test_early_route_keeps_every_gate_closed(self):
         message = self.unopened_message()
         draft = self.root / "draft.md"
-        draft.write_text("확인 중: 초안입니다.")
+        draft.write_text("작업 중(확인 중): 초안입니다.")
         cases = {
-            "body does not start with the prefix": dict(body="그림을 올립니다. 확인 중: 입니다."),
+            "body does not start with the prefix": dict(body="그림을 올립니다. 작업 중(확인 중): 입니다."),
+            "old head main-channel refuses": dict(body="확인 중: 그림을 올립니다. 합친 보고가 오면 고칩니다."),
+            "finished state": dict(body="끝남: 그림을 올렸습니다."),
             "yoyoo draft": dict(command=f"python3 {self.POST_CHANNEL} post --thread 1794000000.000100 --yoyoo-draft {draft} {draft}"),
             "yoyoo draft with equal sign": dict(command=f"python3 {self.POST_CHANNEL} post --yoyoo-draft={draft} {draft}"),
             "reply to a team channel": dict(command=f"python3 {self.POST_CHANNEL} reply --channel CTEAM --thread 1794000000.000100 - <<'EOF'\n{self.EARLY_BODY}\nEOF"),
@@ -1345,9 +1352,9 @@ class RelayTests(unittest.TestCase):
             "file that is not there": dict(command=f"python3 {self.POST_CHANNEL} post {self.root}/missing.md"),
             "stdin with no heredoc": dict(command=f"python3 {self.POST_CHANNEL} post -"),
             "another command after the post": dict(command=f"python3 {self.POST_CHANNEL} post - <<'EOF'; cat /tmp/fake-ts\n{self.EARLY_BODY}\nEOF"),
-            "production mark": dict(body="확인 중: 운영 DB 값을 바꿨습니다."),
-            "money mark": dict(body="확인 중: 결제 금액 합계는 120만 원입니다."),
-            "security mark": dict(body="확인 중: 토큰을 새로 발급했습니다."),
+            "production mark": dict(body="작업 중(확인 중): 운영 DB 값을 바꿨습니다."),
+            "money mark": dict(body="작업 중(확인 중): 결제 금액 합계는 120만 원입니다."),
+            "security mark": dict(body="작업 중(확인 중): 토큰을 새로 발급했습니다."),
         }
         for name, args in cases.items():
             with self.subTest(name):
