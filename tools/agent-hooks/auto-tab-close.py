@@ -425,7 +425,9 @@ def unchecked_head(reply: str, why: str) -> str:
     """The head of a report the main pane gets with no check pane. One that delivers keeps the ordinary head, so share-guard
     asks the main pane for a check pane, as it does for any other pane's claim."""
     if delivers(reply):
-        return f"이 칸의 보고입니다({why}). 요유에게 갈 결과물(그림, 답 초안, 올릴 숫자)이 있습니다. {share.DELEGATE_NOTE}. {share.UNCHECKED_EARLY_NOTE}."
+        # the early route only where the check pane could not open: one that never tried (waiting for 요유) keeps its demand
+        note = f" {share.UNCHECKED_EARLY_NOTE}." if why in share.EARLY_WHYS else ""
+        return f"이 칸의 보고입니다({why}). 요유에게 갈 결과물(그림, 답 초안, 올릴 숫자)이 있습니다. {share.DELEGATE_NOTE}.{note}"
     return f"바로 전달하는 칸의 보고입니다({why})."
 
 
@@ -1095,7 +1097,7 @@ def finish(reply: str, env):
                 if routed is not None:
                     return routed
             except (OSError, ValueError, KeyError) as error:
-                return send(f"{unchecked_head(reply, '확인 자동 연결 실패')} {error}\n{short_report(reply, None)}\n전체 보고: {path} ({now:%H:%M:%S} 항목)", immediate=True)
+                return send(f"{unchecked_head(reply, share.LINK_FAILED_WHY)} {error}\n{short_report(reply, None)}\n전체 보고: {path} ({now:%H:%M:%S} 항목)", immediate=True)
         if needs_yoyoo:
             head = unchecked_head(reply, "자동 칸이 요유를 기다립니다") if delivers(reply) else f"{share.JOB_NOTE}:"
             message = f"{head}\n{short_report(reply)}\n칸: {me.get('label') or ''}\n전체 보고: {path} ({now:%H:%M:%S} 항목)"

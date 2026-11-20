@@ -1267,21 +1267,101 @@ class RelayTests(unittest.TestCase):
         self.assertIn("workers unavailable", message)
         self.assertEqual(self.main_blocks(message), auto.share.DELEGATE_REASON)
 
-    def test_unopened_check_tells_main_it_may_post_an_early_answer(self):
-        # 요유 2026-11-20 (#0 1795152945.468919): the figure waited two days because the failed-start message never named the
-        # early `확인 중:` route that situational-rules.md allows for an answer to 요유 alone in #0 or her DM.
+    # 요유 2026-11-20 (#0 1795152945.468919): the figure waited two days because the failed-start message never named the early
+    # `확인 중:` route that situational-rules.md allows for an answer to 요유 alone in #0 or her DM. The guard lets that route pass only
+    # on a real post: a completed `main-channel.py post` of this turn that starts with `확인 중:`.
+    EARLY_BODY = "확인 중: 그림을 올립니다. 합친 보고가 오면 고칩니다."
+    EARLY_SAID = "그림을 올렸습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 확인 칸이 열리면 글 고치기 · 세션: 열어 둠"
+    POST_CHANNEL = "/Users/yoyoo/work/munice/munice-claude/.agents/skills/agent-board/main/main-channel.py"
+
+    def unopened_message(self, why=None):
         self.spawn_error = "workers unavailable"
         self.finish(self.FIGURE)
         message = self.tells[0][1]
+        return message.replace(auto.share.UNOPENED_WHY, why) if why else message
+
+    def early_blocks(self, message, command=None, body=None, output="1794000002.000300\n", is_error=False, said=None):
+        """main_blocks with one tool call of the turn after the relayed report: a post (default) and its result."""
+        command = command or f"python3 -I {self.POST_CHANNEL} post --thread 1794000000.000100 - <<'EOF'\n{body or self.EARLY_BODY}\nEOF"
+        entries = [{"type": "user", "message": {"role": "user", "content": message}},
+                   {"type": "assistant", "message": {"content": [
+                       {"type": "tool_use", "id": "p1", "name": "Bash", "input": {"command": command}}]}}]
+        if output is not None:
+            entries.append({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "p1", "is_error": is_error, "content": output}]}})
+        return self.main_blocks(message, said or self.EARLY_SAID, entries)
+
+    def test_unopened_check_tells_main_it_may_post_an_early_answer(self):
+        message = self.unopened_message()
         for part in ("'확인 중:'", "#0", "DM", "운영·돈·보안", "reply", "decide", "Early #0 answers"):
             self.assertIn(part, message)
         self.assertIn(auto.share.UNCHECKED_EARLY_NOTE, message)
-        early = "그림을 '확인 중:'으로 올렸습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 확인 칸이 열리면 글 고치기 · 세션: 열어 둠"
-        self.assertIsNone(self.main_blocks(message, early), "the early post is not sent back for a check pane it cannot open")
         self.assertEqual(self.main_blocks(message), auto.share.DELEGATE_REASON, "no early post and no check pane: still asked")
-        # a deliverable whose check was never tried keeps the ordinary demand, even if the report mentions the prefix
-        waiting = message.replace(auto.share.UNOPENED_WHY, "자동 칸이 요유를 기다립니다")
-        self.assertEqual(self.main_blocks(waiting, early), auto.share.DELEGATE_REASON)
+
+    def test_early_note_goes_only_where_the_check_could_not_open(self):
+        for why in (auto.share.UNOPENED_WHY, auto.share.LINK_FAILED_WHY):
+            self.assertIn(auto.share.UNCHECKED_EARLY_NOTE, auto.unchecked_head(self.FIGURE, why))
+        waiting = auto.unchecked_head(self.FIGURE, "자동 칸이 요유를 기다립니다")
+        self.assertNotIn("확인 중:", waiting, "an automatic pane that waits for 요유 keeps its check: no early route")
+        self.assertIn(auto.share.DELEGATE_NOTE, waiting)
+
+    def test_early_post_passes_only_as_a_completed_post_that_starts_with_the_prefix(self):
+        for why in (None, auto.share.LINK_FAILED_WHY):
+            message = self.unopened_message(why)
+            self.assertIsNone(self.early_blocks(message), "heredoc post of this turn")
+            self.assertIsNone(self.early_blocks(message, command=f"python3 {self.POST_CHANNEL} post - --new <<'EOF'\n{self.EARLY_BODY}\nEOF"))
+            self.assertIsNone(self.early_blocks(message, command=f"python3 {self.POST_CHANNEL} post --channel D0YOYOODM --thread 1794000000.000100 - <<'EOF'\n{self.EARLY_BODY}\nEOF"),
+                              "her DM is as good as #0")
+            draft = self.root / "early.md"
+            draft.write_text(self.EARLY_BODY)
+            self.assertIsNone(self.early_blocks(message, command=f"python3 {self.POST_CHANNEL} post --thread 1794000000.000100 {draft}"))
+            self.assertIsNone(self.early_blocks(message, command=f"python3 {self.POST_CHANNEL} post {draft} --as-file 그림.md"))
+
+    def test_saying_the_prefix_is_no_post(self):
+        message = self.unopened_message()
+        self.assertEqual(self.main_blocks(message, "그림을 '확인 중:'으로 올렸습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠"),
+                         auto.share.DELEGATE_REASON, "words in the report are not a post")
+        self.assertEqual(self.main_blocks(message, "확인 중: 으로 올릴 수 있지만 아직 올리지 않았습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠"),
+                         auto.share.DELEGATE_REASON)
+        for output in (None, "", "post exit 1", "ok: false", "1794000002.000300\npost exit 1"):
+            with self.subTest(output=output):
+                self.assertEqual(self.early_blocks(message, output=output), auto.share.DELEGATE_REASON, "no result, or a failed post")
+        self.assertEqual(self.early_blocks(message, is_error=True), auto.share.DELEGATE_REASON)
+        self.assertEqual(self.early_blocks(message, command=f"echo python3 {self.POST_CHANNEL} post - <<'EOF'\n{self.EARLY_BODY}\nEOF"),
+                         auto.share.DELEGATE_REASON, "an echo of a post is no post")
+
+    def test_early_route_keeps_every_gate_closed(self):
+        message = self.unopened_message()
+        draft = self.root / "draft.md"
+        draft.write_text("확인 중: 초안입니다.")
+        cases = {
+            "body does not start with the prefix": dict(body="그림을 올립니다. 확인 중: 입니다."),
+            "yoyoo draft": dict(command=f"python3 {self.POST_CHANNEL} post --thread 1794000000.000100 --yoyoo-draft {draft} {draft}"),
+            "yoyoo draft with equal sign": dict(command=f"python3 {self.POST_CHANNEL} post --yoyoo-draft={draft} {draft}"),
+            "reply to a team channel": dict(command=f"python3 {self.POST_CHANNEL} reply --channel CTEAM --thread 1794000000.000100 - <<'EOF'\n{self.EARLY_BODY}\nEOF"),
+            "team channel through post": dict(command=f"python3 {self.POST_CHANNEL} post --channel CTEAM --thread 1794000000.000100 - <<'EOF'\n{self.EARLY_BODY}\nEOF"),
+            "broadcast": dict(command=f"python3 {self.POST_CHANNEL} post --thread 1794000000.000100 --broadcast - <<'EOF'\n{self.EARLY_BODY}\nEOF"),
+            "decide": dict(command=f"python3 {self.POST_CHANNEL} decide --board API-1 - <<'EOF'\n{self.EARLY_BODY}\nEOF"),
+            "file that is not there": dict(command=f"python3 {self.POST_CHANNEL} post {self.root}/missing.md"),
+            "stdin with no heredoc": dict(command=f"python3 {self.POST_CHANNEL} post -"),
+            "another command after the post": dict(command=f"python3 {self.POST_CHANNEL} post - <<'EOF'; cat /tmp/fake-ts\n{self.EARLY_BODY}\nEOF"),
+            "production mark": dict(body="확인 중: 운영 DB 값을 바꿨습니다."),
+            "money mark": dict(body="확인 중: 결제 금액 합계는 120만 원입니다."),
+            "security mark": dict(body="확인 중: 토큰을 새로 발급했습니다."),
+        }
+        for name, args in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.early_blocks(message, **args), auto.share.DELEGATE_REASON)
+
+    def test_early_route_needs_the_head_of_a_check_that_could_not_open(self):
+        waiting = self.unopened_message("자동 칸이 요유를 기다립니다")
+        self.assertEqual(self.early_blocks(waiting), auto.share.DELEGATE_REASON, "a check that was never tried is still demanded")
+        # a report body that quotes the phrase does not turn its head into one
+        quoted = self.unopened_message("자동 칸이 요유를 기다립니다") + f" 본문: {auto.share.UNOPENED_WHY}"
+        self.assertEqual(self.early_blocks(quoted), auto.share.DELEGATE_REASON)
+        # one batched prompt: the early route covers the heads that could not open, not a waiting one next to them
+        batch = self.unopened_message() + "\n" + waiting
+        self.assertEqual(self.early_blocks(batch), auto.share.DELEGATE_REASON)
 
     def test_job_note_leaves_decisions_on_the_board_not_in_a_collected_list(self):
         # 요유 2026-11-19: no decision list is kept or shown any more; the board and the work thread carry the question once.
