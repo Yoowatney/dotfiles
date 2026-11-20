@@ -390,6 +390,22 @@ def save(reply: str, me: dict, pane: str, env, now=None) -> str:
 QUESTION = re.compile(r"^\s*(?:[-*]\s*)?(?:질문|결정\s*요청|승인\s*요청|선택\s*요청)\s*[:：]|(?:승인|결정|선택)(?:이|을)?\s*(?:필요|부탁|요청)|확인할\s*결과(?:가)?\s*없|[?？](?:\s|$)", re.M)
 RESULT = re.compile(r"완료|마쳤|끝났|통과|고쳤|수정|바꿨|변경|검증|확인했|만들었|추가했|작성했|정리했|PASS|FAIL|tested|finished|implemented", re.I)
 CHECK_TOKEN = re.compile(r"\[ac-([0-9a-f]{16})\]")
+RECHECK_TOKEN = re.compile(share.RECHECK_TOKEN)  # the name of a read-only recheck worker that main opened because a check could not open
+
+
+def unopened_recheck(label: str, env) -> bool:
+    """The pane's name holds [rc-<id>] of a check that really could not open (its fallback context, never handed to a check pane)."""
+    token = RECHECK_TOKEN.search(label)
+    try:
+        with open(os.path.join(herdr_peers.state_dir(env), "automatic-checks", token[1] + ".json"), encoding="utf-8") as f:
+            context = json.load(f)
+    except (TypeError, OSError, ValueError):
+        return False
+    return isinstance(context, dict) and context.get("fallback_delivered") is True and not context.get("handed")
+
+
+def check_key(me: dict, reply: str) -> str:
+    return hashlib.sha256((str(me.get("terminal_id")) + str(me.get("agent_session")) + reply).encode()).hexdigest()[:16]
 # api#1218 (2026-11-13): a figure a pane drew went to 요유 unchecked and was wrong, since a report with 요유 몫, a question
 # or a free-form `세션:` line took the direct route. What 요유 would see (a figure, a draft, numbers handed on to post) never
 # does. ponytail: a word list, so an idiom like "큰 그림" costs one more check pane, and a new phrasing can slip past it.
@@ -425,9 +441,10 @@ def unchecked_head(reply: str, why: str) -> str:
     """The head of a report the main pane gets with no check pane. One that delivers keeps the ordinary head, so share-guard
     asks the main pane for a check pane, as it does for any other pane's claim."""
     if delivers(reply):
-        # the early route only where the check pane could not open: one that never tried (waiting for 요유) keeps its demand
-        note = f" {share.UNCHECKED_EARLY_NOTE}." if why in share.EARLY_WHYS else ""
-        return f"이 칸의 보고입니다({why}). 요유에게 갈 결과물(그림, 답 초안, 올릴 숫자)이 있습니다. {share.DELEGATE_NOTE}.{note}"
+        # a check pane that could not open holds nothing back: main looks again or hands a read-only recheck out. One that never
+        # tried (waiting for 요유) keeps its demand for a check pane.
+        note = share.UNOPENED_NOTE if why in share.EARLY_WHYS else share.DELEGATE_NOTE
+        return f"이 칸의 보고입니다({why}). 요유에게 갈 결과물(그림, 답 초안, 올릴 숫자)이 있습니다. {note}."
     return f"바로 전달하는 칸의 보고입니다({why})."
 
 
@@ -798,12 +815,14 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
             return sent
     if opener(name) != to.get("terminal_id"):
         return None  # an absent ordinary lead's pane still reaches main as before
-    reason = direct_reason(reply)
+    # a read-only recheck of a check that could not open is the way out, so its report comes straight back and gets no check of its own
+    recheck = unopened_recheck(me.get("label") or "", env)
+    reason = "읽기 전용 재확인 보고" if recheck else direct_reason(reply)
     body = (f"{short_report(reply, None)}\n칸: {herdr_peers.address(env, me['pane_id'])} {me.get('label') or ''}\n"
             f"전체 보고: {path} ({entry})")
     if reason:
-        return send(f"바로 전달하는 칸의 보고입니다(확인 칸을 열지 않습니다). {reason}:\n{body}")
-    key = hashlib.sha256((str(me.get("terminal_id")) + str(me.get("agent_session")) + reply).encode()).hexdigest()[:16]
+        return send(f"바로 전달하는 칸의 보고입니다({'읽기 전용 재확인입니다' if recheck else '확인 칸을 열지 않습니다'}). {reason}:\n{body}")
+    key = check_key(me, reply)
     folder = os.path.join(herdr_peers.state_dir(env), "automatic-checks")
     os.makedirs(folder, exist_ok=True)
     context_path = os.path.join(folder, key + ".json")
@@ -901,7 +920,8 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
             context["spawn_error"] = error
             write_context(context_path, context)
         message = (f"{unchecked_head(reply, share.UNOPENED_WHY)} 결과는 아직 확인하지 못했습니다. "
-                   f"확인 칸 시작 실패: {context['spawn_error']}\n확인 종류: {kind_line(context)}\n{body}")
+                   f"확인 칸 시작 실패: {context['spawn_error']}\n확인 종류: {kind_line(context)}\n{body}\n"
+                   f"일 칸: {context['worker_address']} [ac-{key}]")
         sent = (send_immediate or send)(message)
         if sent:
             context["fallback_delivered"] = True
@@ -1097,7 +1117,18 @@ def finish(reply: str, env):
                 if routed is not None:
                     return routed
             except (OSError, ValueError, KeyError) as error:
-                return send(f"{unchecked_head(reply, share.LINK_FAILED_WHY)} {error}\n{short_report(reply, None)}\n전체 보고: {path} ({now:%H:%M:%S} 항목)", immediate=True)
+                # leave the receipt a post needs for a check that never opened, with what main needs to look again
+                key, address = check_key(me, reply), herdr_peers.address(env, pane)
+                try:
+                    folder = os.path.join(herdr_peers.state_dir(env), "automatic-checks")
+                    os.makedirs(folder, exist_ok=True)
+                    if not os.path.exists(os.path.join(folder, key + ".json")):  # never over a context a check pane may already hold
+                        write_context(os.path.join(folder, key + ".json"), dict(report=path, entry=f"{now:%H:%M:%S} 항목", worker_address=address,
+                                                                                spawn_error=str(error), fallback_delivered=True))
+                except OSError:
+                    pass
+                return send(f"{unchecked_head(reply, share.LINK_FAILED_WHY)} {error}\n{short_report(reply, None)}\n전체 보고: {path} ({now:%H:%M:%S} 항목)\n"
+                            f"일 칸: {address} [ac-{key}]", immediate=True)
         if needs_yoyoo:
             head = unchecked_head(reply, "자동 칸이 요유를 기다립니다") if delivers(reply) else f"{share.JOB_NOTE}:"
             message = f"{head}\n{short_report(reply)}\n칸: {me.get('label') or ''}\n전체 보고: {path} ({now:%H:%M:%S} 항목)"

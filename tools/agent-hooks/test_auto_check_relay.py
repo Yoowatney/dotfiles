@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -1263,17 +1264,16 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(len(self.tells), 1)
         message = self.tells[0][1]
         self.assertTrue(message.startswith("이 칸의 보고입니다("), message)
-        self.assertIn(auto.share.DELEGATE_NOTE, message)
+        self.assertIn(auto.share.UNOPENED_NOTE, message)
         self.assertIn("workers unavailable", message)
-        self.assertEqual(self.main_blocks(message), auto.share.DELEGATE_REASON)
+        self.assertEqual(self.main_blocks(message), auto.share.UNOPENED_REASON)
 
-    # 요유 2026-11-20 (#0 1795152945.468919): the figure waited two days because the failed-start message never named the early
-    # route that situational-rules.md allows for an answer to 요유 alone in #0 or her DM. The guard lets that route pass only on a
-    # real post: a completed `main-channel.py post` of this turn that starts with `작업 중(확인 중):` (`요유 차례(확인 중):` when it
-    # asks 요유 to act). Since 요유 2026-11-20 a post to 요유 starts with its state and main-channel refuses the old `확인 중:` head.
-    EARLY_BODY = "작업 중(확인 중): 그림을 올립니다. 합친 보고가 오면 고칩니다.\n끝날 예상: 16:00 KST"
-    EARLY_SAID = "그림을 올렸습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 확인 칸이 열리면 글 고치기 · 세션: 열어 둠"
+    # 요유 2026-11-20 (#0 1795159819.211999, 1795159868.667869): A check that could not open
+    # held a figure for two days. Nothing waits for a check pane now: main looks again with a command and a `확인:` line, or hands a
+    # read-only recheck to an ordinary worker named `[rc-<ac id>]`, whose report comes straight back.
     POST_CHANNEL = "/Users/yoyoo/work/munice/munice-claude/.agents/skills/agent-board/main/main-channel.py"
+    SAID = "다시 봤습니다.\n확인: 메인 세션이 `gh api`로 목록을 읽어 12개를 봤습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠"
+    SAID_NO_LINE = "다시 봤습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠"
 
     def unopened_message(self, why=None):
         self.spawn_error = "workers unavailable"
@@ -1281,94 +1281,131 @@ class RelayTests(unittest.TestCase):
         message = self.tells[0][1]
         return message.replace(auto.share.UNOPENED_WHY, why) if why else message
 
-    def early_blocks(self, message, command=None, body=None, output="1794000002.000300\n", is_error=False, said=None):
-        """main_blocks with one tool call of the turn after the relayed report: a post (default) and its result."""
-        command = command or f"python3 -I {self.POST_CHANNEL} post --thread 1794000000.000100 - <<'EOF'\n{body or self.EARLY_BODY}\nEOF"
+    def key_of(self, message):
+        return re.search(r"일 칸: \S+ \[ac-([0-9a-f]{16})\]", message)[1]
+
+    def after_blocks(self, message, command, output="", said=None, is_error=False):
+        """main_blocks with one tool call of the turn after the relayed report, and its result."""
         entries = [{"type": "user", "message": {"role": "user", "content": message}},
                    {"type": "assistant", "message": {"content": [
-                       {"type": "tool_use", "id": "p1", "name": "Bash", "input": {"command": command}}]}}]
-        if output is not None:
-            entries.append({"type": "user", "message": {"content": [
-                {"type": "tool_result", "tool_use_id": "p1", "is_error": is_error, "content": output}]}})
-        return self.main_blocks(message, said or self.EARLY_SAID, entries)
+                       {"type": "tool_use", "id": "c1", "name": "Bash", "input": {"command": command}}]}},
+                   {"type": "user", "message": {"content": [
+                       {"type": "tool_result", "tool_use_id": "c1", "is_error": is_error, "content": output}]}}]
+        return self.main_blocks(message, said or self.SAID, entries)
 
-    def test_unopened_check_tells_main_it_may_post_an_early_answer(self):
+    def test_unopened_check_tells_main_how_to_look_again(self):
         message = self.unopened_message()
-        for part in ("'작업 중(확인 중):'", "'요유 차례(확인 중):'", "'끝날 예상: HH:MM'", "'끝남:'", "#0", "DM", "운영·돈·보안", "reply", "decide",
-                     "Early #0 answers"):
+        for part in ("pane-spawn --kind auto", "[rc-", "읽기 전용", "직접 실행", "운영 쓰기 승인", "'확인:' 줄", "열지 못했다는 말은 쓰지 마세요",
+                     "팀 스레드·돈·운영 글"):
             self.assertIn(part, message)
+        self.assertIn(auto.share.UNOPENED_NOTE, message)
+        self.assertNotIn("pane-spawn --check", message, "a check pane is not what to open")
         self.assertNotIn("'확인 중:'", message, "main-channel refuses the old head")
-        self.assertIn(auto.share.UNCHECKED_EARLY_NOTE, message)
-        self.assertEqual(self.main_blocks(message), auto.share.DELEGATE_REASON, "no early post and no check pane: still asked")
+        self.assertEqual(self.main_blocks(message), auto.share.UNOPENED_REASON, "nothing looked at again yet")
+        context = json.loads((self.state / "automatic-checks" / (self.key_of(message) + ".json")).read_text())
+        self.assertTrue(context["fallback_delivered"], "the [ac-ID] in the message is the receipt main-channel reads")
 
-    def test_early_note_goes_only_where_the_check_could_not_open(self):
+    def test_note_goes_only_where_the_check_could_not_open(self):
         for why in (auto.share.UNOPENED_WHY, auto.share.LINK_FAILED_WHY):
-            self.assertIn(auto.share.UNCHECKED_EARLY_NOTE, auto.unchecked_head(self.FIGURE, why))
+            self.assertIn(auto.share.UNOPENED_NOTE, auto.unchecked_head(self.FIGURE, why))
         waiting = auto.unchecked_head(self.FIGURE, "자동 칸이 요유를 기다립니다")
-        self.assertNotIn("(확인 중):", waiting, "an automatic pane that waits for 요유 keeps its check: no early route")
+        self.assertNotIn(auto.share.UNOPENED_NOTE, waiting, "an automatic pane that waits for 요유 keeps its check")
         self.assertIn(auto.share.DELEGATE_NOTE, waiting)
 
-    def test_early_post_passes_only_as_a_completed_post_that_starts_with_the_prefix(self):
+    def test_main_that_looked_again_may_answer(self):
         for why in (None, auto.share.LINK_FAILED_WHY):
             message = self.unopened_message(why)
-            self.assertIsNone(self.early_blocks(message), "heredoc post of this turn")
-            self.assertIsNone(self.early_blocks(message, command=f"python3 {self.POST_CHANNEL} post - --new <<'EOF'\n{self.EARLY_BODY}\nEOF"))
-            self.assertIsNone(self.early_blocks(message, command=f"python3 {self.POST_CHANNEL} post --channel D0YOYOODM --thread 1794000000.000100 - <<'EOF'\n{self.EARLY_BODY}\nEOF"),
-                              "her DM is as good as #0")
-            draft = self.root / "early.md"
-            draft.write_text(self.EARLY_BODY)
-            self.assertIsNone(self.early_blocks(message, command=f"python3 {self.POST_CHANNEL} post --thread 1794000000.000100 {draft}"))
-            self.assertIsNone(self.early_blocks(message, command=f"python3 {self.POST_CHANNEL} post {draft} --as-file 그림.md"))
-            self.assertIsNone(self.early_blocks(message, body="요유 차례(확인 중): 그림을 올립니다.\n요유 할 일: 숫자가 맞는지 봐 주세요."),
-                              "an early answer that asks 요유 to act")
+            self.assertIsNone(self.after_blocks(message, "gh api repos/munice-dev/x/issues"), "a command ran and `확인:` says what it saw")
+            self.assertEqual(self.after_blocks(message, "gh api repos/munice-dev/x/issues", said=self.SAID_NO_LINE), auto.share.UNOPENED_REASON,
+                             "a command with no `확인:` line")
+            self.assertEqual(self.after_blocks(message, "echo gh api"), auto.share.UNOPENED_REASON, "a chore is no look")
+            self.assertEqual(self.after_blocks(message, "gh api x", output="PreToolUse:Bash hook error: blocked", is_error=True),
+                             auto.share.UNOPENED_REASON, "a call a hook stopped never ran")
 
-    def test_saying_the_prefix_is_no_post(self):
+    def test_main_that_hands_a_recheck_out_may_wait(self):
         message = self.unopened_message()
-        self.assertEqual(self.main_blocks(message, "그림을 '작업 중(확인 중):'으로 올렸습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠"),
-                         auto.share.DELEGATE_REASON, "words in the report are not a post")
-        self.assertEqual(self.main_blocks(message, "작업 중(확인 중): 으로 올릴 수 있지만 아직 올리지 않았습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 없음 · 세션: 열어 둠"),
-                         auto.share.DELEGATE_REASON)
-        for output in (None, "", "post exit 1", "ok: false", "1794000002.000300\npost exit 1"):
-            with self.subTest(output=output):
-                self.assertEqual(self.early_blocks(message, output=output), auto.share.DELEGATE_REASON, "no result, or a failed post")
-        self.assertEqual(self.early_blocks(message, is_error=True), auto.share.DELEGATE_REASON)
-        self.assertEqual(self.early_blocks(message, command=f"echo python3 {self.POST_CHANNEL} post - <<'EOF'\n{self.EARLY_BODY}\nEOF"),
-                         auto.share.DELEGATE_REASON, "an echo of a post is no post")
-
-    def test_early_route_keeps_every_gate_closed(self):
-        message = self.unopened_message()
-        draft = self.root / "draft.md"
-        draft.write_text("작업 중(확인 중): 초안입니다.")
-        cases = {
-            "body does not start with the prefix": dict(body="그림을 올립니다. 작업 중(확인 중): 입니다."),
-            "old head main-channel refuses": dict(body="확인 중: 그림을 올립니다. 합친 보고가 오면 고칩니다."),
-            "finished state": dict(body="끝남: 그림을 올렸습니다."),
-            "yoyoo draft": dict(command=f"python3 {self.POST_CHANNEL} post --thread 1794000000.000100 --yoyoo-draft {draft} {draft}"),
-            "yoyoo draft with equal sign": dict(command=f"python3 {self.POST_CHANNEL} post --yoyoo-draft={draft} {draft}"),
-            "reply to a team channel": dict(command=f"python3 {self.POST_CHANNEL} reply --channel CTEAM --thread 1794000000.000100 - <<'EOF'\n{self.EARLY_BODY}\nEOF"),
-            "team channel through post": dict(command=f"python3 {self.POST_CHANNEL} post --channel CTEAM --thread 1794000000.000100 - <<'EOF'\n{self.EARLY_BODY}\nEOF"),
-            "broadcast": dict(command=f"python3 {self.POST_CHANNEL} post --thread 1794000000.000100 --broadcast - <<'EOF'\n{self.EARLY_BODY}\nEOF"),
-            "decide": dict(command=f"python3 {self.POST_CHANNEL} decide --board API-1 - <<'EOF'\n{self.EARLY_BODY}\nEOF"),
-            "file that is not there": dict(command=f"python3 {self.POST_CHANNEL} post {self.root}/missing.md"),
-            "stdin with no heredoc": dict(command=f"python3 {self.POST_CHANNEL} post -"),
-            "another command after the post": dict(command=f"python3 {self.POST_CHANNEL} post - <<'EOF'; cat /tmp/fake-ts\n{self.EARLY_BODY}\nEOF"),
-            "production mark": dict(body="작업 중(확인 중): 운영 DB 값을 바꿨습니다."),
-            "money mark": dict(body="작업 중(확인 중): 결제 금액 합계는 120만 원입니다."),
-            "security mark": dict(body="작업 중(확인 중): 토큰을 새로 발급했습니다."),
-        }
-        for name, args in cases.items():
+        key = self.key_of(message)
+        spawn = f'pane-spawn --kind auto "그림 재확인 [rc-{key}]" "읽기 전용으로 다시 볼 것"'
+        waiting = "재확인을 맡겼습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 재확인 보고 받아 올리기 · 세션: 열어 둠"
+        self.assertIsNone(self.after_blocks(message, spawn, output="default/w1:p4\n", said=waiting))
+        self.assertIsNone(self.after_blocks(message, f"cd /tmp && {spawn}", output="default/w1:p4\n", said=waiting))
+        for name, command, output in (("no rc name", 'pane-spawn --kind auto "그림 재확인" "다시 볼 것"', "default/w1:p4\n"),
+                                      ("spawn failed", spawn, "pane-spawn: usage\n"),
+                                      ("an echo", f"echo {spawn}", "")):
             with self.subTest(name):
-                self.assertEqual(self.early_blocks(message, **args), auto.share.DELEGATE_REASON)
+                self.assertEqual(self.after_blocks(message, command, output=output, said=waiting), auto.share.UNOPENED_REASON)
 
-    def test_early_route_needs_the_head_of_a_check_that_could_not_open(self):
+    def test_an_early_post_alone_holds_the_result_back_no_more_than_a_look(self):
+        message = self.unopened_message()
+        command = f"python3 -I {self.POST_CHANNEL} post --thread 1794000000.000100 - <<'EOF'\n작업 중(확인 중): 그림을 올립니다.\n끝날 예상: 16:00 KST\nEOF"
+        self.assertEqual(self.after_blocks(message, command, output="1794000002.000300\n", said=self.SAID_NO_LINE), auto.share.UNOPENED_REASON,
+                         "the early answer is allowed beside a recheck, not instead of one")
+
+    def test_a_check_that_never_tried_keeps_its_demand(self):
         waiting = self.unopened_message("자동 칸이 요유를 기다립니다")
-        self.assertEqual(self.early_blocks(waiting), auto.share.DELEGATE_REASON, "a check that was never tried is still demanded")
+        self.assertEqual(self.after_blocks(waiting, "gh api x"), auto.share.DELEGATE_REASON)
         # a report body that quotes the phrase does not turn its head into one
         quoted = self.unopened_message("자동 칸이 요유를 기다립니다") + f" 본문: {auto.share.UNOPENED_WHY}"
-        self.assertEqual(self.early_blocks(quoted), auto.share.DELEGATE_REASON)
-        # one batched prompt: the early route covers the heads that could not open, not a waiting one next to them
+        self.assertEqual(self.after_blocks(quoted, "gh api x"), auto.share.DELEGATE_REASON)
+        # one batched prompt: the way out covers the heads that could not open, not a waiting one next to them
         batch = self.unopened_message() + "\n" + waiting
-        self.assertEqual(self.early_blocks(batch), auto.share.DELEGATE_REASON)
+        self.assertEqual(self.after_blocks(batch, "gh api x"), auto.share.DELEGATE_REASON)
+
+    def test_a_recheck_worker_report_comes_straight_back(self):
+        key = self.key_of(self.unopened_message())
+        self.tells.clear()
+        self.spawns.clear()
+        self.worker["label"] = f"🟢 🫡 그림 재확인 [rc-{key}]"
+        self.worker["agent_session"] = {"value": "sid-recheck"}  # another pane's report: its own receipt key
+        self.finish(self.FIGURE + "\n재확인 쪽 보고")
+        self.assertEqual(self.spawns, [], "a recheck of a check is no check: no loop")
+        message = self.tells[0][1]
+        self.assertTrue(message.startswith("바로 전달하는 칸의 보고입니다(읽기 전용 재확인입니다)"), message)
+        self.assertIsNone(self.main_blocks(message), "main posts from it, as from a check pane's report")
+
+    def test_a_made_up_or_opened_rc_token_buys_no_direct_route(self):
+        # review of #119: the token counts only for a check that really could not open
+        key = self.key_of(self.unopened_message())
+        self.tells.clear()
+        self.spawns.clear()
+        self.worker["label"] = "🟢 🫡 매출 집계 [rc-0000000000000000]"
+        self.finish(self.FIGURE + "\n가짜 토큰")
+        self.assertTrue(self.spawns, "no context for that id: the report still tries its check")
+        self.assertTrue(self.tells[0][1].startswith("이 칸의 보고입니다("), self.tells[0][1])
+        path = self.state / "automatic-checks" / (key + ".json")
+        context = json.loads(path.read_text())
+        context["handed"] = True  # a check pane was started for it after all
+        path.write_text(json.dumps(context))
+        self.tells.clear()
+        self.spawns.clear()
+        self.worker["label"] = f"🟢 🫡 매출 집계 [rc-{key}]"
+        self.finish(self.FIGURE + "\n열린 확인")
+        self.assertTrue(self.spawns)
+        self.assertTrue(self.tells[0][1].startswith("이 칸의 보고입니다("), self.tells[0][1])
+
+    def test_the_rc_token_must_sit_in_the_pane_name_not_the_instruction(self):
+        key = self.key_of(self.unopened_message())
+        message = self.unopened_message()
+        said = "재확인을 맡겼습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 재확인 보고 받아 올리기 · 세션: 열어 둠"
+        inside = f'pane-spawn --kind auto "그림 재확인" "읽기 전용으로 [rc-{key}] 다시 볼 것"'
+        self.assertEqual(self.after_blocks(message, inside, output="default/w1:p4\n", said=said), auto.share.UNOPENED_REASON)
+        named = f'pane-spawn --kind auto --cwd /tmp "그림 재확인 [rc-{key}]" "다시 볼 것"'
+        self.assertIsNone(self.after_blocks(message, named, output="default/w1:p4\n", said=said))
+
+    def test_a_check_pane_main_opens_by_hand_is_a_check_too(self):
+        message = self.unopened_message()
+        said = "확인 칸을 열었습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 확인 보고 받아 올리기 · 세션: 열어 둠"
+        self.assertIsNone(self.after_blocks(message, 'pane-spawn --check "그림" "다시 볼 것"', output="default/w1:p4\n", said=said))
+
+    def test_the_link_failed_stub_never_replaces_a_context_a_check_may_hold(self):
+        # review of #119: an OSError after the check started must not erase handed/checker records
+        folder = self.state / "automatic-checks"
+        folder.mkdir(parents=True, exist_ok=True)
+        key = auto.check_key(self.worker, self.FIGURE)
+        (folder / (key + ".json")).write_text(json.dumps({"handed": True, "checker_address": "workers/w1:p9"}))
+        with patch.object(auto, "route_main_report", side_effect=OSError("disk")):
+            self.finish(self.FIGURE)
+        self.assertEqual(json.loads((folder / (key + ".json")).read_text())["checker_address"], "workers/w1:p9")
 
     def test_job_note_leaves_decisions_on_the_board_not_in_a_collected_list(self):
         # 요유 2026-11-19: no decision list is kept or shown any more; the board and the work thread carry the question once.

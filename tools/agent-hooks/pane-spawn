@@ -24,8 +24,8 @@
 # pane today); any other lead checks results itself, so there it is bad usage and opens nothing. Every check is Claude Sonnet,
 # with the checked folder protected by Seatbelt, whatever the runner policy says, and --check --kind codex is refused
 # (요유 2026-11-19: no Codex reviews; that day a quota lookup past its six seconds sent automatic checks to Codex).
-# Past Claude's measured usage reserve no check opens and the caller sends its report on unchecked (lead decision
-# 2026-11-19); an unknown, stale or slow reading opens the check on Claude.
+# Past Claude's measured usage reserve no check opens, and nothing waits for one (lead decision 2026-11-19, 요유 2026-11-20): the caller
+# looks again with one command or hands a read-only recheck to an ordinary worker; an unknown, stale or slow reading opens the check on Claude.
 # --kind auto selects a normal worker using fresh local subscription quota (agent-quota); tools/agent-hooks/agent-runner shows or
 # switches the policy (claude | codex | auto). Policy quota-aware keeps Codex unless its week
 # runs ahead of pace; claude-first (one local policy value, e.g. while Codex quota is short) picks Claude first
@@ -64,7 +64,8 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] 
     Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요
   --check: a fresh check (main pane only) on Claude, which cannot write the checked folder.
     Always Claude, whatever the policy (요유 2026-11-19: no Codex reviews); --kind codex is refused. Past the measured Claude
-    usage reserve it opens nothing and exits 2: send the report on unchecked. An unknown usage reading still opens it.
+    usage reserve it opens nothing and exits 2: look again with one command, or open an ordinary read-only recheck pane (no --check;
+    name it "<work name> [rc-<ac id>]" so its report comes straight back). An unknown usage reading still opens it.
   --artifact: keep the Artifact tool in a Claude pane (a job that publishes a page); every Claude pane starts without it otherwise.
   --skills: keep the design (taste-skill), office-file (docx/pdf/pptx/xlsx) and Claude-API skills in a Claude pane (UI or office-file job).
   --opus: opt out of the main pane Claude work trial (Sonnet 5.5/high); use global model/effort defaults for heavy work.
@@ -199,14 +200,14 @@ elif [ "$asked" = auto ] && [ -z "$check" ]; then
   fi
 fi
 # Lead decision 2026-11-19: Claude's usage reserve keeps room for the main pane on the same account, so past a measured
-# reading over it no check opens; auto-tab-close then sends the report on unchecked with this reason, and so does the main
-# pane by hand. An unknown, stale or slow reading is not past the reserve: the check opens on Claude.
+# reading over it no check opens; auto-tab-close then sends the report with the way to look again (UNOPENED_NOTE in
+# yoyoo-share-guard.py). An unknown, stale or slow reading is not past the reserve: the check opens on Claude.
 if [ -n "$check" ] && [ -z "$request_child" ]; then
   reserve=$(bounded "$quota_limit" python3 -I "$helper_dir/agent-quota" claude-reserve "$cwd")
   case $? in
     0) ;;
     3) read -r week five < <(printf '%s' "$reserve" | jq -r 'def p: if . == floor then floor else . end; "\(.week | p)% \(if .short == null then "none" else "\(.short | p)%" end)"' 2>/dev/null)
-       die "Claude is past its usage reserve (week ${week:-?}, five-hour ${five:-?}), kept for the main pane: no check opened. Send the report on unchecked, with this reason. If it only answers 요유 in #0 or her DM and is not operations, money or security, post it at once with '확인 중:' (main-orchestrator Early #0 answers); otherwise wait." ;;
+       die "Claude is past its usage reserve (week ${week:-?}, five-hour ${five:-?}), kept for the main pane: no check opened, and nothing waits for one. If one command can show the claims again, run it yourself; otherwise open a read-only recheck pane that is no check: pane-spawn --kind auto \"<work name> [rc-<the [ac-] id of the report>]\" \"<what to re-read, the full report file>\". Its report comes straight back; post from it, citing its report entry time in the 확인: line as [재확인 HH:MM:SS]. Team threads, money and operations posts are the same. Other gates, such as production write approval, stay." ;;
     *) echo 'pane-spawn: Claude usage unknown; the check opens on Claude' >&2 ;;
   esac
 fi

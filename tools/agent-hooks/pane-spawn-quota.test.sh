@@ -99,14 +99,17 @@ has "--kind codex" "claude-first: Claude past its reserve returns to Codex"
 grep -q 'reserve' "$SANDBOX/err" || fail "the fallback names its reason"
 is_main
 # Lead decision 2026-11-19: past Claude's measured reserve, kept for the main pane on the same account, no check opens;
-# the caller sends the report on unchecked with the reason. Codex never stands in.
+# nothing waits for one: the caller looks again or hands a read-only recheck out (요유 2026-11-20). Codex never stands in.
 if PANE_SPAWN_CHECK_RECEIPT="$SANDBOX/over-receipt.json" ps --check "over" "instruction" >/dev/null 2>"$SANDBOX/err"; then
   fail "a check past the Claude reserve must not open"
 fi
 grep -q 'past its usage reserve (week 85%, five-hour 20%)' "$SANDBOX/err" || fail "the refusal names the reserve and the reading"
-grep -q 'unchecked' "$SANDBOX/err" || fail "the refusal tells the caller to send the report on unchecked"
-grep -q "'확인 중:'" "$SANDBOX/err" || fail "the refusal names the early 확인 중: route for an answer to 요유 alone in #0 or her DM"
-grep -q 'operations, money or security' "$SANDBOX/err" || fail "the refusal keeps operations, money and security waiting"
+grep -q 'nothing waits for one' "$SANDBOX/err" || fail "the refusal tells the caller nothing waits for a check"
+grep -q 'run it yourself' "$SANDBOX/err" || fail "the refusal names the direct look"
+grep -q 'pane-spawn --kind auto .*\[rc-' "$SANDBOX/err" || fail "the refusal names the read-only recheck pane"
+grep -q 'Team threads, money and operations posts are the same' "$SANDBOX/err" || fail "the way out covers team, money and operations posts"
+grep -q 'production write approval' "$SANDBOX/err" || fail "the other gates stay"
+! grep -q 'unchecked' "$SANDBOX/err" || fail "the refusal no longer sends the report on unchecked"
 [ ! -e "$SANDBOX/log" ] || fail "a check past the reserve must not even query herdr"
 rm -f "$SANDBOX/home/.local/state/agent-quota/claude.json"
 quota_fixture 99 90 true
