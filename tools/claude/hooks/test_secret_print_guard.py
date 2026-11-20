@@ -452,7 +452,27 @@ class BrowserAndTranscriptOutputTests(unittest.TestCase):
             command = "ego-browser nodejs <<'JS'\n" + script + "\nJS"
             with self.subTest(script=script):
                 self.assertIsNone(guard.bash_problem(command))
-        self.assertIsNone(guard.bash_problem("R=$(" + self.RAW_BROWSER + "\n)"))
+        self.assertIsNone(guard.bash_problem("R=$(" + self.RAW_BROWSER.replace("nodejs ", "nodejs 2>&1 ", 1) + "\n)"))
+
+    def test_browser_capture_without_stderr_is_denied(self):
+        # ego-browser nodejs prints console output on stderr: $() alone captures nothing, so the value meant for the
+        # variable reaches the chat (2026-11-20, a Slack bot token read from its settings page).
+        script = "console.log('X=' + await page.evaluate(() => document.querySelector('input').value))"
+        for command in (
+            "T=$(ego-browser nodejs <<'JS' | sed -n 's/^X=//p'\n" + script + "\nJS\n)",
+            "T=$(ego-browser nodejs -e " + shlex.quote(script) + ")",
+            "T=`ego-browser nodejs -e " + shlex.quote(script) + "`",
+            "R=$(" + self.RAW_BROWSER + "\n)",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(guard.bash_problem(command))
+        for command in (
+            "T=$(ego-browser nodejs 2>&1 <<'JS' | sed -n 's/^X=//p'\n" + script + "\nJS\n)",
+            "T=$(ego-browser nodejs <<'JS' 2>&1 | sed -n 's/^X=//p'\n" + script + "\nJS\n)",
+            "T=$(ego-browser nodejs -e " + shlex.quote(script) + " 2>&1)",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(guard.bash_problem(command))
 
     def test_transcript_counts_and_unrelated_files_remain_allowed(self):
         for path in self.TRANSCRIPTS:
