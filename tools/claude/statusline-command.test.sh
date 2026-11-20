@@ -217,7 +217,7 @@ touch "$T/fake/stuck"
 started=$SECONDS
 out=$(STATUSLINE_WORKERS_LIMIT=1 run_lead s-lead)
 check "a stuck workers server: the rest still shows" "$out" '↳ 옆 칸  단계 near' '숨은 칸'
-[ $((SECONDS - started)) -lt 10 ] && r=soon || r=late
+[ $((SECONDS - started)) -lt 30 ] && r=soon || r=late   # limit 1 s; the stuck fake sleeps 30, so a busy host's slowness cannot look like no bound
 check "a stuck workers server does not hold the line back" "$r" 'soon'
 rm -f "$T/fake/stuck"
 

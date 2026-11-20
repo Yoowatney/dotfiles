@@ -179,9 +179,9 @@ class PageRequestTest(unittest.TestCase):
     def test_a_huge_message_is_read_in_linear_time(self):
         # The hook has 10 seconds and a page write has no watchdog, so a timeout lets the write through (Codex review).
         self.record('HTML ' * 20000)
-        started = time.monotonic()
+        started = time.process_time()  # CPU time of this process, so a loaded host does not count as slow
         self.assertTrue(COMMON.riders(self.payload()))
-        self.assertLess(time.monotonic() - started, 2)
+        self.assertLess(time.process_time() - started, 2)
 
     def test_malformed_or_missing_context_passes_without_inventing_a_question(self):
         for body in ['', '{broken', '[]\nnull\n', '{"type":"user","message":"broken"}']:

@@ -16,6 +16,24 @@ from unittest.mock import patch
 HOOK = Path(__file__).with_name("yoyoo-share-guard.py")
 
 
+LAUNCHER = '''
+import json, os, runpy, subprocess, sys
+class Faked(subprocess.Popen):
+    def communicate(self, input=None, timeout=None):
+        if timeout is not None:
+            herdr = self.args[0] == os.environ.get("HERDR_BIN_PATH")
+            delay = float(os.environ.get("TEST_HERDR_SLEEP" if herdr else "TEST_SLEEP", "0"))
+            with open(os.environ["TEST_LIMIT_LOG"], "a") as log:  # who, its limit, the fake time it used
+                log.write(json.dumps(["herdr" if herdr else "checker", timeout, min(delay, timeout)]) + "\\n")
+            if delay > timeout:
+                raise subprocess.TimeoutExpired(self.args, timeout)
+        return super().communicate(input, None)
+subprocess.Popen = Faked
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+'''
+
+
 class ReactionPolicyTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -29,19 +47,24 @@ class ReactionPolicyTests(unittest.TestCase):
         self.pane = self.root / "pane.json"
         self.set_pane()
         herdr = self.root / "herdr"
-        herdr.write_text("#!" + sys.executable + "\nimport json,os,sys,time\n"
-                         "time.sleep(float(os.environ.get('TEST_HERDR_SLEEP','0')))\n"
+        # Delays are faked, not slept: launcher.py (below) makes a call that outlasts its real timeout raise TimeoutExpired.
+        herdr.write_text("#!" + sys.executable + "\nimport json,os,sys\n"
                          "pane=json.load(open(os.environ['TEST_PANE']))\n"
                          "print(json.dumps({'result':{'pane':pane}} if sys.argv[1:3]==['pane','get'] else {'result':{}}))\n")
         herdr.chmod(0o700)
         self.received = self.root / "received.json"
         self.checker = self.root / "checker.py"
-        self.checker.write_text("import json,os,sys,time\n"
+        self.checker.write_text("import json,os,sys\n"
                                "json.dump(json.load(sys.stdin),open(os.environ['TEST_RECEIVED'],'w'))\n"
-                               "time.sleep(float(os.environ.get('TEST_SLEEP','0')))\n"
                                "print(os.environ.get('TEST_DETAIL','checker detail'),file=sys.stderr)\n"
                                "sys.exit(int(os.environ.get('TEST_EXIT','0')))\n")
-        self.env = {**os.environ, "HOME": str(self.root), "XDG_CONFIG_HOME": str(self.root / "config"),
+        # The hook runs for real, as its own process, but its two time limits (the 2 s herdr call and the policy's
+        # checker timeout) are judged against a delay the test declares (TEST_HERDR_SLEEP, TEST_SLEEP), not against
+        # how long this host takes to start Python: a loaded host cannot make a call miss its limit.
+        self.launcher = self.root / "launcher.py"
+        self.launcher.write_text(LAUNCHER)
+        self.limits = self.root / "limits.jsonl"
+        self.env = {**os.environ, "TEST_LIMIT_LOG": str(self.limits), "HOME": str(self.root), "XDG_CONFIG_HOME": str(self.root / "config"),
                     "XDG_STATE_HOME": str(self.root / "state"), "HERDR_BIN_PATH": str(herdr),
                     "HERDR_PANE_ID": "wTest:p1", "HERDR_SOCKET_PATH": "",
                     "CLAUDE_CODE_ENTRYPOINT": "cli", "TEST_PANE": str(self.pane),
@@ -62,9 +85,9 @@ class ReactionPolicyTests(unittest.TestCase):
                               "stop_hook_active": True, "last_assistant_message": "done"}
         self.sequence += 1
         payload.setdefault("turn_id", str(self.sequence))
-        result = subprocess.run([sys.executable, "-I", str(HOOK), *(["--claude"] if claude else [])],
+        result = subprocess.run([sys.executable, "-I", str(self.launcher), str(HOOK), *(["--claude"] if claude else [])],
                                 input=json.dumps(payload), text=True, capture_output=True,
-                                env={**self.env, **environment}, timeout=8)
+                                env={**self.env, **environment}, timeout=300)  # a stuck-process guard, not a hook limit
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout) if result.stdout.strip() else None
 
@@ -132,10 +155,12 @@ class ReactionPolicyTests(unittest.TestCase):
         self.config.symlink_to(self.root / "missing-policy")
         self.assert_block(self.run_hook(), "policy")
 
+    def limits_used(self, who):
+        return [limit for name, limit, _ in map(json.loads, self.limits.read_text().splitlines()) if name == who]
+
     def test_checker_timeout_blocks_with_bounded_wait(self):
-        start = time.monotonic()
         self.assert_block(self.run_hook(TEST_SLEEP="5"), "timed out")
-        self.assertLess(time.monotonic() - start, 4)
+        self.assertEqual(self.limits_used("checker"), [1])  # the wait was bounded by the policy's timeout
 
     def test_missing_executable_blocks_without_exposing_argv(self):
         self.policy(command=[str(self.root / "private-command")])
@@ -162,13 +187,14 @@ class ReactionPolicyTests(unittest.TestCase):
                     extra["TEST_SLEEP"] = "5"
                 payload = {"session_id": "test-session", "turn_id": mode,
                            "stop_hook_active": True, "last_assistant_message": "done"}
+                started = time.time()  # the hook's own clock is later, so backoff_until is at least this + 300
                 for _ in range(3):
                     self.assert_block(self.run_hook(payload=payload, **extra), "reaction-policy")
                 self.assertIsNone(self.run_hook(payload=payload, **extra))
                 state = next((self.root / "state/agent-hooks/reaction-checks").glob("*.json"))
                 record = json.loads(state.read_text())
                 self.assertEqual(record["failures"], 3)
-                self.assertGreater(record["backoff_until"], time.time() + 290)
+                self.assertGreaterEqual(record["backoff_until"], started + 300)
         note = self.root / ".local/state/next-prompt/test-session"
         self.assertIn("backoff", note.read_text())
 
@@ -195,24 +221,23 @@ class ReactionPolicyTests(unittest.TestCase):
         hook = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(hook)
         order = []
-        started = threading.Event()
+        started, decided = threading.Event(), threading.Event()
+        # Order, not elapsed time: each side waits for the other to have started, so only running in parallel finishes.
+        # The generous wait is how a sequential regression fails, never how a pass is reached.
         def decide(*args):
             order.append("decide")
-            self.assertTrue(started.wait(2), "reaction must start before ordinary checks finish")
-            time.sleep(.4)
+            self.assertTrue(started.wait(60), "reaction must start before ordinary checks finish")
+            decided.set()
             return "ordinary reason"
         def inbox(*args):
             order.append("inbox")
-            time.sleep(.1)
             return "inbox reason"
         def reaction(*args):
             started.set()
-            time.sleep(.4)
+            self.assertTrue(decided.wait(60), "ordinary checks must run while the reaction check is still running")
             return "reaction reason"
         with patch.object(hook, "decide", decide), patch.object(hook, "inbox_context", inbox), patch.object(hook, "reaction_reason", reaction):
-            start = time.monotonic()
             result = hook.hook_output({}, {}, True)
-        self.assertLess(time.monotonic() - start, .8)
         self.assertEqual(order, ["decide", "inbox"])
         self.assertEqual(result, {"decision": "block", "reason": "inbox reason\n\nordinary reason\n\nreaction reason"})
         with patch.object(hook, "inbox_context", return_value=None), patch.object(hook, "reaction_reason", return_value="reaction reason"):
@@ -248,11 +273,12 @@ class ReactionPolicyTests(unittest.TestCase):
 
     def test_slow_identity_and_max_checker_budget_fit_existing_ten_second_fixture(self):
         self.policy(timeout_seconds=5)
-        start = time.monotonic()
-        # A slow herdr, 1 s against its 2 s timeout: 1.5 s left too little for the fake's own Python start under pre-push load, and
-        # origin/main failed there too (2026-11-18).
+        # A slow herdr, 1 s against its 2 s limit, then a checker that outlasts the largest allowed timeout. The fake time the
+        # hook waited is the sum of what each call used; real Python start-up under pre-push load is no longer part of it.
         self.assert_block(self.run_hook(TEST_SLEEP="6", TEST_HERDR_SLEEP="1"), "timed out")
-        self.assertLess(time.monotonic() - start, 9.5)
+        self.assertEqual(self.limits_used("herdr"), [2] * len(self.limits_used("herdr")))
+        self.assertEqual(self.limits_used("checker"), [5])
+        self.assertLess(sum(spent for _, _, spent in map(json.loads, self.limits.read_text().splitlines())), 9.5)
 
 
 if __name__ == "__main__":

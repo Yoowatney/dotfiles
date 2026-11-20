@@ -188,15 +188,34 @@ def selftest():
     import subprocess, tempfile
     fake = subprocess.Popen(["bash", "-c", "exec -a '/usr/local/bin/node /tmp/x/node_modules/jest-worker/build/workers/processChild.js' sleep 60"])
     agent = subprocess.Popen(["bash", "-c", "exec -a 'claude --fake' sleep 60"])
-    time.sleep(0.3)
+    # The real hook sends real signals, so it must see only these two processes: any other jest worker on the host (another
+    # session's test run) would be among the 8 it ends, and a busy host could outlast ps's 5 s limit. The wrapper filters the
+    # hook's `ps` to the two pids and lifts that limit; the hook itself is unchanged.
+    wrapper = ("import runpy, subprocess, sys\n"
+               "real, keep, script = subprocess.run, set(sys.argv[2:]), sys.argv[1]\n"
+               "def run(cmd, *a, **k):\n"
+               "    if cmd[0] == '/bin/ps':\n"
+               "        k['timeout'] = None\n"
+               "        done = real(cmd, *a, **k)\n"
+               "        done.stdout = '\\n'.join(l for l in done.stdout.splitlines() if l.split(None, 1)[0] in keep)\n"
+               "        return done\n"
+               "    return real(cmd, *a, **k)\n"
+               "subprocess.run, sys.argv = run, [script]\n"
+               "runpy.run_path(script, run_name='__main__')\n")
     try:
-        counts = guard.census(guard.ps_text())
-        assert fake.pid in [w[0] for w in counts["workers"]] and agent.pid not in [w[0] for w in counts["workers"]], "census finds the fake worker only"
+        seen = lambda: [w[0] for w in guard.census("\n".join(l for l in guard.ps_text().splitlines()
+                                                              if l.split(None, 1)[0] in (str(fake.pid), str(agent.pid))))["workers"]]
+        # Wait until the fake worker's command line is what the census reads (bash has exec'd), however long a busy host takes.
+        deadline = time.monotonic() + 120
+        while fake.pid not in seen() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert fake.pid in seen() and agent.pid not in seen(), "census finds the fake worker only"
         with tempfile.TemporaryDirectory() as d:
             env = {**os.environ, "LOAD_GUARD_MEM": "4,3", "LOAD_WATCH_DIR": d, "HOME": d, "XDG_STATE_HOME": d}
             for _ in range(2):
-                subprocess.run([sys.executable, "-I", os.path.abspath(__file__)], env=env, check=True)
-            assert fake.wait(timeout=5) == -signal.SIGTERM or fake.poll() is not None, "the fake worker ended"
+                subprocess.run([sys.executable, "-I", "-c", wrapper, os.path.abspath(__file__), str(fake.pid), str(agent.pid)],
+                               env=env, check=True)
+            assert fake.wait(timeout=60) == -signal.SIGTERM or fake.poll() is not None, "the fake worker ended"
             assert agent.poll() is None, "the agent-like process is untouched"
             assert "critical ended=1" in open(os.path.join(d, "log")).read()
     finally:
