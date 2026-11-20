@@ -1,0 +1,3 @@
+# Keyboard input sources every Mac keeps enabled. apply selects the first one.
+org.youknowone.inputmethod.Gureum.han2
+org.youknowone.inputmethod.Gureum.system
