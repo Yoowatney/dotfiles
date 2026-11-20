@@ -159,6 +159,12 @@ PRECHECK_NOTE = ("아래는 일 칸의 주장이며 아직 확인되지 않았�
                  "#0에서 요유에게만 하는 답은 '확인 중:'으로 시작해 먼저 올리고, 합친 보고가 오면 같은 글을 고치세요. "
                  "요유 이름의 초안(--yoyoo-draft), reply, 팀 전달, decide, 운영·돈·보안 글은 이 예외가 아니니 합친 보고를 기다리세요. "
                  "이 보고는 '확인:' 줄의 근거가 아닙니다")
+# 요유 2026-11-20: a deliverable whose check could not open (usage reserve, workers down) waited two days because nothing here named the
+# early `확인 중:` route that main-orchestrator's "Early #0 answers" allows. UNOPENED_WHY is the head's reason text for that case.
+UNOPENED_WHY = "확인 칸을 열지 못했습니다"
+UNCHECKED_EARLY_NOTE = ("확인 칸이 열리지 않으면 기다리지 마세요. 이 보고가 #0이나 요유 DM에서 요유에게만 하는 답이고 운영·돈·보안 표시가 없으면, "
+                        "그림과 숫자를 '확인 중:'으로 시작해 바로 올리고 확인 칸이 열려 합친 보고가 오면 같은 글을 고치세요(main-orchestrator의 Early #0 answers). "
+                        "운영·돈·보안 글, 팀 전달, reply, decide, 요유 이름의 초안(--yoyoo-draft)이면 지금처럼 확인 칸을 기다리세요")
 PRECHECK_REASON = ("yoyoo-share-guard: 확인 전 보고를 받은 뒤 쓰는 보고인데, 아직 끝나지 않은 확인 칸을 '확인:' 줄의 근거로 적었습니다. "
                    "합친 보고가 오기 전에는 '확인:' 줄을 빼고, 먼저 올린 답은 '확인 중:'으로 두세요.")
 # 요유 2026-11-05: dispatch tabs run on the hidden workers server, and only what needs 요유 reaches the main pane. It is no claim of work
@@ -557,6 +563,8 @@ def relay_reason(payload: dict, text: str, env) -> str | None:
     refused = {i for kind, _, _, i in after if kind == "refused"}
     stated = [v for v in (m.group(1).strip(" \t*_.,;") for m in CHECK_LINE.finditer(prose(text))) if v and not NONE.match(v)]
     if delegates_checks(payload, env):
+        if kind == "이" and UNOPENED_WHY in lines[start] and "확인 중:" in prose(text):
+            return None  # its check could not open, and the answer to 요유 alone already went up as `확인 중:`
         if kind == "바로 전달하는":
             return None  # questions, decisions, no result, or a failed automatic spawn: do not ask for a check again
         if kind == "확인":

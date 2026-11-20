@@ -425,7 +425,7 @@ def unchecked_head(reply: str, why: str) -> str:
     """The head of a report the main pane gets with no check pane. One that delivers keeps the ordinary head, so share-guard
     asks the main pane for a check pane, as it does for any other pane's claim."""
     if delivers(reply):
-        return f"이 칸의 보고입니다({why}). 요유에게 갈 결과물(그림, 답 초안, 올릴 숫자)이 있습니다. {share.DELEGATE_NOTE}."
+        return f"이 칸의 보고입니다({why}). 요유에게 갈 결과물(그림, 답 초안, 올릴 숫자)이 있습니다. {share.DELEGATE_NOTE}. {share.UNCHECKED_EARLY_NOTE}."
     return f"바로 전달하는 칸의 보고입니다({why})."
 
 
@@ -898,7 +898,7 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
                 return True
             context["spawn_error"] = error
             write_context(context_path, context)
-        message = (f"{unchecked_head(reply, '확인 칸을 열지 못했습니다')} 결과는 아직 확인하지 못했습니다. "
+        message = (f"{unchecked_head(reply, share.UNOPENED_WHY)} 결과는 아직 확인하지 못했습니다. "
                    f"확인 칸 시작 실패: {context['spawn_error']}\n확인 종류: {kind_line(context)}\n{body}")
         sent = (send_immediate or send)(message)
         if sent:

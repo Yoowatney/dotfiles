@@ -1267,6 +1267,22 @@ class RelayTests(unittest.TestCase):
         self.assertIn("workers unavailable", message)
         self.assertEqual(self.main_blocks(message), auto.share.DELEGATE_REASON)
 
+    def test_unopened_check_tells_main_it_may_post_an_early_answer(self):
+        # 요유 2026-11-20 (#0 1795152945.468919): the figure waited two days because the failed-start message never named the
+        # early `확인 중:` route that situational-rules.md allows for an answer to 요유 alone in #0 or her DM.
+        self.spawn_error = "workers unavailable"
+        self.finish(self.FIGURE)
+        message = self.tells[0][1]
+        for part in ("'확인 중:'", "#0", "DM", "운영·돈·보안", "reply", "decide", "Early #0 answers"):
+            self.assertIn(part, message)
+        self.assertIn(auto.share.UNCHECKED_EARLY_NOTE, message)
+        early = "그림을 '확인 중:'으로 올렸습니다.\n남은 것: 요유 몫: 없음 · 유요 몫: 확인 칸이 열리면 글 고치기 · 세션: 열어 둠"
+        self.assertIsNone(self.main_blocks(message, early), "the early post is not sent back for a check pane it cannot open")
+        self.assertEqual(self.main_blocks(message), auto.share.DELEGATE_REASON, "no early post and no check pane: still asked")
+        # a deliverable whose check was never tried keeps the ordinary demand, even if the report mentions the prefix
+        waiting = message.replace(auto.share.UNOPENED_WHY, "자동 칸이 요유를 기다립니다")
+        self.assertEqual(self.main_blocks(waiting, early), auto.share.DELEGATE_REASON)
+
     def test_job_note_leaves_decisions_on_the_board_not_in_a_collected_list(self):
         # 요유 2026-11-19: no decision list is kept or shown any more; the board and the work thread carry the question once.
         self.assertNotIn("모아 둔 결정", auto.share.JOB_NOTE)
