@@ -49,7 +49,7 @@
 # (load-guard.py: it waited 90 s and opened nothing; try again in a few minutes).
 original_args=("$@")
 H=${HERDR_BIN_PATH:-herdr}
-USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] [--] "<work name>" "<instruction>" [-- <agent arguments>]
+USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full] [--opus] [--artifact] [--skills] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] [--] "<work name>" "<instruction>" [-- <agent arguments>]
   Work name and instruction must contain non-whitespace text. Agent configuration/model/effort/sandbox/approval
     options cannot be work names; put agent options after both task operands and a second --.
   --task-type code|research|media|office|full: worker startup catalog; unknown tasks retain full context.
@@ -70,6 +70,10 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--opus] [--artifact] [--skills] 
     usage reserve it opens nothing and exits 2: look again with one command, or open an ordinary read-only recheck pane (no --check;
     name it "<work name> [rc-<ac id>]" so its report comes straight back; if no session can open for usage, ask 요유 to switch the account
     or spend a reset ticket instead of waiting for the reset). An unknown usage reading still opens it.
+  --check-level: how far the automatic check of this pane result goes, chosen by the main pane. none: no check session; the report goes
+    to the main pane, which posts it headed 끝남(확인 안 함): and opens a check only when asked. figures: the check re-runs only the commands
+    that gave the numbers of the report. full (also what no level means): the whole report is checked, as before levels existed.
+    With --check, figures gives the check pane the figures-only brief.
   --artifact: keep the Artifact tool in a Claude pane (a job that publishes a page); every Claude pane starts without it otherwise.
   --skills: keep the design (taste-skill), office-file (docx/pdf/pptx/xlsx) and Claude-API skills in a Claude pane (UI or office-file job).
   --opus: opt out of the main pane Claude work trial (Sonnet 5.5/high); use global model/effort defaults for heavy work.
@@ -82,7 +86,7 @@ USAGE_BLOCK_NOTE="Never put the work off until the usage reset (요유 2026-11-2
 # starts that way made an ordinary pane unreachable (요유 2026-11-05), so no tab it names starts that way.
 tab_name() { case "$1" in "자동 "* | "알아서 "*) echo "일 $1" ;; *) echo "$1" ;; esac; }
 
-same= new_tab= check= allow_duplicate= opus= artifact= skills= kind= why= opener= task_type= job_id= cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
+same= new_tab= check= check_level= allow_duplicate= opus= artifact= skills= kind= why= opener= task_type= job_id= cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
 while [ $# -gt 0 ]; do
   case "$1" in
     --same-tab) same=1; shift ;;
@@ -93,9 +97,9 @@ while [ $# -gt 0 ]; do
     --artifact) artifact=1; shift ;;
     --skills) skills=1; shift ;;
     -h | --help) echo "$USAGE"; exit 0 ;;
-    --kind | --cwd | --why | --opener | --task-type | --job-id)
+    --kind | --cwd | --why | --opener | --task-type | --job-id | --check-level)
       [ $# -ge 2 ] || die "$USAGE"
-      case "$1" in --kind) kind=$2 ;; --cwd) cwd=$2 ;; --why) why=$2 ;; --opener) opener=${2#term_}; [[ "$opener" =~ ^[0-9A-Za-z]+$ ]] || die "$USAGE" ;; --task-type) task_type=$2 ;; --job-id) job_id=$2 ;; esac
+      case "$1" in --check-level) case "$2" in none|figures|full) check_level=$2 ;; *) die "--check-level takes none, figures or full" ;; esac ;; --kind) kind=$2 ;; --cwd) cwd=$2 ;; --why) why=$2 ;; --opener) opener=${2#term_}; [[ "$opener" =~ ^[0-9A-Za-z]+$ ]] || die "$USAGE" ;; --task-type) task_type=$2 ;; --job-id) job_id=$2 ;; esac
       shift 2 ;;
     --) shift; break ;;
     --*) die "$USAGE" ;;
@@ -290,6 +294,8 @@ if [ -n "$check" ]; then
   env_args+=(--env HERDR_TASK_ROLE=check)
 else
   env_args+=(--env HERDR_TASK_ROLE=worker)
+  # auto-tab-close reads it when this pane reports; full is the unmarked default, so only a narrower level is written
+  [ -z "$check_level" ] || [ "$check_level" = full ] || env_args+=(--env "HERDR_CHECK_LEVEL=$check_level")
   [ "$kind" != codex ] || env_args+=(--env HERDR_CODEX_STARTUP_ROLE=worker --env "HERDR_CODEX_TASK_TYPE=$task_type")
   if [ "$kind" = codex ] && [ -f "$helper_dir/codex-startup.py" ]; then
     env_args+=(--env "HERDR_CODEX_STARTUP_HELPER=$helper_dir/codex-startup.py")
@@ -333,7 +339,7 @@ if [ -n "$check" ]; then
   [ -n "$delegates" ] || die "--check is for the main pane; any other lead checks a pane's result itself (직접 확인: run the test or command, or look at the changed behavior or data)"
   name="확인 $name"
   prompt+=' 이 칸은 확인 칸입니다. 다른 칸이 다 했다고 보고한 일을 확인만 합니다. 코드나 설정을 고치지 말고, 테스트나 명령을 직접 실행하거나 바뀐 동작과 데이터를 직접 보세요. 다른 칸의 보고를 다시 읽는 것은 확인이 아닙니다. 다른 칸을 열지 마세요. 보고 첫 줄에 실행한 명령, 본 결과, 통과 여부를 모두 쓰세요.'
-  prompt+=' Check whether the result answers the original question as asked, including the improvement the user is considering. Read the original request from its primary source; if unavailable, report that coverage is unverified. For investigative results, check the recommendation and next action, and whether available checks were executed for material unknowns. Do not mark an unanswered material question as passed merely because individual factual claims are correct. Report missing scope and follow-up evidence explicitly; do not implement the proposed changes.'
+  [ "$check_level" = figures ] || prompt+=' Check whether the result answers the original question as asked, including the improvement the user is considering. Read the original request from its primary source; if unavailable, report that coverage is unverified. For investigative results, check the recommendation and next action, and whether available checks were executed for material unknowns. Do not mark an unanswered material question as passed merely because individual factual claims are correct. Report missing scope and follow-up evidence explicitly; do not implement the proposed changes.'
   permission_contract=$(python3 -I "$helper_dir/check-permissions.py" --contract) || die "cannot load check result contract"
   prompt+="$permission_contract"
   env_args+=(--env "CLAUDE_CHECK_TARGET=$cwd")
