@@ -135,7 +135,7 @@ def unrequested(payload: dict) -> bool:
                     continue
                 text = item[1].strip()
                 relay = PASTED.sub('', text, 1)
-                if relay.startswith(RELAY) and places(relay):
+                if relay.startswith(RELAY):  # a relay with no place too: a pasted_content wrapper hid its '[' from the skip below
                     chain += places(relay)
                     continue
                 if text.startswith(('<task-notification', '<system-reminder', '[', '# AGENTS.md', '<environment_context')):
