@@ -429,7 +429,8 @@ handoff_contract() {
   case "$request" in *"답을 기다리는 요유 질문"*"회사 결정은 보드 링크"*"개인 결정은 파일 위치"*) ;; *) fail "$mode locates unanswered questions and company/personal decisions" ;; esac
   case "$request" in *"백그라운드로 도는 작업(main-refresh 자신은 빼고)"*"재시작 명령(명령 전문"*"pgrep -f"*) ;; *) fail "$mode keeps background restart commands and skips running copies" ;; esac
   case "$request" in *"오늘 남은 일"*"아직 처리하지 않은 요청은 원문 포함"*) ;; *) fail "$mode keeps the remaining work and unprocessed original requests" ;; esac
-  case "$request" in *"배운 요령은 ~/.claude/skills/main-orchestrator/references/operational-notes.md 한 곳에 모으고"*"날짜별 새 파일을 만들지 마세요"*"기존 메모를 읽고 없는 요령만 Ongoing operational notes 아래에 덧붙이세요"*"인계에는 쓰지 마세요"*) ;; *) fail "$mode sends new lessons to one operational memo section instead of daily files or the handoff" ;; esac
+  case "$request" in *"배운 요령은 인계에도 운영 메모에도 쓰지 마세요"*) ;; *) fail "$mode keeps lessons out of both the handoff and the operational memo" ;; esac
+  case "$request" in *"Ongoing operational notes"*|*"없는 요령만"*|*"operational-notes.md"*) fail "$mode must not tell the main session to read or append to the operational memo" ;; esac
   case "$request" in *"'앞 인계 그대로' 같은 사슬 참조는 쓰지 말고 필요한 줄은 직접 옮겨 적으세요"*) ;; *) fail "$mode forbids chained handoffs and requires the needed lines directly" ;; esac
   case "$request" in *"모아 둔 결정"*) fail "$mode must not request accumulated decisions" ;; esac
   HANDOFF_CONTRACT="${request#*열린 상태}"
