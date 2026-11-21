@@ -86,6 +86,14 @@ def complete(gate_path):
         write(record / "completed", "Session transition confirmed.\n")
 
 
+def resolve(folder):
+    """Main session finished reconciling this record: end it, keep every file."""
+    folder = Path(folder)
+    json.loads((folder / "metadata.json").read_text())  # refuse a non-record folder
+    write(folder / "completed", "Reconciled by the main session.\n")
+    (folder / "active").unlink(missing_ok=True)
+
+
 def blocked(gate_path, pane, priority="0"):
     gate = json.loads(Path(gate_path).read_text())
     if priority == "1" and not gate.get("clearing"):
@@ -141,7 +149,8 @@ def notice(pending):
     for folder in records(pending.parent, key=pending.stem):
         metadata = json.loads((folder / "metadata.json").read_text())
         lines.append(f"Original handoff: {folder / 'handoff.md'}\nSubsequent relay attempts: {folder / 'relays.jsonl'}"
-                     f"\nOriginal session: {metadata['session']}\nOriginal transcript: {metadata.get('transcript') or '(unavailable)'}")
+                     f"\nOriginal session: {metadata['session']}\nOriginal transcript: {metadata.get('transcript') or '(unavailable)'}"
+                     f"\nAfter reconciling, end this record (files are kept): python3 {Path(__file__).resolve()} resolve {folder}")
     if not lines:
         return ""
     return ("Refresh confirmation timed out. Read every recovery file below in full before continuing. "
@@ -159,6 +168,8 @@ def main():
             accept(*args)
         elif command == "complete":
             complete(*args)
+        elif command == "resolve":
+            resolve(*args)
         elif command == "activate":
             activate(json.loads(Path(args[0]).read_text()))
         elif command == "blocked":
