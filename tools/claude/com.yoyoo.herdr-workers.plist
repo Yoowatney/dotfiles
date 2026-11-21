@@ -1,5 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Same detached start as com.yoyoo.herdr-server. Without setsid the workers server reports
+  detached_server_daemon=false, and `herdr machine add ... --remote-session workers` refuses it
+  ("remote server is not ready for saved machines", herdr 0.9.0, 2026-11-21).
+  No KeepAlive: the job exits right after the fork, so KeepAlive would respawn it in a loop, and it
+  would also respawn a server that herdr's own stop / update just ended. workers-watch.py reports a dead server.
+  fork first: a launchd job is a process-group leader, so setsid() in place fails.
+-->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -7,6 +15,10 @@
 
     <key>ProgramArguments</key>
     <array>
+        <string>/usr/bin/perl</string>
+        <string>-MPOSIX</string>
+        <string>-e</string>
+        <string>fork and exit 0; POSIX::setsid() or die "setsid: $!"; exec @ARGV or die "exec: $!"</string>
         <string>/bin/sh</string>
         <string>/Users/yoyoo/.dotfiles/tools/claude/herdr-workers-server.sh</string>
     </array>
@@ -14,7 +26,7 @@
     <key>RunAtLoad</key>
     <true/>
 
-    <key>KeepAlive</key>
+    <key>AbandonProcessGroup</key>
     <true/>
 
     <key>StandardOutPath</key>
