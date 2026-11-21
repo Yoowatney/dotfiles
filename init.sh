@@ -513,10 +513,15 @@ post_install() {
         /opt/homebrew/opt/fzf/install --key-bindings --completion --no-update-rc --no-bash --no-fish
     fi
 
-    # 구름 입력기 등록 (시스템 입력 소스에 표시되도록)
-    if [[ -d "/Library/Input Methods/Gureum.app" ]]; then
-        open "/Library/Input Methods/Gureum.app"
-        info "구름 입력기 실행됨 (시스템 설정 > 키보드 > 입력 소스에서 추가)"
+    # 입력 소스를 macos/input-sources/enabled.txt(구름 두벌식·로마자)로 맞춘다. TIS로 바로 적용되어 로그아웃이 필요 없다.
+    bash "$DOTFILES/scripts/input-sources.sh" apply || warn "입력 소스 적용 실패: bash $DOTFILES/scripts/input-sources.sh apply"
+    # 구름은 샌드박스 앱이라 컨테이너 안의 설정만 읽는다(오른쪽 Command 한영 전환 등). ~/Library/Preferences 복원만으로는 적용되지 않는다.
+    local gureum_prefs="$HOME/Library/Containers/org.youknowone.inputmethod.Gureum/Data/Library/Preferences"
+    if [[ -d "$gureum_prefs" ]]; then
+        defaults import "$gureum_prefs/org.youknowone.Gureum" "$DOTFILES/macos/gureum/gureum.xml" && killall Gureum 2>/dev/null
+        info "구름 설정을 컨테이너에 적용함"
+    else
+        warn "구름 컨테이너가 아직 없음: 구름으로 한 번 입력한 뒤 init.sh를 다시 실행"
     fi
 
     # Brewfile에서 cask 앱들 추출해서 전부 실행 (Gatekeeper 경고 처리)
@@ -586,7 +591,6 @@ post_install() {
 
     echo ""
     echo -e "${YELLOW}  💡 권한 설정: 시스템 설정 > 개인정보 보호 및 보안 > 입력 모니터링 / 손쉬운 사용${NC}"
-    echo -e "${YELLOW}  💡 구름 설정: 시스템 설정 > 키보드 > 입력 소스 > 구름 추가${NC}"
     echo ""
 }
 
@@ -621,6 +625,7 @@ show_secrets_guide() {
     echo -e "${GREEN}2. System Permissions${NC}"
     echo "   시스템 설정 > 개인정보 보호 및 보안 > 입력 모니터링:"
     echo "   - karabiner_grabber, karabiner_observer"
+    echo "   - 구름 (없으면 오른쪽 Command 한영 전환과 iTerm2 Caps Lock 영문 전환이 안 됨)"
     echo "   손쉬운 사용: Karabiner, Hammerspoon, Rectangle, Snap"
     echo ""
 

@@ -279,8 +279,8 @@ echo "  → Activity Monitor settings..."
 # Dock 아이콘 CPU 사용량 표시
 defaults write com.apple.ActivityMonitor IconType -int 5
 
-# 모든 프로세스 표시
-defaults write com.apple.ActivityMonitor ShowCategory -int 0
+# 모든 프로세스 표시 (현재 macOS는 0을 100으로 바꿔 저장한다)
+defaults write com.apple.ActivityMonitor ShowCategory -int 100
 
 # ===========================================
 # Apply Changes
