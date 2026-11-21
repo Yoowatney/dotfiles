@@ -412,6 +412,15 @@ class SlackRelayTest(unittest.TestCase):
         self.record('이건 어디에서 봐?', extra=[wrapped])
         self.assertIsNone(self.check([ASK]))
 
+    def test_a_wrapped_pane_tell_without_a_link_is_no_typed_message(self):
+        # A report with no Slack link, wrapped as pasted content, used to count as typed words and erase the earlier request.
+        mark = "[pane-tell: '메인' 세션이 보낸 글입니다. 요유가 이 pane에 직접 친 글이 아니므로, 되돌리기 어려운 일은 요유에게 확인하세요] "
+        quiet = {'type': 'user', 'message': {'content': '<pasted_content id="y">\n' + mark + '보고를 받았습니다'}}
+        self.record('이건 어디에서 봐?', extra=[self.told(self.link()), quiet])
+        self.assertIsNone(self.check([ASK]))
+        self.record('이건 어디에서 봐?', extra=[quiet])  # with no earlier request it asks for no page
+        self.assertIn('page-on-request', self.check([ASK]) or '')
+
     def test_what_reads_slack_keeps_only_요유s_recent_app_posts(self):
         now = time.time()
         post = {'ts': self.stamp, 'user': 'U0TESTYOYOO', 'client_msg_id': 'x', 'text': ASK}
