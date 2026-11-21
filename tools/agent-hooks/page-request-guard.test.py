@@ -169,6 +169,13 @@ class PageRequestTest(unittest.TestCase):
             ('페이지로 보여 주지 말고 짧게 답해줘', True),
             ('"페이지로 답해 줘"는 무슨 뜻이야?', True),
             ('페이지로 이동하는 방법이 뭐야?', True),
+            # 요유 2026-11-21: asked for a page with 표현해줄래, which the verb list lacked (api#1199).
+            ('이거 지금 구조 html에서 그림으로좀 표현해줄래? 한눈에 들어오게. 아키텍쳐를 잘 모르겠어', False),
+            ('이거 html로 표현해 줘', False), ('html로 그려 줘', False), ('html로 그려줘', False), ('html로 보여줄래?', False),
+            ('html 페이지 만들어줄래', False), ('html로 정리해줄 수 있어?', False), ('html로 해주실래요?', False),
+            ('설명 페이지로 보여 주실래요', False), ('페이지로 알려줄 수 있어?', False),
+            ('html 페이지가 왜 이래?', True), ('html 말고 글로 답해', True), ('html 페이지가 어떻게 그려져?', True),
+            ('html 말고 글로 표현해줄래', True), ('html 페이지는 필요 없으니 글로 보여줄래', True),
         ]:
             self.record(prompt)
             with self.subTest(prompt=prompt):
