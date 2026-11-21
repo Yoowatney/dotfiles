@@ -156,7 +156,7 @@ def unrequested(payload: dict) -> bool:
     # Quoting a request or saying not to write HTML is not a direct request.
     request = re.sub(r'`[^`]*`|"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’', '', latest)
     page = r'(?:html|설명\s*페이지|웹\s*페이지|explainer\s*page|페이지)'
-    verb = r'(?:만들어|써\s*줘|작성해|설명해|정리해|보여\s*(?:줘|주)|답해|답하|해\s*(?:줘|주)|수정해|고쳐|부탁|주세요)'
+    verb = r'(?:만들어|써\s*줘|작성해|설명해|정리해|보여\s*(?:줘|주)|답해|답하|해\s*(?:줘|주)|수정해|고쳐|부탁|주세요|표현해|그려\s*(?:줘|주|줄)|보여\s*줄|줄래|줄\s*수|주실)'  # 2026-11-21: 표현해줄래 was a request the list missed
     # A refusal of the page itself, close to the page word and on the next line too ("HTML 페이지\n만들지 말고", "HTML로 자세히
     # 정리하지 말고", "HTML 말고"). A limit on the page ("페이지는 공개하지 말고", "고객 식별자를 포함하지 말아") is no refusal.
     refuse = r'(?:(?:만들|쓰|작성하|정리하|보여\s*주|답하|해\s*주)지\s*(?:말|마|않)|필요\s*없)'
