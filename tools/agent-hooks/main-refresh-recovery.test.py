@@ -73,6 +73,17 @@ class Recovery(unittest.TestCase):
         recovery.record(self.root, "main", "new", "normal relay")
         self.assertEqual((self.folder / "relays.jsonl").read_text(), "")
 
+    def test_resolve_ends_an_active_record_and_keeps_its_files(self):
+        recovery.activate(self.data)
+        self.assertIn(str(self.folder / "handoff.md"), recovery.notice(self.memo))
+        self.assertIn("resolve", recovery.notice(self.memo))
+        recovery.resolve(self.folder)
+        self.assertEqual(recovery.notice(self.memo), "")
+        self.assertFalse((self.folder / "active").exists())
+        self.assertTrue((self.folder / "completed").exists())
+        for name in ("handoff.md", "relays.jsonl", "metadata.json"):
+            self.assertTrue((self.folder / name).exists())
+
     def test_aborted_prepare_does_not_activate_later(self):
         recovery.complete(self.gate)
         self.assertTrue((self.folder / "completed").exists())
