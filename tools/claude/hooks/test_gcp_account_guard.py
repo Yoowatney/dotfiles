@@ -1,4 +1,5 @@
 """Main-pane Slack approval boundaries; all GCP commands are inert hook inputs."""
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -447,6 +448,68 @@ class KeyCleanupApprovalTest(unittest.TestCase):
                 with self.subTest(command=cmd, env=env):
                     self.assertTrue(self.run_hook(cmd, approved=False, env=env))
         self.assertFalse(self.calls)
+
+
+class UngatedUseTest(unittest.TestCase):
+    """A request for a command the guard lets run anyway gets its use record when that command runs (api#1445).
+    Without it the presence watcher never sees the request consumed and nudges a finished command as 'run now'."""
+    command = "gh pr merge 847 -R example/repo --squash"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.requests = Path(self.tmp.name, "requests")
+        self.requests.mkdir()
+        self.log = Path(self.tmp.name, "consumed.log")
+        self.module = Path(self.tmp.name, "stub_slack_approval.py")
+        self.module.write_text(f"def consume(ts, c):\n    with open({str(self.log)!r}, 'a') as f:\n        f.write(ts + '|' + c + '\\n')\n    return True\n")
+
+    def request(self, command=None, **record):
+        key = hashlib.sha256((command or self.command).strip().encode()).hexdigest()
+        data = {"at": 1000.0, "status": "posted", "ts": "1000.500000"}
+        data.update(record)
+        (self.requests / f"{key}.json").write_text(json.dumps(data))
+
+    def run_use(self, command=None, now=1100.0, path=None):
+        GUARD.ungated_use(command or self.command, requests=str(self.requests), path=str(path or self.module), now=now)
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def test_open_posted_request_for_the_same_command_is_consumed(self):
+        self.request()
+        self.assertEqual(self.run_use(), [f"1000.500000|{self.command}"])
+
+    def test_other_commands_and_missing_records_are_left_alone(self):
+        self.assertEqual(self.run_use(), [])
+        self.request("gh pr merge 1 -R example/repo")
+        self.assertEqual(self.run_use(), [])
+
+    def test_expired_unposted_or_malformed_records_are_left_alone(self):
+        for record in ({"at": 100.0}, {"status": "prepared"}, {"status": "posting"}, {"ts": ""}, {"ts": "x"}, {"at": "soon"}):
+            with self.subTest(record=record):
+                self.request(**record)
+                self.assertEqual(self.run_use(), [])
+        (self.requests / "junk.json").write_text("{")
+
+    def test_a_broken_or_missing_module_never_stops_the_command(self):
+        self.request()
+        self.module.write_text("raise RuntimeError('x')\n")
+        self.assertEqual(self.run_use(), [])
+        self.assertEqual(self.run_use(path=Path(self.tmp.name, "none.py")), [])
+
+    def hook(self, command, rider=None, strict_command=False):
+        used = []
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+        reason = GUARD.hook(payload, {}, lambda _: rider, lambda c, d: (None, "no ✅"), lambda _: True,
+                            record_use=used.append)
+        return reason, used
+
+    def test_hook_records_the_use_only_of_a_command_it_lets_run(self):
+        self.assertEqual(self.hook(self.command), (None, [self.command]))
+        reason, used = self.hook(self.command, rider="pane-fit-guard: ask")
+        self.assertEqual((reason, used), ("pane-fit-guard: ask", []))
+        reason, used = self.hook("gcloud config set account me@example.com")
+        self.assertTrue(reason)
+        self.assertEqual(used, [])
 
 
 if __name__ == "__main__":
