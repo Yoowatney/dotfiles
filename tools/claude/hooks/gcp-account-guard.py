@@ -23,6 +23,7 @@ once within 10 minutes, regardless of account (api#1052). Slack word grants neve
 """
 from __future__ import annotations  # a hook whose python3 is macOS's 3.9 would crash and let everything through
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -751,6 +752,28 @@ def tool_problem(payload: dict, env: dict, prompt: str | None = None) -> str | N
             "terraform#1005, api#1026")
 
 
+REQUESTS = os.path.expanduser("~/.local/state/orchestrator/approval-requests")  # where slack_approval.py keeps each request
+REQUEST_WINDOW = 600  # slack_approval.WINDOW: a request counts for ten minutes
+
+
+def ungated_use(command: str, requests: str = REQUESTS, path: str = SLACK, now: float | None = None) -> None:
+    """Leave the use record of the open ✅ request for this exact command, when the guard lets the command run anyway.
+    The guard never asks Slack for such a command, so nothing else writes the record, and presence-watch would nudge a
+    finished command as "run now" (api#1445). Only a command a request already names reaches the module: one failed open
+    for every other Bash call. The record only retires a request; it never lifts a refusal."""
+    try:
+        key = hashlib.sha256(command.strip().encode()).hexdigest()
+        with open(os.path.join(requests, key + ".json"), encoding="utf-8") as source:
+            record = json.load(source)
+        ts = str(record["ts"])
+        if (record.get("status") != "posted" or not re.fullmatch(r"\d+\.\d+", ts)
+                or not 0 <= (time.time() if now is None else now) - float(record["at"]) <= REQUEST_WINDOW):
+            return
+        load(path).consume(ts, command)
+    except Exception:
+        pass  # the command is allowed whatever happens here; a missing record only leaves the old nudge
+
+
 def load(path: str):
     sys.dont_write_bytecode = True
     spec = importlib.util.spec_from_file_location(os.path.basename(path).replace("-", "_")[:-3], path)
@@ -905,13 +928,16 @@ def slack_grant(hook_input: dict, env: dict, turn: tuple[str, str], grants, left
 
 
 def hook(hook_input: dict, env: dict, riders, approvals, is_main, budget: float = HOOK_BUDGET, started: float | None = None,
-         grants=slack_grants):
+         grants=slack_grants, record_use=ungated_use):
     """The whole PreToolUse verdict, within `budget` seconds of `started`. On the Slack paths the other checks run first:
     pane-fit-guard asks the main pane once a message, and its repeat must still find the approval unused."""
     started = time.monotonic() if started is None else started
     strict = tool_problem(hook_input, env, prompt="")  # what no word typed in this pane lifts
     if not strict:
-        return riders(hook_input)
+        other = riders(hook_input)
+        if not other and hook_input.get("tool_name") == "Bash":
+            record_use((hook_input.get("tool_input") or {}).get("command") or "")
+        return other
     typed = tool_problem(hook_input, env)
     # Subordinate panes never take typed grants or Slack approvals; the main pane still owns the Slack routes (api#1026).
     # ponytail: herdr lookups can fail and labels can change; these checks stop mistakes, not a determined bypass.
