@@ -133,13 +133,39 @@ def finished_report(text):
 
 
 def blocked(text):
-    # Match a single paragraph, not a quota discussion in one section and an
-    # unrelated delayed task in another. Quotes/code are not new commitments.
+    # Documents and quoted examples are not new work commitments. Remove HTML
+    # through its closing tag (or EOF for partial output), preserving any real
+    # deferral reported outside the document.
+    deferral_words = re.compile(r"미[룬룹뤄뤘]|보류|막[혀힘혔]|멈[춰췄춥춤]|중단|내일.{0,60}(?:자동\s*배정|맡|넘)|defer|blocked|unavailable", re.I)
+
+    def inline_code(match):
+        value = match.group(2)
+        example = (re.search(r"codex|코덱스|사용량|quota|usage.limit", value, re.I) and
+                   deferral_words.search(value))
+        # Keep command names and error terms used in a real deferral; only a
+        # quoted deferral statement (or an HTML tag example) is evidence text.
+        return "" if example or re.search(r"<[^>]+>", value) else value
+
     text = unicodedata.normalize("NFC", text)
     text = re.sub(r"```.*?```", "", text, flags=re.S)
+    text = re.sub(r"(`+)([^\n]*?)\1", inline_code, text)
     text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(">"))
+    text = re.sub(r"^[ \t]*(?:<!doctype\s+html\b[^>]*>|<html\b[^>]*>).*?(?:</html\s*>|\Z)",
+                  "", text, flags=re.I | re.S | re.M)
     if finished_report(text):
         return False
+    quota_problem = re.compile(
+        r"(?:사용량|quota|usage.limit|주간)[^\n.!?。]{0,60}"
+        r"(?:소진|고갈|바닥|부족|초과|막[혀힘혔]|(?<![\d.])0\s*%|떨어|"
+        r"한도(?:로|에\s*(?:걸|도달)|를\s*(?:다\s*)?써|가\s*찼|\s*도달)|"
+        r"(?<![A-Za-z])(?:ran\s+out|used\s+up|exhaust\w*|deplet\w*|exceed\w*|unavailable|reached|hit)\b)|"
+        r"\b(?:hit|reached|exhausted|exceeded|used\s+up)\b"
+        r"[^\n.!?。]{0,60}(?:quota|usage.limit)|"
+        r"(?:사용량|주간)(?:이|가|은|는)?\s*(?:(?:전혀|아예|거의)\s*)?없[어음으다습]", re.I)
+    quota_cause = re.compile(
+        r"(?:사용량|quota|usage.limit|주간)[^\n.!?。]{0,60}"
+        r"(?:때문|여서|(?<!따)라서|만\s*남아서|뿐이라|\bbecause\b|\bdue\s+to\b)|"
+        r"\b(?:because|due\s+to)\b[^\n.!?。]{0,60}(?:quota|usage.limit)", re.I)
     for paragraph in text.split("\n\n"):
         sentences = re.split(r"(?<=[.!?。])\s+|\n", paragraph)
         current = []
@@ -148,11 +174,18 @@ def blocked(text):
             negative = re.search(r"\b(?:not|never)\b|않|못|미재개", sentence, re.I)
             if not resumed or negative:
                 current.append(sentence)
-        paragraph = "\n".join(current)
-        if (re.search(r"codex|코덱스", paragraph, re.I) and
-                re.search(r"사용량|quota|usage.limit|주간.*(?:0%|소진)", paragraph, re.I) and
-                re.search(r"미[룬룹뤄뤘]|보류|막[혀힘혔]|멈[춰췄춥춤]|중단|못|불가|쓸\s*수\s*없|내일.{0,60}(?:자동\s*배정|맡|넘)|defer|blocked|unavailable", paragraph, re.I)):
-            return True
+        # Keep an adjacent reason sentence ("tomorrow ... because Codex quota
+        # ran out"), but never combine scattered words across a long report.
+        for index in range(len(current)):
+            context = "\n".join(current[max(0, index - 1):index + 1])
+            deferred = deferral_words.search(context)
+            unable = re.search(r"못|불가|쓸\s*수\s*없", context)
+            # A usage explanation alone does not make an unrelated failure a
+            # quota obstacle: causal wording needs an explicit deferral.
+            if (re.search(r"codex|코덱스", context, re.I) and
+                    ((quota_problem.search(context) and (deferred or unable)) or
+                     (quota_cause.search(context) and deferred))):
+                return True
     return False
 
 
