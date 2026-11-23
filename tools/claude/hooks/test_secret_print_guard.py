@@ -386,6 +386,10 @@ class BrowserAndTranscriptOutputTests(unittest.TestCase):
             "console.log(await page.evaluate(async()=>{const r=await fetch('/api/fixture'); return r.json()}));",
             "const r=await page.fetch('/api/fixture'); console.dir(JSON.parse(r.body));",
             "const r=await page.fetch('/api/fixture'); process.stdout.write(r.body);",
+            "const r=await page.fetch('/api/fixture'); console.trace(r);",
+            "const r=await page.fetch('/api/fixture'); console.group(r);",
+            "const r=await page.fetch('/api/fixture'); console.assert(false, r);",
+            "const r=await page.fetch('/api/fixture'); console['log'](r);",
         ):
             command = "ego-browser nodejs <<'JS'\n" + script + "\nJS"
             with self.subTest(script=script):
@@ -524,6 +528,34 @@ class BrowserPageStateOutputTests(unittest.TestCase):
         "document.getElementById('__NEXT_DATA__').textContent)); "
     )
     DENIED = (
+        "window.__NEXT_DATA__",
+        "__NEXT_DATA__",
+        "window.__NEXT_DATA__\n.props.pageProps",
+        "await\npage.evaluate(() => window.__NEXT_DATA__)",
+        "window.__NEXT_DATA__.props.pageProps;",
+        "JSON.stringify(window.__NEXT_DATA__.props.pageProps)",
+        "await page.evaluate(() => window.__NEXT_DATA__)",
+        "await page.evaluate(() => window.__NEXT_DATA__.props.pageProps)",
+        NEXT_READ + "data",
+        NEXT_READ + "data.props.pageProps; // implicit output",
+        NEXT_READ + "(\nJSON.stringify(data.props.pageProps)\n)",
+        "const data=window.__NEXT_DATA__\ndata.props.pageProps",
+        NEXT_READ + "console.log('loaded');\ndata.props.pageProps",
+        NEXT_READ + "const {props:{pageProps:pp}}=data; console.log(pp);",
+        NEXT_READ + "const {props:{pageProps:pp}}=data; pp",
+        NEXT_READ + "const {props:{pageProps:{settings:cfg}}}=data; console.log(cfg);",
+        "const raw=await page.locator('#__NEXT_DATA__').textContent(); console.log(raw);",
+        "console.log(await page.textContent('#__NEXT_DATA__'));",
+        "console.log(await page.innerText('#__NEXT_DATA__'));",
+        "console.log(await page.locator('script#__NEXT_DATA__').innerText());",
+        "console.log(await page.$eval('#__NEXT_DATA__', el => el.textContent));",
+        "console.log(await page.evaluate(() => document.querySelector('#__NEXT_DATA__').innerText));",
+        "const el=page.locator('#__NEXT_DATA__'); console.log(await el.textContent());",
+        NEXT_READ + "console.trace(data);",
+        NEXT_READ + "console.group(data);",
+        NEXT_READ + "console.assert(false, data);",
+        NEXT_READ + "console['log'](data);",
+        NEXT_READ + 'console["log"](data);',
         NEXT_READ + "console.log(data);",
         NEXT_READ + "console.log(data.props.pageProps);",
         NEXT_READ + "console.log(JSON.stringify(data.props.pageProps.settings));",
@@ -548,6 +580,22 @@ class BrowserPageStateOutputTests(unittest.TestCase):
         "console.log(await page.evaluate(function () {return window.__NUXT__;}));",
     )
     ALLOWED = (
+        "await page.content()",
+        "await page.screenshot({path:'/tmp/fixture.png'})",
+        "await page.locator('h1').textContent()",
+        "await page.innerText('h1')",
+        "await page.$eval('h1', el => el.textContent)",
+        "await page.evaluate(() => document.title)",
+        "const data=window.__NEXT_DATA__",
+        "const data=\nawait page.evaluate(() => window.__NEXT_DATA__)",
+        "const data=window.__NEXT_DATA__;\nconst summary=\n({title:data.props.pageProps.title}); summary",
+        NEXT_READ + "({title:data.props.pageProps.title})",
+        NEXT_READ + "JSON.stringify({count:data.props.pageProps.items.length})",
+        "await page.evaluate(() => ({title:window.__NEXT_DATA__.props.pageProps.title}))",
+        NEXT_READ + "console['log']({count:data.props.pageProps.items.length});",
+        NEXT_READ + "console.trace({present:!!data.props.pageProps});",
+        NEXT_READ + "console.log(await page.locator('h1').textContent());",
+        NEXT_READ + "console.log(await page.evaluate(() => document.title));",
         NEXT_READ + "console.log({title:data.props.pageProps.title,enabled:data.props.pageProps.enabled});",
         NEXT_READ + "console.log({count:data.props.pageProps.items.length,present:!!data.props.pageProps.settings,type:typeof data.props.pageProps.settings});",
         NEXT_READ + "const summary={title:data.props.pageProps.title}; console.log(summary);",
@@ -582,6 +630,16 @@ class BrowserPageStateOutputTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNotNone(guard.bash_problem(command))
         self.assertIsNone(guard.bash_problem("R=$(" + inline + " 2>&1)"))
+
+    def test_session_final_expression_output(self):
+        for script in self.DENIED:
+            with self.subTest(script=script):
+                command = "ego-browser nodejs --session fixture -e " + shlex.quote(script)
+                self.assertIsNotNone(guard.bash_problem(command))
+        for script in self.ALLOWED:
+            with self.subTest(script=script):
+                command = "ego-browser nodejs --session fixture -e " + shlex.quote(script)
+                self.assertIsNone(guard.bash_problem(command))
 
     def test_claude_and_codex_hook_protocol_before_execution(self):
         # Codex's shared hook adapter normalizes shell calls to Bash. Also cover
