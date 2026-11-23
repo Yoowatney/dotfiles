@@ -333,6 +333,28 @@ class RecoveryTests(unittest.TestCase):
                 self.assertTrue((self.root / "deferred/state.json").exists())
                 self.assertEqual(self.state()["items"][0]["summary"], text)
 
+    def test_reached_quota_limit_variants_are_captured(self):
+        for text in ("Codex 주간 사용량 한도에 도달해 리뷰를 미룹니다.",
+                     "Codex 사용량 한도를 다 써서 리뷰를 내일로 미룹니다.",
+                     "Codex 사용량 한도 도달로 교차 리뷰를 보류합니다.",
+                     "Codex 주간 사용량 한도가 찼습니다. 교차 리뷰는 내일로 미룹니다.",
+                     "Codex usage limit hit; review deferred."):
+            with self.subTest(text=text):
+                self.defer(text)
+                self.assertTrue((self.root / "deferred/state.json").exists())
+                self.assertEqual(self.state()["items"][0]["summary"], text)
+
+    def test_usage_explanations_do_not_imply_a_quota_obstacle(self):
+        for text in ("Codex 사용량이 충분히 남아서 교차 리뷰를 돌렸지만, 보고서 파일은 찾지 못했습니다.",
+                     "Codex 사용량 정책에 따라서 리뷰는 Claude로 넘겼고, 배포는 테스트 실패로 보류합니다.",
+                     "Codex reviewed the architecture; usage limits unchanged. Deployment deferred for a failing test.",
+                     "Codex 사용량은 문제 없습니다. 배포는 테스트 실패로 보류합니다.",
+                     "Codex 사용량 표시가 늦게 갱신되기 때문에 아침 점검 결과를 전하지 못했습니다."):
+            with self.subTest(text=text):
+                (self.root / "deferred/state.json").unlink(missing_ok=True)
+                self.hook(last_assistant_message=text)
+                self.assertFalse((self.root / "deferred/state.json").exists())
+
     def test_html_does_not_hide_a_real_deferral_outside_the_document(self):
         self.defer("<HTML><body>Completed report.</body></HTML>\n\n"
                    "Codex quota exhausted; cross-review deferred.")
