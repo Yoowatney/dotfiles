@@ -169,10 +169,15 @@ alias ql='qlmanage -p'
 # Markdown viewer
 mdc() { open -a "Google Chrome" "$@" }
 
-# Attach to the server Mac — the one that stays awake and runs the scheduled
-# jobs (동물유형 점검 etc.). It is only reachable over tailscale, but tailscale is
-# usually already up: `status` exits non-zero only when it is stopped or logged
-# out, so `up` gets paid for only when it is actually needed.
+# Open the server Mac's own herdr client — the Mac that stays awake and runs the
+# scheduled jobs (동물유형 점검 etc.). Not `herdr --remote`: that attaches to one
+# remote session only, so the server Mac's saved machines (its workers session,
+# the home Mac) never show. Its own client shows its Local session and every
+# machine it has saved, exactly as at its desk.
+#
+# It is only reachable over tailscale, but tailscale is usually already up:
+# `status` exits non-zero only when it is stopped or logged out, so `up` gets
+# paid for only when it is actually needed.
 #
 # The ssh target is read from a file instead of being written here, because this
 # repo is public. The account name is already all over it, but which machine you
@@ -185,7 +190,8 @@ srv() {
     return 1
   fi
   tailscale status >/dev/null 2>&1 || tailscale up || return
-  herdr --remote "$target" "$@"
+  # Absolute path: a non-login ssh shell's PATH has no /opt/homebrew/bin.
+  ssh -t "$target" /opt/homebrew/bin/herdr "${(q)@}"
 }
 
 killport() {
