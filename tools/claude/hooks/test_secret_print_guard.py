@@ -386,6 +386,10 @@ class BrowserAndTranscriptOutputTests(unittest.TestCase):
             "console.log(await page.evaluate(async()=>{const r=await fetch('/api/fixture'); return r.json()}));",
             "const r=await page.fetch('/api/fixture'); console.dir(JSON.parse(r.body));",
             "const r=await page.fetch('/api/fixture'); process.stdout.write(r.body);",
+            "const r=await page.fetch('/api/fixture'); console.trace(r);",
+            "const r=await page.fetch('/api/fixture'); console.group(r);",
+            "const r=await page.fetch('/api/fixture'); console.assert(false, r);",
+            "const r=await page.fetch('/api/fixture'); console['log'](r);",
         ):
             command = "ego-browser nodejs <<'JS'\n" + script + "\nJS"
             with self.subTest(script=script):
@@ -515,6 +519,145 @@ class BrowserAndTranscriptOutputTests(unittest.TestCase):
                         f'jq . {path}'):
             with self.subTest(command=command):
                 self.assertIsNotNone(guard.bash_problem(command))
+
+
+class BrowserPageStateOutputTests(unittest.TestCase):
+    # Parser inputs only: no browser, page, account or real credential is used.
+    NEXT_READ = (
+        "const data=await page.evaluate(() => JSON.parse("
+        "document.getElementById('__NEXT_DATA__').textContent)); "
+    )
+    DENIED = (
+        "window.__NEXT_DATA__",
+        "__NEXT_DATA__",
+        "window.__NEXT_DATA__\n.props.pageProps",
+        "await\npage.evaluate(() => window.__NEXT_DATA__)",
+        "window.__NEXT_DATA__.props.pageProps;",
+        "JSON.stringify(window.__NEXT_DATA__.props.pageProps)",
+        "await page.evaluate(() => window.__NEXT_DATA__)",
+        "await page.evaluate(() => window.__NEXT_DATA__.props.pageProps)",
+        NEXT_READ + "data",
+        NEXT_READ + "data.props.pageProps; // implicit output",
+        NEXT_READ + "(\nJSON.stringify(data.props.pageProps)\n)",
+        "const data=window.__NEXT_DATA__\ndata.props.pageProps",
+        NEXT_READ + "console.log('loaded');\ndata.props.pageProps",
+        NEXT_READ + "const {props:{pageProps:pp}}=data; console.log(pp);",
+        NEXT_READ + "const {props:{pageProps:pp}}=data; pp",
+        NEXT_READ + "const {props:{pageProps:{settings:cfg}}}=data; console.log(cfg);",
+        "const raw=await page.locator('#__NEXT_DATA__').textContent(); console.log(raw);",
+        "console.log(await page.textContent('#__NEXT_DATA__'));",
+        "console.log(await page.innerText('#__NEXT_DATA__'));",
+        "console.log(await page.locator('script#__NEXT_DATA__').innerText());",
+        "console.log(await page.$eval('#__NEXT_DATA__', el => el.textContent));",
+        "console.log(await page.evaluate(() => document.querySelector('#__NEXT_DATA__').innerText));",
+        "const el=page.locator('#__NEXT_DATA__'); console.log(await el.textContent());",
+        NEXT_READ + "console.trace(data);",
+        NEXT_READ + "console.group(data);",
+        NEXT_READ + "console.assert(false, data);",
+        NEXT_READ + "console['log'](data);",
+        NEXT_READ + 'console["log"](data);',
+        NEXT_READ + "console.log(data);",
+        NEXT_READ + "console.log(data.props.pageProps);",
+        NEXT_READ + "console.log(JSON.stringify(data.props.pageProps.settings));",
+        NEXT_READ + "const settings=data.props.pageProps.settings; console.dir(settings);",
+        NEXT_READ + "const settings=data.props.pageProps.settings; console.log({settings});",
+        NEXT_READ + "const {settings}=data.props.pageProps; console.table(settings);",
+        "console.log(await page.evaluate(() => window.__NEXT_DATA__));",
+        "const d=await page.evaluate(() => window.__NUXT__); console.info(d.config);",
+        "const d=await page.evaluate(() => window['__NUXT__']); console.warn(d);",
+        "const d=await page.evaluate(() => window.__INITIAL_STATE__); console.error(d.user);",
+        "const d=await page.evaluate(() => globalThis.__PRELOADED_STATE__); process.stdout.write(JSON.stringify(d));",
+        "const d=await page.evaluate(() => window.__APOLLO_STATE__); process.stderr.write(JSON.stringify(d));",
+        "console.log(await page.evaluate(() => JSON.parse(document.querySelector('#__NEXT_DATA__').textContent).props.pageProps.settings));",
+        NEXT_READ + "console.log({data:data});",
+        NEXT_READ + "console.log({...data.props.pageProps});",
+        "const d=\nawait page.evaluate(() => window.__NUXT__); console.log(d);",
+        "const d=await page.evaluate('window.__INITIAL_STATE__'); console.log(d);",
+        "console.log(await page.evaluate(() => {if (ready) return window.__NUXT__; return {title:window.__NUXT__.title};}));",
+        "console.log(await page.evaluate(() => ({title:window.__NUXT__.title})) + window.__NUXT__);",
+        "console.log(await page.evaluate(() => JSON.parse(document.querySelector('script#__NEXT_DATA__').textContent)));",
+        NEXT_READ + "console.log('state', data.props.pageProps);",
+        "console.log(await page.evaluate(function () {return window.__NUXT__;}));",
+    )
+    ALLOWED = (
+        "await page.content()",
+        "await page.screenshot({path:'/tmp/fixture.png'})",
+        "await page.locator('h1').textContent()",
+        "await page.innerText('h1')",
+        "await page.$eval('h1', el => el.textContent)",
+        "await page.evaluate(() => document.title)",
+        "const data=window.__NEXT_DATA__",
+        "const data=\nawait page.evaluate(() => window.__NEXT_DATA__)",
+        "const data=window.__NEXT_DATA__;\nconst summary=\n({title:data.props.pageProps.title}); summary",
+        NEXT_READ + "({title:data.props.pageProps.title})",
+        NEXT_READ + "JSON.stringify({count:data.props.pageProps.items.length})",
+        "await page.evaluate(() => ({title:window.__NEXT_DATA__.props.pageProps.title}))",
+        NEXT_READ + "console['log']({count:data.props.pageProps.items.length});",
+        NEXT_READ + "console.trace({present:!!data.props.pageProps});",
+        NEXT_READ + "console.log(await page.locator('h1').textContent());",
+        NEXT_READ + "console.log(await page.evaluate(() => document.title));",
+        NEXT_READ + "console.log({title:data.props.pageProps.title,enabled:data.props.pageProps.enabled});",
+        NEXT_READ + "console.log({count:data.props.pageProps.items.length,present:!!data.props.pageProps.settings,type:typeof data.props.pageProps.settings});",
+        NEXT_READ + "const summary={title:data.props.pageProps.title}; console.log(summary);",
+        "const summary=await page.evaluate(() => ({title:window.__NEXT_DATA__.props.pageProps.title})); console.log(summary);",
+        "console.log(await page.evaluate(() => ({title:window.__INITIAL_STATE__.title})));",
+        "console.log(await page.content());",
+        "await page.screenshot({path:'/tmp/fixture.png'});",
+        NEXT_READ + "console.log(await page.content()); await page.screenshot({path:'/tmp/fixture.png'});",
+        "console.log('__NEXT_DATA__ is a script element');",
+        "// window.__NUXT__ is mentioned in a comment\nconsole.log(await page.content());",
+        "const d=await page.evaluate(() => document.querySelector('#fixture').textContent); console.log(d);",
+        NEXT_READ + "console.log('loaded');",
+        "const summary=await page.evaluate(() => {const d=window.__NUXT__; return {title:d.title};}); console.log(summary);",
+        "const summary=await page.evaluate('({title:window.__INITIAL_STATE__.title})'); console.log(summary);",
+        NEXT_READ + "console.log({title:data?.props?.pageProps?.title});",
+        "console.log(await page.evaluate(function () {return {title:window.__NUXT__.title};}));",
+    )
+
+    def test_whole_page_state_and_child_objects_are_denied(self):
+        for script in self.DENIED:
+            with self.subTest(script=script):
+                self.assertIsNotNone(guard.bash_problem("ego-browser nodejs <<'JS'\n" + script + "\nJS"))
+
+    def test_explicit_projections_and_common_qa_remain_allowed(self):
+        for script in self.ALLOWED:
+            with self.subTest(script=script):
+                self.assertIsNone(guard.bash_problem("ego-browser nodejs <<'JS'\n" + script + "\nJS"))
+
+    def test_inline_shell_wrapped_and_captured_state_output(self):
+        inline = "ego-browser nodejs -e " + shlex.quote(self.DENIED[2])
+        for command in (inline, "bash -lc " + shlex.quote(inline)):
+            with self.subTest(command=command):
+                self.assertIsNotNone(guard.bash_problem(command))
+        self.assertIsNone(guard.bash_problem("R=$(" + inline + " 2>&1)"))
+
+    def test_session_final_expression_output(self):
+        for script in self.DENIED:
+            with self.subTest(script=script):
+                command = "ego-browser nodejs --session fixture -e " + shlex.quote(script)
+                self.assertIsNotNone(guard.bash_problem(command))
+        for script in self.ALLOWED:
+            with self.subTest(script=script):
+                command = "ego-browser nodejs --session fixture -e " + shlex.quote(script)
+                self.assertIsNone(guard.bash_problem(command))
+
+    def test_claude_and_codex_hook_protocol_before_execution(self):
+        # Codex's shared hook adapter normalizes shell calls to Bash. Also cover
+        # native exec_command input so the guard remains safe without that adapter.
+        for tool, key in (("Bash", "command"), ("exec_command", "cmd")):
+            cases = [(script, True) for script in self.DENIED]
+            cases += [(script, False) for script in self.ALLOWED]
+            for script, denied in cases:
+                with self.subTest(tool=tool, denied=denied, script=script):
+                    result = subprocess.run(
+                        [sys.executable, "-I", str(GUARD)],
+                        input=json.dumps({"tool_name": tool, "tool_input": {
+                            key: "ego-browser nodejs <<'JS'\n" + script + "\nJS"}}),
+                        text=True, capture_output=True, check=True,
+                    )
+                    decision = json.loads(result.stdout or "{}").get(
+                        "hookSpecificOutput", {}).get("permissionDecision")
+                    self.assertEqual(decision, "deny" if denied else None)
 
 
 if __name__ == "__main__":

@@ -170,7 +170,169 @@ HEREDOC = re.compile(r"<<-?\s*['\"]?([\w.-]+)['\"]?([^\n]*)\n(.*?)\n\s*\1\s*(?=\
 # ponytail: a heredoc handed to bash/sh is still read as text; check its body like a command if one leaks that way.
 INTERPRETER = re.compile(r"(?:^|[\s(/])(?:python[\d.]*|node(?:js)?|ruby|perl|deno|bun)(?=[\s;&|)]|$)")
 JS_LITERAL = re.compile(r"'[^'\\]*(?:\\.[^'\\]*)*'|\"[^\"\\]*(?:\\.[^\"\\]*)*\"|`[^`$]*`")
-JS_OUTPUT = re.compile(r"\b(?:console\s*\.\s*(?:log|dir|table|info|debug|warn|error)|process\s*\.\s*stdout\s*\.\s*write)\s*\(")
+JS_CONSOLE_METHOD = r"(?:log|dir|table|info|debug|warn|error|trace|group|assert)"
+JS_OUTPUT = re.compile(r"\b(?:console\s*(?:\.\s*" + JS_CONSOLE_METHOD + r"|\[\s*['\"]?" + JS_CONSOLE_METHOD + r"['\"]?\s*\])|process\s*\.\s*(?:stdout|stderr)\s*\.\s*write)\s*\(")
+JS_PAGE_STATE = re.compile(r"(?<![\w$])__(?:NEXT_DATA|NUXT|INITIAL_STATE|PRELOADED_STATE|APOLLO_STATE)__(?![\w$])")
+JS_NAME = r"[A-Za-z_$][\w$]*"
+JS_MEMBER = JS_NAME + r"(?:\s*(?:\?\.|\.)\s*" + JS_NAME + r"|\s*\[\s*(?:\d+|" + JS_NAME + r")\s*\])*"
+
+
+def js_expression(text: str, start: int, statement=False, group=False) -> tuple[str, int]:
+    """Read an expression in literal-masked JS; stop at its outer delimiter."""
+    while start < len(text) and text[start].isspace():
+        start += 1
+    stack, end = [], start
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    while end < len(text):
+        char = text[end]
+        if not stack and char in (";\n)]}" if statement else ",;\n)]}"):
+            # A declaration/expression continued after an operator is not a new
+            # statement just because its right-hand side starts on another line.
+            if statement and char == "\n":
+                before, after = text[start:end].rstrip(), text[end + 1:].lstrip()
+                if (re.search(r"[=,:.?+*/&|!<>-]$|\b(?:await|typeof|void|new|delete)$", before)
+                        or after.startswith((".", "(", "[", "?", "+", "-", "*", "/", "&", "|"))):
+                    end += 1
+                    continue
+            break
+        if char in pairs:
+            stack.append(pairs[char])
+        elif char in ")]}":
+            if not stack or char != stack.pop():
+                break
+            if group and not stack:
+                return text[start:end + 1].strip(), end + 1
+        end += 1
+    return text[start:end].strip(), end
+
+
+def browser_state_problem(script: str) -> str | None:
+    """Catch recognizable state dumps, without treating all evaluate/QA as secret.
+
+    Inline aliases and explicit projections are understood, not arbitrary JS
+    dataflow. A selected field is deliberate; a bare object or spread is a dump.
+    """
+    def literal(match):
+        value = match[0][1:-1]
+        prefix = script[:match.start()]
+        # State element IDs and window['__NUXT__'] are sources, but a label
+        # mentioning the same name is inert. Preserve offsets for JS scanning.
+        state = JS_PAGE_STATE.search(value)
+        if state and re.search(
+            r"(?:(?<![\w$])(?:getElementById|querySelector|locator|textContent|innerText|\$eval)\s*\(|\b(?:window|globalThis)\s*\[)\s*$", prefix
+        ):
+            return state[0].ljust(len(match[0]))
+        if re.search(r"\bconsole\s*\[\s*$", prefix) and re.fullmatch(JS_CONSOLE_METHOD, value):
+            return value.ljust(len(match[0]))
+        # evaluate also executes a string expression. Keep its code visible,
+        # unlike ordinary quoted labels that happen to mention a state name.
+        if state and re.search(r"\.\s*evaluate\s*\(\s*$", prefix):
+            return value.ljust(len(match[0]))
+        return "0".ljust(len(match[0]))
+
+    text = JS_LITERAL.sub(literal, script)
+    text = re.sub(r"//[^\n]*|/\*.*?\*/", lambda m: " " * len(m[0]), text, flags=re.S)
+    sources = set(JS_PAGE_STATE.findall(text))
+    if not sources:
+        return None
+    tainted = set(sources)
+
+    def touches(expr):
+        return bool(set(re.findall(JS_NAME, expr)) & tainted)
+
+    def summary(expr, field=False):
+        expr = expr.strip()
+        while expr.startswith("("):
+            inner, end = js_expression(expr, 1)
+            if end != len(expr) - 1 or expr[end] != ")":
+                break
+            expr = inner
+        if not touches(expr):
+            return True
+        expr = re.sub(r"^await\s+", "", expr)
+        stringify = re.match(r"JSON\s*\.\s*stringify\s*\(", expr)
+        if stringify:
+            inner, end = js_expression(expr, stringify.end())
+            if re.fullmatch(r"[\s,0-9)]*", expr[end:]):
+                return summary(inner)
+        evaluate = re.match(JS_MEMBER + r"\s*\.\s*evaluate\s*\(", expr)
+        if evaluate:
+            argument, end = js_expression(expr, evaluate.end())
+            if expr[end:].strip() != ")":
+                return False  # A safe callback cannot justify an unsafe tail.
+            function = re.match(r"(?:async\s+)?function\b[^{}]*", argument)
+            if "=>" not in argument and not function:
+                return summary(argument)
+            body = argument[function.end() if function else argument.index("=>") + 2:].strip()
+            if body.startswith("{"):
+                returns = list(re.finditer(r"\breturn\s+", body))
+                return bool(returns) and all(
+                    summary(js_expression(body, match.end())[0]) for match in returns)
+            return summary(body)
+        if expr.startswith("{") and expr.endswith("}"):
+            body, pos = expr[1:-1], 0
+            while pos < len(body):
+                item, end = js_expression(body, pos)
+                # Never accept spread or a tainted shorthand property.
+                pair = re.fullmatch(r"\s*(?:" + JS_NAME + r"|0)\s*:\s*(.+)", item, re.S)
+                if not summary(pair[1] if pair else item, field=bool(pair)):
+                    return False
+                pos = end + 1
+            return True
+        if re.fullmatch(r"(?:typeof\s+|!!\s*)" + JS_MEMBER, expr):
+            return True
+        if re.fullmatch(JS_MEMBER + r"\s*\.\s*length", expr):
+            return True
+        if field and re.fullmatch(JS_MEMBER, expr):
+            # Named fields are allowed in a fresh projection, never the known
+            # state/props containers or an alias holding a complete object.
+            parts = re.findall(JS_NAME, expr)
+            return len(parts) > 1 and parts[-1] not in sources | {"props", "pageProps"}
+        return False
+
+    assignments = []
+    for match in re.finditer(r"(?<![\w$.])(?:" + JS_NAME + r"|\{)", text):
+        target, end = js_expression(text, match.start(), group=True) if match[0] == "{" else (match[0], match.end())
+        assignment = re.match(r"\s*=(?!=|>)", text[end:])
+        if assignment:
+            expr, _ = js_expression(text, end + assignment.end())
+            assignments.append((re.findall(JS_NAME, target), expr))
+    # Alias chains may cross callback scopes. Over-approximating reassignment
+    # keeps an earlier object from becoming safe merely by reusing its name.
+    for _ in range(len(assignments) + 1):
+        previous = set(tainted)
+        for targets, expr in assignments:
+            if touches(expr) and not summary(expr):
+                tainted.update(targets)
+        if tainted == previous:
+            break
+    message = ("Browser page state may contain credentials. Do not print whole state or child objects; "
+               "construct an explicit field projection, counts, presence or types instead.")
+    checked_calls = []
+    for call in JS_OUTPUT.finditer(text):
+        expr, end = js_expression(text, call.end())
+        while True:
+            if touches(expr) and not summary(expr):
+                return message
+            if end >= len(text) or text[end] != ",":
+                break
+            expr, end = js_expression(text, end + 1)
+        checked_calls.append((call.start(), end + 1))
+    # Console calls return no page-state value. Their arguments were checked
+    # above; hide just those calls before checking nodejs's implicit output.
+    completion = list(text)
+    for start, end in checked_calls:
+        completion[start:end] = "0".ljust(end - start)
+    completion = "".join(completion)
+    final, pos = "", 0
+    while pos < len(completion):
+        expr, end = js_expression(completion, pos, statement=True)
+        if expr:
+            final = expr
+        pos = end + 1
+    if not re.match(r"(?:const|let|var)\b", final) and touches(final) and not summary(final):
+        return message
+    return None
 
 
 def is_reader(x: str) -> bool:
@@ -244,9 +406,17 @@ def browser_problem(w: list[str]) -> str | None:
     if not is_browser_script(w):
         return None
     n = names(w)
-    script = " ".join(w[n.index("nodejs") + 1:])
+    args = w[n.index("nodejs") + 1:]
+    while args and (args[0] in {"--session", "-e", "--", "<<heredoc"} or args[0].startswith("--session=")):
+        args = args[2:] if args[0] == "--session" else args[1:]
+    script = " ".join(args)
+    if problem := browser_state_problem(script):
+        return problem
     # Preserve positions when hiding literals. A quoted mention of fetch is inert.
-    masked = JS_LITERAL.sub(lambda m: " " * len(m[0]), script)
+    masked = JS_LITERAL.sub(
+        lambda m: (m[0][1:-1].ljust(len(m[0]))
+                   if re.search(r"\bconsole\s*\[\s*$", script[:m.start()])
+                   and re.fullmatch(JS_CONSOLE_METHOD, m[0][1:-1]) else " " * len(m[0])), script)
     masked = re.sub(r"//[^\n]*|/\*.*?\*/", lambda m: " " * len(m[0]), masked, flags=re.S)
     if not re.search(r"\bfetch\s*\(", masked):
         return None
@@ -654,8 +824,8 @@ def bash_problem(cmd: str) -> str | None:
 
 def tool_problem(payload: dict) -> str | None:
     tool, inp = payload.get("tool_name"), payload.get("tool_input") or {}
-    if tool == "Bash":
-        return bash_problem(inp.get("command") or "")
+    if tool in {"Bash", "exec_command"}:
+        return bash_problem(inp.get("command") or inp.get("cmd") or "")
     if tool == "Read" and SECRET_PATH.search(inp.get("file_path") or ""):
         return "비밀 파일을 Read로 열면 값이 전부 대화에 남음"
     path = inp.get("path") or ""
