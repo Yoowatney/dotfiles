@@ -265,8 +265,8 @@ class RecoveryTests(unittest.TestCase):
         self.assert_document_not_deferred(report)
 
     def test_nov23_daily_review_html_does_not_register_deferred_work(self):
-        # The second incident combined unrelated usage and failure wording
-        # within one HTML section, rather than a current quota error.
+        # Reconstruct unrelated usage and failure wording within the saved
+        # document structure; the truncated summary omits the original trigger.
         report = ("<!doctype html>\n<html lang=\"ko\">\n<head>"
                   "<title>Daily review 2026-11-23</title></head>\n<body>\n\n"
                   "<div class=\"hero\">\n"
@@ -297,14 +297,54 @@ class RecoveryTests(unittest.TestCase):
                   "An unrelated deployment was deferred for a failing test.")
         self.assert_document_not_deferred(report)
 
+    def test_review_report_quoted_deferral_examples_are_not_current_work(self):
+        # Sanitized excerpt of the review report that was itself miscaptured.
+        report = ("The reviewed change misses genuine quota deferrals.\n\n"
+                  "## Direct comparison\n\n"
+                  "| Input | Before | After |\n|---|---|---|\n"
+                  "| `Codex hit its usage limit; review deferred.` | True | False |\n"
+                  "| `Codex 사용량 때문에 교차 리뷰를 미룹니다.` | True | False |\n\n"
+                  "- Existing record: `Codex 사용량이 6%만 남아서 보완을 미뤘습니다.`\n\n"
+                  "TASK_CHECK: fail\n"
+                  "남은 것: 요유 몫: 없음 · 유요 몫: 수정 뒤 누락을 확인함 · 세션: 검토 중")
+        self.assert_document_not_deferred(report)
+
+    def test_html_tag_example_does_not_hide_a_real_deferral(self):
+        for example in ('<html lang="ko">', '`<html lang="ko">`'):
+            with self.subTest(example=example):
+                text = (f'보고서의 {example} 속성을 고쳤습니다.\n\n'
+                        'Codex 사용량이 없어 교차 리뷰를 미룹니다.')
+                self.defer(text)
+                self.assertTrue((self.root / "deferred/state.json").exists())
+                self.assertEqual(self.state()["items"][0]["summary"], text)
+
     def test_available_quota_and_unrelated_failure_are_not_a_deferral(self):
         self.hook(last_assistant_message="Codex 사용량은 충분하지만 보고서 파일은 찾지 못했습니다.")
         self.assertFalse((self.root / "deferred/state.json").exists())
+
+    def test_causal_quota_deferrals_keep_existing_natural_language_variants(self):
+        for text in ("Codex 사용량 때문에 검토를 미룹니다.",
+                     "Codex 주간 사용량이 88%여서 검토를 미룹니다.",
+                     "Codex 사용량이 3%만 남아서 검토를 미룹니다.",
+                     "Codex quota ran out; cross-review deferred.",
+                     "Codex hit its usage limit; cross-review deferred."):
+            with self.subTest(text=text):
+                self.defer(text)
+                self.assertTrue((self.root / "deferred/state.json").exists())
+                self.assertEqual(self.state()["items"][0]["summary"], text)
 
     def test_html_does_not_hide_a_real_deferral_outside_the_document(self):
         self.defer("<HTML><body>Completed report.</body></HTML>\n\n"
                    "Codex quota exhausted; cross-review deferred.")
         self.assertEqual(self.state()["items"][0]["status"], "pending")
+
+    def test_partial_html_is_not_a_current_quota_error(self):
+        self.assert_document_not_deferred("<!doctype html><html><body>"
+                                          "Codex quota exhausted; historical review deferred.")
+
+    def test_available_nonzero_quota_does_not_match_zero_percent(self):
+        self.hook(last_assistant_message="Codex 주간 사용량은 10% 남았고 보고서 파일은 찾지 못했습니다.")
+        self.assertFalse((self.root / "deferred/state.json").exists())
 
     def test_long_report_does_not_hide_a_real_deferral_at_the_end(self):
         self.defer("Completed checks. " * 500 + "\n\n"

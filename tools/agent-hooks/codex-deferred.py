@@ -138,15 +138,19 @@ def blocked(text):
     # deferral reported outside the document.
     text = unicodedata.normalize("NFC", text)
     text = re.sub(r"```.*?```", "", text, flags=re.S)
+    text = re.sub(r"(`+)[^\n]*?\1", "", text)
     text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(">"))
-    text = re.sub(r"(?:<!doctype\s+html\b[^>]*>|<html\b[^>]*>).*?(?:</html\s*>|\Z)",
-                  "", text, flags=re.I | re.S)
+    text = re.sub(r"^[ \t]*(?:<!doctype\s+html\b[^>]*>|<html\b[^>]*>).*?(?:</html\s*>|\Z)",
+                  "", text, flags=re.I | re.S | re.M)
     if finished_report(text):
         return False
-    quota_failure = re.compile(
+    quota_problem = re.compile(
         r"(?:사용량|quota|usage.limit|주간)[^\n.!?。]{0,60}"
-        r"(?:소진|고갈|바닥|부족|초과|한도|없[어음]|막[혀힘혔]|0\s*%|"
-        r"exhaust\w*|deplet\w*|exceed\w*|unavailable|reached)", re.I)
+        r"(?:소진|고갈|바닥|부족|초과|없[어음으다습]|막[혀힘혔]|(?<![\d.])0\s*%|"
+        r"때문|여서|라서|남아서|뿐이라|떨어|한도(?:로|에\s*걸)|because|due\s+to|ran\s+out|used\s+up|"
+        r"exhaust\w*|deplet\w*|exceed\w*|unavailable|reached)|"
+        r"(?:hit|reached|exhausted|exceeded|used\s+up|because|due\s+to)"
+        r"[^\n.!?。]{0,60}(?:quota|usage.limit)", re.I)
     for paragraph in text.split("\n\n"):
         sentences = re.split(r"(?<=[.!?。])\s+|\n", paragraph)
         current = []
@@ -159,7 +163,7 @@ def blocked(text):
         # ran out"), but never combine scattered words across a long report.
         for index in range(len(current)):
             context = "\n".join(current[max(0, index - 1):index + 1])
-            if (quota_failure.search(context) and
+            if (quota_problem.search(context) and
                     re.search(r"codex|코덱스", context, re.I) and
                     re.search(r"미[룬룹뤄뤘]|보류|막[혀힘혔]|멈[춰췄춥춤]|중단|못|불가|쓸\s*수\s*없|내일.{0,60}(?:자동\s*배정|맡|넘)|defer|blocked|unavailable", context, re.I)):
                 return True
