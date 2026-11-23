@@ -25,4 +25,11 @@ check no --yolo
 check no --pane-spawn-args
 check no --dangerously-bypass-approvals-and-sandbox
 [[ $(codex --approve-for-me) == *"--approve-for-me"*"--approve-for-me"* ]] && { print -u2 "FAIL: duplicated --approve-for-me"; exit 1 }
+# Codex sessions open in Fast mode (요유 2026-11-23, #0): every launch carries service_tier="fast", a caller's own later -c wins.
+for args in "" "resume" "--sandbox danger-full-access --ask-for-approval never" "--yolo"; do
+  out=$(cd "$tmp" && codex ${=args})
+  [[ $out == *'-c service_tier="fast"'* ]] || { print -u2 "FAIL: expected Fast mode for: $args  got: $out"; exit 1 }
+done
+out=$(cd "$tmp" && codex -c 'service_tier="default"')
+[[ $out == *'service_tier="fast"'*'service_tier="default"' ]] || { print -u2 "FAIL: a caller's own service_tier must come last: $out"; exit 1 }
 print ok
