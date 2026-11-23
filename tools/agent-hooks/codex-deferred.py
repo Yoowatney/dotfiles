@@ -133,13 +133,20 @@ def finished_report(text):
 
 
 def blocked(text):
-    # Match a single paragraph, not a quota discussion in one section and an
-    # unrelated delayed task in another. Quotes/code are not new commitments.
+    # Documents and quoted examples are not new work commitments. Remove HTML
+    # through its closing tag (or EOF for partial output), preserving any real
+    # deferral reported outside the document.
     text = unicodedata.normalize("NFC", text)
     text = re.sub(r"```.*?```", "", text, flags=re.S)
     text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(">"))
+    text = re.sub(r"(?:<!doctype\s+html\b[^>]*>|<html\b[^>]*>).*?(?:</html\s*>|\Z)",
+                  "", text, flags=re.I | re.S)
     if finished_report(text):
         return False
+    quota_failure = re.compile(
+        r"(?:사용량|quota|usage.limit|주간)[^\n.!?。]{0,60}"
+        r"(?:소진|고갈|바닥|부족|초과|한도|없[어음]|막[혀힘혔]|0\s*%|"
+        r"exhaust\w*|deplet\w*|exceed\w*|unavailable|reached)", re.I)
     for paragraph in text.split("\n\n"):
         sentences = re.split(r"(?<=[.!?。])\s+|\n", paragraph)
         current = []
@@ -148,11 +155,14 @@ def blocked(text):
             negative = re.search(r"\b(?:not|never)\b|않|못|미재개", sentence, re.I)
             if not resumed or negative:
                 current.append(sentence)
-        paragraph = "\n".join(current)
-        if (re.search(r"codex|코덱스", paragraph, re.I) and
-                re.search(r"사용량|quota|usage.limit|주간.*(?:0%|소진)", paragraph, re.I) and
-                re.search(r"미[룬룹뤄뤘]|보류|막[혀힘혔]|멈[춰췄춥춤]|중단|못|불가|쓸\s*수\s*없|내일.{0,60}(?:자동\s*배정|맡|넘)|defer|blocked|unavailable", paragraph, re.I)):
-            return True
+        # Keep an adjacent reason sentence ("tomorrow ... because Codex quota
+        # ran out"), but never combine scattered words across a long report.
+        for index in range(len(current)):
+            context = "\n".join(current[max(0, index - 1):index + 1])
+            if (quota_failure.search(context) and
+                    re.search(r"codex|코덱스", context, re.I) and
+                    re.search(r"미[룬룹뤄뤘]|보류|막[혀힘혔]|멈[춰췄춥춤]|중단|못|불가|쓸\s*수\s*없|내일.{0,60}(?:자동\s*배정|맡|넘)|defer|blocked|unavailable", context, re.I)):
+                return True
     return False
 
 

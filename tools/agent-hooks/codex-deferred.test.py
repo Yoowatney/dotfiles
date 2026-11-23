@@ -253,6 +253,64 @@ class RecoveryTests(unittest.TestCase):
         self.hook(last_assistant_message="Claude quota exhausted; review deferred.")
         self.assertFalse((self.root / "deferred/state.json").exists())
 
+    def test_nov22_daily_review_html_does_not_register_deferred_work(self):
+        # Sanitized reconstruction: the stored summary is truncated at 6000
+        # characters and the original ephemeral transcript no longer exists.
+        report = ("<!doctype html>\n<html lang=\"ko\">\n<head>"
+                  "<title>Daily review 2026-11-22</title></head>\n<body>\n\n"
+                  "<section><h2>Completed checks</h2>\n"
+                  "<p>Codex quota exhausted; review deferred earlier.</p>\n"
+                  "<p>The review has since finished; these are historical findings.</p>"
+                  "</section>\n</body>\n</html>")
+        self.assert_document_not_deferred(report)
+
+    def test_nov23_daily_review_html_does_not_register_deferred_work(self):
+        # The second incident combined unrelated usage and failure wording
+        # within one HTML section, rather than a current quota error.
+        report = ("<!doctype html>\n<html lang=\"ko\">\n<head>"
+                  "<title>Daily review 2026-11-23</title></head>\n<body>\n\n"
+                  "<div class=\"hero\">\n"
+                  "<p>코덱스 기록에서 경로 검사를 확인했습니다.</p>\n"
+                  "<p>클로드 주간 사용량은 94%입니다.</p>\n"
+                  "<p>아침 점검 결과를 전하지 못했습니다.</p>\n"
+                  "</div>\n</body>\n</html>")
+        self.assert_document_not_deferred(report)
+
+    def assert_document_not_deferred(self, report):
+        for runtime in ("claude", "codex"):
+            with self.subTest(runtime=runtime):
+                if runtime == "claude":
+                    rows = [{"type": "assistant", "message": {"content": report}}]
+                else:
+                    self.success(write_only=True)
+                    rows = [json.loads(line) for line in self.transcript.read_text().splitlines()]
+                    rows[-1]["payload"]["content"][0]["text"] = report
+                self.transcript.write_text("".join(json.dumps(row) + "\n" for row in rows))
+                self.hook("SessionStart")
+                self.hook(transcript_path=str(self.transcript))
+                self.hook(transcript_path=str(self.transcript))  # Already open session.
+                self.assertFalse((self.root / "deferred/state.json").exists())
+
+    def test_long_report_does_not_join_unrelated_quota_and_failure_wording(self):
+        report = ("Daily review\n\n" + "The requested checks finished successfully. " * 40 +
+                  "Codex generated the report. Usage limits were inspected. "
+                  "An unrelated deployment was deferred for a failing test.")
+        self.assert_document_not_deferred(report)
+
+    def test_available_quota_and_unrelated_failure_are_not_a_deferral(self):
+        self.hook(last_assistant_message="Codex 사용량은 충분하지만 보고서 파일은 찾지 못했습니다.")
+        self.assertFalse((self.root / "deferred/state.json").exists())
+
+    def test_html_does_not_hide_a_real_deferral_outside_the_document(self):
+        self.defer("<HTML><body>Completed report.</body></HTML>\n\n"
+                   "Codex quota exhausted; cross-review deferred.")
+        self.assertEqual(self.state()["items"][0]["status"], "pending")
+
+    def test_long_report_does_not_hide_a_real_deferral_at_the_end(self):
+        self.defer("Completed checks. " * 500 + "\n\n"
+                   "Codex 사용량이 없어 교차 리뷰를 미룹니다.")
+        self.assertEqual(self.state()["items"][0]["status"], "pending")
+
     def test_explicit_record_resolve_and_concurrent_records_are_durable(self):
         def record(i):
             return self.run_script(SCRIPT, "defer", "--id", f"job-{i}", "--summary", "Review delayed",
