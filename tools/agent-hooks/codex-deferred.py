@@ -158,7 +158,7 @@ def blocked(text):
         r"(?:사용량|quota|usage.limit|주간)[^\n.!?。]{0,60}"
         r"(?:소진|고갈|바닥|부족|초과|막[혀힘혔]|(?<![\d.])0\s*%|떨어|"
         r"한도(?:로|에\s*(?:걸|도달)|를\s*(?:다\s*)?써|가\s*찼|\s*도달)|"
-        r"\b(?:ran\s+out|used\s+up|exhaust\w*|deplet\w*|exceed\w*|unavailable|reached|hit)\b)|"
+        r"(?<![A-Za-z])(?:ran\s+out|used\s+up|exhaust\w*|deplet\w*|exceed\w*|unavailable|reached|hit)\b)|"
         r"\b(?:hit|reached|exhausted|exceeded|used\s+up)\b"
         r"[^\n.!?。]{0,60}(?:quota|usage.limit)|"
         r"(?:사용량|주간)(?:이|가|은|는)?\s*(?:(?:전혀|아예|거의)\s*)?없[어음으다습]", re.I)

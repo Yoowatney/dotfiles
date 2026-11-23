@@ -348,7 +348,8 @@ class RecoveryTests(unittest.TestCase):
         for text in ("`codex exec`가 사용량 한도로 막혀서 교차 리뷰를 미룹니다.",
                      "`codex-review-run`이 usage limit exceeded로 실패해서 교차 리뷰를 미룹니다.",
                      "Codex `usage limit` reached; review deferred.",
-                     "Codex reported `usage limit exceeded`; review deferred."):
+                     "Codex reported `usage limit exceeded`; review deferred.",
+                     "Codex reported `usage_limit_exceeded`; review deferred."):
             with self.subTest(text=text):
                 self.defer(text)
                 self.assertTrue((self.root / "deferred/state.json").exists())
