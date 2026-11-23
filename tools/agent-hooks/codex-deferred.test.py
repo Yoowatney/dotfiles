@@ -344,6 +344,16 @@ class RecoveryTests(unittest.TestCase):
                 self.assertTrue((self.root / "deferred/state.json").exists())
                 self.assertEqual(self.state()["items"][0]["summary"], text)
 
+    def test_inline_command_and_quota_terms_keep_real_deferrals(self):
+        for text in ("`codex exec`가 사용량 한도로 막혀서 교차 리뷰를 미룹니다.",
+                     "`codex-review-run`이 usage limit exceeded로 실패해서 교차 리뷰를 미룹니다.",
+                     "Codex `usage limit` reached; review deferred.",
+                     "Codex reported `usage limit exceeded`; review deferred."):
+            with self.subTest(text=text):
+                self.defer(text)
+                self.assertTrue((self.root / "deferred/state.json").exists())
+                self.assertEqual(self.state()["items"][0]["summary"], text)
+
     def test_usage_explanations_do_not_imply_a_quota_obstacle(self):
         for text in ("Codex 사용량이 충분히 남아서 교차 리뷰를 돌렸지만, 보고서 파일은 찾지 못했습니다.",
                      "Codex 사용량 정책에 따라서 리뷰는 Claude로 넘겼고, 배포는 테스트 실패로 보류합니다.",

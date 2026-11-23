@@ -136,9 +136,19 @@ def blocked(text):
     # Documents and quoted examples are not new work commitments. Remove HTML
     # through its closing tag (or EOF for partial output), preserving any real
     # deferral reported outside the document.
+    deferral_words = re.compile(r"미[룬룹뤄뤘]|보류|막[혀힘혔]|멈[춰췄춥춤]|중단|내일.{0,60}(?:자동\s*배정|맡|넘)|defer|blocked|unavailable", re.I)
+
+    def inline_code(match):
+        value = match.group(2)
+        example = (re.search(r"codex|코덱스|사용량|quota|usage.limit", value, re.I) and
+                   deferral_words.search(value))
+        # Keep command names and error terms used in a real deferral; only a
+        # quoted deferral statement (or an HTML tag example) is evidence text.
+        return "" if example or re.search(r"<[^>]+>", value) else value
+
     text = unicodedata.normalize("NFC", text)
     text = re.sub(r"```.*?```", "", text, flags=re.S)
-    text = re.sub(r"(`+)[^\n]*?\1", "", text)
+    text = re.sub(r"(`+)([^\n]*?)\1", inline_code, text)
     text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(">"))
     text = re.sub(r"^[ \t]*(?:<!doctype\s+html\b[^>]*>|<html\b[^>]*>).*?(?:</html\s*>|\Z)",
                   "", text, flags=re.I | re.S | re.M)
@@ -168,7 +178,7 @@ def blocked(text):
         # ran out"), but never combine scattered words across a long report.
         for index in range(len(current)):
             context = "\n".join(current[max(0, index - 1):index + 1])
-            deferred = re.search(r"미[룬룹뤄뤘]|보류|막[혀힘혔]|멈[춰췄춥춤]|중단|내일.{0,60}(?:자동\s*배정|맡|넘)|defer|blocked|unavailable", context, re.I)
+            deferred = deferral_words.search(context)
             unable = re.search(r"못|불가|쓸\s*수\s*없", context)
             # A usage explanation alone does not make an unrelated failure a
             # quota obstacle: causal wording needs an explicit deferral.
