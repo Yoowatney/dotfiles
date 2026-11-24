@@ -16,6 +16,8 @@ In the main pane `prod 허용`/`staging 허용` written by 요유 in any Slack c
 starts (api#1026): the relay names the message as `글 <channel>/<ts>`, and slack_approval.py reads author, time and words back
 from Slack, and only when the whole relayed text is that message's relay. `api#973 prod 허용` (an item right before the word, or
 opening the words) lifts only commands that name the item; an item named any other way, or an unclear grant, lifts nothing.
+A command whose exact text has a ✅ request on record (slack_approval.py's approval-requests) runs only on an unused ✅ of its own
+within the ten minutes, whether or not anything else here refuses it (held()); a command nobody asked about is not touched.
 Service account key list/disable/delete require their own exact-command main-pane Slack ✅,
 once within 10 minutes, regardless of account (api#1052). Slack word grants never lift these commands.
 
@@ -753,25 +755,46 @@ def tool_problem(payload: dict, env: dict, prompt: str | None = None) -> str | N
 
 
 REQUESTS = os.path.expanduser("~/.local/state/orchestrator/approval-requests")  # where slack_approval.py keeps each request
-REQUEST_WINDOW = 600  # slack_approval.WINDOW: a request counts for ten minutes
 
 
-def ungated_use(command: str, requests: str = REQUESTS, path: str = SLACK, now: float | None = None) -> None:
-    """Leave the use record of the open ✅ request for this exact command, when the guard lets the command run anyway.
-    The guard never asks Slack for such a command, so nothing else writes the record, and presence-watch would nudge a
-    finished command as "run now" (api#1445). Only a command a request already names reaches the module: one failed open
-    for every other Bash call. The record only retires a request; it never lifts a refusal."""
+def requested(command: str, requests: str = REQUESTS) -> bool:
+    """True when a ✅ request names exactly this command (sent or possibly sent), whatever its age. The ✅ is then the
+    only way to run it, even when nothing else in this guard refuses it: a ✅ that came after the ten minutes had no
+    guard behind it, and the command ran anyway (terraform#1267). Only a record that is missing says no; one that cannot
+    be read counts as a request, since the file exists only for a command that was asked."""
     try:
-        key = hashlib.sha256(command.strip().encode()).hexdigest()
-        with open(os.path.join(requests, key + ".json"), encoding="utf-8") as source:
-            record = json.load(source)
-        ts = str(record["ts"])
-        if (record.get("status") != "posted" or not re.fullmatch(r"\d+\.\d+", ts)
-                or not 0 <= (time.time() if now is None else now) - float(record["at"]) <= REQUEST_WINDOW):
-            return
-        load(path).consume(ts, command)
+        with open(os.path.join(requests, hashlib.sha256(command.strip().encode()).hexdigest() + ".json"), encoding="utf-8") as source:
+            return json.load(source).get("status") in ("posting", "posted")
+    except (FileNotFoundError, NotADirectoryError):
+        return False
     except Exception:
-        pass  # the command is allowed whatever happens here; a missing record only leaves the old nudge
+        return True
+
+
+def held(hook_input: dict, env: dict, approvals, is_main, budget: float, started: float) -> str | None:
+    """The refusal for a requested command that lacks an unused ✅ of its own (the same one a refused SELECT uses), else None."""
+    command = (hook_input.get("tool_input") or {}).get("command") or ""
+    head = ("gcp-account-guard: 이 명령은 요유에게 실행 허락 요청을 올린 명령입니다. 올린 뒤 10분 안에 요유가 누른 ✅로 "
+            "한 번만 실행하고, 요청이 만료됐거나 ✅를 이미 썼으면 같은 명령으로 새 요청을 올릴 것.")
+    inp = hook_input.get("tool_input") or {}
+    if (hook_input.get("tool_name") != "Bash" or env.get("MUNICE_AUTO_DISPATCH") == "1" or env.get("MUNICE_AMBIENT") == "1"
+            or inp.get("run_in_background") or subordinate_pane(env) or not is_main(env)):
+        return f"{head} 이 ✅는 메인 칸의 Bash 호출(백그라운드 아님)에서만 쓸 수 있고, 리드 밑 칸은 메인 칸에 넘길 것."
+    left = min(SLACK_DEADLINE, budget - (time.monotonic() - started))
+    if left < SLACK_MIN:
+        return f"{head} 지금 Slack: 훅 시간이 모자라 읽지 않음"
+    try:  # whatever breaks here refuses: a crashed hook lets the command run
+        use, why = approvals(command, left)
+    except BaseException as e:
+        use, why = None, f"Slack을 읽지 못함({type(e).__name__})"
+    if use:
+        try:
+            if use() is True:
+                return None
+        except BaseException:
+            pass
+        why = "이 승인은 쓸 수 없음(이미 한 번 썼거나 사용 기록을 남기지 못함)"
+    return f"{head} 지금 Slack: {why}"
 
 
 def load(path: str):
@@ -928,16 +951,18 @@ def slack_grant(hook_input: dict, env: dict, turn: tuple[str, str], grants, left
 
 
 def hook(hook_input: dict, env: dict, riders, approvals, is_main, budget: float = HOOK_BUDGET, started: float | None = None,
-         grants=slack_grants, record_use=ungated_use):
+         grants=slack_grants, is_requested=requested):
     """The whole PreToolUse verdict, within `budget` seconds of `started`. On the Slack paths the other checks run first:
     pane-fit-guard asks the main pane once a message, and its repeat must still find the approval unused."""
     started = time.monotonic() if started is None else started
     strict = tool_problem(hook_input, env, prompt="")  # what no word typed in this pane lifts
     if not strict:
         other = riders(hook_input)
-        if not other and hook_input.get("tool_name") == "Bash":
-            record_use((hook_input.get("tool_input") or {}).get("command") or "")
-        return other
+        if other or hook_input.get("tool_name") not in ("Bash", "Monitor"):
+            return other
+        if is_requested((hook_input.get("tool_input") or {}).get("command") or ""):
+            return held(hook_input, env, approvals, is_main, budget, started)
+        return None
     typed = tool_problem(hook_input, env)
     # Subordinate panes never take typed grants or Slack approvals; the main pane still owns the Slack routes (api#1026).
     # ponytail: herdr lookups can fail and labels can change; these checks stop mistakes, not a determined bypass.
