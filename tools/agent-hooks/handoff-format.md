@@ -30,6 +30,8 @@ of leaving a field empty. Keep the useful narrative outside the JSON as needed.
 }
 ```
 
+Write each open question in `remaining` on one line as `질문: <question> · 근거: <link of the post, release body or comment that made it a question>`; a `질문:` line with no link is refused on save. The next session re-checks that basis (the release body's Hold cell, an earlier decision, a board comment) before it asks the question again, because a question carried over a `/clear` can already be settled there (2026-11-24). The main pane's own freeform handoff follows the same rule in its restart reference.
+
 For work without code, use `"code": "none", "repositories": []`.
 Otherwise list every relevant checkout separately, including different worktrees.
 The saver records each checkout's current branch, full commit and dirty flag.

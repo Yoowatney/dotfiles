@@ -63,6 +63,10 @@ def validate(data):
         if field not in data or (field != "repositories" and
                                  (not isinstance(data[field], str) or not data[field].strip())):
             raise ValueError("missing/non-text field: " + field)
+    # An open question names what made it a question (2026-11-24: one carried over a /clear was asked again though a release body had settled it).
+    for line in data["remaining"].splitlines():
+        if re.match(r"^\W*질문:", line) and not re.search(r"근거:\s*\S*https?://", line):
+            raise ValueError("each 질문: line in remaining needs 근거: <link of the post, release body or comment that made it a question> on the same line")
     if data["code"] not in ("none", "repositories") or not isinstance(data["repositories"], list):
         raise ValueError("code must be none or repositories; repositories must be a list")
     if (data["code"] == "none") != (len(data["repositories"]) == 0):
