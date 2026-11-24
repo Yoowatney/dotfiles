@@ -15,6 +15,8 @@ import tomllib
 
 WEEK = 604800
 MAX_AGE = 600
+CODEX_FALLBACK_MAX_AGE = 86400
+CODEX_FALLBACK_CEILING = 80  # 15 percentage points below the fresh weekly ceiling.
 FUTURE_SLOP = 5  # A rollout can grow while the scan is in progress.
 DECISION_BYTES = 1048576
 
@@ -220,7 +222,7 @@ def normalize(at, short, week, now, short_key, week_key, ceiling, optional_short
             "short": five, "week": seven, "gap": gap, "observed_at": at, "resets_at": wr}
 
 
-def codex_quota(now, cwd):
+def codex_quota(now, cwd, allow_stale=False):
     root, newest = latest_codex(now)
     auth_path = root / "auth.json"
     auth = read_json(auth_path)
@@ -245,6 +247,21 @@ def codex_quota(now, cwd):
     windows = [limits.get("primary"), limits.get("secondary")]
     short = next((w for w in windows if isinstance(w, dict) and w.get("window_minutes") == 300), None)
     week = next((w for w in windows if isinstance(w, dict) and w.get("window_minutes") == 10080), None)
+    if allow_stale and MAX_AGE < now - at <= CODEX_FALLBACK_MAX_AGE:
+        # Validate the original windows before discarding an expired short window.
+        # The same weekly window must still be live; never infer zero usage after a reset.
+        observed = normalize(at, short, week, at, "used_percent", "used_percent", CODEX_FALLBACK_CEILING, optional_short=True)
+        if "week" not in observed:
+            return observed
+        if now >= observed["resets_at"]:
+            return invalid("stale weekly window expired")
+        five = observed["short"]
+        if short is not None and now >= epoch(short.get("resets_at")):
+            five = None
+        eligible = (five is None or five < 80) and observed["week"] <= CODEX_FALLBACK_CEILING
+        return dict(observed, eligible=eligible, short=five,
+                    gap=observed["week"] - 100 * (now - (observed["resets_at"] - WEEK)) / WEEK,
+                    reason="stale same-week observation within reserve" if eligible else "stale observation reserve reached")
     return normalize(at, short, week, now, "used_percent", "used_percent", 95, optional_short=True)
 
 
@@ -274,15 +291,16 @@ def select(now, policy, cwd=None):
     if policy not in ("quota-aware", "claude-first"):
         return result
     cwd = Path(cwd or Path.cwd()).resolve()
-    codex, claude = codex_quota(now, cwd), claude_quota(now, cwd, first=policy == "claude-first")
+    codex = codex_quota(now, cwd, allow_stale=policy == "claude-first")
+    claude = claude_quota(now, cwd, first=policy == "claude-first")
     result.update(codex=codex, claude=claude)
     if policy == "claude-first":
         # Claude while its measured usage is inside the reserve; otherwise Codex if it is too, else refuse.
         if claude["eligible"]:
             return dict(result, kind="claude", reason="claude first: within reserve")
         if codex["eligible"]:
-            return dict(result, kind="codex", reason="claude first: Claude unavailable (" + claude["reason"] + "); Codex within reserve")
-        return dict(result, reason="claude first: neither subscription within reserve (Claude: " + claude["reason"] + ")")
+            return dict(result, kind="codex", reason="claude first: Claude unavailable (" + claude["reason"] + "); Codex: " + codex["reason"])
+        return dict(result, reason="claude first: neither subscription within reserve (Claude: " + claude["reason"] + "; Codex: " + codex["reason"] + ")")
     # Unknown Codex usage is not evidence for switching. The legacy default can run only when its own safety is known.
     if "week" not in codex:
         return dict(result, reason="Codex subscription usage/safety unknown; no automatic switch")
