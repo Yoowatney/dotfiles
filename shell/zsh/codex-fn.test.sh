@@ -35,24 +35,24 @@ run() { # codex args... -> what the fake codex printed, with an open pipe on std
 }
 
 out=$(run exec -s read-only "say ok")
-[[ $out == 'STDIN=NULL ARGS=-c service_tier="fast" exec -s read-only say ok' ]] || fail "a prompt argument should close stdin: $out"
+[[ $out == 'STDIN=NULL ARGS=-c service_tier="ultrafast" exec -s read-only say ok' ]] || fail "a prompt argument should close stdin: $out"
 out=$(run exec -)
-[[ $out == 'STDIN=OPEN ARGS=--approve-for-me -c service_tier="fast" exec -' ]] || fail "the stdin prompt marker should keep stdin: $out"
+[[ $out == 'STDIN=OPEN ARGS=--approve-for-me -c service_tier="ultrafast" exec -' ]] || fail "the stdin prompt marker should keep stdin: $out"
 out=$(run exec review --uncommitted)
 [[ $out == STDIN=OPEN* ]] || fail "a trailing option should keep stdin: $out"
 out=$(run resume)
-[[ $out == 'STDIN=OPEN ARGS=--approve-for-me -c service_tier="fast" resume' ]] || fail "a non-exec subcommand should keep stdin: $out"
+[[ $out == 'STDIN=OPEN ARGS=--approve-for-me -c service_tier="ultrafast" resume' ]] || fail "a non-exec subcommand should keep stdin: $out"
 out=$(HERDR=1 run exec "say ok")
-[[ $out == 'STDIN=NULL ARGS=--approve-for-me -c service_tier="fast" --no-daemon exec say ok' ]] || fail "herdr should add --no-daemon first: $out"
+[[ $out == 'STDIN=NULL ARGS=--approve-for-me -c service_tier="ultrafast" --no-daemon exec say ok' ]] || fail "herdr should add --no-daemon first: $out"
 # Startup flags are expanded after entering the shell, below the terminal line limit.
 cat > "$SANDBOX/startup.py" <<'EOF'
 import os, sys
 os.execv(sys.argv[1], [sys.argv[1], '-c', 'skills.config=[{path="demo",enabled=false}]', *sys.argv[2:]])
 EOF
 out=$(HERDR_CODEX_STARTUP_ROLE=worker HERDR_CODEX_STARTUP_HELPER="$SANDBOX/startup.py" HERDR=1 run exec "say ok")
-[[ $out == 'STDIN=NULL ARGS=-c skills.config=[{path="demo",enabled=false}] --approve-for-me -c service_tier="fast" --no-daemon exec say ok' ]] || fail "worker expands startup flags after launch: $out"
+[[ $out == 'STDIN=NULL ARGS=-c skills.config=[{path="demo",enabled=false}] --approve-for-me -c service_tier="ultrafast" --no-daemon exec say ok' ]] || fail "worker expands startup flags after launch: $out"
 out=$(HERDR_CODEX_STARTUP_ROLE=check HERDR_CODEX_STARTUP_HELPER="$SANDBOX/startup.py" HERDR=1 run exec "say ok")
-[[ $out == 'STDIN=NULL ARGS=-c skills.config=[{path="demo",enabled=false}] --approve-for-me -c service_tier="fast" --no-daemon exec say ok' ]] || fail "check expands the common startup profile: $out"
+[[ $out == 'STDIN=NULL ARGS=-c skills.config=[{path="demo",enabled=false}] --approve-for-me -c service_tier="ultrafast" --no-daemon exec say ok' ]] || fail "check expands the common startup profile: $out"
 # A temporary HOME provides the default helper without changing the real one.
 mkdir -p "$SANDBOX/home/.dotfiles/tools/agent-hooks" "$SANDBOX/home/work/munice/project" "$SANDBOX/home/outside"
 cat > "$SANDBOX/home/.dotfiles/tools/agent-hooks/codex-startup.py" <<'EOF'
@@ -65,7 +65,7 @@ auto_role() {
       zsh "$1" "$ZSHRC" </dev/null
 }
 out=$(auto_role "$SANDBOX/home/work/munice/project")
-[[ $out == 'STDIN=NULL ARGS=ROLE=general --approve-for-me -c service_tier="fast" exec say ok' ]] || fail "munice defaults to exported general role and default helper: $out"
+[[ $out == 'STDIN=NULL ARGS=ROLE=general --approve-for-me -c service_tier="ultrafast" exec say ok' ]] || fail "munice defaults to exported general role and default helper: $out"
 out=$(auto_role "$SANDBOX/home/outside")
-[[ $out == 'STDIN=NULL ARGS=--approve-for-me -c service_tier="fast" exec say ok' ]] || fail "outside munice retains the full unprofiled launch: $out"
+[[ $out == 'STDIN=NULL ARGS=--approve-for-me -c service_tier="ultrafast" exec say ok' ]] || fail "outside munice retains the full unprofiled launch: $out"
 echo "ok"
