@@ -137,6 +137,24 @@ class HandoffTest(unittest.TestCase):
         self.assertNotEqual(rejected.returncode, 0)
         self.assertEqual(self.file.read_bytes(), before)
 
+    def test_an_open_question_needs_the_link_that_made_it_a_question(self):
+        """2026-11-24 #0: a question carried over a /clear was asked again by decide, though the release body's Hold cell had settled it.
+        Each `질문:` line of `remaining` names its basis as `근거: <link>`, so the next session re-checks it before asking."""
+        link = "https://municehq.slack.com/archives/C0CEX59CX60/p1795518191484029"
+        for remaining, ok in (
+                ("질문: iOS에서 두 화면을 봤는지", False),
+                ("step two\n- 질문: iOS에서 두 화면을 봤는지 · 근거: 없음", False),
+                ("질문: iOS에서 두 화면을 봤는지 · 근거: " + link, True),
+                ("- 질문: 올릴지\n  근거: " + link, False),  # the basis stays on the question's own line
+                ("step two", True),
+                ("질문 없음, step two", True)):
+            with self.subTest(remaining=remaining):
+                self.meta["remaining"] = remaining
+                r = self.runho("save", self.memo())
+                self.assertEqual(r.returncode == 0, ok, r.stderr)
+                if not ok:
+                    self.assertIn("근거", r.stderr)
+
     def test_policy_checks_decoded_metadata_before_replacing_memo(self):
         path = self.policy()
         data = json.loads(path.read_text())
