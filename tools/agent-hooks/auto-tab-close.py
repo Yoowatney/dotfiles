@@ -351,12 +351,22 @@ def nearest_lead(me: dict, panes: list, name: str = "", sideways: bool = True, e
     return (lead_pane(me, panes, name, sideways, env) or ("",))[0]
 
 
+# A report rewritten after the path/ID check says so (guard.py REWRITE_NOTE): that sentence is no part of main's summary (11/24: 9 of 19 began with it).
+REWRITTEN = re.compile(r"(?:경로|해시|파일\s*이름|파일명)[^.\n]*?(?:고쳐|바꿔)\s*(?:다시\s*)?(?:씁니다|썼습니다|올립니다|올렸습니다|보냅니다|보고합니다)"
+                       r"|(?:경로|해시)[^.\n]*?고쳐\s*다시\s*쓴\s*보고|같은 보고를[^.\n]*다시\s*(?:씁니다|보냅니다|올립니다)")
+
+
+def drop_rewrite_notes(line: str) -> str:
+    sentences = re.split(r"(?<=[.!?。])\s+", line)
+    return " ".join(s for s in sentences if not REWRITTEN.search(s))
+
+
 def short_report(reply: str, cap: int | None = 200) -> str:
     """The first prose line, up to `cap` characters, and the last `남은 것:` line (with the lines under it when it is a heading). Both
     keep their inline code and quotes (`prod 허용` is what 요유 types, and a check pane's first line names what it ran); only fenced
     code and blockquotes are not the report's."""
     raw = share.STRIP[2].sub(" ", share.STRIP[0].sub(" ", unicodedata.normalize("NFC", reply)))
-    lines = [line.strip() for line in raw.splitlines()]
+    lines = [drop_rewrite_notes(line.strip()) for line in raw.splitlines()]
     first = next((line for line in lines if line and not LEFT.search(line)), "")[:cap]
     verdict = next((line for line in reversed(lines) if re.fullmatch(r"TASK_(?:RESULT|CHECK): (?:pass|fail|unknown)", line)), "")
     if verdict and verdict not in first:
@@ -2013,6 +2023,17 @@ esac''')
     assert short_report('`ls -l`, `wc -l`로 "hello" 한 줄을 봤습니다.\n남은 것: 세션: 닫음') == \
         '`ls -l`, `wc -l`로 "hello" 한 줄을 봤습니다.\n남은 것: 세션: 닫음', "the first line keeps its code and quotes"
     assert short_report("```\n코드\n```\n> 인용\n끝났습니다.\n남은 것: 세션: 닫음") == "끝났습니다.\n남은 것: 세션: 닫음", "a fence or a quote is still no first line"
+    # A report rewritten after the path check says so in its first sentence; main's summary starts at the result (11/24: 9 of 19).
+    for fixed in ["앞 보고에서 `~`로 줄여 쓴 경로를 전체 경로로 고쳐 다시 씁니다.",
+                  "이전 보고에서 `progress.py`를 파일명만 적어 전체 경로로 고쳐 다시 올립니다.",
+                  "앞 보고에서 커밋 해시를 줄여 쓴 곳과 파일 이름을 고쳐 다시 올립니다.",
+                  "같은 보고를 파일 경로를 모두 절대 경로로 다시 씁니다."]:
+        assert short_report(f"{fixed} 서버 코드를 읽었습니다.\n남은 것: 세션: 닫음") == "서버 코드를 읽었습니다.\n남은 것: 세션: 닫음", fixed
+        assert short_report(f"서버 코드를 읽었습니다. {fixed}\n남은 것: 세션: 닫음") == "서버 코드를 읽었습니다.\n남은 것: 세션: 닫음", fixed
+        assert short_report(f"{fixed}\n서버 코드를 읽었습니다.\n남은 것: 세션: 닫음") == "서버 코드를 읽었습니다.\n남은 것: 세션: 닫음", fixed
+    assert short_report("끝날 예상: 이미 끝났습니다. 아래는 파일 이름을 전체 절대경로로 고쳐 다시 쓴 보고의 해당 부분입니다.\n남은 것: 세션: 닫음") == "끝날 예상: 이미 끝났습니다.\n남은 것: 세션: 닫음"
+    assert short_report("`guard.py`를 고쳐 다시 썼습니다.\n남은 것: 세션: 닫음") == "`guard.py`를 고쳐 다시 썼습니다.\n남은 것: 세션: 닫음", "a real rewrite result stays"
+    assert short_report("경로 검사 규칙을 고쳤습니다.\n남은 것: 세션: 닫음") == "경로 검사 규칙을 고쳤습니다.\n남은 것: 세션: 닫음", "a real result about paths stays"
     # The default and workers servers mark the watch's reported file; other named servers are left alone.
     os.unlink(f"{sandbox}/.local/state/orchestrator/reported/term_2")
     herdr_says({"name": "spawned"}, [crown, me])
