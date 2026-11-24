@@ -123,7 +123,8 @@ codex() {
   # prompt; the PreToolUse hooks (gcp-account-guard, secret-print-guard, ...) stay the guard. 집맥 and 휴대맥 have a host-role
   # file and keep --approve-for-me (workspace-write). exec/review keep it too: they are not sessions 요유 types into.
   local sessionmac=
-  [[ -z $(head -1 ~/.config/munice/host-role 2>/dev/null) && $(head -1 ~/.config/munice/ambient-company-host 2>/dev/null) == yoyoo-session ]] && sessionmac=1
+  # A host-role file that exists at all (empty or unreadable too) means another Mac: only a missing file passes.
+  [[ ! -e ~/.config/munice/host-role && ! -L ~/.config/munice/host-role && $(head -1 ~/.config/munice/ambient-company-host 2>/dev/null) == yoyoo-session ]] && sessionmac=1
   if [[ -n $own_approval ]]; then :
   elif [[ -n $sessionmac && $1 != (exec|e|review) ]]; then launch_args=(--sandbox danger-full-access --ask-for-approval never "${launch_args[@]}")
   else launch_args=(--approve-for-me "${launch_args[@]}")

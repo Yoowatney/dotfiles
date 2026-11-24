@@ -15,6 +15,8 @@ mkdir -p "$tmp/home/.config/munice"; export HOME="$tmp/home"
 host() { # host <session|home|none>
   rm -f "$HOME/.config/munice/host-role" "$HOME/.config/munice/ambient-company-host"
   [[ $1 == session ]] && print yoyoo-session >"$HOME/.config/munice/ambient-company-host"
+  [[ $1 == empty ]] && { : >"$HOME/.config/munice/host-role"; print yoyoo-session >"$HOME/.config/munice/ambient-company-host" }
+  [[ $1 == unreadable ]] && { print ambient-runner >"$HOME/.config/munice/host-role"; chmod 000 "$HOME/.config/munice/host-role"; print yoyoo-session >"$HOME/.config/munice/ambient-company-host" }
   [[ $1 == home ]] && { print ambient-runner >"$HOME/.config/munice/host-role"; print yoyoo-session >"$HOME/.config/munice/ambient-company-host" }
   true
 }
@@ -44,9 +46,9 @@ for args in "exec hi" "review"; do
 done
 out=$(cd "$tmp" && codex --sandbox read-only)
 [[ $out != *danger-full-access* && $out != *--approve-for-me* ]] || { print -u2 "FAIL: a caller's own --sandbox must win: $out"; exit 1 }
-for h in home none; do
+for h in home none empty unreadable; do
   host $h; out=$(cd "$tmp" && codex)
-  [[ $out == *--approve-for-me* && $out != *danger-full-access* ]] || { print -u2 "FAIL: host $h must keep --approve-for-me  got: $out"; exit 1 }
+  [[ $out == *--approve-for-me* && $out != *danger-full-access* ]] || { print -u2 "FAIL: host $h (a host-role file exists, or no marker) must keep --approve-for-me  got: $out"; exit 1 }
 done
 host none
 [[ $(codex --approve-for-me) == *"--approve-for-me"*"--approve-for-me"* ]] && { print -u2 "FAIL: duplicated --approve-for-me"; exit 1 }
