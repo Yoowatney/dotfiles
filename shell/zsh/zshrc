@@ -119,7 +119,15 @@ codex() {
       --dangerously-bypass-approvals-and-sandbox | --yolo | --full-auto | -s* | --sandbox | --sandbox=* | -a* | --ask-for-approval | --ask-for-approval=* | --approve-for-me | --pane-spawn-args) own_approval=1 ;;
     esac
   done
-  [[ -n $own_approval ]] || launch_args=(--approve-for-me "${launch_args[@]}")
+  # 세션맥 only (요유 2026-11-24): a session 요유 opens by hand starts like a pane-spawn work pane, with no sandbox and no approval
+  # prompt; the PreToolUse hooks (gcp-account-guard, secret-print-guard, ...) stay the guard. 집맥 and 휴대맥 have a host-role
+  # file and keep --approve-for-me (workspace-write). exec/review keep it too: they are not sessions 요유 types into.
+  local sessionmac=
+  [[ -z $(head -1 ~/.config/munice/host-role 2>/dev/null) && $(head -1 ~/.config/munice/ambient-company-host 2>/dev/null) == yoyoo-session ]] && sessionmac=1
+  if [[ -n $own_approval ]]; then :
+  elif [[ -n $sessionmac && $1 != (exec|e|review) ]]; then launch_args=(--sandbox danger-full-access --ask-for-approval never "${launch_args[@]}")
+  else launch_args=(--approve-for-me "${launch_args[@]}")
+  fi
   [[ ${HERDR_ENV:-} == 1 ]] && launch_args+=(--no-daemon)
   # Expand the skill catalog after the terminal has received the short launch
   # command. Serializing it into terminal input can exceed its line limit.
