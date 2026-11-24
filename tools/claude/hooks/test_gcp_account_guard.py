@@ -450,9 +450,10 @@ class KeyCleanupApprovalTest(unittest.TestCase):
         self.assertFalse(self.calls)
 
 
-class UngatedUseTest(unittest.TestCase):
-    """A request for a command the guard lets run anyway gets its use record when that command runs (api#1445).
-    Without it the presence watcher never sees the request consumed and nudges a finished command as 'run now'."""
+class RequestedCommandTest(unittest.TestCase):
+    """A command with a ✅ request on record runs only on a valid ✅, even when nothing else in the guard refuses it
+    (terraform#1267: a ✅ after the ten minutes was no guard at all). slack_approval.py judges the ✅ (its own tests cover
+    expiry, edits and reuse); here a stand-in gives its verdicts and the guard must act on them."""
     command = "gh pr merge 847 -R example/repo --squash"
 
     def setUp(self):
@@ -460,9 +461,6 @@ class UngatedUseTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.requests = Path(self.tmp.name, "requests")
         self.requests.mkdir()
-        self.log = Path(self.tmp.name, "consumed.log")
-        self.module = Path(self.tmp.name, "stub_slack_approval.py")
-        self.module.write_text(f"def consume(ts, c):\n    with open({str(self.log)!r}, 'a') as f:\n        f.write(ts + '|' + c + '\\n')\n    return True\n")
 
     def request(self, command=None, **record):
         key = hashlib.sha256((command or self.command).strip().encode()).hexdigest()
@@ -470,46 +468,74 @@ class UngatedUseTest(unittest.TestCase):
         data.update(record)
         (self.requests / f"{key}.json").write_text(json.dumps(data))
 
-    def run_use(self, command=None, now=1100.0, path=None):
-        GUARD.ungated_use(command or self.command, requests=str(self.requests), path=str(path or self.module), now=now)
-        return self.log.read_text().splitlines() if self.log.exists() else []
+    def hook(self, verdict, command=None, rider=None, env=None, is_main=True, background=False, tool="Bash"):
+        """(reason, how many times the approval was read, how many times it was used)."""
+        reads, uses = [], []
 
-    def test_open_posted_request_for_the_same_command_is_consumed(self):
+        def approvals(cmd, left):
+            reads.append(cmd)
+            if verdict is True:
+                return (lambda: uses.append(cmd) or True), ""
+            if verdict == "used":
+                return (lambda: False), ""
+            if verdict == "raises":
+                raise OSError("down")
+            return None, verdict
+
+        inp = {"command": command or self.command, **({"run_in_background": True} if background else {})}
+        reason = GUARD.hook({"tool_name": tool, "tool_input": inp}, env or {}, lambda _: rider, approvals,
+                            lambda _: is_main, is_requested=lambda c: GUARD.requested(c, str(self.requests)))
+        return reason, len(reads), len(uses)
+
+    def test_requested_command_with_an_expired_approval_is_refused(self):
         self.request()
-        self.assertEqual(self.run_use(), [f"1000.500000|{self.command}"])
+        reason, reads, uses = self.hook("ts 1000.5: 올린 지 10분이 지남: 같은 명령으로 새 요청을 올릴 것")
+        self.assertIn("올린 지 10분이 지남", reason)
+        self.assertEqual((reads, uses), (1, 0))
 
-    def test_other_commands_and_missing_records_are_left_alone(self):
-        self.assertEqual(self.run_use(), [])
+    def test_requested_command_with_no_or_a_spent_approval_is_refused(self):
+        self.request()
+        self.assertIn("✅가 없음", self.hook("요유가 ✅를 누른 답글이 없음 ✅가 없음")[0])
+        reason, _, uses = self.hook("used")
+        self.assertIn("이미 한 번 썼거나", reason)
+        self.assertEqual(uses, 0)
+
+    def test_requested_command_with_a_valid_approval_runs_once_and_uses_it(self):
+        self.request()
+        self.assertEqual(self.hook(True), (None, 1, 1))
+        self.request(status="posting")
+        self.assertEqual(self.hook(True), (None, 1, 1))
+
+    def test_command_nobody_asked_about_is_untouched(self):
+        self.assertEqual(self.hook("never read"), (None, 0, 0))  # no record at all
         self.request("gh pr merge 1 -R example/repo")
-        self.assertEqual(self.run_use(), [])
+        self.assertEqual(self.hook("never read"), (None, 0, 0))  # the record names another command
+        self.request(status="prepared")  # prepared: reserved, never sent
+        self.assertEqual(self.hook("never read"), (None, 0, 0))
+        self.assertEqual(self.hook("never read", tool="Read"), (None, 0, 0))
 
-    def test_expired_unposted_or_malformed_records_are_left_alone(self):
-        for record in ({"at": 100.0}, {"status": "prepared"}, {"status": "posting"}, {"ts": ""}, {"ts": "x"}, {"at": "soon"}):
-            with self.subTest(record=record):
-                self.request(**record)
-                self.assertEqual(self.run_use(), [])
-        (self.requests / "junk.json").write_text("{")
+    def test_an_unreadable_record_counts_as_asked_and_a_failing_slack_read_refuses(self):
+        (self.requests / (hashlib.sha256(self.command.encode()).hexdigest() + ".json")).write_text("{")
+        self.assertEqual(self.hook(True), (None, 1, 1))  # asked, so a valid ✅ is read and used
+        self.assertIn("Slack을 읽지 못함(OSError)", self.hook("raises")[0])
 
-    def test_a_broken_or_missing_module_never_stops_the_command(self):
+    def test_only_the_main_pane_foreground_bash_may_use_the_approval(self):
         self.request()
-        self.module.write_text("raise RuntimeError('x')\n")
-        self.assertEqual(self.run_use(), [])
-        self.assertEqual(self.run_use(path=Path(self.tmp.name, "none.py")), [])
+        for kwargs in ({"is_main": False}, {"background": True}, {"tool": "Monitor"},
+                       {"env": {"MUNICE_AUTO_DISPATCH": "1"}}, {"env": {"MUNICE_AMBIENT": "1"}}):
+            with self.subTest(kwargs=kwargs):
+                reason, reads, uses = self.hook(True, **kwargs)
+                self.assertIn("메인 칸의 Bash 호출", reason)
+                self.assertEqual((reads, uses), (0, 0))
 
-    def hook(self, command, rider=None, strict_command=False):
-        used = []
-        payload = {"tool_name": "Bash", "tool_input": {"command": command}}
-        reason = GUARD.hook(payload, {}, lambda _: rider, lambda c, d: (None, "no ✅"), lambda _: True,
-                            record_use=used.append)
-        return reason, used
+    def test_another_guards_refusal_comes_first_and_leaves_the_approval_unused(self):
+        self.request()
+        self.assertEqual(self.hook(True, rider="pane-fit-guard: ask"), ("pane-fit-guard: ask", 0, 0))
 
-    def test_hook_records_the_use_only_of_a_command_it_lets_run(self):
-        self.assertEqual(self.hook(self.command), (None, [self.command]))
-        reason, used = self.hook(self.command, rider="pane-fit-guard: ask")
-        self.assertEqual((reason, used), ("pane-fit-guard: ask", []))
-        reason, used = self.hook("gcloud config set account me@example.com")
+    def test_other_refusals_are_unchanged(self):
+        reason, reads, uses = self.hook(True, command="gcloud config set account me@example.com")
         self.assertTrue(reason)
-        self.assertEqual(used, [])
+        self.assertEqual((reads, uses), (0, 0))
 
 
 if __name__ == "__main__":
