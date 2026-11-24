@@ -23,7 +23,8 @@ import sys
 import uuid
 from zoneinfo import ZoneInfo
 
-KINDS = ("request", "run", "check", "complete", "reassign", "session_stop")
+KINDS = ("request", "run", "check", "complete", "reassign", "session_stop", "phase", "handoff")
+HOST_ROLES = {"": "세션맥", "portable": "휴대맥", "ambient-runner": "집맥"}  # ~/.config/munice/host-role, first line
 _spec = importlib.util.spec_from_file_location("check_permissions", Path(__file__).with_name("check-permissions.py"))
 check_permissions = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(check_permissions)
@@ -87,6 +88,56 @@ def append_event(state, event, *, outcome_update=False):
             stream.flush()
             os.fsync(stream.fileno())
     return True
+
+
+def current_host(env=os.environ):
+    """The Mac this call runs on, named as phases name it. AGENT_HOST overrides; no role file is the session Mac."""
+    if env.get("AGENT_HOST"):
+        return env["AGENT_HOST"]
+    try:
+        role = Path(os.path.expanduser("~/.config/munice/host-role")).read_text().splitlines()[0].strip()
+    except (OSError, IndexError):
+        role = ""
+    return HOST_ROLES.get(role, role)
+
+
+def host_check(events, job, host, phase=None):
+    """Whether `host` may work on `job`'s phase: the phase recorded nearest the job (itself, then its parents).
+
+    A job with no phase recorded is not restricted: this is a default that asks, never a wall (ponytail: a Mac a
+    phase leaves out is refused, so a handoff naming it, with artifacts and done criteria, is the way across).
+    """
+    parents = {e["job_id"]: e["parent_job_id"] for e in events if e.get("parent_job_id")}
+    seen, found = set(), None
+    while job and job not in seen and not found:
+        seen.add(job)
+        rows = [e for e in events if e["job_id"] == job and e["kind"] in ("phase", "handoff") and e.get("phase")]
+        name = phase or next((e["phase"] for e in reversed(rows) if e["kind"] == "phase"), None)
+        if any(e["phase"] == name for e in rows):
+            found = (job, name, [e for e in rows if e["phase"] == name])
+        job = parents.get(job)
+    result = {"host": host, "phase": phase, "status": "unrecorded", "allowed": [], "owner": ""}
+    if not found:
+        return result
+    job, name, rows = found
+    allowed, owner, handoff = [], "", None
+    for e in rows:
+        if e["kind"] == "phase":  # writing a phase again replaces its hosts and the handoffs before it
+            allowed, owner, handoff = [h for h in e.get("allowed_hosts", []) if h], e.get("owner", ""), None
+        elif e.get("to_host"):
+            allowed = allowed + [e["to_host"]] if e["to_host"] not in allowed else allowed
+            if e["to_host"] == host:
+                handoff = {"artifacts": e.get("artifacts", ""), "done_criteria": e.get("done_criteria", "")}
+    result.update(phase=name, allowed=allowed, owner=owner, handoff=handoff,
+                  status="allowed" if host in allowed else "refused")
+    if result["status"] == "refused":
+        who = "(책임자 " + owner + ")" if owner else ""
+        result["message"] = (
+            "task-ledger: 작업 " + job + "의 '" + name + "' 단계는 " + (", ".join(allowed) or "(없음)") + "에서만 하도록 적혀 있습니다"
+            + who + ". 이 맥(" + host + ")으로 넘기려면 산출물과 완료 기준을 함께 적으세요: "
+            "task-ledger.py record handoff --job-id " + job + " --phase '" + name + "' --from-host <맥> --to-host " + host
+            + " --artifacts '<산출물>' --done-criteria '<완료 기준>'")
+    return result
 
 
 def number(usage, key):
@@ -521,11 +572,16 @@ def main():
     record = sub.add_parser("record")
     record.add_argument("kind", choices=KINDS)
     record.add_argument("--job-id", required=True)
-    for name in ("parent-job-id", "session-id", "parent-session-id", "check-id", "model", "from-model", "reason", "event-id"):
+    for name in ("parent-job-id", "session-id", "parent-session-id", "check-id", "model", "from-model", "reason", "event-id",
+                 "phase", "allowed-hosts", "owner", "from-host", "to-host", "artifacts", "done-criteria"):
         record.add_argument("--" + name)
     record.add_argument("--attempt", type=int, default=1)
     record.add_argument("--verdict", choices=("pass", "fail", "unknown"), default="unknown")
     record.add_argument("--at", default=None)
+    check = sub.add_parser("host-check", help="Exit 3 when this Mac is not allowed in the job's phase; 0 otherwise")
+    check.add_argument("--job-id", required=True)
+    check.add_argument("--phase")
+    check.add_argument("--host", help="default: this Mac, from host-role")
     hook_parser = sub.add_parser("hook")
     hook_parser.add_argument("hook_event", choices=("SessionStart", "Stop"))
     lookup = sub.add_parser("job-for-session", help="Print the last associated stable job ID, or exit 1")
@@ -550,13 +606,31 @@ def main():
             timestamp(args.at)
         if args.kind == "reassign" and (not args.reason or not args.from_model or not args.model):
             parser.error("reassign requires --reason, --from-model and --model")
+        needs = {"phase": ("phase", "allowed_hosts"), "handoff": ("phase", "to_host", "artifacts", "done_criteria")}
+        for key in needs.get(args.kind, ()):
+            if not getattr(args, key):
+                parser.error(args.kind + " requires --" + key.replace("_", "-"))
         event = {k: v for k, v in vars(args).items() if v is not None and k not in {"state_dir", "command"}}
+        if "allowed_hosts" in event:
+            event["allowed_hosts"] = [h.strip() for h in event["allowed_hosts"].split(",") if h.strip()]
+            if not event["allowed_hosts"]:
+                parser.error("phase requires --allowed-hosts")
+        for key in ("artifacts", "done_criteria"):  # structured pointers, never a pasted reply
+            if key in event:
+                event[key] = event[key][:300]
         event["at"] = args.at or now()
         event["event_id"] = args.event_id or str(uuid.uuid4())
         added = append_event(args.state_dir, event)
         print(json.dumps({"event_id": event["event_id"], "added": added}))
         return
     events, corrupt = read_events(args.state_dir / "events.jsonl")
+    if args.command == "host-check":
+        result = host_check(events, args.job_id, args.host or current_host(), args.phase)
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        if result["status"] == "refused":
+            print(result["message"], file=sys.stderr)
+            sys.exit(3)
+        return
     if args.command == "job-for-session":
         job = next((e["job_id"] for e in reversed(events) if e.get("session_id") == args.session_id), None)
         if job:

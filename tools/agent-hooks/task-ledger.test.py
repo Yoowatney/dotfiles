@@ -438,6 +438,94 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(data["tokens"]["known_inclusive"], 12)
         self.assertEqual(data["missing"]["incomplete_session_ids"], ["session"])
 
+    # api#1508: a multi-step job names, per phase, the Macs allowed to work on it and who answers for it.
+    def host_check(self, *args, role=None, **env):
+        home = self.root / "home"
+        marker = home / ".config" / "munice" / "host-role"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.unlink(missing_ok=True)
+        if role is not None:
+            marker.write_text(role + "\n")
+        result = subprocess.run([sys.executable, str(SCRIPT), "host-check", *args], capture_output=True, text=True,
+                                env={**self.env, **env})
+        return result.returncode, (json.loads(result.stdout) if result.stdout.strip() else None), result.stderr
+
+    def phase(self, job, phase, hosts, **fields):
+        return self.event("phase", job, phase=phase, allowed_hosts=hosts, **fields)
+
+    def refuses(self, *args):
+        result = subprocess.run([sys.executable, str(SCRIPT), "record", *args], capture_output=True, text=True, env=self.env)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        return result.stderr
+
+    def test_phase_allows_listed_hosts_and_refuses_the_rest(self):
+        self.phase("job", "분석", "세션맥,휴대맥", owner="lead")
+        self.phase("job", "상주 잡", "세션맥", owner="lead")
+        rc, data, _ = self.host_check("--job-id", "job", "--phase", "분석")
+        self.assertEqual((rc, data["status"], data["host"]), (0, "allowed", "세션맥"), "no host-role file is 세션맥")
+        rc, data, _ = self.host_check("--job-id", "job", "--phase", "분석", role="portable")
+        self.assertEqual((rc, data["status"], data["host"]), (0, "allowed", "휴대맥"), "the carried Mac may share work, not just 세션맥")
+        rc, data, message = self.host_check("--job-id", "job", "--phase", "상주 잡", role="portable")
+        self.assertEqual((rc, data["status"]), (3, "refused"))
+        for word in ("상주 잡", "세션맥", "휴대맥", "lead", "record handoff", "--artifacts", "--done-criteria"):
+            self.assertIn(word, message)
+        rc, data, _ = self.host_check("--job-id", "job", "--phase", "상주 잡", role="ambient-runner")
+        self.assertEqual((rc, data["host"]), (3, "집맥"))
+
+    def test_current_phase_is_the_latest_one_recorded(self):
+        self.phase("job", "분석", "세션맥,휴대맥")
+        self.phase("job", "production", "세션맥", at="2026-01-02T13:00:00Z")
+        rc, data, _ = self.host_check("--job-id", "job", role="portable")
+        self.assertEqual((rc, data["phase"]), (3, "production"))
+        self.phase("job", "production", "세션맥,휴대맥", at="2026-01-02T14:00:00Z")
+        rc, data, _ = self.host_check("--job-id", "job", role="portable")
+        self.assertEqual((rc, data["status"]), (0, "allowed"), "a phase written again replaces its hosts")
+
+    def test_nothing_recorded_means_no_restriction(self):
+        for args in (["--job-id", "unknown"], ["--job-id", "job", "--phase", "never-written"]):
+            self.event("request", "job")
+            rc, data, _ = self.host_check(*args, role="portable")
+            self.assertEqual((rc, data["status"]), (0, "unrecorded"), args)
+        # No ledger file at all, and a damaged line next to a good phase.
+        self.assertEqual(self.host_check("--job-id", "job")[0], 0)
+        self.phase("job", "분석", "세션맥")
+        with (self.root / "state" / "events.jsonl").open("a") as stream:
+            stream.write("{not json\n")
+        self.assertEqual(self.host_check("--job-id", "job", role="portable")[0], 3, "the good line still counts")
+
+    def test_child_job_follows_the_nearest_phase_up_its_parents(self):
+        self.event("request", "root")
+        self.phase("root", "분석", "세션맥")
+        self.event("request", "child", parent_job_id="root")
+        self.event("request", "grandchild", parent_job_id="child")
+        self.assertEqual(self.host_check("--job-id", "grandchild", role="portable")[0], 3)
+        self.phase("child", "분석", "세션맥,휴대맥")
+        self.assertEqual(self.host_check("--job-id", "grandchild", role="portable")[0], 0, "the nearest phase wins")
+
+    def test_handoff_needs_artifacts_and_done_criteria_and_opens_the_host(self):
+        self.phase("job", "상주 잡", "세션맥", owner="lead")
+        self.assertIn("--artifacts", self.refuses("handoff", "--job-id", "job", "--phase", "상주 잡", "--to-host", "휴대맥",
+                                                  "--done-criteria", "시험 통과"))
+        self.assertIn("--done-criteria", self.refuses("handoff", "--job-id", "job", "--phase", "상주 잡", "--to-host", "휴대맥",
+                                                      "--artifacts", "PR 주소"))
+        self.assertIn("--to-host", self.refuses("handoff", "--job-id", "job", "--phase", "상주 잡",
+                                                "--artifacts", "PR 주소", "--done-criteria", "시험 통과"))
+        self.assertIn("--allowed-hosts", self.refuses("phase", "--job-id", "job", "--phase", "x"))
+        self.assertIn("--phase", self.refuses("phase", "--job-id", "job", "--allowed-hosts", "세션맥"))
+        self.assertEqual(self.host_check("--job-id", "job", role="portable")[0], 3, "refused handoffs changed nothing")
+        self.event("handoff", "job", phase="상주 잡", from_host="세션맥", to_host="휴대맥", artifacts="PR 주소",
+                   done_criteria="시험 통과", at="2026-01-02T13:00:00Z")
+        rc, data, _ = self.host_check("--job-id", "job", role="portable")
+        self.assertEqual((rc, data["status"]), (0, "allowed"))
+        self.assertEqual(data["allowed"], ["세션맥", "휴대맥"])
+        self.assertEqual(data["handoff"], {"artifacts": "PR 주소", "done_criteria": "시험 통과"})
+        self.assertEqual(self.host_check("--job-id", "job", role="ambient-runner")[0], 3, "only the named Mac opened")
+
+    def test_phase_events_never_break_the_usage_report(self):
+        self.event("request", "root")
+        self.phase("root", "분석", "세션맥")
+        self.assertEqual(self.report()["jobs"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
