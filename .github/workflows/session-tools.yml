@@ -11,6 +11,8 @@ on:
       - 'tools/agent-hooks/herdr_peers.py'
       - 'tools/agent-hooks/workers-watch.py'
       - 'tools/agent-hooks/pane-spawn*'
+      - 'tools/agent-hooks/agent-quota*'
+      - 'tools/agent-hooks/test_agent_quota.py'
       - 'tools/agent-hooks/load-guard.py'
       - 'tools/agent-hooks/load-watch.py'
       - 'tools/agent-hooks/reboot-resume.py'
@@ -44,6 +46,8 @@ on:
       - 'tools/agent-hooks/herdr_peers.py'
       - 'tools/agent-hooks/workers-watch.py'
       - 'tools/agent-hooks/pane-spawn*'
+      - 'tools/agent-hooks/agent-quota*'
+      - 'tools/agent-hooks/test_agent_quota.py'
       - 'tools/agent-hooks/load-guard.py'
       - 'tools/agent-hooks/load-watch.py'
       - 'tools/agent-hooks/reboot-resume.py'
@@ -100,6 +104,7 @@ jobs:
           for test in tools/agent-hooks/pane-spawn*.test.sh; do
             bash "$test"
           done
+      - run: bash tools/agent-hooks/agent-quota.test.sh
       - run: python3 -m unittest discover -s tools/agent-hooks -p test_startup_estimate.py
       - run: bash shell/zsh/codex-fn.test.sh
       - run: python3 tools/agent-hooks/codex-startup.test.py

@@ -6,24 +6,24 @@ source "$(cd "$(dirname "$0")" && pwd)/pane-spawn-test-fixture.sh"
 workers_up
 echo '{"result":{"workspaces":[{"workspace_id":"w1","label":"workers"}]}}' > "$SANDBOX/workers-workspaces.json"
 # Quota-aware normal workers; all data and agent starts remain synthetic.
-quota_fixture() { # <Codex weekly> <Claude weekly> [extra usage enabled]
-  env HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" CLAUDE_CONFIG_DIR="$SANDBOX/home/.claude" python3 -I - "$SUBJECT" "$1" "$2" "${3:-false}" <<'PY'
+quota_fixture() { # <Codex weekly> <Claude weekly> [extra usage enabled] [Codex age seconds]
+  env HOME="$SANDBOX/home" CODEX_HOME="$SANDBOX/home/.codex" CLAUDE_CONFIG_DIR="$SANDBOX/home/.claude" python3 -I - "$SUBJECT" "$1" "$2" "${3:-false}" "${4:-0}" <<'PY'
 import importlib.machinery, importlib.util, json, os, pathlib, sys, time, datetime
 sys.dont_write_bytecode = True
 loader = importlib.machinery.SourceFileLoader('quota', str(pathlib.Path(sys.argv[1]).with_name('agent-quota')))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 q = importlib.util.module_from_spec(spec)
 loader.exec_module(q)
-h = pathlib.Path.home(); now = time.time()
+h = pathlib.Path.home(); now = time.time(); at = now - int(sys.argv[5])
 def write(p, obj):
     p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps(obj)); return p
 auth = write(h / '.codex/auth.json', {'auth_mode':'chatgpt', 'tokens':{'account_id':'test'}})
-os.utime(auth, (now - 100, now - 100))
+os.utime(auth, (at - 100, at - 100))
 write(h / '.claude.json', {'oauthAccount':{'accountUuid':'test', 'hasExtraUsageEnabled':json.loads(sys.argv[4])}})
-stamp = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).isoformat()
+stamp = datetime.datetime.fromtimestamp(at, datetime.timezone.utc).isoformat()
 week = lambda used: {'used_percent':int(used), 'window_minutes':10080, 'resets_at':now+302400}
 write(h / '.codex/sessions/quota.jsonl', {'timestamp':stamp, 'payload':{'rate_limits':{'limit_id':'codex',
-    'primary':{'used_percent':20,'window_minutes':300,'resets_at':now+1000}, 'secondary':week(sys.argv[2]),
+    'primary':{'used_percent':20,'window_minutes':300,'resets_at':at+1000}, 'secondary':week(sys.argv[2]),
     'credits':{'has_credits':False,'unlimited':False}}}})
 snap = {'account':q.identity('test'), 'machine':q.machine(), 'observed_at':now,
     'five_hour':{'used_percentage':20,'resets_at':now+1000}, 'seven_day':{'used_percentage':int(sys.argv[3]),'resets_at':now+302400}}
@@ -97,6 +97,17 @@ not_main
 ps --kind auto "over" "instruction" >/dev/null 2>"$SANDBOX/err"
 has "--kind codex" "claude-first: Claude past its reserve returns to Codex"
 grep -q 'reserve' "$SANDBOX/err" || fail "the fallback names its reason"
+quota_fixture 20 85 true 3600
+ps --kind auto "stale fallback" "instruction" >/dev/null 2>"$SANDBOX/err"
+has "--kind codex" "claude-first: low stale Codex usage still opens a worker"
+grep -q 'stale' "$SANDBOX/err" || fail "the fallback discloses its stale observation"
+quota_fixture 81 85 true 3600
+if ps --kind auto "stale refused" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "stale Codex needs extra weekly headroom"; fi
+[ ! -e "$SANDBOX/log" ] || fail "stale refusal must not query herdr"
+grep -q 'Codex:.*reserve' "$SANDBOX/err" || fail "the refusal names the Codex reason"
+grep -q 'agent-quota codex-week.*ask 요유' "$SANDBOX/err" || fail "inspect Codex before asking for an account switch"
+grep -q 'does not authorize' "$SANDBOX/err" || fail "displaying usage does not bypass admission checks"
+quota_fixture 10 85 true
 is_main
 # Lead decision 2026-11-19: past Claude's measured reserve, kept for the main pane on the same account, no check opens;
 # nothing waits for one: the caller looks again or hands a read-only recheck out (요유 2026-11-20). Codex never stands in.

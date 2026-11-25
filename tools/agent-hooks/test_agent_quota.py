@@ -46,11 +46,11 @@ class RoutingTests(unittest.TestCase):
         path.write_text(json.dumps(value))
         return path
 
-    def event(self, used=40, short=20, age=0, credits=False, file="a.jsonl", reset=None):
+    def event(self, used=40, short=20, age=0, credits=False, file="a.jsonl", reset=None, short_reset=None):
         at = self.now - age
         row = {"timestamp": datetime.datetime.fromtimestamp(at, datetime.timezone.utc).isoformat(),
             "type": "event_msg", "payload": {"type": "token_count", "rate_limits": {
-                "limit_id": "codex", "primary": {"used_percent": short, "window_minutes": 300, "resets_at": self.now + 1000},
+                "limit_id": "codex", "primary": {"used_percent": short, "window_minutes": 300, "resets_at": self.now + 1000 if short_reset is None else short_reset},
                 "secondary": {"used_percent": used, "window_minutes": 10080, "resets_at": reset or self.now + 302400},
                 "credits": {"has_credits": credits, "unlimited": False}}}}
         path = self.write(".codex/sessions/" + file, row)
@@ -209,6 +209,82 @@ class RoutingTests(unittest.TestCase):
         self.event(99, credits=True)
         self.capture(10, tick=102)
         self.assertEqual(self.select("claude-first")["kind"], "claude")
+
+    def stale_codex(self, **kwargs):
+        os.utime(self.home / ".codex/auth.json", (self.now - 2 * 86400,) * 2)
+        self.capture(85, tick=101)
+        return self.event(used=20, age=3600, **kwargs)
+
+    def test_claude_first_reuses_low_stale_codex_in_same_week(self):
+        self.stale_codex()
+        result = self.select("claude-first")
+        self.assertEqual(result["kind"], "codex")
+        self.assertIn("stale", result["codex"]["reason"])
+        self.assertIn("stale", result["reason"])
+        self.assertIsNone(self.select("quota-aware")["kind"], "other policies keep the ten-minute limit")
+
+    def test_stale_codex_age_and_weekly_headroom_boundaries(self):
+        self.stale_codex()
+        for age, used, allowed in [(600, 95, True), (600, 95.01, False), (601, 80, True), (86400, 80, True),
+                                    (86401, 20, False), (601, 80.01, False), (-6, 20, False)]:
+            with self.subTest(age=age, used=used):
+                self.event(used=used, age=age, short_reset=self.now - age + 1000)
+                self.assertEqual(self.select("claude-first")["kind"], "codex" if allowed else None)
+
+    def test_stale_codex_requires_live_week_and_valid_original_windows(self):
+        self.stale_codex()
+        for reset in [self.now, self.now - 1, self.now + self.q.WEEK - 3599]:
+            with self.subTest(reset=reset):
+                self.event(age=3600, reset=reset)
+                self.assertIsNone(self.select("claude-first")["kind"])
+        self.event(age=3600, short_reset=self.now - 3600)
+        self.assertIsNone(self.select("claude-first")["kind"], "invalid at observation is not an expired valid window")
+        self.event(age=3600, short=None, short_reset=self.now - 1)
+        self.assertIsNone(self.select("claude-first")["kind"], "expired malformed short window is still rejected")
+
+    def test_stale_codex_short_window_limit_and_expiry(self):
+        self.stale_codex()
+        self.event(age=3600, short=80)
+        self.assertIsNone(self.select("claude-first")["kind"])
+        self.event(age=3600, short=99, short_reset=self.now)
+        self.assertEqual(self.select("claude-first")["kind"], "codex")
+        path = self.event(age=3600)
+        row = json.loads(path.read_text())
+        row["payload"]["rate_limits"]["primary"] = None
+        path.write_text(json.dumps(row))
+        os.utime(path, (self.now,) * 2)
+        self.assertEqual(self.select("claude-first")["kind"], "codex")
+
+    def test_stale_codex_keeps_login_billing_and_api_guards(self):
+        self.stale_codex()
+        auth = self.home / ".codex/auth.json"
+        os.utime(auth, (self.now - 3599,) * 2)
+        self.assertIn("predates", self.select("claude-first")["codex"]["reason"])
+        os.utime(auth, (self.now - 7200,) * 2)
+        for credit in [True, None, "false"]:
+            self.event(age=3600, credits=credit)
+            self.assertIn("paid credit", self.select("claude-first")["codex"]["reason"])
+        self.event(age=3600)
+        for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"):
+            with patch.dict(os.environ, {key: "synthetic"}):
+                self.assertIn("API environment", self.select("claude-first")["codex"]["reason"])
+        self.write(".codex/config.toml", {}).write_text('model_provider = "external"\n')
+        self.assertIn("settings", self.select("claude-first")["codex"]["reason"])
+
+    def test_claude_first_refusal_names_both_reasons(self):
+        self.capture(85, tick=101)
+        self.event(age=601, credits=True)
+        result = self.select("claude-first")
+        self.assertIsNone(result["kind"])
+        self.assertIn("Claude: reserve reached", result["reason"])
+        self.assertIn("Codex: paid credit availability", result["reason"])
+
+    def test_stale_codex_does_not_fall_back_past_newer_unsafe_record(self):
+        self.stale_codex()
+        self.event(age=1000, credits=True, file="newer.jsonl")
+        result = self.select("claude-first")
+        self.assertIsNone(result["kind"])
+        self.assertIn("paid credit", result["codex"]["reason"])
 
     def test_both_near_limit_block(self):
         self.event(99)

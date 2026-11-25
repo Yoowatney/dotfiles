@@ -28,7 +28,7 @@
 # looks again with one command or hands a read-only recheck to an ordinary worker; an unknown, stale or slow reading opens the check on Claude.
 # A refusal for usage never means "wait for the reset": USAGE_BLOCK_NOTE tells the main pane to ask 요유 to switch the account or spend a
 # reset ticket and reopen at once, and a pane under a lead to report that this request is needed (요유 2026-11-20).
-# --kind auto selects a normal worker using fresh local subscription quota (agent-quota); tools/agent-hooks/agent-runner shows or
+# --kind auto selects a normal worker using local subscription quota (agent-quota); tools/agent-hooks/agent-runner shows or
 # switches the policy (claude | codex | auto). Policy quota-aware keeps Codex unless its week
 # runs ahead of pace; claude-first (one local policy value, e.g. while Codex quota is short) picks Claude first
 # and returns to Codex once Claude's measured usage passes its reserve. Checks never follow the policy. The local policy codex-only
@@ -57,7 +57,8 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full]
   --phase NAME: which phase of the job (--job-id, else the calling job) this pane works on, for the allowed-Mac check below.
   --allow-duplicate: intentionally start another worker with the same instruction. Otherwise an open worker from the
     same caller and folder is reused for ten minutes. Checks always start fresh.
-  --kind auto: choose a normal worker from fresh subscription quota and weekly pace; unknown/paid usage is excluded.
+  --kind auto: choose a normal worker from subscription quota and weekly pace; unknown/paid usage is excluded.
+    claude-first can reuse a same-week Codex reading up to 24h old at <=80%, with the same login/billing/API guards.
     If neither runner qualifies, no pane opens. Set the agent-quota policy to codex-only for the previous routing.
     When that is for usage, the refusal asks the main pane to have 요유 switch the account or spend a reset ticket, never to wait for the reset.
     Policy claude-first: Claude while its measured usage is within reserve, else Codex. Checks never follow the policy.
@@ -82,7 +83,7 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full]
 MIN_ROWS=${PANE_SPAWN_MIN_ROWS:-16} # a 46-row window holds 4 panes of 11-12 rows, which still show about 5 lines of work (2026-11-04); a fifth would leave 5-6
 die() { echo "pane-spawn: $*" >&2; exit 2; }
 # 요유 2026-11-20: a usage refusal once sent the main pane to put several jobs off to the next reset; the way out is a request, never a wait.
-USAGE_BLOCK_NOTE="Never put the work off until the usage reset (요유 2026-11-20). Main pane: ask 요유, in that work's thread or in #0, to switch the account or spend a reset ticket, and open the session again as soon as they say it is done. A pane under a lead: report to the lead that this request is needed."
+USAGE_BLOCK_NOTE="Never put the work off until the usage reset (요유 2026-11-20). Before asking for an account switch, run agent-quota codex-week and inspect the Codex rejection reason from --kind auto. The display does not authorize a launch or replace login, paid-credit and API checks; never bypass a rejection with an explicit runner. Retry --kind auto when a safe reading is available. If no safe runner qualifies, main pane: ask 요유, in that work's thread or in #0, to switch the account or spend a reset ticket, and open the session again as soon as they say it is done. A pane under a lead: report to the lead that this request is needed."
 # Every reader takes a tab named "자동 …" or "알아서 …" for a job's: pane-tell refuses its panes, and no mark goes on it. A work name that
 # starts that way made an ordinary pane unreachable (요유 2026-11-05), so no tab it names starts that way.
 tab_name() { case "$1" in "자동 "* | "알아서 "*) echo "일 $1" ;; *) echo "$1" ;; esac; }
