@@ -5,6 +5,7 @@ on:
     paths:
       - 'tools/agent-hooks/actions-run-guard*'
       - 'tools/agent-hooks/ci-watch*'
+      - 'tools/agent-hooks/page-request-guard.py'
       - 'tools/claude/hooks/gcp-account-guard.py'
       - '.github/workflows/ci-watch.yml'
   push:
@@ -12,6 +13,7 @@ on:
     paths:
       - 'tools/agent-hooks/actions-run-guard*'
       - 'tools/agent-hooks/ci-watch*'
+      - 'tools/agent-hooks/page-request-guard.py'
       - 'tools/claude/hooks/gcp-account-guard.py'
       - '.github/workflows/ci-watch.yml'
 
