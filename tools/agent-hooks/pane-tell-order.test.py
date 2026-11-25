@@ -446,12 +446,15 @@ esac
         gate = self.hold_main_for_refresh()
         # PANE_TELL_BATCH only opens a batch for a resting receiver; these panes work, so a held line is queued.
         cases = [(line, "w1:p9") for line in self.YOYOO_LINES] + [(line, "unknown") for line in self.OTHER_LINES]
-        for line, source in cases:
+        held = gate.read_text()
+        for count, (line, source) in enumerate(cases, 1):
             with self.subTest(line=line, source=source):
+                gate.write_text(held)
                 self.assertIn("queued", self.relayed(line, source))
-                self.assertEqual(self.prompts(), [])
-        gate.unlink()
-        self.wait_for(lambda: len(self.prompts()) == len(cases) and not self.waiting())
+                self.assertEqual(len(self.prompts()), count - 1)
+                # One at a time: a queue of all of them outlives PANE_TELL_WAIT on a slow runner.
+                gate.unlink()
+                self.wait_for(lambda: len(self.prompts()) == count and not self.waiting())
 
     def test_worker_spoof_of_yoyoo_prefix_waits_for_older_queue(self):
         main = self.root / "state/orchestrator/main"
