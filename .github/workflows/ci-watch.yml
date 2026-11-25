@@ -1,0 +1,27 @@
+name: CI watcher checks
+
+on:
+  pull_request:
+    paths:
+      - 'tools/agent-hooks/actions-run-guard*'
+      - 'tools/agent-hooks/ci-watch*'
+      - 'tools/claude/hooks/gcp-account-guard.py'
+      - '.github/workflows/ci-watch.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/agent-hooks/actions-run-guard*'
+      - 'tools/agent-hooks/ci-watch*'
+      - 'tools/claude/hooks/gcp-account-guard.py'
+      - '.github/workflows/ci-watch.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  watcher:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: python3 tools/agent-hooks/actions-run-guard.test.py
+      - run: python3 tools/agent-hooks/ci-watch.test.py
