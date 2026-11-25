@@ -460,7 +460,7 @@ class RoutingTests(unittest.TestCase):
                 self.q.prepare_agy(self.now + 700, self.home)
             refresh.assert_not_called()
 
-    def test_agy_prepare_refreshes_only_missing_or_stale_metadata(self):
+    def test_agy_prepare_refreshes_missing_stale_or_incomplete_metadata(self):
         path = self.agy_fixture()
         with patch.object(self.q, "refresh_agy_metadata", return_value=False) as refresh:
             self.q.prepare_agy(self.now + 700, self.home)
@@ -468,6 +468,9 @@ class RoutingTests(unittest.TestCase):
             path.unlink()
             self.q.prepare_agy(self.now, self.home)
             self.assertEqual(refresh.call_count, 2)
+            self.write("state/agent-quota/agy.json", {"captured_at": self.now, "plan_tier": "", "quota": {}})
+            self.q.prepare_agy(self.now, self.home)
+            self.assertEqual(refresh.call_count, 3)
 
     def test_agy_refresh_uses_no_prompt_and_discards_terminal_output(self):
         self.agy_fixture()
