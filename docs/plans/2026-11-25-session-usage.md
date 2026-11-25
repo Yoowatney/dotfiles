@@ -13,7 +13,9 @@ credential wrapper, token metering, HTTP tracing, or deployment is introduced.
 - Persist counts and identifiers, never message bodies, commands or credentials.
 - Character counts exclude hidden context and are not token estimates.
 - Count visible gh command invocations, not HTTP requests. Background jobs,
-  REPL-hidden commands and other machines remain unattributed.
+  Codex exec / Claude REPL scripts and other machines remain unattributed.
+  Count those opaque script invocations separately, without claiming they
+  contain gh, and disclose them and bounded scan coverage in each alert.
 - Keep existing handoffs intact. Add only a short, source-ranked reduction hint;
   never discard user text, safety instructions or tool results automatically.
 - One quota request per five minutes across processes, including failures;
