@@ -13,7 +13,7 @@ trap cleanup EXIT
 
 PLIST="$HERE/com.yoyoo.herdr-workers.plist"
 check "the plist runs the script last" "$(plutil -extract ProgramArguments json -o - "$PLIST" | jq -r '.[-2:] | join(" ")')" "/bin/sh $HOME/.dotfiles/tools/claude/herdr-workers-server.sh"
-check "the plist has no KeepAlive" "$(plutil -extract KeepAlive raw -o - "$PLIST" 2>/dev/null || echo none)" none
+check "the plist has no KeepAlive" "$(v=$(plutil -extract KeepAlive raw -o - "$PLIST" 2>/dev/null) && printf '%s' "$v" || echo none)" none
 
 # Start it the way launchd does (the plist's own command plus the session name), so the detach is tested too.
 mapfile -t ARGS < <(plutil -extract ProgramArguments json -o - "$PLIST" | jq -r '.[]')
