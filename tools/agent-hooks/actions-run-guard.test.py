@@ -25,6 +25,7 @@ class ActionsGuardTest(unittest.TestCase):
             'gh workflow enable build.yml', '/opt/homebrew/bin/gh workflow run build.yml',
             'gh -R owner/repo workflow run build.yml', 'gh --repo=owner/repo run rerun 123',
             'gh workflow --repo owner/repo run build.yml',
+            'timeout 30 gh workflow run build.yml',
             'env GH_HOST=github.com gh workflow run build.yml',
             'cd /tmp && gh workflow run build.yml', 'true; gh run rerun 123',
             'true\ngh workflow enable build.yml', 'gh workflow ' + '\\\n' + ' run build.yml',
@@ -56,7 +57,7 @@ class ActionsGuardTest(unittest.TestCase):
             './deploy-release.sh staging', 'bash scripts/deploy-release.sh --staging',
             'gh release create v1.2.3 --prerelease', 'git push origin feature',
             'gh pr create --title test --body test', 'gh run list', 'gh run view 123 --log',
-            'gh run watch 123', 'gh workflow list', 'gh workflow view build.yml',
+            'gh workflow list', 'gh workflow view build.yml',
             'gh api repos/owner/repo/actions/workflows/build.yml/dispatches -X GET',
             'gh api repos/owner/repo/actions/runs/123',
             'gh api -X POST repos/owner/repo/releases -f tag_name=v1.2.3',
@@ -74,6 +75,21 @@ class ActionsGuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNone(self.verdict(command))
         self.assertIsNone(self.verdict('gh workflow run x', tool='Read'))
+
+    def test_watch_requires_the_shared_locked_entry_even_with_a_reason(self):
+        for command in ['gh run watch 123', 'gh -R owner/repo run watch 123 --interval 60',
+                        "ACTIONS_RUN_REASON='required recovery' gh run watch 123",
+                        'bash -lc "gh run watch 123"', 'x=$(gh run watch 123)',
+                        'gh run --repo owner/repo watch 123',
+                        'timeout 30 gh run watch 123', 'gtimeout -k 5 30s gh run watch 123',
+                        'nice -n 5 gh run watch 123', 'gnice --adjustment=5 gh run watch 123',
+                        'stdbuf -o L gh run watch 123', 'gstdbuf --output=L gh run watch 123']:
+            with self.subTest(command=command):
+                self.assertIn('ci-watch.py', self.verdict(command) or '')
+        for command in ['gh run watch --help', "echo 'gh run watch 123'",
+                        "timeout 30 printf '%s' 'gh run watch 123'",
+                        'uv run --no-project python3 ~/.dotfiles/tools/agent-hooks/ci-watch.py --repo owner/repo 123']:
+            self.assertIsNone(self.verdict(command))
 
     def test_reason_is_required_on_each_command_and_does_not_leak(self):
         for command in [
@@ -102,6 +118,9 @@ class ActionsGuardTest(unittest.TestCase):
         for runtime in ('claude', 'codex'):
             for command, denied in [('gh workflow run build.yml', True),
                                     ("ACTIONS_RUN_REASON='required recovery' gh workflow run build.yml", False),
+                                    ('gh run watch 123 --interval 3', True),
+                                    ('timeout 30 gh run watch 123', True),
+                                    ('uv run --no-project python3 ~/.dotfiles/tools/agent-hooks/ci-watch.py --repo owner/repo 123', False),
                                     ('git push origin feature', False)]:
                 with self.subTest(runtime=runtime, command=command):
                     payload = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash',
