@@ -8,6 +8,7 @@ import shutil
 import shlex
 import signal
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -26,20 +27,20 @@ class MainAlertHooksTest(unittest.TestCase):
             shutil.copy2(HERE / name, self.hooks / name)
         (self.hooks / "pane-label").write_text('printf "%s\\n" "$*" > "$HOME/rename"\n')
         self.herdr = self.home / "herdr"
-        self.herdr.write_text('''#!/usr/bin/env python3
-import json, os, sys, time
-with open(os.environ["HOME"] + "/herdr-commands", "a") as f:
-    f.write(json.dumps(sys.argv[1:]) + "\\n")
-if sys.argv[1:3] == ["pane", "get"]:
-    if os.environ.get("QUERY_SLEEP"): time.sleep(3)
-    if os.environ.get("QUERY_FAIL"):
-        print(os.environ["PANE_JSON"])
-        sys.exit(1)
-    print(os.environ["PANE_JSON"])
-elif sys.argv[1:] == ["pane", "list"]:
-    print('{"result":{"panes":[]}}')
-else:
-    sys.exit(2)
+        self.herdr.write_text('''#!/bin/sh
+case "$1 $2" in
+    'pane get')
+        printf '["pane", "get", "%s"]\\n' "$3" >> "$HOME/herdr-commands"
+        [ -z "${QUERY_SLEEP:-}" ] || sleep 3
+        printf '%s\\n' "$PANE_JSON"
+        [ -z "${QUERY_FAIL:-}" ] || exit 1
+        ;;
+    'pane list')
+        printf '["pane", "list"]\\n' >> "$HOME/herdr-commands"
+        printf '%s\\n' '{"result":{"panes":[]}}'
+        ;;
+    *) printf '%s\\n' '["unexpected"]' >> "$HOME/herdr-commands"; exit 2 ;;
+esac
 ''')
         self.herdr.chmod(0o755)
         # The reader's storage/ack contract is tested by its own suite. This
@@ -396,6 +397,7 @@ if __name__ == "__main__":
                 self.assertEqual(len(inbox.pending(self.env)), 1, "offering context must not consume")
                 second = self.run_hook(event, claude=claude)
                 self.assertTrue(second is None or "local-main-alert" not in self.context(second), "lease suppresses immediate duplicate")
+                self.assertIn("Receipt command: ", context)
                 command = context.split("Receipt command: ", 1)[1].splitlines()[0]
                 receipt = subprocess.run(shlex.split(command), env=self.env, capture_output=True, text=True, timeout=5)
                 self.assertEqual(receipt.returncode, 0, receipt.stderr)
@@ -441,6 +443,7 @@ if __name__ == "__main__":
         inbox = self.real_inbox()
         inbox.enqueue(self.env, "restart", "Recovery fixture", "Private fixture")
         first = self.context(self.run_hook("UserPromptSubmit"))
+        self.assertIn("Receipt command: ", first)
         old_command = first.split("Receipt command: ", 1)[1].splitlines()[0]
         self.pane["agent_session"] = {"value": "session-2"}
         second = self.context(self.run_hook("SessionStart", session_id="session-2"))
@@ -449,6 +452,19 @@ if __name__ == "__main__":
         old_ack = subprocess.run(shlex.split(old_command), env=self.env, capture_output=True, text=True, timeout=5)
         self.assertNotEqual(old_ack.returncode, 0)
         self.assertEqual(len(inbox.pending(self.env)), 1)
+
+    def test_real_queue_fixture_does_not_need_another_python_startup(self):
+        # The real hook already runs Python. Its fake external CLI must not add
+        # another interpreter startup to the production query's two-second limit.
+        bin_dir = self.home / "bin"
+        bin_dir.mkdir()
+        python = bin_dir / "python3"
+        python.write_text("#!/bin/sh\n"
+                          "if [ \"$1\" = \"$HERDR_BIN_PATH\" ]; then sleep 3; fi\n"
+                          "exec " + shlex.quote(sys.executable) + ' "$@"\n')
+        python.chmod(0o755)
+        self.env["PATH"] = str(bin_dir) + os.pathsep + self.env["PATH"]
+        self.test_real_queue_new_runtime_gets_unacked_claim_immediately()
 
     def assert_sdk_intake_is_skipped(self, event):
         inbox = self.real_inbox()

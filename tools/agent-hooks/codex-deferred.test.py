@@ -25,6 +25,7 @@ class RecoveryTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        self.addCleanup(self.finish_notifiers)
         # Copy the entry points: even an accidental real-main lookup cannot
         # reach the production sibling pane-tell executable from these tests.
         self.hooks = self.root / "hooks"
@@ -61,7 +62,28 @@ class RecoveryTests(unittest.TestCase):
             # The real hook detaches delivery so a slow receiver cannot consume
             # its 10s budget. Drain the notifier before asserting its receipt.
             self.run_script(SCRIPT, "notify", "--wait")
+            self.wait_notifiers()
         return result.stdout
+
+    def wait_notifiers(self):
+        # --wait serializes lock holders, but a detached child may not have
+        # reached that lock yet. The hook has returned after Popen's exec, so
+        # every such child is already visible under this fixture's script path.
+        deadline = time.monotonic() + 60
+        paths = {str(self.script), str(self.script.resolve())}
+        while True:
+            rows = subprocess.check_output(["/bin/ps", "-axo", "args="], text=True)
+            if not any(paths.intersection(row.split()) and "notify" in row.split()
+                       for row in rows.splitlines()):
+                return
+            if time.monotonic() >= deadline:
+                self.fail("fixture notifier did not exit")
+            time.sleep(.01)
+
+    def finish_notifiers(self):
+        # A failed assertion must also release the deliberately blocked relay.
+        (self.root / "relay.fail").touch()
+        self.wait_notifiers()
 
     def hook(self, event="Stop", drain=True, **payload):
         return self.run_script(HOOK, "hook", event, payload={"session_id": "session", **payload}, drain=drain)
@@ -94,6 +116,33 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(item["status"], "pending")
         self.assertIn("https://example.org/issues/1", item["links"])
         self.assertIsNone(item.get("notified_at"))
+
+    def test_hook_drain_waits_for_notifier_before_it_takes_the_lock(self):
+        # Delay only the detached worker before it takes .notify.lock. The
+        # synchronous `notify --wait` can otherwise finish ahead of this child.
+        started = self.root / "notifier-started"
+        release = self.root / "notifier-release"
+        drained = self.root / "notifier-drained"
+        source = self.script.read_text()
+        self.script.write_text(
+            "import pathlib, sys, time, atexit\n"
+            "if __name__ == '__main__' and sys.argv[1:] == ['notify']:\n"
+            f"    pathlib.Path({str(started)!r}).touch()\n"
+            f"    while not pathlib.Path({str(release)!r}).exists(): time.sleep(.01)\n"
+            "if __name__ == '__main__' and sys.argv[1:] == ['notify', '--wait']:\n"
+            f"    atexit.register(pathlib.Path({str(drained)!r}).touch)\n" + source)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(self.defer)
+            try:
+                deadline = time.monotonic() + 15
+                while not (started.exists() and drained.exists()) and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertTrue(started.exists() and drained.exists(), "both notifier paths must start")
+                with self.assertRaises(concurrent.futures.TimeoutError):
+                    pending.result(timeout=1)
+            finally:
+                release.touch()
+            pending.result(timeout=15)
 
     def current_pane(self, terminal):
         # pane get resolves the old environment id after a workspace move.
