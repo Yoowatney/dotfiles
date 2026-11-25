@@ -372,6 +372,7 @@ if [ -z "$check" ]; then
       */sessions/*/herdr.sock) estimate_server=${HERDR_SOCKET_PATH%/herdr.sock}; estimate_server=${estimate_server##*/} ;;
     esac
     prompt+=" Before starting work, send that estimate once to the lead with PANE_TELL_BATCH=0 pane-tell $estimate_server/$me and a message containing the assignment name and the same estimate. This bypasses the idle relay batching window for the startup estimate only. If pane-tell asks you to confirm a suspicious time, check the current KST date and time and send the corrected or confirmed estimate once more. A queued relay will be delivered automatically; continue work without resending it. This startup relay is authorized and does not request a check."
+    [ "$kind" != agy ] || env_args+=(--env "HERDR_AGY_LEAD=$estimate_server/$me")
   fi
 fi
 delegates=

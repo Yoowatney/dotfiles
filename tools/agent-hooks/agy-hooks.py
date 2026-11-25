@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 
@@ -19,6 +20,9 @@ REQUIRED = ('secret-print-guard.py', 'gcp-account-guard.py', 'no-sed-inplace.py'
 SLACK_WRITE = re.compile(r'(?:chat[._](?:post|update|delete|schedule)|slack[\w./-]*(?:send|post|reply|edit)|'
                          r'hooks\.slack\.com|main-channel\.py\s+(?:post|reply|decide)|'
                          r'(?:reply|post)\.sh)', re.I)
+AUTH_OVERRIDES = ('GEMINI_API_KEY', 'GOOGLE_API_KEY', 'AGY_ADC_AUTH', 'GOOGLE_APPLICATION_CREDENTIALS',
+                  'GOOGLE_CLOUD_PROJECT', 'GOOGLE_CLOUD_PROJECT_ID', 'GOOGLE_CLOUD_QUOTA_PROJECT',
+                  'GOOGLE_GENAI_USE_VERTEXAI')
 
 
 def deny(reason):
@@ -197,6 +201,35 @@ console.log(JSON.stringify({mode,text:mode==='off'?'PONYTAIL MODE OFF':builder.g
     return {'injectSteps': [{'systemMessage': {'systemMessage': nonempty(built['text'])}}]}
 
 
+def control_command(command, env=None):
+    """Run only fixed harness operations outside the model's terminal sandbox."""
+    env = os.environ if env is None else env
+    argv = shlex.split(command)
+    batch = bool(argv and argv[0] == 'PANE_TELL_BATCH=0')
+    if batch:
+        argv = argv[1:]
+    if not argv or Path(argv[0]).name not in ('pane-tell', 'pane-label'):
+        return None
+    if env.get('HERDR_AGY_STARTUP_ROLE') != 'worker':
+        raise ValueError('harness bridge is limited to workers')
+    tool = Path(argv[0]).name
+    if tool == 'pane-label':
+        if batch or len(argv) != 2 or argv[1] not in ('--hold', '--free'):
+            raise ValueError('only the own-pane hold flag may be changed')
+    elif len(argv) != 3 or not env.get('HERDR_AGY_LEAD') or argv[1] != env['HERDR_AGY_LEAD']:
+        raise ValueError('progress messages may only reach the launching lead')
+    child_env = dict(env)
+    if batch:
+        child_env['PANE_TELL_BATCH'] = '0'
+    result = subprocess.run([str(Path(__file__).with_name(tool)), *argv[1:]],
+                            env=child_env, stdin=subprocess.DEVNULL, capture_output=True,
+                            text=True, timeout=30)
+    if result.returncode:
+        raise ValueError('harness operation failed')
+    return {'decision': 'allow', 'overwrite': {'CommandLine':
+            shlex.join(['/usr/bin/printf', '%s\n', tool + ': completed by guarded harness bridge'])}}
+
+
 def pre_tool(event):
     try:
         payload = translate(event)
@@ -215,7 +248,17 @@ def pre_tool(event):
                                    timeout=min(float(handler.get('timeout', 10)), 30))
                 if reason:
                     return deny(reason)
-        return {'decision': 'allow'}  # Delegate to AGY policy; never auto-approve.
+        result = {'decision': 'allow'}  # Delegate to AGY policy; never auto-approve.
+        if payload['tool_name'] == 'Bash':
+            control = control_command(payload['tool_input']['command'])
+            if control:
+                return control
+            # AGY may inject ADC variables into tool children after pane startup.
+            # Check the original command first, then keep the execution shell clean.
+            result['overwrite'] = {'CommandLine': shlex.join(
+                ['/usr/bin/env', *[part for key in AUTH_OVERRIDES for part in ('-u', key)],
+                 '/bin/zsh', '-f', '-c', payload['tool_input']['command']])}
+        return result
     except Exception:
         return deny('AGY safety input or configuration is invalid; the tool remains blocked.')
 

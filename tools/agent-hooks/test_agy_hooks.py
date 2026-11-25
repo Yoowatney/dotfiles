@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -75,6 +76,41 @@ class NativeHooksTest(unittest.TestCase):
     def test_safe_command_is_delegated_without_auto_approval(self):
         result = hooks.pre_tool(event(CommandLine='printf OK'))
         self.assertEqual(result['decision'], 'allow')
+
+    def test_native_shell_removes_reinjected_auth_overrides(self):
+        keys = ('GEMINI_API_KEY', 'GOOGLE_API_KEY', 'AGY_ADC_AUTH', 'GOOGLE_APPLICATION_CREDENTIALS',
+                'GOOGLE_CLOUD_PROJECT', 'GOOGLE_CLOUD_PROJECT_ID', 'GOOGLE_CLOUD_QUOTA_PROJECT',
+                'GOOGLE_GENAI_USE_VERTEXAI')
+        script = 'import os; print(sum(bool(os.environ.get(k)) for k in ' + repr(keys) + '))'
+        import shlex
+        command = shlex.join([sys.executable, '-c', script])
+        with patch.object(hooks, 'settings', return_value=([], [])):
+            result = hooks.pre_tool(event(CommandLine=command))
+        self.assertEqual(result['decision'], 'allow')
+        child = subprocess.run(result['overwrite']['CommandLine'], shell=True, capture_output=True,
+                               text=True, env={**os.environ, **dict.fromkeys(keys, 'fixture')})
+        self.assertEqual(child.returncode, 0)
+        self.assertEqual(child.stdout.strip(), '0')
+
+    def test_sandbox_control_bridge_only_reaches_own_lead(self):
+        env = {'HERDR_AGY_STARTUP_ROLE': 'worker', 'HERDR_AGY_LEAD': 'default/wC:p1'}
+        with patch.object(hooks.subprocess, 'run') as run:
+            run.return_value.returncode = 0
+            result = hooks.control_command('PANE_TELL_BATCH=0 pane-tell default/wC:p1 "Progress update"', env)
+            self.assertEqual(result['decision'], 'allow')
+            self.assertIn('CommandLine', result['overwrite'])
+            self.assertEqual(run.call_args.args[0][-2:], ['default/wC:p1', 'Progress update'])
+            self.assertFalse(run.call_args.kwargs.get('shell', False))
+            self.assertEqual(run.call_args.kwargs['env']['PANE_TELL_BATCH'], '0')
+            for cmd in ['pane-tell default/wC:p9 hi', 'pane-label --close',
+                        'pane-label --free; touch /tmp/unexpected', 'pane-tell --raw default/wC:p1 hi']:
+                with self.subTest(cmd=cmd), self.assertRaises(ValueError):
+                    hooks.control_command(cmd, env)
+            self.assertIsNone(hooks.control_command('printf OK', env))
+
+    def test_control_bridge_does_not_grant_nonworkers_host_execution(self):
+        with self.assertRaises(ValueError):
+            hooks.control_command('pane-label --free', {})
 
     def test_guard_failure_and_invalid_output_fail_closed(self):
         payload = hooks.translate(event(CommandLine='printf OK'))

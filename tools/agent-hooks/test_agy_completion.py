@@ -44,6 +44,10 @@ class AgyCompletionTests(unittest.TestCase):
         self.assertEqual(auto.reply_of(self.payload()), DONE)
         self.assertEqual(auto.decide(self.payload(), self.env), DONE)
 
+    def test_native_cli_no_tool_call_is_a_normal_idle_stop(self):
+        self.write(self.request(), self.response())
+        self.assertEqual(auto.decide(self.payload(terminationReason="NO_TOOL_CALL"), self.env), DONE)
+
     def test_busy_stop_with_cached_reply_cannot_close(self):
         self.write(self.request(), self.response())
         self.assertIsNone(auto.decide(self.payload(fullyIdle=False, last_assistant_message=DONE), self.env))

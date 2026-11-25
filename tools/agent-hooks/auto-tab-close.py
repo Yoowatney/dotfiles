@@ -363,7 +363,7 @@ def decide(payload: dict, env) -> str | None:
     if env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
         return None
     if agy_stop(payload) and (payload.get("fullyIdle") is not True
-            or payload.get("terminationReason") != "model_stop" or payload.get("error")):
+            or payload.get("terminationReason") not in ("model_stop", "NO_TOOL_CALL") or payload.get("error")):
         return None
     text = reply_of(payload)
     if not isinstance(text, str):
