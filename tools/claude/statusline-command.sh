@@ -6,6 +6,94 @@
 # Read input from stdin
 input=$(cat)
 
+# agy sends official statusLine metadata here; Claude only reads its local cache.
+# Store no account, workspace, transcript or prompt fields. Never start a model.
+agy_usage() {
+python3 -I -c '
+import datetime, json, math, os, pathlib, re, sys, tempfile, time, unicodedata
+mode = sys.argv[1]
+path = pathlib.Path(os.environ.get("XDG_STATE_HOME", str(pathlib.Path.home() / ".local/state"))) / "agent-quota/agy.json"
+now = int(time.time())
+keys = ("gemini-5h", "gemini-weekly", "3p-5h", "3p-weekly")
+def epoch(value):
+    if not isinstance(value, str): return None
+    try: return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (ValueError, OverflowError): return None
+def valid(bucket):
+    if not isinstance(bucket, dict): return False
+    fraction = bucket.get("remaining_fraction")
+    return type(fraction) in (int, float) and math.isfinite(fraction) and 0 <= fraction <= 1 and epoch(bucket.get("reset_time")) is not None
+try:
+    if mode == "capture":
+        source = json.load(sys.stdin)
+        if not isinstance(source, dict): sys.exit(0)
+        quotas = source.get("quota") or {}
+        if not isinstance(quotas, dict): quotas = {}
+        plan = source.get("plan_tier", "")
+        if not isinstance(plan, str): plan = ""
+        # Remove terminal controls and bound metadata before it reaches a terminal.
+        plan = "".join(c for c in plan if c.isprintable())[:60]
+        data = {"captured_at": now, "plan_tier": plan, "quota": {
+            k: {"remaining_fraction": quotas[k]["remaining_fraction"], "reset_time": quotas[k]["reset_time"]}
+            for k in keys if valid(quotas.get(k))}}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix=".agy-", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w") as stream: json.dump(data, stream)
+            os.replace(name, path)
+        finally:
+            if os.path.exists(name): os.unlink(name)
+        sys.exit(0)
+    data = json.loads(path.read_text())
+    quotas = data.get("quota") or {}
+    if not any(valid(quotas.get(k)) for k in keys): raise ValueError("no quota")
+    cols = int(os.environ.get("COLUMNS", "0"))
+    width = 10 if not cols or cols >= 100 else 6 if cols >= 60 else 4
+    def duration(seconds):
+        minutes = max(0, math.ceil(seconds / 60))
+        if minutes < 60: return str(minutes) + "m"
+        hours, minutes = divmod(minutes, 60)
+        if hours < 24: return str(hours) + "h" + (" " + str(minutes) + "m" if minutes else "")
+        days, hours = divmod(hours, 24)
+        return str(days) + "d" + (" " + str(hours) + "h" if hours else "")
+    def bucket(key):
+        value = quotas.get(key)
+        if not valid(value): return "(no usage data)"
+        reset = epoch(value["reset_time"])
+        used = (1 - value["remaining_fraction"]) * 100
+        if reset <= now and not (reset == 0 and used == 0): return "(reset; awaiting update)"
+        color = "\033[31m" if used >= 90 else "\033[95m" if used >= 75 else "\033[94m"
+        fill = int(used * width / 100 + .5)
+        bar = color + "█" * fill + "\033[2m" + "░" * (width - fill) + "\033[0m"
+        note = "not started" if reset == 0 else "resets in " + duration(reset - now)
+        return bar + " " + color + str(int(used + .5)) + "%\033[0m (" + note + ")"
+    def cells(text):
+        return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
+                   for c in re.sub(r"\x1b\[[0-9;]*m", "", text))
+    plan = data.get("plan_tier") or "plan unknown"
+    plan = "".join(c for c in str(plan) if c.isprintable())[:60]
+    age = now - data.get("captured_at", 0)
+    title = "agy (" + plan + ")" + (" (updated " + duration(age // 60 * 60) + " ago)" if age >= 3600 else "")
+    for group, label in (("gemini", "Gemini"), ("3p", "3P")):
+        if not any(valid(quotas.get(group + suffix)) for suffix in ("-5h", "-weekly")): continue
+        prefix = title if group == "gemini" else "agy"
+        first = label + " 5h " + bucket(group + "-5h")
+        second = "Weekly " + bucket(group + "-weekly")
+        line = prefix + " " + first + " │ " + second
+        if not cols or cells(line) <= cols: print(line)
+        else:
+            if group == "gemini": print(title)
+            print("agy " + first)
+            print("agy " + label + " " + second)
+except (OSError, ValueError, TypeError, AttributeError, KeyError, OverflowError):
+    if mode != "capture": print("agy (no usage data)")
+' "$1"
+}
+case "${1:-}" in
+    --capture-agy) printf '%s' "$input" | agy_usage capture; exit 0 ;;
+    --agy-text) agy_usage render; exit 0 ;;
+esac
+
 # Cache only official quota fields, tied to the current account and assistant response time.
 # Missing metadata or an unwritable cache must never break the status line.
 printf '%s' "$input" | python3 -I "$(dirname "$(readlink -f "$0")")/../agent-hooks/agent-quota" capture-claude 2>/dev/null || true
@@ -61,6 +149,8 @@ printf '%s' "$hud" | perl -CSDA -e '
 		if (!$done && plain($_) =~ /Usage|Weekly/ && (!$cols || cells($_) + cells($tail) <= $cols)) { $_ .= $tail; $done = 1 }
 		print "$_\n" }
 	print "$codex\n" unless $done' "$(codex_text)" "${COLUMNS:-0}"
+
+agy_usage render
 
 session_id="$(echo "$input" | jq -r '.session_id // empty')"
 

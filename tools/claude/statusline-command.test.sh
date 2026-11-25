@@ -18,7 +18,9 @@ printf '#!/bin/bash\nif [ "$*" = +%%s ]; then echo "$STATUSLINE_TEST_NOW"; else 
 chmod +x "$T/bin/date"
 export PATH="$T/bin:$PATH"
 
-run() { printf '%s' "$INPUT" | bash "$SCRIPT" 2>&1; }
+run_full() { printf '%s' "$INPUT" | bash "$SCRIPT" 2>&1; }
+# Keep existing HUD/Codex assertions exact; agy integration is checked below.
+run() { run_full | grep -v '^agy '; }
 fake_hud() {   # <config dir> <launcher source>
 	mkdir -p "$1/plugins/cache/claude-hud/claude-hud/9.9.9/scripts"
 	printf '%s\n' "$2" >"$1/plugins/cache/claude-hud/claude-hud/9.9.9/scripts/statusline.mjs"
@@ -238,5 +240,44 @@ if [ -f "$T/state/agent-quota/claude.json" ]; then r=captured; else r=missing; f
 check "official quota input is captured for normal worker routing" "$r" '^captured$'
 out=$(INPUT='{"rate_limits":null}' XDG_STATE_HOME=/dev/null CLAUDE_CONFIG_DIR="$T/hud" run)
 check "quota capture failure keeps the HUD" "$out" 'Context' 'Traceback|agent-quota:'
+
+# Official agy statusLine metadata: fractions are remaining, not used.
+export XDG_STATE_HOME="$T/agy-state"
+agy_input=$(jq -nc --arg reset "$(date -u -r "$reset" +%Y-%m-%dT%H:%M:%SZ)" \
+  '{plan_tier:"Google AI Ultra",account:"must-not-be-cached",quota:{"gemini-5h":{remaining_fraction:0.75,reset_time:$reset},"gemini-weekly":{remaining_fraction:0.29,reset_time:$reset},"3p-5h":{remaining_fraction:1,reset_time:"1970-01-01T00:00:00Z"},"3p-weekly":{remaining_fraction:1,reset_time:"1970-01-01T00:00:00Z"}}}')
+printf '%s' "$agy_input" | bash "$SCRIPT" --capture-agy
+out=$(COLUMNS=200 bash "$SCRIPT" --agy-text | plain)
+check "agy shows official plan and converts remaining fraction to usage" "$out" 'agy \(Google AI Ultra\) Gemini 5h ███░░░░░░░ 25% .*Weekly ███████░░░ 71%'
+check "agy keeps third-party quota separate" "$out" 'agy 3P 5h ░░░░░░░░░░ 0% .*Weekly ░░░░░░░░░░ 0%'
+check "agy cache excludes unrelated input" "$(cat "$XDG_STATE_HOME/agent-quota/agy.json")" 'Google AI Ultra' 'must-not-be-cached|account'
+check_exact "agy cache is private" "$(stat -f '%Lp' "$XDG_STATE_HOME/agent-quota/agy.json")" '600'
+out=$(COLUMNS=60 bash "$SCRIPT" --agy-text | plain)
+check "narrow agy display splits quota windows" "$out" '^agy Gemini Weekly ████░░ 71%'
+out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run_full | plain)
+check "Claude HUD includes cached agy usage" "$out" 'agy \(Google AI Ultra\)'
+check "adding agy preserves Codex" "$out" 'Codex '
+printf '%s' '{"plan_tier":"unknown","quota":{"gemini-5h":{"remaining_fraction":1.5}}}' | bash "$SCRIPT" --capture-agy
+out=$(bash "$SCRIPT" --agy-text | plain)
+check "invalid fractions never become real usage" "$out" 'agy \(no usage data\)' '[0-9]+%'
+printf '%s' 'broken' | bash "$SCRIPT" --capture-agy
+out=$(bash "$SCRIPT" --agy-text | plain)
+check "malformed official input does not break rendering" "$out" 'agy \(no usage data\)' 'Traceback'
+printf '%s' "$agy_input" | bash "$SCRIPT" --capture-agy
+python3 -I - "$XDG_STATE_HOME/agent-quota/agy.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); d = json.loads(p.read_text()); d['captured_at'] -= 7200
+p.write_text(json.dumps(d))
+PY
+out=$(bash "$SCRIPT" --agy-text | plain)
+check "old agy data carries its age" "$out" 'updated 2h ago'
+printf '%s' "$agy_input" | jq '.quota["gemini-5h"].reset_time="2020-01-01T00:00:00Z"' | bash "$SCRIPT" --capture-agy
+out=$(COLUMNS=200 bash "$SCRIPT" --agy-text | plain)
+check "expired agy quota awaits a fresh reading" "$out" 'Gemini 5h \(reset; awaiting update\)' 'Gemini 5h .*25%'
+printf '%s' 'broken cache' >"$XDG_STATE_HOME/agent-quota/agy.json"
+out=$(bash "$SCRIPT" --agy-text | plain)
+check "a damaged cache keeps the status line available" "$out" '^agy \(no usage data\)$' 'Traceback'
+rm "$XDG_STATE_HOME/agent-quota/agy.json"
+out=$(bash "$SCRIPT" --agy-text | plain)
+check "missing agy data is explicit" "$out" '^agy \(no usage data\)$'
 
 [ "$fails" -eq 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }
