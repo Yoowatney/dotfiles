@@ -81,7 +81,9 @@ fi
 source "$FIXTURE/dispatch"
 exit 92
 ''')
+        # herdr 0.9.0 fails every command with EINVAL on a socket path that is set but empty.
         (self.root / "herdr").write_text('''#!/bin/bash
+[ -z "${HERDR_SOCKET_PATH+set}" ] || [ -n "$HERDR_SOCKET_PATH" ] || exit 1
 case "$1 $2" in
  'pane get') printf '%s' '{"result":{"pane":{"agent_status":"idle"}}}' ;;
  'pane list') printf '%s' '{"result":{"panes":[{"pane_id":"w1:pM","terminal_id":"term_M","agent":"claude","agent_session":{"value":"sM"}}]}}' ;;
@@ -604,14 +606,15 @@ exec /bin/mv "$@"
         # A default pane has no socket in its env (""); a workers pane telling default/<pane> names the default server's path.
         # Both are the default server: refusing the second dropped two check reports on 2026-11-16 (pane-tell exit 2).
         default = "/private/fixture/herdr.sock"
+        env = lambda socket: {"HERDR_SOCKET_PATH": socket} if socket else {} # "" means unset: herdr refuses an empty one
         for opener, joiner in (("", default), (default, "")):
             with self.subTest(opener=opener):
-                result = self.call("fixture-open", "first", HERDR_SOCKET_PATH=opener)
+                result = self.call("fixture-open", "first", **env(opener))
                 self.assertEqual(result.returncode, 0, result.stderr)
-                result = self.call("fixture-open", "second", HERDR_SOCKET_PATH=joiner)
+                result = self.call("fixture-open", "second", **env(joiner))
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("held up to", result.stdout)
-                result = self.call("--flush", str(self.batch), "term_M", PANE_TELL_BATCH="0", HERDR_SOCKET_PATH=opener)
+                result = self.call("--flush", str(self.batch), "term_M", PANE_TELL_BATCH="0", **env(opener))
                 self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.prompts(), [b"first\n\nsecond", b"first\n\nsecond"])
 
@@ -641,6 +644,17 @@ exec /bin/mv "$@"
         self.assertEqual(self.call("--recover-batch").returncode, 0)
         self.wait_prompt([b"first"])
         self.assertEqual(len(list((self.batch / "jobs").iterdir())), 1)
+
+    def test_recovered_default_batch_reaches_herdr_without_an_empty_socket(self):
+        # 2026-11-26: the watcher tick claimed a due batch just before its --flush woke. The default
+        # server is recorded as "", and the worker it started retried `pane list` for hours with every
+        # later message for that pane behind it.
+        self.open()
+        self.due()
+        self.assertEqual(json.loads((self.batch / "open/.meta").read_text())["socket"], "")
+        self.assertEqual(self.call("--recover-batch").returncode, 0)
+        self.wait_prompt([b"first"])
+        self.assertEqual((self.root / "sockets").read_text(), "default\n")
 
     def test_recovery_restores_recorded_workers_route(self):
         socket = "/private/fixture/sessions/workers/herdr.sock"
