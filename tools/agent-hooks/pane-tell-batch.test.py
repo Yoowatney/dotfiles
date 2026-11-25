@@ -59,6 +59,7 @@ batch_event() {
 }
 send() {
   printf '%s\\0' "$3" >> "$FIXTURE/prompts"
+  [ -z "${SEND_RECORD_DELAY:-}" ] || /bin/sleep "$SEND_RECORD_DELAY"
   printf '%s\\n' "${HERDR_SOCKET_PATH:-default}" >> "$FIXTURE/sockets"
   [ -z "${SEND_RETURN_DELAY:-}" ] || /bin/sleep "$SEND_RETURN_DELAY"
 }
@@ -628,12 +629,21 @@ exec /bin/mv "$@"
 
     def test_recovery_restores_recorded_workers_route(self):
         socket = "/private/fixture/sessions/workers/herdr.sock"
+        self.env["SEND_RECORD_DELAY"] = ".2"
         result = self.call("fixture-open", "workers", HERDR_SOCKET_PATH=socket)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.due()
         self.assertEqual(self.call("--recover-batch").returncode, 0)
-        self.wait_prompt([b"workers"])
-        self.assertEqual((self.root / "sockets").read_text().strip(), socket)
+        # send records the prompt before the route; wait for the complete
+        # route record instead of treating prompt visibility as send completion.
+        recorded = self.root / "sockets"
+        end = time.monotonic() + 30
+        while time.monotonic() < end:
+            if recorded.exists() and recorded.read_text().endswith("\n"):
+                break
+            time.sleep(.01)
+        self.assertEqual(self.prompts(), [b"workers"])
+        self.assertEqual(recorded.read_text().strip(), socket)
 
     def test_default_scheduler_waits_60_before_flushing(self):
         self.open()
