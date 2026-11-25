@@ -6,6 +6,7 @@ Use subscription-authenticated Antigravity CLI for worker sessions while preserv
 ## Implementation
 1. Add explicit AGY routing and simple/normal/complex model selection to pane-spawn.
 2. Validate fresh subscription quota before opening a worker; refuse unknown, stale, exhausted or API-authenticated state.
+   Refresh expired metadata through a bounded, input-free terminal session; accept only complete subscription windows and never submit a model prompt.
 3. Translate native tool events into the existing shared guard interface. Unknown tools, malformed input and hook errors deny execution.
 4. Load the shared instructions and canonical skills through native discovery. Reuse Ponytail's instruction generator.
 5. Adapt native completion records to the existing report, deduplication and close sequence. Busy or failed turns cannot close a pane.

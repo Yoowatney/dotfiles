@@ -8,6 +8,9 @@ import math
 import os
 from pathlib import Path
 import platform
+import pty
+import select as select_io
+import subprocess
 import sys
 import tempfile
 import time
@@ -320,6 +323,72 @@ def agy_quota(now, cwd):
     return normalize(epoch(snap.get("captured_at")), *windows, now, "used_percent", "used_percent", 95)
 
 
+def prepare_agy(now, cwd):
+    # Refresh metadata only, never a model prompt. Admission still validates every
+    # window afterwards and rejects failed refreshes or non-subscription settings.
+    result = agy_quota(now, cwd)
+    if result["reason"] in ("API/project environment override", "subscription settings unavailable",
+                            "subscription settings invalid", "subscription settings unknown/overridden"):
+        return
+    at = epoch(read_json(state_dir() / "agy.json").get("captured_at"))
+    if at is None or not -FUTURE_SLOP <= now - at <= MAX_AGE:
+        refresh_agy_metadata(cwd)
+
+
+def refresh_agy_metadata(cwd):
+    binary = Path.home() / ".local/bin/agy"
+    if not binary.is_file() or any(os.environ.get(key) for key in AGY_API_ENV):
+        return False
+    folder = state_dir()
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (folder / "agy-refresh.lock").open("a") as lock:
+        os.chmod(lock.name, 0o600)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        started, deadline = time.time(), time.monotonic() + 3
+        env = dict(os.environ, TERM="xterm-256color")
+        for key in (*AGY_API_ENV, "HERDR_AGY_STARTUP_ROLE"):
+            env.pop(key, None)
+        settings = dict(enableTerminalSandbox=True, toolPermission="proceed-in-sandbox",
+                        useG1Credits=False, modelProvider="", allowNonWorkspaceAccess=False)
+        master, slave = pty.openpty()
+        process = None
+        try:
+            # Inherit the launcher's isolated process group: its timeout kills
+            # both the lookup and AGY. No keystrokes or prompt are ever submitted.
+            process = subprocess.Popen([str(binary), "--sandbox", "--model", "gemini-4-hydrogen-medium",
+                                        "--settings", json.dumps(settings)],
+                                       stdin=slave, stdout=slave, stderr=slave, env=env,
+                                       cwd=cwd, start_new_session=False)
+            os.close(slave)
+            slave = None
+            while time.monotonic() < deadline and process.poll() is None:
+                if select_io.select([master], [], [], 0.1)[0]:
+                    try:
+                        os.read(master, 65536)  # Discard terminal content, including account identity.
+                    except OSError:
+                        break
+                path = folder / "agy.json"
+                at = epoch(read_json(path).get("captured_at"))
+                ready = agy_quota(time.time(), cwd)["reason"] in ("within reserve", "reserve reached")
+                if ready and at is not None and at >= int(started) and path.stat().st_mtime >= started:
+                    return True
+            return False
+        finally:
+            if process is not None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=0.3)
+            os.close(master)
+            if slave is not None:
+                os.close(slave)
+
+
 def select(now, policy, cwd=None):
     result = {"kind": None, "policy": policy, "reason": "invalid policy"}
     if policy == "codex-only":
@@ -394,7 +463,11 @@ def main():
         capture_claude(json.load(sys.stdin), now)
         return 0
     if command == "select":
-        result = select(now, policy_value(), sys.argv[2] if len(sys.argv) == 3 else None)
+        policy = policy_value()
+        if policy == "agy-only":
+            prepare_agy(now, Path(sys.argv[2] if len(sys.argv) == 3 else Path.cwd()).resolve())
+            now = time.time()
+        result = select(now, policy, sys.argv[2] if len(sys.argv) == 3 else None)
         record_decision(result, now)
         print(json.dumps(result, allow_nan=False))
         return 0 if result["kind"] else 1
@@ -405,7 +478,9 @@ def main():
         print(json.dumps(result, allow_nan=False))
         return 0 if result["eligible"] else 3 if result["reason"] == "reserve reached" else 1
     if command == "agy-reserve":
-        result = agy_quota(now, Path(sys.argv[2] if len(sys.argv) == 3 else Path.cwd()).resolve())
+        cwd = Path(sys.argv[2] if len(sys.argv) == 3 else Path.cwd()).resolve()
+        prepare_agy(now, cwd)
+        result = agy_quota(time.time(), cwd)
         print(json.dumps(result, allow_nan=False))
         return 0 if result["eligible"] else 3 if result["reason"] == "reserve reached" else 1
     if command == "codex-week":

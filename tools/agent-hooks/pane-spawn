@@ -181,13 +181,13 @@ shift 2
 auto_claude=
 quota_limit=${PANE_SPAWN_QUOTA_LIMIT:-6}
 [[ "$quota_limit" =~ ^[1-9][0-9]*$ ]] || quota_limit=6
-# The lookup has no children. Reap it on timeout so slow reads cannot outlive the routing decision.
+# Isolate the lookup and its metadata refresh so neither can outlive a timeout.
 bounded() { # <seconds> <command...>: its exit code, 124 past the limit
   perl -e '
     my $limit = shift; my $pid = fork();
     defined $pid or exit 125;
-    if (!$pid) { exec @ARGV; exit 125; }
-    $SIG{ALRM} = sub { kill "KILL", $pid; waitpid($pid, 0); exit 124; };
+    if (!$pid) { setpgrp(0, 0); exec @ARGV; exit 125; }
+    $SIG{ALRM} = sub { kill "KILL", -$pid; kill "KILL", $pid; waitpid($pid, 0); exit 124; };
     alarm $limit; waitpid($pid, 0); my $rc = $?; alarm 0;
     exit($rc & 127 ? 128 + ($rc & 127) : $rc >> 8);
   ' "$@"

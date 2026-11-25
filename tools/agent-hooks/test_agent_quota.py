@@ -450,6 +450,65 @@ class RoutingTests(unittest.TestCase):
             path.write_text(json.dumps(data))
             self.assertIsNone(self.select("agy-only")["kind"])
 
+    def test_agy_prepare_skips_fresh_cache_and_auth_overrides(self):
+        self.agy_fixture()
+        with patch.object(self.q, "refresh_agy_metadata") as refresh:
+            self.q.prepare_agy(self.now, self.home)
+            refresh.assert_not_called()
+            with patch.dict(os.environ, {"GEMINI_API_KEY": "synthetic"}):
+                self.q.prepare_agy(self.now + 700, self.home)
+            refresh.assert_not_called()
+
+    def test_agy_prepare_refreshes_only_missing_or_stale_metadata(self):
+        path = self.agy_fixture()
+        with patch.object(self.q, "refresh_agy_metadata", return_value=False) as refresh:
+            self.q.prepare_agy(self.now + 700, self.home)
+            refresh.assert_called_once_with(self.home)
+            path.unlink()
+            self.q.prepare_agy(self.now, self.home)
+            self.assertEqual(refresh.call_count, 2)
+
+    def test_agy_refresh_uses_no_prompt_and_discards_terminal_output(self):
+        self.agy_fixture()
+        binary = self.home / ".local/bin/agy"
+        binary.parent.mkdir(parents=True)
+        binary.touch()
+        process = unittest.mock.Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        with patch.object(self.q.subprocess, "Popen", return_value=process) as popen, \
+             patch.object(self.q.pty, "openpty", return_value=(100, 101)), \
+             patch.object(self.q.os, "close"), \
+             patch.object(self.q.select_io, "select", return_value=([], [], [])), \
+             patch.object(self.q.time, "monotonic", side_effect=[0, 20]):
+            self.assertFalse(self.q.refresh_agy_metadata(self.home))
+        args = popen.call_args.args[0]
+        self.assertNotIn("-p", args)
+        self.assertNotIn("--prompt", args)
+        settings = json.loads(args[args.index("--settings") + 1])
+        self.assertIs(settings["useG1Credits"], False)
+        self.assertEqual(settings["toolPermission"], "proceed-in-sandbox")
+        self.assertEqual(popen.call_args.kwargs["stdin"], 101)
+        self.assertIs(popen.call_args.kwargs["start_new_session"], False)
+        process.terminate.assert_called_once()
+
+    def test_agy_refresh_does_not_accept_initial_empty_statusline(self):
+        path = self.agy_fixture(plan=None)
+        os.utime(path, (self.now, self.now))
+        binary = self.home / ".local/bin/agy"
+        binary.parent.mkdir(parents=True)
+        binary.touch()
+        process = unittest.mock.Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        with patch.object(self.q.subprocess, "Popen", return_value=process), \
+             patch.object(self.q.pty, "openpty", return_value=(100, 101)), \
+             patch.object(self.q.os, "close"), \
+             patch.object(self.q.select_io, "select", return_value=([], [], [])), \
+             patch.object(self.q.time, "time", return_value=self.now), \
+             patch.object(self.q.time, "monotonic", side_effect=[0, 1, 20]):
+            self.assertFalse(self.q.refresh_agy_metadata(self.home))
+
 
 if __name__ == "__main__":
     unittest.main()
