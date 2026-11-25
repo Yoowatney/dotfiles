@@ -268,6 +268,18 @@ class NativeHooksTest(unittest.TestCase):
                 self.assertEqual(hooks.pre_tool(event(CommandLine=cmd))['decision'], 'deny')
         self.assertEqual(hooks.pre_tool(event(CommandLine='agy --version'))['decision'], 'allow')
 
+    def test_host_without_agent_gcp_runs_tools_with_an_empty_gcloud_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / '.config/gcloud').mkdir(parents=True)
+            (home / '.config/gcloud/active_config').write_text('default')
+            with patch.object(hooks, 'HOME', home), patch.object(hooks, 'settings', return_value=([], [])):
+                result = hooks.pre_tool(event(CommandLine='printf OK'))
+            self.assertEqual(result['decision'], 'allow')
+            line = result['overwrite']['CommandLine']
+            self.assertIn('CLOUDSDK_CONFIG=' + str(home / '.local/state/antigravity-worker/no-gcloud'), line)
+            self.assertNotIn('access-token', line)
+
     def test_safe_command_is_delegated_without_auto_approval(self):
         result = hooks.pre_tool(event(CommandLine='printf OK'))
         self.assertEqual(result['decision'], 'allow')
