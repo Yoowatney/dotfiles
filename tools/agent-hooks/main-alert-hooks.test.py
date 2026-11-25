@@ -31,7 +31,7 @@ class MainAlertHooksTest(unittest.TestCase):
 case "$1 $2" in
     'pane get')
         printf '["pane", "get", "%s"]\\n' "$3" >> "$HOME/herdr-commands"
-        [ -z "${QUERY_SLEEP:-}" ] || exec sleep 3
+        [ -z "${QUERY_SLEEP:-}" ] || sleep 3
         printf '%s\\n' "$PANE_JSON"
         [ -z "${QUERY_FAIL:-}" ] || exit 1
         ;;
@@ -460,7 +460,7 @@ if __name__ == "__main__":
         bin_dir.mkdir()
         python = bin_dir / "python3"
         python.write_text("#!/bin/sh\n"
-                          "if [ \"$1\" = \"$HERDR_BIN_PATH\" ]; then exec sleep 3; fi\n"
+                          "if [ \"$1\" = \"$HERDR_BIN_PATH\" ]; then sleep 3; fi\n"
                           "exec " + shlex.quote(sys.executable) + ' "$@"\n')
         python.chmod(0o755)
         self.env["PATH"] = str(bin_dir) + os.pathsep + self.env["PATH"]

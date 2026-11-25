@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -38,54 +39,77 @@ class RefreshRace(unittest.TestCase):
         (self.root / "session").write_text("old-session")
         (self.root / "status").write_text("working")
         fake = self.root / "herdr"
-        fake.write_text('''#!/usr/bin/env python3
-import json, os, pathlib, sys, time
-r = pathlib.Path(os.environ["FIXTURE"])
-a = sys.argv[1:]
-sid = (r / "session").read_text()
-main = dict(pane_id="w1:p1", terminal_id="main-terminal", agent="claude", agent_session=dict(value=sid), agent_status=(r / "status").read_text(), label="main", scroll=dict(offset_from_bottom=0))
-sender = dict(pane_id="w1:p9", terminal_id="sender-terminal", agent="codex", agent_session=dict(value="sender"), label="worker")
-if a[:2] == ["pane", "list"]: print(json.dumps(dict(result=dict(panes=[main, sender]))))
-elif a[:2] == ["pane", "get"]:
-    if a[2] not in ("w1:p1", "w1:p9"): raise SystemExit(1)
-    if a[2] == "w1:p1" and (r / "get-fails").exists():
-        (r / "get-fails").unlink()
-        (r / "get-failed").touch()
-        raise SystemExit(1)
-    print(json.dumps(dict(result=dict(pane=main if a[2] == "w1:p1" else sender))))
-elif a[:2] == ["pane", "read"]:
-    print("─" * 40 + "\\n❯ " + ("typed draft" if (r / "full").exists() else "") + "\\n" + "─" * 40 + "\\n  footer")
-elif a[:2] == ["tab", "list"]: print('{"result":{"tabs":[]}}')
-elif a[:2] == ["session", "list"]: print('{"sessions":[{"name":"default","running":true,"socket_path":"/default/herdr.sock"}]}')
-elif a[:2] == ["agent", "prompt"]:
-    if a[2] != "w1:p1": raise SystemExit(0)
-    text = a[3]
-    if (r / "pause-priority").exists() and "[Slack #0-yoyooyo 요유]" in text:
-        (r / "priority-inflight").touch()
-        while not (r / "priority-continue").exists(): time.sleep(.02)
-    with (r / "prompts").open("a") as f: f.write(json.dumps([sid, text]) + "\\n")
-    if text == "/clear":
-        (r / "clearing").touch()
-        if (r / "return-before-clear").exists(): raise SystemExit(0)
-        while not (r / "clear-continue").exists(): time.sleep(.02)
-        (r / "session").write_text("new-session")
-        (r / "status").write_text("idle")
-    elif "[main-refresh]" in text:
-        with (r / "old-session.jsonl").open("a") as f: f.write(json.dumps(dict(type="user", message=dict(content=text))) + "\\n")
-        (r / "requested").touch()
-        if (r / "pause-retry").exists() and (r / "no-handoff").exists():
-            (r / "retry-inflight").touch()
-            while not (r / "retry-continue").exists(): time.sleep(.02)
-        if not (r / "no-handoff").exists():
-            time.sleep(.05)
-            (r / "state/agent-handoff/w1:p1.md").write_text(text.split()[-1] + "\\nhandoff")
-            if (r / "snapshot-fails").exists():
-                (r / "state/agent-handoff/refresh-recovery").write_text("not a directory")
-        if (r / "hold-after-request").exists(): (r / "status").write_text("working")
-    else:
-        with (r / "old-session.jsonl").open("a") as f: f.write(json.dumps(dict(type="user", message=dict(content=text))) + "\\n")
-elif a[:2] == ["agent", "send-keys"]: raise SystemExit("must preserve typed draft")
-else: raise SystemExit(2)
+        # The fixture must not start an extra Python interpreter for every CLI
+        # query inside the watcher's real deadlines, especially under load.
+        fake.write_text('''#!/bin/sh
+r=$FIXTURE
+sid=$(cat "$r/session")
+main() {
+    jq -cn --arg sid "$sid" --arg status "$(cat "$r/status")" \\
+      '{pane_id:"w1:p1",terminal_id:"main-terminal",agent:"claude",agent_session:{value:$sid},agent_status:$status,label:"main",scroll:{offset_from_bottom:0}}'
+}
+sender='{"pane_id":"w1:p9","terminal_id":"sender-terminal","agent":"codex","agent_session":{"value":"sender"},"label":"worker"}'
+append_user() {
+    jq -cn --arg text "$text" '{type:"user",message:{content:$text}}' >> "$r/old-session.jsonl"
+}
+case "$1 $2" in
+    'pane list') printf '{"result":{"panes":[%s,%s]}}\\n' "$(main)" "$sender" ;;
+    'pane get')
+        case "$3" in
+            w1:p1)
+                if [ -e "$r/get-fails" ]; then
+                    rm "$r/get-fails"
+                    touch "$r/get-failed"
+                    exit 1
+                fi
+                row=$(main) ;;
+            w1:p9) row=$sender ;;
+            *) exit 1 ;;
+        esac
+        printf '{"result":{"pane":%s}}\\n' "$row" ;;
+    'pane read')
+        draft=
+        [ ! -e "$r/full" ] || draft='typed draft'
+        printf '%s\\n' '────────────────────────────────────────' "❯ $draft" '────────────────────────────────────────' '  footer' ;;
+    'tab list') printf '%s\\n' '{"result":{"tabs":[]}}' ;;
+    'session list') printf '%s\\n' '{"sessions":[{"name":"default","running":true,"socket_path":"/default/herdr.sock"}]}' ;;
+    'agent prompt')
+        [ "$3" = w1:p1 ] || exit 0
+        text=$4
+        case "$text" in *'[Slack #0-yoyooyo 요유]'*)
+            if [ -e "$r/pause-priority" ]; then
+                touch "$r/priority-inflight"
+                while [ ! -e "$r/priority-continue" ]; do sleep .02; done
+            fi ;;
+        esac
+        jq -cn --arg sid "$sid" --arg text "$text" '[$sid,$text]' >> "$r/prompts"
+        if [ "$text" = /clear ]; then
+            touch "$r/clearing"
+            [ ! -e "$r/return-before-clear" ] || exit 0
+            while [ ! -e "$r/clear-continue" ]; do sleep .02; done
+            printf '%s' new-session > "$r/session"
+            printf '%s' idle > "$r/status"
+        else
+            append_user
+            case "$text" in *'[main-refresh]'*)
+                touch "$r/requested"
+                if [ -e "$r/pause-retry" ] && [ -e "$r/no-handoff" ]; then
+                    touch "$r/retry-inflight"
+                    while [ ! -e "$r/retry-continue" ]; do sleep .02; done
+                fi
+                if [ ! -e "$r/no-handoff" ]; then
+                    sleep .05
+                    printf '%s\\nhandoff' "${text##* }" > "$r/state/agent-handoff/w1:p1.md"
+                    if [ -e "$r/snapshot-fails" ]; then
+                        printf '%s' 'not a directory' > "$r/state/agent-handoff/refresh-recovery"
+                    fi
+                fi
+                [ ! -e "$r/hold-after-request" ] || printf '%s' working > "$r/status" ;;
+            esac
+        fi ;;
+    'agent send-keys') printf '%s\\n' 'must preserve typed draft' >&2; exit 1 ;;
+    *) exit 2 ;;
+esac
 ''')
         fake.chmod(0o755)
         self.env = {**os.environ, "FIXTURE": str(self.root), "HOME": str(self.root),
@@ -102,6 +126,7 @@ else: raise SystemExit(2)
         (self.root / "clear-continue").touch()
         (self.root / "priority-continue").touch()
         (self.root / "retry-continue").touch()
+        (self.root / "expire-deadline").touch()
         (self.root / "full").unlink(missing_ok=True)
         (self.root / "status").write_text("idle")
         if self.proc and self.proc.poll() is None:
@@ -344,9 +369,29 @@ else: raise SystemExit(2)
         (self.root / "return-before-clear").touch()
         (self.root / "status").write_text("idle")
         self.env["MAIN_REFRESH_DEADLINE"] = "8"
+        # Exercise expiry after /clear was accepted, not host startup speed.
+        # Keep the real eight-second timer; hold only its completion signal
+        # until the test has reached the recovery boundary under contention.
+        bindir = self.root / "bin"
+        bindir.mkdir(exist_ok=True)
+        timer = bindir / "sleep"
+        timer.write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = "$MAIN_REFRESH_DEADLINE" ]; then\n'
+            '  /bin/sleep "$1" & timer=$!\n'
+            '  trap \'if [ -n "$timer" ]; then kill "$timer" 2>/dev/null; wait "$timer" 2>/dev/null; fi; exit 0\' HUP INT TERM\n'
+            '  wait "$timer"; timer=\n'
+            '  while [ ! -e "$FIXTURE/expire-deadline" ]; do /bin/sleep .02; done\n'
+            'else\n'
+            '  exec /bin/sleep "$@"\n'
+            'fi\n')
+        timer.chmod(0o755)
+        self.env["PATH"] = str(bindir) + os.pathsep + self.env["PATH"]
         self.start()
         until(lambda: (self.root / "clearing").exists())
         self.tell("after-accepted-clear", raw=True)
+        self.assertIsNone(self.proc.poll(), "watcher must await the expiry signal")
+        (self.root / "expire-deadline").touch()
         self.assertEqual(self.proc.wait(timeout=12), 0)
         self.assertTrue((self.state / "agent-handoff/w1:p1.md").exists())
         until(lambda: any(text == "after-accepted-clear" for _, text in self.prompts()), timeout=3)
@@ -367,6 +412,20 @@ else: raise SystemExit(2)
         self.assertIn(str(records[0]), result)
         self.assertIn("relays.jsonl", result)
         self.assertEqual(records[0].read_text(), original)
+
+    def test_refresh_fixture_does_not_need_another_python_startup(self):
+        # The real watcher has a bounded workflow. Loading another Python
+        # interpreter for each fake CLI call must not consume that budget.
+        bindir = self.root / "bin"
+        bindir.mkdir()
+        python = bindir / "python3"
+        python.write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = "$HERDR_BIN_PATH" ]; then sleep 3; fi\n'
+            f'exec "{sys.executable}" "$@"\n')
+        python.chmod(0o755)
+        self.env["PATH"] = str(bindir) + os.pathsep + self.env["PATH"]
+        self.test_clear_confirmation_timeout_recovers_handoff_and_relays()
 
     def test_dead_clear_owner_expires_and_record_failure_retains_queue(self):
         (self.root / "return-before-clear").touch()
