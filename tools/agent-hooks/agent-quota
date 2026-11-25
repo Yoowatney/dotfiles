@@ -213,8 +213,7 @@ def subscription_settings(kind, root, cwd):
 
 
 def normalize(at, short, week, now, short_key, week_key, ceiling, optional_short=False):
-    if (at is None or not -FUTURE_SLOP <= now - at <= MAX_AGE
-            or result["reason"] not in ("within reserve", "reserve reached")):
+    if at is None or not -FUTURE_SLOP <= now - at <= MAX_AGE:
         return invalid("missing/stale/future observation")
     if (not isinstance(short, dict) and not (optional_short and short is None)) or not isinstance(week, dict):
         return invalid("missing limit window")
@@ -332,7 +331,8 @@ def prepare_agy(now, cwd):
                             "subscription settings invalid", "subscription settings unknown/overridden"):
         return
     at = epoch(read_json(state_dir() / "agy.json").get("captured_at"))
-    if at is None or not -FUTURE_SLOP <= now - at <= MAX_AGE:
+    if (at is None or not -FUTURE_SLOP <= now - at <= MAX_AGE
+            or result["reason"] not in ("within reserve", "reserve reached")):
         refresh_agy_metadata(cwd)
 
 
