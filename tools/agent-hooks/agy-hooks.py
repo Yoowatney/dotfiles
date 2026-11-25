@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import configparser
 import importlib.util
 import json
 import os
@@ -108,6 +109,9 @@ def policy_problem(payload, rules):
             return 'Subscription OAuth credentials cannot be accessed by worker tools.'
     if tool == 'Bash' and SLACK_WRITE.search(inp['command']):
         return 'Worker Slack publication must go through the lead.'
+    if tool == 'Bash' and re.search(r'\bgcloud\s+config\b', inp['command']) and re.search(
+            r'\b(?:set|unset|activate|create|delete|rename)\b', inp['command']):
+        return 'Worker tools cannot change persistent GCP account or project configuration.'
     if tool == 'Bash':
         source = CLAUDE / 'hooks/no-sed-inplace.py'
         spec = importlib.util.spec_from_file_location('agy_shell_policy', source)
@@ -242,6 +246,42 @@ def control_command(command, env=None):
             shlex.join(['/usr/bin/printf', '%s\n', tool + ': completed by guarded harness bridge'])}}
 
 
+def gcloud_environment():
+    """Use only the existing agent ADC; leave the shared credential database read-only."""
+    directory = HOME / '.config/gcloud'
+    active_path = directory / 'active_config'
+    if not active_path.exists():
+        return []
+    active = active_path.read_text().strip()
+    if active != 'munice':
+        raise ValueError('the active GCP configuration is not the agent configuration')
+    config = configparser.ConfigParser()
+    config.read(directory / 'configurations' / ('config_' + active))
+    principal = config.get('auth', 'impersonate_service_account')
+    if not re.fullmatch(r'ai-agent-[A-Za-z0-9-]+@[A-Za-z0-9-]+\.iam\.gserviceaccount\.com', principal):
+        raise ValueError('the GCP configuration does not select an agent account')
+    adc_path = directory / 'application_default_credentials.json'
+    adc = json.loads(adc_path.read_text())
+    expected = 'https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/' + principal + ':generateAccessToken'
+    if adc.get('type') != 'impersonated_service_account' or adc.get('service_account_impersonation_url') != expected:
+        raise ValueError('the existing ADC does not match the configured agent account')
+    # A separate config root keeps all other accounts outside the sandbox.
+    # Account and project files stay read-only; cache writes stay isolated. No credential is copied.
+    worker = HOME / '.local/state/antigravity-worker/gcloud'
+    (worker / 'configurations').mkdir(parents=True, exist_ok=True, mode=0o700)
+    for target, content in ((worker / 'active_config', active),
+                            (worker / 'configurations' / ('config_' + active),
+                             (directory / 'configurations' / ('config_' + active)).read_text())):
+        if not target.exists() or target.read_text() != content:
+            temp = target.with_suffix('.tmp')
+            temp.write_text(content)
+            temp.chmod(0o400)
+            temp.replace(target)
+    return ['CLOUDSDK_CONFIG=' + str(worker),
+            'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=' + str(adc_path),
+            'CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=']
+
+
 def pre_tool(event):
     try:
         payload = translate(event)
@@ -268,7 +308,10 @@ def pre_tool(event):
             # AGY may inject ADC variables into tool children after pane startup.
             # Check the original command first, then keep the execution shell clean.
             result['overwrite'] = {'CommandLine': shlex.join(
-                ['/usr/bin/env', *[part for key in AUTH_OVERRIDES for part in ('-u', key)],
+                ['/usr/bin/env', *[part for key in (*AUTH_OVERRIDES,
+                     'CLOUDSDK_CORE_ACCOUNT', 'CLOUDSDK_ACTIVE_CONFIG_NAME',
+                     'CLOUDSDK_AUTH_ACCESS_TOKEN', 'CLOUDSDK_AUTH_ACCESS_TOKEN_FILE') for part in ('-u', key)],
+                 *gcloud_environment(),
                  '/bin/zsh', '-f', '-c', payload['tool_input']['command']])}
         return result
     except Exception:

@@ -47,8 +47,8 @@ echo "ok: agent-runner"
   rm "$SANDBOX/home/.config/munice/host-role"
   is_main
   if ps --kind claude --why gcp "GCP worker" "Synthetic task" >/dev/null 2>"$SANDBOX/err"; then fail 'GCP cannot justify Claude work'; fi
-  grep -qF -- '--kind codex' "$SANDBOX/err" || fail 'GCP refusal must name the working Codex route'
-  grep -qF -- 'GCP 작업과 재확인은 --kind codex' "$SUBJECT" || fail 'help must name the GCP Codex route'
-  grep -qF -- 'pane-spawn --kind codex' "$here/yoyoo-share-guard.py" || fail 'recheck guidance must retain a working GCP route'
+  grep -qF -- '--kind auto' "$SANDBOX/err" || fail 'GCP refusal must name the guarded automatic route'
+  grep -qF -- 'GCP 작업과 재확인은 --kind auto' "$SUBJECT" || fail 'help must name the GCP automatic route'
+  grep -qF -- 'pane-spawn --kind auto' "$here/yoyoo-share-guard.py" || fail 'recheck guidance must retain a working GCP route'
 )
 echo 'ok: default AGY routing regressions'

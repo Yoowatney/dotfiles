@@ -19,6 +19,37 @@ def event(name='run_command', **args):
 
 
 class NativeHooksTest(unittest.TestCase):
+    def test_gcloud_uses_matching_agent_adc_without_writable_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            folder = home / '.config/gcloud'
+            (folder / 'configurations').mkdir(parents=True)
+            (folder / 'active_config').write_text('munice')
+            principal = 'ai-agent-test@example.iam.gserviceaccount.com'
+            (folder / 'configurations/config_munice').write_text('[auth]\nimpersonate_service_account = ' + principal)
+            adc = folder / 'application_default_credentials.json'
+            data = {'type': 'impersonated_service_account', 'service_account_impersonation_url':
+                    'https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/' + principal + ':generateAccessToken'}
+            adc.write_text(json.dumps(data))
+            with patch.object(hooks, 'HOME', home):
+                env = hooks.gcloud_environment()
+                self.assertEqual(env, ['CLOUDSDK_CONFIG=' + str(home / '.local/state/antigravity-worker/gcloud'),
+                                      'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=' + str(adc),
+                                      'CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT='])
+                data['service_account_impersonation_url'] += 'wrong'
+                adc.write_text(json.dumps(data))
+                with self.assertRaises(ValueError):
+                    hooks.gcloud_environment()
+                (folder / 'active_config').write_text('munice-admin')
+                with self.assertRaises(ValueError):
+                    hooks.gcloud_environment()
+
+    def test_gcloud_configuration_change_is_denied_before_rewrite(self):
+        for command in ('gcloud config set project example', 'gcloud config unset auth/impersonate_service_account',
+                        'gcloud --configuration=munice-admin version'):
+            with self.subTest(command=command):
+                self.assertEqual(hooks.pre_tool(event(CommandLine=command))['decision'], 'deny')
+
     def test_maps_commands_and_file_content(self):
         p = hooks.translate(event(CommandLine='printf OK'))
         self.assertEqual(p['tool_name'], 'Bash')
