@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Safe regressions for the live watchdog test's preconditions and snapshot use."""
 import importlib.util
+import fcntl
 import json
+import os
 from pathlib import Path
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -16,6 +20,106 @@ def load(name, filename):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+class UidLockTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.children = []
+        self.addCleanup(self.stop_children)
+        source = (HERE / 'fork-watch.test.sh').read_text()
+        prefix = source[:source.index('\nHERE=')]
+        lock_source = '/tmp/dotfiles-fork-watch-{os.getuid()}.lock'
+        self.assertEqual(prefix.count(lock_source), 1)
+        lock_dir = self.root / 'locks'
+        lock_dir.mkdir()
+        self.lock_path = lock_dir / f'dotfiles-fork-watch-{os.getuid()}.lock'
+        # Keep the UID key outside both TMPDIRs without contending with live tests.
+        prefix = prefix.replace(lock_source, str(lock_dir) + '/dotfiles-fork-watch-{os.getuid()}.lock')
+        # Execute the real locking entry point with a small critical section.
+        # Each copy has a different TMPDIR, just like independent pre-push runs.
+        self.script = self.root / 'fixture.sh'
+        self.script.write_text(prefix + '''
+exec /usr/bin/python3 -I - "$FORK_FIXTURE_DIR" "$FORK_FIXTURE_NAME" "$FORK_FIXTURE_EXIT" <<'PY'
+from pathlib import Path
+import sys, time
+root, name, code = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+(root / (name + '.entered')).touch()
+deadline = time.monotonic() + 30
+while not (root / (name + '.release')).exists():
+    if time.monotonic() >= deadline:
+        raise SystemExit(99)
+    time.sleep(.02)
+raise SystemExit(code)
+PY
+''')
+
+    def stop_children(self):
+        for proc, output in self.children:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=10)
+            output.close()
+
+    def start(self, name, code=0):
+        tmpdir = self.root / ('tmp-' + name)
+        tmpdir.mkdir()
+        output = (self.root / (name + '.log')).open('w+')
+        env = dict(os.environ, TMPDIR=str(tmpdir), FORK_FIXTURE_DIR=str(self.root),
+                   FORK_FIXTURE_NAME=name, FORK_FIXTURE_EXIT=str(code))
+        proc = subprocess.Popen(['/bin/bash', str(self.script)], env=env,
+                                stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        self.children.append((proc, output))
+        return proc
+
+    def wait_for(self, condition):
+        deadline = time.monotonic() + 30
+        while not condition():
+            self.assertLess(time.monotonic(), deadline, 'fixture condition was not reached')
+            time.sleep(.02)
+
+    def entered(self, name):
+        return (self.root / (name + '.entered')).exists()
+
+    def waiting(self, name):
+        return 'Waiting for another fork-watch live test' in (self.root / (name + '.log')).read_text()
+
+    def pair(self, code=0):
+        first = self.start('first', code)
+        self.wait_for(lambda: self.entered('first'))
+        with self.lock_path.open('a') as probe:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        second = self.start('second')
+        self.wait_for(lambda: self.waiting('second') or self.entered('second'))
+        self.assertTrue(self.waiting('second'))
+        self.assertFalse(self.entered('second'))
+        return first, second
+
+    def finish(self, proc, name, code=0):
+        (self.root / (name + '.release')).touch()
+        self.assertEqual(proc.wait(timeout=10), code)
+
+    def test_different_tmpdirs_share_one_uid_lock(self):
+        first, second = self.pair()
+        self.finish(first, 'first')
+        self.wait_for(lambda: self.entered('second'))
+        self.finish(second, 'second')
+
+    def test_failed_owner_releases_lock_and_preserves_exit_status(self):
+        first, second = self.pair(7)
+        self.finish(first, 'first', 7)
+        self.wait_for(lambda: self.entered('second'))
+        self.finish(second, 'second')
+
+    def test_killed_owner_releases_lock(self):
+        first, second = self.pair()
+        os.killpg(first.pid, signal.SIGKILL)
+        self.assertEqual(first.wait(timeout=10), -signal.SIGKILL)
+        self.wait_for(lambda: self.entered('second'))
+        self.finish(second, 'second')
 
 
 class ReadinessTests(unittest.TestCase):

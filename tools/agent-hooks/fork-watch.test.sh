@@ -13,6 +13,33 @@
 # Refuses to start when its cap (twice the count) would pass three quarters of kern.maxprocperuid; stops the runaway itself if the
 # count passes its cap + 100. A fixed 1300 refused on a busy host, where a dozen agent sessions alone hold 1400 processes.
 set -uo pipefail
+# The live fixture consumes the UID-wide process allowance. Serialize separate
+# pushes before measuring it; each push has its own TMPDIR, so the lock cannot.
+if [ "${1-}" != "--uid-lock-held" ]; then
+  exec /usr/bin/python3 -I - "$0" "$BASH" <<'PY'
+import fcntl
+import os
+import signal
+import subprocess
+import sys
+
+path = f'/tmp/dotfiles-fork-watch-{os.getuid()}.lock'
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+with os.fdopen(fd, 'w') as lock:
+    os.fchmod(lock.fileno(), 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print('Waiting for another fork-watch live test...', flush=True)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+    child = subprocess.Popen([sys.argv[2], sys.argv[1], '--uid-lock-held'])
+    # Let the shell finish its EXIT cleanup before releasing the lock. In
+    # particular, subprocess.run would kill it on KeyboardInterrupt.
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, signal.SIG_IGN)
+    raise SystemExit(child.wait())
+PY
+fi
 HERE=$(cd "$(dirname "$0")" && pwd)
 T=$(mktemp -d)
 bomb=0 fails=0
