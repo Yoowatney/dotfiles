@@ -247,15 +247,20 @@ agy_input=$(jq -nc --arg reset "$(date -u -r "$reset" +%Y-%m-%dT%H:%M:%SZ)" \
   '{plan_tier:"Google AI Ultra",account:"must-not-be-cached",quota:{"gemini-5h":{remaining_fraction:0.75,reset_time:$reset},"gemini-weekly":{remaining_fraction:0.29,reset_time:$reset},"3p-5h":{remaining_fraction:1,reset_time:"1970-01-01T00:00:00Z"},"3p-weekly":{remaining_fraction:1,reset_time:"1970-01-01T00:00:00Z"}}}')
 printf '%s' "$agy_input" | bash "$SCRIPT" --capture-agy
 out=$(COLUMNS=200 bash "$SCRIPT" --agy-text | plain)
-check "agy shows official plan and converts remaining fraction to usage" "$out" 'agy \(Google AI Ultra\) Gemini 5h ███░░░░░░░ 25% .*Weekly ███████░░░ 71%'
-check "agy keeps third-party quota separate" "$out" 'agy 3P 5h ░░░░░░░░░░ 0% .*Weekly ░░░░░░░░░░ 0%'
+check "agy shows official plan and converts remaining fraction to usage" "$out" 'agy \(Google AI Ultra\) 5h ███░░░░░░░ 25% .*Weekly ███████░░░ 71%'
+check "agy hides model names and third-party quota" "$out" 'agy ' 'Gemini|3P'
+check_exact "wide agy display uses one line" "$(wc -l <<<"$out" | tr -d ' ')" '1'
 check "agy cache excludes unrelated input" "$(cat "$XDG_STATE_HOME/agent-quota/agy.json")" 'Google AI Ultra' 'must-not-be-cached|account'
 check_exact "agy cache is private" "$(stat -f '%Lp' "$XDG_STATE_HOME/agent-quota/agy.json")" '600'
 out=$(COLUMNS=60 bash "$SCRIPT" --agy-text | plain)
-check "narrow agy display splits quota windows" "$out" '^agy Gemini Weekly ████░░ 71%'
+check "narrow agy display splits quota windows without model names" "$out" '^agy Weekly ████░░ 71%' 'Gemini|3P'
 out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run_full | plain)
 check "Claude HUD includes cached agy usage" "$out" 'agy \(Google AI Ultra\)'
 check "adding agy preserves Codex" "$out" 'Codex '
+check "Claude HUD omits agy model names and third-party quota" "$out" 'agy ' 'Gemini|3P'
+printf '%s' "$agy_input" | jq 'del(.quota["gemini-5h"], .quota["gemini-weekly"])' | bash "$SCRIPT" --capture-agy
+out=$(bash "$SCRIPT" --agy-text | plain)
+check "third-party quota alone does not appear" "$out" '^agy \(no usage data\)$' 'Gemini|3P|[0-9]+%'
 printf '%s' '{"plan_tier":"unknown","quota":{"gemini-5h":{"remaining_fraction":1.5}}}' | bash "$SCRIPT" --capture-agy
 out=$(bash "$SCRIPT" --agy-text | plain)
 check "invalid fractions never become real usage" "$out" 'agy \(no usage data\)' '[0-9]+%'
@@ -272,7 +277,7 @@ out=$(bash "$SCRIPT" --agy-text | plain)
 check "old agy data carries its age" "$out" 'updated 2h ago'
 printf '%s' "$agy_input" | jq '.quota["gemini-5h"].reset_time="2020-01-01T00:00:00Z"' | bash "$SCRIPT" --capture-agy
 out=$(COLUMNS=200 bash "$SCRIPT" --agy-text | plain)
-check "expired agy quota awaits a fresh reading" "$out" 'Gemini 5h \(reset; awaiting update\)' 'Gemini 5h .*25%'
+check "expired agy quota awaits a fresh reading" "$out" '5h \(reset; awaiting update\)' '5h .*25%'
 printf '%s' 'broken cache' >"$XDG_STATE_HOME/agent-quota/agy.json"
 out=$(bash "$SCRIPT" --agy-text | plain)
 check "a damaged cache keeps the status line available" "$out" '^agy \(no usage data\)$' 'Traceback'

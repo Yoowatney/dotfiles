@@ -14,7 +14,7 @@ import datetime, json, math, os, pathlib, re, sys, tempfile, time, unicodedata
 mode = sys.argv[1]
 path = pathlib.Path(os.environ.get("XDG_STATE_HOME", str(pathlib.Path.home() / ".local/state"))) / "agent-quota/agy.json"
 now = int(time.time())
-keys = ("gemini-5h", "gemini-weekly", "3p-5h", "3p-weekly")
+keys = ("gemini-5h", "gemini-weekly")
 def epoch(value):
     if not isinstance(value, str): return None
     try: return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
@@ -74,17 +74,14 @@ try:
     plan = "".join(c for c in str(plan) if c.isprintable())[:60]
     age = now - data.get("captured_at", 0)
     title = "agy (" + plan + ")" + (" (updated " + duration(age // 60 * 60) + " ago)" if age >= 3600 else "")
-    for group, label in (("gemini", "Gemini"), ("3p", "3P")):
-        if not any(valid(quotas.get(group + suffix)) for suffix in ("-5h", "-weekly")): continue
-        prefix = title if group == "gemini" else "agy"
-        first = label + " 5h " + bucket(group + "-5h")
-        second = "Weekly " + bucket(group + "-weekly")
-        line = prefix + " " + first + " │ " + second
-        if not cols or cells(line) <= cols: print(line)
-        else:
-            if group == "gemini": print(title)
-            print("agy " + first)
-            print("agy " + label + " " + second)
+    first = "5h " + bucket("gemini-5h")
+    second = "Weekly " + bucket("gemini-weekly")
+    line = title + " " + first + " │ " + second
+    if not cols or cells(line) <= cols: print(line)
+    else:
+        print(title)
+        print("agy " + first)
+        print("agy " + second)
 except (OSError, ValueError, TypeError, AttributeError, KeyError, OverflowError):
     if mode != "capture": print("agy (no usage data)")
 ' "$1"
