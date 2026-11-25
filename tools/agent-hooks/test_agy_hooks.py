@@ -38,6 +38,15 @@ class NativeHooksTest(unittest.TestCase):
         self.assertEqual(hooks.pre_tool(event())['decision'], 'deny')
         self.assertEqual(hooks.pre_tool(event(CommandLine='printf OK', RequestedTerminalID='another-terminal'))['decision'], 'deny')
 
+    def test_sandbox_bypass_is_denied(self):
+        with patch.object(hooks, 'settings', return_value=([], [])):
+            for value in (True, 'true', 1, 'invalid', None):
+                with self.subTest(value=value):
+                    self.assertEqual(hooks.pre_tool(event(CommandLine='printf OK', BypassSandbox=value))['decision'], 'deny')
+            for value in (False, 'false'):
+                with self.subTest(value=value):
+                    self.assertEqual(hooks.pre_tool(event(CommandLine='printf OK', BypassSandbox=value))['decision'], 'allow')
+
     def test_stop_only_handles_declared_worker(self):
         with patch.object(hooks, 'load_completion') as loader:
             self.assertEqual(hooks.completion({}, {}), {'decision': 'allow'})

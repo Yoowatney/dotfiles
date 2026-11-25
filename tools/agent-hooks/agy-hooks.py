@@ -45,6 +45,8 @@ def translate(event):
     base = {'session_id': nonempty(event.get('conversationId')), 'cwd': cwd,
             'transcript_path': event.get('transcriptPath') or '', 'hook_event_name': 'PreToolUse'}
     if name == 'run_command':
+        if 'BypassSandbox' in args and not (args['BypassSandbox'] is False or args['BypassSandbox'] == 'false'):
+            raise ValueError('sandbox bypass is not supported')
         if args.get('RequestedTerminalID'):
             raise ValueError('cross-terminal execution is not supported')
         tool, inp = 'Bash', {'command': nonempty(args.get('CommandLine')),
