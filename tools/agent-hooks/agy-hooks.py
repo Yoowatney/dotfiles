@@ -110,7 +110,7 @@ def policy_problem(payload, rules):
             return 'Subscription OAuth credentials cannot be accessed by worker tools.'
     if tool == 'Bash' and SLACK_WRITE.search(inp['command']):
         return 'Worker Slack publication must go through the lead.'
-    if tool == 'Bash' and re.search(r'\bgcloud\s+config\b', inp['command']) and re.search(
+    if tool == 'Bash' and re.search(r'\bgcloud\b[^\n;&|]*\bconfig\b', inp['command']) and re.search(
             r'\b(?:set|unset|activate|create|delete|rename)\b', inp['command']):
         return 'Worker tools cannot change persistent GCP account or project configuration.'
     if tool == 'Bash':

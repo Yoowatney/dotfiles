@@ -46,6 +46,8 @@ class NativeHooksTest(unittest.TestCase):
 
     def test_gcloud_configuration_change_is_denied_before_rewrite(self):
         for command in ('gcloud config set project example', 'gcloud config unset auth/impersonate_service_account',
+                        'gcloud --project=example config set project another',
+                        'gcloud --quiet config configurations activate munice',
                         'gcloud --configuration=munice-admin version'):
             with self.subTest(command=command):
                 self.assertEqual(hooks.pre_tool(event(CommandLine=command))['decision'], 'deny')
