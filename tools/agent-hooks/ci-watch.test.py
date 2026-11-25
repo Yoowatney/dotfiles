@@ -2,6 +2,7 @@
 """Exercise the real CLI with a local gh stand-in; no network or Actions starts."""
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -21,6 +22,8 @@ class WatchTests(unittest.TestCase):
 p = pathlib.Path(os.environ['CALLS'])
 with p.open('a') as f:
     f.write(json.dumps(sys.argv[1:]) + '\\n')
+if os.environ.get('PID_FILE'):
+    pathlib.Path(os.environ['PID_FILE']).write_text(str(os.getpid()))
 if os.environ.get('WAIT'):
     while not pathlib.Path(os.environ['WAIT']).exists(): time.sleep(.01)
 sys.exit(int(os.environ.get('RESULT', '0')))
@@ -78,6 +81,27 @@ sys.exit(int(os.environ.get('RESULT', '0')))
             child.communicate(timeout=5)
             self.assertEqual(child.returncode, 2)
         self.assertFalse((self.root / 'calls').exists())
+
+    def test_killed_wrapper_does_not_release_a_running_gh_lock(self):
+        release = self.root / 'release'
+        pid_file = self.root / 'gh.pid'
+        first = self.start(WAIT=str(release), PID_FILE=str(pid_file))
+        deadline = time.monotonic() + 5
+        while not pid_file.exists() and time.monotonic() < deadline:
+            if first.poll() is not None:
+                self.fail(first.communicate()[1])
+            time.sleep(.01)
+        self.assertTrue(pid_file.exists())
+        child_pid = int(pid_file.read_text())
+        try:
+            first.kill()
+            first.wait(timeout=5)
+            duplicate = self.start()
+            _, err = duplicate.communicate(timeout=5)
+            self.assertEqual(duplicate.returncode, 75, err)
+            self.assertEqual(len((self.root / 'calls').read_text().splitlines()), 1)
+        finally:
+            os.kill(child_pid, signal.SIGTERM)
 
 
 if __name__ == '__main__':
