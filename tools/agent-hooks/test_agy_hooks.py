@@ -135,6 +135,17 @@ class NativeHooksTest(unittest.TestCase):
             with self.subTest(payload=payload):
                 self.assertEqual(hooks.pre_tool(payload)['decision'], 'deny')
 
+    def test_agent_token_is_only_accessible_to_sdk(self):
+        target = str(Path.home() / '.local/state/antigravity-worker/gcp-auth/access-token')
+        cases = [event('view_file', AbsolutePath=target),
+                 event('grep_search', SearchPath=str(Path.home() / '.local/state'), Query='synthetic'),
+                 event('write_to_file', TargetFile=target, CodeContent='fixture'),
+                 event(CommandLine='cat "$CLOUDSDK_AUTH_ACCESS_TOKEN_FILE" >/dev/null'),
+                 event(CommandLine='cat ~/.local/state/antigravity-worker/gcp-auth/ac* >/dev/null')]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                self.assertEqual(hooks.pre_tool(payload)['decision'], 'deny')
+
     def test_existing_gcp_guard_blocks_native_identity_change(self):
         result = hooks.pre_tool(event(CommandLine='gcloud auth login'))
         self.assertEqual(result['decision'], 'deny')

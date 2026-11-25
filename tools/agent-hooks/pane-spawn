@@ -7,7 +7,7 @@
 # hands over the instruction. The agent's herdr name is what lets the pane close itself when its work ends (pane-label).
 # Agents cannot run `herdr agent start` or `herdr pane split` themselves: the hook no-sed-inplace.py sends them here.
 #   pane-spawn [--new-tab] [--kind claude|codex|auto|agy] [--complexity simple|normal|complex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
-#   pane-spawn "api#1 설계" "지시" -- --model opus --effort high
+#   pane-spawn --complexity complex "api#1 설계" "지시"
 # Three callers stay where they are and open beside themselves: a pane under a lead (🫡), a job tab (`pane-tell` refuses a job pane,
 # so a hidden child could reach nobody), and a pane on any server but default. So does a lead when workers cannot take the pane
 # (no such server on 집맥, down or stuck): it says so on stderr and exits 0. Beside the caller the tallest pane of the rightmost column
@@ -34,7 +34,9 @@
 # and returns to Codex once Claude's measured usage passes its reserve. Checks never follow the policy. The local policy codex-only
 # restores the previous Codex-only routing before Python runs. Forwarded arguments and ambient-runner stay on Codex.
 # A quota lookup exceeding six seconds warns once and retains the previous Codex routing.
-# Policy agy-only instead requires safe AGY subscription quota and refuses on lookup failure; it has no fallback.
+# Policy agy-only overrides every normal worker request, including explicit kinds and ambient callers.
+# It requires safe AGY subscription quota, refuses unsupported forwarded options and never falls back.
+# The legacy routing above applies only when a non-AGY rollback policy is explicitly selected.
 # Startup/readiness responses provide no verified current quota-block signal: failures never switch runners.
 # A lead opens a pane for code, tests or docs with it (요유 2026-11-05). The main pane posts to Slack; its work panes only report results.
 # The main pane opens a Claude pane that does the job only with --why, the reason Codex cannot do it (api#1036). A missing
@@ -61,7 +63,10 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full]
   --phase NAME: which phase of the job (--job-id, else the calling job) this pane works on, for the allowed-Mac check below.
   --allow-duplicate: intentionally start another worker with the same instruction. Otherwise an open worker from the
     same caller and folder is reused for ten minutes. Checks always start fresh.
+  AGY-only policy: every normal worker uses AGY, including omitted/explicit kinds and ambient callers.
+    Unsupported forwarded options are refused; use --complexity for AGY model selection. Checks remain Claude.
   --kind auto: choose a normal worker from subscription quota and weekly pace; unknown/paid usage is excluded.
+    The following legacy routing applies only after explicitly selecting a non-AGY rollback policy.
     claude-first can reuse a same-week Codex reading up to 24h old at <=80%, with the same login/billing/API guards.
     If neither runner qualifies, no pane opens. Set the agent-quota policy to codex-only for the previous routing.
     When that is for usage, the refusal asks the main pane to have 요유 switch the account or spend a reset ticket, never to wait for the reset.
@@ -193,6 +198,15 @@ bounded() { # <seconds> <command...>: its exit code, 124 past the limit
     exit($rc & 127 ? 128 + ($rc & 127) : $rc >> 8);
   ' "$@"
 }
+quota_dir=$helper_dir
+quota_policy_file=$state/agent-quota/policy
+[ -e "$quota_policy_file" ] || quota_policy_file=$quota_dir/agent-quota-policy
+quota_policy=$(cat "$quota_policy_file" 2>/dev/null)
+# A worker-only AGY policy also covers old callers, ambient work and omitted --kind.
+# Unsupported legacy options are rejected below; they never select another runtime.
+if [ -z "$check" ] && [ "$quota_policy" = agy-only ]; then
+  kind=agy asked=agy runner_reason='AGY-only worker policy'
+fi
 if [ -n "$request_child" ]; then
   # Retain the first routing decision; rechecking can change runners or warn twice.
   kind=$request_kind auto_claude=$request_auto_claude

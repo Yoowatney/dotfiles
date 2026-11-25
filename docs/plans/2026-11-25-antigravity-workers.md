@@ -24,6 +24,6 @@ Restore the previous local worker policy and settings snapshot, and remove only 
 - Open GCP work and ordinary fallback rechecks through `--kind auto`. The trusted hook validates the existing agent configuration and obtains a short-lived impersonated token outside the sandbox.
 - The native sandbox reads only the agent access token and an isolated worker configuration. It cannot read the original ADC or its source credentials. Its cache root allows SDK log/cache writes; explicit denies keep active-account, project configuration and the token read-only. No source credential file is copied and the shared GCP directory is not mounted.
 - Direct file write grants could not initialize the SQLite cache; the isolated cache-root grant is therefore required and verified together with negative configuration-write probes.
-- Pinned Codex arguments and ambient-runner calls keep the Codex route even under the AGY default policy.
+- The AGY-only policy overrides omitted and explicit normal-worker kinds, including ambient callers. Unsupported forwarded options fail without opening another runtime; model selection uses `--complexity`. Only `--check` retains Claude.
 - Model tools cannot read or modify the subscription OAuth credential file. CLI authentication remains local.
 - Install native customization and authenticate on each host before adopting the AGY default. Missing quota or customization must never trigger a paid fallback.

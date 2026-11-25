@@ -110,6 +110,16 @@ def policy_problem(payload, rules):
         if (resolved == credential or resolved.name == 'oauth_creds.json'
                 or (tool == 'Grep' and resolved in credential.parents)):
             return 'Subscription OAuth credentials cannot be accessed by worker tools.'
+    # Only the SDK may consume the short-lived token. The model must not print it
+    # or alter it; recursive searches of parent directories are denied too.
+    token = (HOME / '.local/state/antigravity-worker/gcp-auth/access-token').resolve()
+    if tool == 'Bash' and re.search(r'CLOUDSDK_AUTH_ACCESS_TOKEN_FILE|gcp-auth', inp['command']):
+        return 'Agent authentication files cannot be accessed by worker tools.'
+    if tool in ('Read', 'Grep', 'Write', 'Edit', 'MultiEdit'):
+        target = inp.get('file_path', inp.get('path', ''))
+        resolved = Path(payload['cwd'], os.path.expanduser(target)).resolve()
+        if resolved == token or token.parent in resolved.parents or resolved == token.parent or (tool == 'Grep' and resolved in token.parents):
+            return 'Agent authentication files cannot be accessed by worker tools.'
     if tool == 'Bash' and SLACK_WRITE.search(inp['command']):
         return 'Worker Slack publication must go through the lead.'
     if tool == 'Bash' and re.search(r'\bgcloud\b[^\n;&|]*\bconfig\b', inp['command']) and re.search(

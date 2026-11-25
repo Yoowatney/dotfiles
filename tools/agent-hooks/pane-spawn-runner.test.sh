@@ -32,22 +32,28 @@ run auto >/dev/null; rm -f "$policy"
 out=$(run); grep -q '^runner: agy$' <<<"$out" || fail "removing the file restores the default"
 echo "ok: agent-runner"
 
-# Default-AGY routing keeps explicit Codex arguments and ambient work on Codex.
+# AGY-only workers never fall back to Codex, including legacy/pinned callers.
 (
   source "$here/pane-spawn-test-fixture.sh"
   echo agy-only > "$SANDBOX/home/.local/state/agent-quota/policy"
+  mkdir -p "$SANDBOX/home/.gemini/antigravity-cli"
+  printf '{"useG1Credits":false,"modelProvider":""}\n' > "$SANDBOX/home/.gemini/antigravity-cli/settings.json"
+  jq -n --argjson now "$(date +%s)" '{captured_at:$now,plan_tier:"Google AI Ultra",quota:{"gemini-5h":{remaining_fraction:0.9,reset_time:($now+1000)},"gemini-weekly":{remaining_fraction:0.8,reset_time:($now+300000)}}}' > "$SANDBOX/home/.local/state/agent-quota/agy.json"
   workers_up
-  ps --kind auto "Pinned worker" "Synthetic task" -- --model codex-fixture >/dev/null 2>"$SANDBOX/err" || fail 'forwarded Codex arguments must still open'
-  has '--kind codex' 'forwarded arguments retain Codex under AGY policy'
-  has '--model codex-fixture' 'forwarded arguments reach Codex'
+  if ps --kind auto "Pinned worker" "Synthetic task" -- --model codex-fixture >/dev/null 2>"$SANDBOX/err"; then fail 'unsupported forwarded options must be refused'; fi
+  [ ! -s "$SANDBOX/log" ] || fail 'unsupported options must not open Codex'
   mkdir -p "$SANDBOX/home/.config/munice"
   echo ambient-runner > "$SANDBOX/home/.config/munice/host-role"
   ps --kind auto "Ambient worker" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'ambient worker must still open'
-  has '--kind codex' 'ambient routing retains Codex under AGY policy'
+  has '--kind agy' 'ambient routing uses AGY'
   rm "$SANDBOX/home/.config/munice/host-role"
+  ps "Default worker" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'default worker must open'
+  has '--kind agy' 'default worker uses AGY'
+  ps --kind codex "Legacy worker" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'legacy caller must open AGY'
+  has '--kind agy' 'explicit legacy runner does not select Codex'
   is_main
-  if ps --kind claude --why gcp "GCP worker" "Synthetic task" >/dev/null 2>"$SANDBOX/err"; then fail 'GCP cannot justify Claude work'; fi
-  grep -qF -- '--kind auto' "$SANDBOX/err" || fail 'GCP refusal must name the guarded automatic route'
+  ps --kind claude --why gcp "GCP worker" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'legacy GCP caller must open AGY'
+  has '--kind agy' 'GCP uses AGY'
   grep -qF -- 'GCP 작업과 재확인은 --kind auto' "$SUBJECT" || fail 'help must name the GCP automatic route'
   grep -qF -- 'pane-spawn --kind auto' "$here/yoyoo-share-guard.py" || fail 'recheck guidance must retain a working GCP route'
 )
