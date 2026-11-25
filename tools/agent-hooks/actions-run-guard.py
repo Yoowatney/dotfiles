@@ -17,6 +17,7 @@ WATCH_DENY = (
     'actions-run-guard: CI 감시는 60초 간격과 같은 run의 중복 방지를 적용하는 공용 진입점을 쓰세요: '
     'uv run --no-project python3 ~/.dotfiles/tools/agent-hooks/ci-watch.py --repo OWNER/REPO RUN_ID. '
     '이미 감시 중이면 종료 코드 75를 반환합니다. CI 성공으로 해석하지 마세요.'
+    ' PR 검사 감시는 gh pr checks --watch --interval 60처럼 60초 이상을 지정하세요.'
 )
 DENY = (
     'actions-run-guard: GitHub Actions 사용량이 이미 초과되어 확인만을 위한 새 실행을 막습니다. '
@@ -57,7 +58,33 @@ def command_args(args: list[str]) -> list[str]:
 
 
 def watches_run(args: list[str]) -> bool:
-    return not any(a in args for a in ('--help', '-h')) and command_args(args)[:2] == ['run', 'watch']
+    if any(a in args for a in ('--help', '-h')):
+        return False
+    args = command_args(args)
+    if args[:2] == ['run', 'watch']:
+        return True
+    if args[:2] != ['pr', 'checks']:
+        return False
+    watch = False
+    interval = '10'
+    for index, arg in enumerate(args[2:], 2):
+        if arg == '--watch':
+            watch = True
+        elif arg.startswith('--watch='):
+            watch = arg.split('=', 1)[1].lower() not in ('false', 'f', '0')
+        elif arg in ('--interval', '-i'):
+            interval = args[index + 1] if index + 1 < len(args) else ''
+        elif arg.startswith('--interval='):
+            interval = arg.split('=', 1)[1]
+        elif arg.startswith('-i'):
+            interval = arg[2:].removeprefix('=')
+    try:
+        # pflag uses Go's base-zero ParseInt: leading zero means octal.
+        digits = interval.lstrip('+-')
+        base = 8 if len(digits) > 1 and digits[0] == '0' and digits[1] not in 'xXoObB' else 0
+        return watch and int(interval, base) < 60
+    except ValueError:
+        return watch
 
 
 def starts_actions(args: list[str]) -> bool:

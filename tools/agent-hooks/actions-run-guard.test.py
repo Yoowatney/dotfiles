@@ -112,6 +112,32 @@ class ActionsGuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertTrue(self.verdict(command))
 
+    def test_pr_checks_watch_requires_at_least_sixty_seconds(self):
+        for command in ['gh pr checks 12 --watch', 'gh pr checks --watch -i 10',
+                        'gh pr checks --watch --interval=30',
+                        'gh -R owner/repo pr checks --watch -i0',
+                        'timeout 30 gh pr checks --watch --interval 59',
+                        'gh pr checks --watch -i070',
+                        'gh pr checks --watch --interval=0060',
+                        'gh pr checks --watch --interval=0_70',
+                        'gh pr checks --watch --interval=+070',
+                        'gh pr checks --watch --interval=0x3b',
+                        'gh pr checks --watch --interval=0o73',
+                        'gh pr checks --watch --interval=0b111011',
+                        'bash -lc "gh pr checks 12 --watch"',
+                        "ACTIONS_RUN_REASON='required recovery' gh pr checks --watch"]:
+            with self.subTest(command=command):
+                self.assertTrue(self.verdict(command))
+        for command in ['gh pr checks 12', 'gh pr checks --watch --interval 60',
+                        'gh pr checks --watch -i60', 'gh pr checks --watch --interval=120',
+                        'gh pr checks --watch -i075', 'gh pr checks --watch --interval=0x3c',
+                        'gh pr checks --watch --interval=0o74',
+                        'gh pr checks --watch --interval=0b111100',
+                        'gh pr checks --watch --help', "echo 'gh pr checks --watch'",
+                        'gh pr checks --watch=false']:
+            with self.subTest(command=command):
+                self.assertIsNone(self.verdict(command))
+
     def test_both_runtime_payloads_receive_native_deny_and_allow(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith(('HERDR_', 'MUNICE_'))}
         env.pop('ACTIONS_RUN_REASON', None)
@@ -120,6 +146,10 @@ class ActionsGuardTest(unittest.TestCase):
                                     ("ACTIONS_RUN_REASON='required recovery' gh workflow run build.yml", False),
                                     ('gh run watch 123 --interval 3', True),
                                     ('timeout 30 gh run watch 123', True),
+                                    ('gh pr checks 12 --watch', True),
+                                    ('gh pr checks 12 --watch --interval 60', False),
+                                    ('gh pr checks 12 --watch --interval 0060', True),
+                                    ('gh pr checks 12 --watch --interval 0x3c', False),
                                     ('uv run --no-project python3 ~/.dotfiles/tools/agent-hooks/ci-watch.py --repo owner/repo 123', False),
                                     ('git push origin feature', False)]:
                 with self.subTest(runtime=runtime, command=command):
