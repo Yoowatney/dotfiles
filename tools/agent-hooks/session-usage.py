@@ -93,6 +93,12 @@ def tool_name(value):
     return value if isinstance(value, str) and re.fullmatch(r'[\w.:/-]{1,100}', value) else 'unknown'
 
 
+def script_tool(name):
+    """Do not confuse opaque script invocations with observed gh commands."""
+    return name.lower() == 'repl' or name == 'exec' or name.endswith(
+        ('.exec', '__exec', '.REPL', '__REPL', 'repl__js', 'repl.js'))
+
+
 def timestamp(row):
     try:
         return datetime.datetime.fromisoformat(row['timestamp'].replace('Z', '+00:00')).timestamp()
@@ -102,7 +108,7 @@ def timestamp(row):
 
 def summarize(path, since=None, max_bytes=MAX_BYTES):
     chars, calls, seen = collections.Counter(), {}, set()
-    gh, malformed, partial = 0, 0, False
+    gh, unparsed, malformed, partial = 0, 0, 0, False
     with Path(path).open('rb') as stream:
         size = os.fstat(stream.fileno()).st_size
         if size > max_bytes:
@@ -144,6 +150,8 @@ def summarize(path, since=None, max_bytes=MAX_BYTES):
                         chars['tool_input:' + name] += len(json.dumps(data, ensure_ascii=False))
                         if recent and name in ('Bash', 'exec_command') and isinstance(data, dict):
                             gh += gh_count(data.get('command', data.get('cmd')))
+                        elif recent and script_tool(name):
+                            unparsed += 1
                     elif kind == 'tool_result':
                         ident = block.get('tool_use_id')
                         name = calls.get(ident, 'unknown') if isinstance(ident, str) else 'unknown'
@@ -168,12 +176,14 @@ def summarize(path, since=None, max_bytes=MAX_BYTES):
                             gh += gh_count(args.get('cmd', args.get('command')))
                         except (ValueError, AttributeError):
                             pass
+                    elif recent and script_tool(name):
+                        unparsed += 1
                 elif kind in ('function_call_output', 'custom_tool_call_output'):
                     ident = p.get('call_id')
                     name = calls.get(ident, 'unknown') if isinstance(ident, str) else 'unknown'
                     chars['tool_output:' + name] += text_size(p.get('output'))
     return dict(characters=dict(chars), ranked=[list(x) for x in chars.most_common()],
-                gh_commands=gh, malformed_lines=malformed, partial=partial,
+                gh_commands=gh, unparsed_script_calls=unparsed, malformed_lines=malformed, partial=partial,
                 measure='visible_characters_and_gh_commands', hidden_context='not_observed')
 
 
@@ -214,8 +224,10 @@ def session_start(payload, env, previous=None):
 
 
 def attribution(sources, since, *, diagnostics=None, max_bytes=MAX_BYTES):
+    sources = list(sources)
     result = []
-    detail = dict(scanned_files=0, partial_files=0, skipped_files=0, byte_budget=max_bytes)
+    detail = dict(candidate_files=len(sources), scanned_files=0, partial_files=0,
+                  skipped_files=0, unparsed_script_calls=0, byte_budget=max_bytes)
     remaining = max_bytes
     for label, path in sources:
         if remaining <= 0:
@@ -228,14 +240,19 @@ def attribution(sources, since, *, diagnostics=None, max_bytes=MAX_BYTES):
             detail['scanned_files'] += 1
             detail['partial_files'] += summary['partial']
             count = summary['gh_commands']
-            if count:
-                result.append(dict(source=label, gh_commands=count))
+            unparsed = summary['unparsed_script_calls']
+            detail['unparsed_script_calls'] += unparsed
+            if count or unparsed:
+                item = dict(source=label, gh_commands=count)
+                if unparsed:
+                    item['unparsed_script_calls'] = unparsed
+                result.append(item)
         except (OSError, ValueError):
             detail['skipped_files'] += 1
             continue
     if diagnostics is not None:
         diagnostics.update(detail)
-    return sorted(result, key=lambda x: x['gh_commands'], reverse=True)[:10]
+    return sorted(result, key=lambda x: (x['gh_commands'], x.get('unparsed_script_calls', 0)), reverse=True)[:10]
 
 
 def find_sources(env, where, now):
@@ -258,7 +275,7 @@ def find_sources(env, where, now):
     sources = []
     for _, path in sorted(candidates, reverse=True)[:128]:
         label = next((address for sid, address in active.items() if sid in path.name), None)
-        sources.append((label or 'closed-session-' + hashlib.sha256(str(path).encode()).hexdigest()[:8], path))
+        sources.append((label or 'unmatched-session-' + hashlib.sha256(str(path).encode()).hexdigest()[:8], path))
     return sources
 
 
@@ -331,23 +348,32 @@ def quota_tick(env, now, where=None, *, fetch=None, send=None, sources=None):
             else:
                 value = fetch()
             quotas = validate_quota(value)
-            if sources is None:
-                if where is None:
-                    peers = load_module('quota_peers', 'herdr_peers.py')
-                    where = peers.all_panes(env)
-                sources = find_sources(env, where, now)
-            scan = {}
-            counts = attribution(sources, now - 3600, diagnostics=scan)
+            scan, counts = {}, []
+            state.pop('source_error', None)
+            try:
+                if sources is None:
+                    if where is None:
+                        peers = load_module('quota_peers', 'herdr_peers.py')
+                        where = peers.all_panes(env)
+                    sources = find_sources(env, where, now)
+                counts = attribution(sources, now - 3600, diagnostics=scan)
+            except Exception as error:
+                state['source_error'] = type(error).__name__
             state.update(status='ok', sampled_at=now, resources=quotas, sources=counts, source_scan=scan,
-                         attribution='visible gh commands in last hour; HTTP requests, jobs and other hosts not attributable')
+                         attribution='visible gh commands in last hour; opaque Codex exec / Claude REPL, HTTP requests, jobs and other hosts not attributable')
             state.pop('error', None)
             low = {k: v for k, v in quotas.items() if v['limit'] and v['remaining'] < v['limit'] * .2 and v['reset'] > now}
             keys = [f'{name}:{item["reset"]}' for name, item in low.items()]
             if keys and any(key not in state.get('notified', []) for key in keys):
                 numbers = ', '.join(f'{name} {q["remaining"]}/{q["limit"]}' for name, q in low.items())
-                busiest = ', '.join(f'{r["source"]} {r["gh_commands"]}회' for r in counts[:3]) or '없음'
+                known = [r for r in counts if r['gh_commands']][:3]
+                busiest = ', '.join(f'{r["source"]} {r["gh_commands"]}회' for r in known) or '없음'
+                coverage = ('출처 집계 실패: 사용 출처 미확인. ' if state.get('source_error') else
+                            f'기록 {scan["scanned_files"]}/{scan["candidate_files"]}개 읽음(일부 {scan["partial_files"]}개). '
+                            f'미계측 스크립트 호출 {scan["unparsed_script_calls"]}회. ')
                 state['pending'] = dict(keys=keys, expires=min(q['reset'] for q in low.values()), message=(
                     f'[GitHub 한도] 잔여량 20% 미만: {numbers}. 최근 1시간 관측 gh 명령: {busiest}. '
+                    + coverage + 'Codex exec·Claude REPL 안의 gh는 세지 않았습니다. '
                     '한정된 로컬 기록의 추정치이며 HTTP 요청 수가 아닙니다. 잡·다른 호스트 등 관측 밖 출처는 알 수 없습니다.'))
             elif not low:
                 state.pop('pending', None)

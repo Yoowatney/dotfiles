@@ -86,6 +86,39 @@ class UsageTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(usage.gh_count(command), count)
 
+    def test_current_script_formats_are_explicitly_unparsed_and_windowed(self):
+        p = self.transcript([
+            dict(type='response_item', timestamp='1970-01-01T00:20:00Z', payload=dict(
+                type='custom_tool_call', name='exec', call_id='c',
+                input="await tools.exec_command({cmd: 'gh pr view 1'});")),
+            dict(timestamp='1970-01-01T00:20:00Z', message=dict(content=[
+                dict(type='tool_use', name='REPL', input=dict(code='await $`gh pr view 1`'))])),
+            dict(type='response_item', timestamp='1970-01-01T00:00:00Z', payload=dict(
+                type='custom_tool_call', name='exec', input='old script')),
+        ])
+        result = usage.summarize(p, since=1000)
+        self.assertEqual(result['gh_commands'], 0)
+        self.assertEqual(result['unparsed_script_calls'], 2)
+        detail = {}
+        self.assertEqual(usage.attribution([('workers/p2', p)], 1000, diagnostics=detail),
+                         [dict(source='workers/p2', gh_commands=0, unparsed_script_calls=2)])
+        self.assertEqual(detail['unparsed_script_calls'], 2)
+        sent = []
+        usage.quota_tick(self.env, 4600, fetch=self.response, send=lambda m: sent.append(m) or True,
+                         sources=[('workers/p2', p)])
+        self.assertIn('미계측 스크립트 호출 2회', sent[0])
+        self.assertIn('관측 gh 명령: 없음', sent[0])
+
+    def test_unknown_source_does_not_claim_the_session_is_closed(self):
+        folder = self.root / '.codex/sessions'
+        folder.mkdir(parents=True)
+        path = folder / 'live-but-unmatched.jsonl'
+        path.write_text('{}\n')
+        os.utime(path, (1000, 1000))
+        sources = usage.find_sources(self.env, {}, 1000)
+        self.assertEqual(len(sources), 1)
+        self.assertTrue(sources[0][0].startswith('unmatched-session-'))
+
     def test_main_restart_records_once_and_carries_ranked_reduction(self):
         old = self.claude()
         new = self.transcript([], 'new')
@@ -205,6 +238,34 @@ class UsageTest(unittest.TestCase):
         self.assertNotIn('remaining', state)
         self.assertIn('error', state)
 
+    def test_alert_discloses_unparsed_scripts_and_scan_coverage(self):
+        p = self.transcript([dict(type='response_item', timestamp='1970-01-01T00:20:00Z',
+            payload=dict(type='custom_tool_call', name='exec', input='x' * 200))])
+        sent = []
+        with patch.object(usage, 'SOURCE_BYTES', 100):
+            usage.quota_tick(self.env, 1500, fetch=self.response, send=lambda m: sent.append(m) or True,
+                             sources=[('workers/p2', p)])
+        self.assertIn('1/1', sent[0])
+        self.assertIn('일부 1', sent[0])
+        self.assertIn('Codex exec', sent[0])
+        self.assertIn('Claude REPL', sent[0])
+        self.assertIn('미계측 스크립트 호출', sent[0])
+        self.assertIn('gh는 세지', sent[0])
+
+    def test_attribution_failure_keeps_the_valid_quota_and_alert(self):
+        p = self.root / 'deep.jsonl'
+        p.write_text('[' * 10000 + '\n')
+        sent = []
+        usage.quota_tick(self.env, 1000, fetch=self.response, send=lambda m: sent.append(m) or True,
+                         sources=[('workers/p2', p)])
+        state = usage.read_json(self.state / 'github-quota.json')
+        self.assertEqual(state['status'], 'ok')
+        self.assertEqual(state['resources']['core']['remaining'], 999)
+        self.assertEqual(state['source_error'], 'RecursionError')
+        self.assertEqual(len(sent), 1)
+        self.assertIn('출처 집계 실패', sent[0])
+        self.assertNotIn('workers/p2', sent[0])
+
     def test_corrupt_cached_fields_do_not_disable_future_samples(self):
         usage.write_json(self.state / 'github-quota.json', dict(attempt_at='bad', pending=[], notified=None))
         usage.quota_tick(self.env, 1000, fetch=self.response, send=lambda _: True, sources=[])
@@ -268,6 +329,23 @@ class UsageTest(unittest.TestCase):
                 env=dict(env, WORKERS_WATCH_NOW=str(now)), check=True, capture_output=True, timeout=20)
         self.assertEqual((self.root / 'quota-calls').read_text().splitlines(), ['call', 'call'])
         self.assertEqual(usage.read_json(self.state / 'github-quota.json')['status'], 'ok')
+
+    def test_bridge_is_started_before_a_potentially_slow_quota_sample(self):
+        spec = importlib.util.spec_from_file_location('watcher', HERE / 'workers-watch.py')
+        watcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(watcher)
+        events = []
+        class Loader:
+            def create_module(self, spec):
+                return None
+            def exec_module(self, module):
+                module.quota_tick = lambda *args: events.append('quota')
+        fake_spec = importlib.util.spec_from_loader('fake_usage', Loader())
+        with patch.object(watcher, 'run_tick'), patch.object(watcher.subprocess, 'Popen',
+                side_effect=lambda args, **kwargs: events.append('bridge' if args[-1] == 'bridge' else 'drain')), \
+                patch.object(watcher.importlib.util, 'spec_from_file_location', return_value=fake_spec):
+            watcher.main()
+        self.assertEqual(events, ['drain', 'bridge', 'quota'])
 
 
 if __name__ == '__main__':
