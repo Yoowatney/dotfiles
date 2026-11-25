@@ -395,10 +395,18 @@ fi
 if [ "$job_id" != "$parent_job" ]; then
   record_task request --event-id "request:$job_id" ${parent_job:+--parent-job-id "$parent_job"}
 fi
+delegates=
+if [ -z "$opener" ] && python3 -I "$helper_dir/herdr_peers.py" --delegates-checks "term_$term"; then delegates=1; fi
 prompt+=$'\n\nCurrent KST time: '"$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S KST')"'. Use this date and time when estimating completion; read the current clock again if startup or the task is delayed.'
 # Send estimates to the caller's server, before a main caller moves the work to workers.
 if [ -z "$check" ]; then
-  prompt+=$'\n\nAt the start of each assignment, your first response line must be `끝날 예상: HH:MM KST`, using your own earliest realistic time to finish the assigned work and report it. Do not add buffer. Times in the assignment are upper bounds, never reasons to wait. Start immediately and report immediately when finished; revise the estimate when a delay becomes apparent. The startup estimate is not a completion report; keep the final report first-line contract.'
+  estimate_scope='to finish the assigned work and report it. Do not add buffer.'
+  recheck_re='\[rc-[0-9a-f]{16}\]'
+  if [ -n "$delegates" ] && [ "$check_level" != none ] && [[ ! "$name" =~ $recheck_re ]]; then
+    # 2026-11-25 pane-reports [ac-*] delta (27 pairs): overall mean 5.05m / median 3.53m, afternoon 14-pair median 5.58m, p75 7.43m / heavy checks ~7-9m.
+    estimate_scope='until both your assigned work and the post-report automatic check session finish (add 5 minutes for the automatic check, or 8 minutes if checking runs test suites, builds, or multi-repo/DB inspections; do not add extra buffer beyond that).'
+  fi
+  prompt+=$'\n\nAt the start of each assignment, your first response line must be `끝날 예상: HH:MM KST`, using your own earliest realistic time '"$estimate_scope"' Times in the assignment are upper bounds, never reasons to wait. Start immediately and report immediately when your own work finishes; revise the estimate when a delay becomes apparent. The startup estimate is not a completion report; keep the final report first-line contract.'
   if [ -n "$me" ]; then
     estimate_server=default
     case "${HERDR_SOCKET_PATH:-}" in
@@ -408,8 +416,6 @@ if [ -z "$check" ]; then
     [ "$kind" != agy ] || env_args+=(--env "HERDR_AGY_LEAD=$estimate_server/$me")
   fi
 fi
-delegates=
-if [ -z "$opener" ] && python3 -I "$helper_dir/herdr_peers.py" --delegates-checks "term_$term"; then delegates=1; fi
 if [ -n "$check" ]; then
   [ -n "$delegates" ] || die "--check is for the main pane; any other lead checks a pane's result itself (직접 확인: run the test or command, or look at the changed behavior or data)"
   name="확인 $name"
