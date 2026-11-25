@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import configparser
+import fcntl
 import importlib.util
 import json
 import os
@@ -12,6 +13,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 
 HOME = Path.home()
 CLAUDE = HOME / '.claude'
@@ -248,7 +250,7 @@ def control_command(command, env=None):
 
 
 def gcloud_environment():
-    """Use only the existing agent ADC; leave the shared credential database read-only."""
+    """Expose a short-lived agent token, never the source OAuth/ADC credentials."""
     directory = HOME / '.config/gcloud'
     active_path = directory / 'active_config'
     if not active_path.exists():
@@ -267,7 +269,7 @@ def gcloud_environment():
     if adc.get('type') != 'impersonated_service_account' or adc.get('service_account_impersonation_url') != expected:
         raise ValueError('the existing ADC does not match the configured agent account')
     # A separate config root keeps all other accounts outside the sandbox.
-    # Account and project files stay read-only; cache writes stay isolated. No credential is copied.
+    # Account and project files stay read-only; SDK cache writes stay isolated.
     worker = HOME / '.local/state/antigravity-worker/gcloud'
     (worker / 'configurations').mkdir(parents=True, exist_ok=True, mode=0o700)
     for target, content in ((worker / 'active_config', active),
@@ -278,8 +280,38 @@ def gcloud_environment():
             temp.write_text(content)
             temp.chmod(0o400)
             temp.replace(target)
+    auth = worker.parent / 'gcp-auth'
+    auth.mkdir(parents=True, exist_ok=True, mode=0o700)
+    token = auth / 'access-token'
+    metadata = auth / 'metadata.json'
+    with (auth / 'refresh.lock').open('a') as lock:
+        os.chmod(lock.name, 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            cached = json.loads(metadata.read_text())
+        except (OSError, ValueError):
+            cached = {}
+        if not (cached.get('principal') == principal and cached.get('expires_at', 0) > time.time() + 300
+                and token.is_file() and 0 < token.stat().st_size < 8192):
+            child_env = {key: value for key, value in os.environ.items()
+                         if not key.startswith('CLOUDSDK_') and key not in AUTH_OVERRIDES}
+            child_env['CLOUDSDK_CONFIG'] = str(directory)
+            result = subprocess.run(['gcloud', '--configuration=munice',
+                                     '--impersonate-service-account=' + principal,
+                                     'auth', 'print-access-token', '--quiet'],
+                                    capture_output=True, text=True, env=child_env, timeout=20)
+            value = result.stdout.strip()
+            if result.returncode or not re.fullmatch(r'[A-Za-z0-9._~+/-]{20,8192}', value):
+                raise ValueError('agent access token refresh failed')
+            for target, content in ((token, value), (metadata, json.dumps({
+                    'principal': principal, 'expires_at': time.time() + 2700}))):
+                temp = target.with_suffix('.tmp')
+                temp.write_text(content)
+                temp.chmod(0o400)
+                temp.replace(target)
     return ['CLOUDSDK_CONFIG=' + str(worker),
-            'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=' + str(adc_path),
+            'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=',
+            'CLOUDSDK_AUTH_ACCESS_TOKEN_FILE=' + str(token),
             'CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=']
 
 

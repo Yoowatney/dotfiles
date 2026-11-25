@@ -19,7 +19,7 @@ def event(name='run_command', **args):
 
 
 class NativeHooksTest(unittest.TestCase):
-    def test_gcloud_uses_matching_agent_adc_without_writable_credentials(self):
+    def test_gcloud_exposes_only_a_cached_agent_access_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             folder = home / '.config/gcloud'
@@ -31,14 +31,41 @@ class NativeHooksTest(unittest.TestCase):
             data = {'type': 'impersonated_service_account', 'service_account_impersonation_url':
                     'https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/' + principal + ':generateAccessToken'}
             adc.write_text(json.dumps(data))
-            with patch.object(hooks, 'HOME', home):
+            with patch.object(hooks, 'HOME', home), patch.object(hooks.subprocess, 'run') as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = 'synthetic-agent-token\n'
                 env = hooks.gcloud_environment()
                 self.assertEqual(env, ['CLOUDSDK_CONFIG=' + str(home / '.local/state/antigravity-worker/gcloud'),
-                                      'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=' + str(adc),
+                                      'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=',
+                                      'CLOUDSDK_AUTH_ACCESS_TOKEN_FILE=' + str(home / '.local/state/antigravity-worker/gcp-auth/access-token'),
                                       'CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT='])
+                self.assertIn('--impersonate-service-account=' + principal, run.call_args.args[0])
+                token = home / '.local/state/antigravity-worker/gcp-auth/access-token'
+                self.assertEqual(token.read_text(), 'synthetic-agent-token')
+                self.assertEqual(token.stat().st_mode & 0o777, 0o400)
+                self.assertNotIn(str(adc), ' '.join(env))
+                hooks.gcloud_environment()
+                self.assertEqual(run.call_count, 1)
                 data['service_account_impersonation_url'] += 'wrong'
                 adc.write_text(json.dumps(data))
                 with self.assertRaises(ValueError):
+                    hooks.gcloud_environment()
+
+    def test_gcloud_token_fetch_error_fails_closed_without_error_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            folder = home / '.config/gcloud'
+            (folder / 'configurations').mkdir(parents=True)
+            (folder / 'active_config').write_text('munice')
+            principal = 'ai-agent-test@example.iam.gserviceaccount.com'
+            (folder / 'configurations/config_munice').write_text('[auth]\nimpersonate_service_account = ' + principal)
+            (folder / 'application_default_credentials.json').write_text(json.dumps({
+                'type': 'impersonated_service_account', 'service_account_impersonation_url':
+                'https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/' + principal + ':generateAccessToken'}))
+            with patch.object(hooks, 'HOME', home), patch.object(hooks.subprocess, 'run') as run:
+                run.return_value.returncode = 1
+                run.return_value.stderr = 'synthetic-sensitive-error'
+                with self.assertRaisesRegex(ValueError, '^agent access token refresh failed$'):
                     hooks.gcloud_environment()
                 (folder / 'active_config').write_text('munice-admin')
                 with self.assertRaises(ValueError):

@@ -21,8 +21,8 @@ Use subscription-authenticated Antigravity CLI for worker sessions while preserv
 Restore the previous local worker policy and settings snapshot, and remove only the AGY customization links introduced by this change. Existing Claude and Codex guards remain intact.
 
 ## Initial rollout constraints
-- Open GCP work and ordinary fallback rechecks through `--kind auto`. AGY uses the existing impersonated agent ADC after validating its target against the agent configuration.
-- The native sandbox reads only that ADC and an isolated worker configuration. Its cache root allows token/log writes; explicit denies keep active-account and project configuration read-only. No credential file is copied and the shared GCP directory is not mounted.
+- Open GCP work and ordinary fallback rechecks through `--kind auto`. The trusted hook validates the existing agent configuration and obtains a short-lived impersonated token outside the sandbox.
+- The native sandbox reads only the agent access token and an isolated worker configuration. It cannot read the original ADC or its source credentials. Its cache root allows SDK log/cache writes; explicit denies keep active-account, project configuration and the token read-only. No source credential file is copied and the shared GCP directory is not mounted.
 - Direct file write grants could not initialize the SQLite cache; the isolated cache-root grant is therefore required and verified together with negative configuration-write probes.
 - Pinned Codex arguments and ambient-runner calls keep the Codex route even under the AGY default policy.
 - Model tools cannot read or modify the subscription OAuth credential file. CLI authentication remains local.
