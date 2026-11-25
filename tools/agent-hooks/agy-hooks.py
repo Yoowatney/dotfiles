@@ -105,7 +105,8 @@ def policy_problem(payload, rules):
         target = inp.get('file_path', inp.get('path', ''))
         resolved = Path(payload['cwd'], os.path.expanduser(target)).resolve()
         credential = (HOME / '.gemini/oauth_creds.json').resolve()
-        if resolved == credential or resolved.name == 'oauth_creds.json':
+        if (resolved == credential or resolved.name == 'oauth_creds.json'
+                or (tool == 'Grep' and resolved in credential.parents)):
             return 'Subscription OAuth credentials cannot be accessed by worker tools.'
     if tool == 'Bash' and SLACK_WRITE.search(inp['command']):
         return 'Worker Slack publication must go through the lead.'

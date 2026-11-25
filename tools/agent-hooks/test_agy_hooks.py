@@ -98,6 +98,7 @@ class NativeHooksTest(unittest.TestCase):
         target = str(Path.home() / '.gemini/oauth_creds.json')
         cases = [event('view_file', AbsolutePath=target),
                  event('grep_search', SearchPath=target, Query='.'),
+                 event('grep_search', SearchPath=str(Path.home() / '.gemini'), Query='synthetic'),
                  event('write_to_file', TargetFile=target, CodeContent='fixture'),
                  event(CommandLine='cat ~/.gemini/oauth_creds.json'),
                  event(CommandLine='cat "${HOME}/.gemini/oauth_creds.json"')]
