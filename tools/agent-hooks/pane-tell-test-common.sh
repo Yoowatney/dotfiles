@@ -199,6 +199,22 @@ check "text in the box: says it is queued" "${out%%: *}" "queued for w1:p1 (👑
 sleep 0.3; check "still typed: still waiting" "$(sent)" ""
 claude_screen > "$SANDBOX/screen"; settled
 check "box empty: delivered once" "$(sent)|$(cut -d'|' -f2- "$SANDBOX/log")" "w1:p1 |$msg"
+# mbr#119: a queued combined report of an automatic check gets its receipt from the delivery itself. auto-tab-close.py's own
+# waiter gives up after 10 minutes, and on 11/25 the main box stayed full for 28.
+checks=$SANDBOX/state/orchestrator/automatic-checks; mkdir -p "$checks"
+echo '{}' > "$checks/0123456789abcdef.json"; echo '{}' > "$checks/fedcba9876543210.json"
+printf '1.other' > "$checks/fedcba9876543210.json.redeliver"
+claude_screen "야 리드야" > "$SANDBOX/screen"; pt "리드" "보고" >/dev/null
+printf '%s' "$(ls "$SANDBOX/state/pane-tell/waiting")" > "$checks/0123456789abcdef.json.redeliver"
+receipts() { jq -r '.check_delivered // false' "$checks"/*.json | tr '\n' ' '; ls "$checks" | grep -c 'redeliver$'; }
+check "queued check report: no receipt yet" "$(receipts)" "false false 2"
+claude_screen > "$SANDBOX/screen"; settled
+check "delivered check report: the delivery records its receipt, and no other" "$(receipts)" "true false 1"
+rm -f "$checks"/*; claude_screen "야" > "$SANDBOX/screen"; pt "리드" "보고" >/dev/null
+printf '%s' "$(ls "$SANDBOX/state/pane-tell/waiting")" > "$checks/0123456789abcdef.json.redeliver"
+claude_screen > "$SANDBOX/screen"; settled
+check "a receipt with no check record: the delivery still finishes" "$(sent)|$(ls "$SANDBOX"/state/pane-tell/waiting | wc -l | tr -d ' ')" "w1:p1 |0"
+rm -rf "$checks"
 claude_screen "야" > "$SANDBOX/screen"
 PANE_TELL_WAIT=0 pt "리드" "보고" >/dev/null; settled
 check "too long: 요유's text untouched, nothing sent" "$(sent)" ""

@@ -385,6 +385,13 @@ warn() { # what happened, sender's terminal, sender's socket when on another ser
   )
 }
 
+# An automatic check's combined report that had to queue left <check>.json.redeliver naming this payload (auto-tab-close.py).
+# That script's own waiter gives up after 10 minutes, so the delivery itself records the receipt (mbr#119: 28 minutes).
+check_receipt() { # delivered payload name
+  local receipt
+  receipt=$(grep -lxF -- "$1" "${XDG_STATE_HOME:-$HOME/.local/state}"/orchestrator/automatic-checks/*.json.redeliver 2>/dev/null) || return 0
+  python3 "${DRAFT_HELPER%/*}/auto-tab-close.py" --redeliver-check "ac-$(basename "$receipt" .json.redeliver)" >/dev/null 2>>"$STATE/worker-errors.log" || :
+}
 deliver() { # message file, receiver's terminal (a moved pane gets a new pane id), its session when queued, sender's terminal,
   # sender's socket, predecessor payload (if any)
   local list row pane kind sid label result t0=$SECONDS
@@ -416,6 +423,7 @@ deliver() { # message file, receiver's terminal (a moved pane gets a new pane id
         echo "$(date '+%F %T') cancelled refresh request $(basename "$1") for $pane" >> "$STATE/log"
       else
         echo "$(date '+%F %T') delivered $(basename "$1") to $pane" >> "$STATE/log"
+        check_receipt "$(basename "$1")"
       fi
       return
     fi
