@@ -258,6 +258,29 @@ out=$(COLUMNS=200 CLAUDE_CONFIG_DIR="$T/usage" run_full | plain)
 check "Claude HUD includes cached agy usage" "$out" 'agy \(Google AI Ultra\)'
 check "adding agy preserves Codex" "$out" 'Codex '
 check "Claude HUD omits agy model names and third-party quota" "$out" 'agy ' 'Gemini|3P'
+# Unusable captures must keep the last good reading, including its original age.
+jq '.captured_at -= 7200' "$XDG_STATE_HOME/agent-quota/agy.json" >"$T/agy-last-good.json"
+for invalid in \
+  '{"plan_tier":"","quota":{}}' \
+  '{}' \
+  '{"error":{"code":"unavailable"}}' \
+  "$(printf '%s' "$agy_input" | jq '.error="unavailable"')" \
+  '{"plan_tier":"unknown","quota":{"gemini-5h":{"remaining_fraction":1.5,"reset_time":"2030-01-01T00:00:00Z"}}}' \
+  '{"plan_tier":"unknown","quota":{"gemini-5h":{"remaining_fraction":0.5,"reset_time":"invalid"}}}' \
+  "$(printf '%s' "$agy_input" | jq 'del(.quota["gemini-5h"], .quota["gemini-weekly"])')" \
+  'broken' \
+  ''; do
+	cp "$T/agy-last-good.json" "$XDG_STATE_HOME/agent-quota/agy.json"
+	printf '%s' "$invalid" | bash "$SCRIPT" --capture-agy
+	check_exact "unusable agy capture preserves the last good cache" \
+		"$(cat "$XDG_STATE_HOME/agent-quota/agy.json")" "$(cat "$T/agy-last-good.json")"
+done
+out=$(COLUMNS=200 bash "$SCRIPT" --agy-text | plain)
+check "rejected agy captures keep readable usage and its age" "$out" 'updated 2h ago.*25% .*71%'
+rm "$XDG_STATE_HOME/agent-quota/agy.json"
+printf '%s' '{"plan_tier":"","quota":{}}' | bash "$SCRIPT" --capture-agy
+if [ -e "$XDG_STATE_HOME/agent-quota/agy.json" ]; then r=created; else r=absent; fi
+check_exact "empty agy capture creates no cache without a previous reading" "$r" 'absent'
 printf '%s' "$agy_input" | jq 'del(.quota["gemini-5h"], .quota["gemini-weekly"])' | bash "$SCRIPT" --capture-agy
 out=$(bash "$SCRIPT" --agy-text | plain)
 check "third-party quota alone does not appear" "$out" '^agy \(no usage data\)$' 'Gemini|3P|[0-9]+%'

@@ -1,0 +1,29 @@
+name: Statusline
+
+on:
+  pull_request:
+    paths:
+      - 'tools/claude/statusline-command.sh'
+      - 'tools/claude/statusline-command.test.sh'
+      - '.github/workflows/statusline.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/claude/statusline-command.sh'
+      - 'tools/claude/statusline-command.test.sh'
+      - '.github/workflows/statusline.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  statusline:
+    # The statusline suite uses the macOS date and stat interfaces.
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Check shell syntax
+        run: bash -n tools/claude/statusline-command.sh tools/claude/statusline-command.test.sh
+      - name: Test statusline
+        run: bash tools/claude/statusline-command.test.sh

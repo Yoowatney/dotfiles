@@ -26,7 +26,7 @@ def valid(bucket):
 try:
     if mode == "capture":
         source = json.load(sys.stdin)
-        if not isinstance(source, dict): sys.exit(0)
+        if not isinstance(source, dict) or source.get("error"): sys.exit(0)
         quotas = source.get("quota") or {}
         if not isinstance(quotas, dict): quotas = {}
         plan = source.get("plan_tier", "")
@@ -36,6 +36,8 @@ try:
         data = {"captured_at": now, "plan_tier": plan, "quota": {
             k: {"remaining_fraction": quotas[k]["remaining_fraction"], "reset_time": quotas[k]["reset_time"]}
             for k in keys if valid(quotas.get(k))}}
+        # Keep the last good reading and its age when no usable quota arrives.
+        if not data["quota"]: sys.exit(0)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, name = tempfile.mkstemp(prefix=".agy-", dir=path.parent)
         try:
