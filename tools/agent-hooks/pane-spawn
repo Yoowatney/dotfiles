@@ -242,7 +242,9 @@ fi
 if [ "$kind" = agy ]; then
   # Options cannot override the model, subscription-only settings or sandbox.
   [ $# -eq 0 ] && [ -z "$opus$artifact$skills" ] || die "AGY uses --complexity and fixed safety settings; forwarded agent options and Claude-only flags are refused"
-  reserve=$(bounded "$quota_limit" python3 -I "$helper_dir/agent-quota" agy-reserve "$cwd")
+  # Parent GCP tooling may use ADC; the AGY child explicitly clears it below.
+  # Keep API-key and project-override checks intact for subscription admission.
+  reserve=$(bounded "$quota_limit" env -u GOOGLE_APPLICATION_CREDENTIALS python3 -I "$helper_dir/agent-quota" agy-reserve "$cwd")
   reserve_rc=$?
   if [ "$reserve_rc" != 0 ]; then
     reserve_reason=$(printf '%s' "$reserve" | jq -r '.reason // "quota unavailable"' 2>/dev/null)

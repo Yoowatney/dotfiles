@@ -39,6 +39,9 @@ no_herdr 'unknown quota does not reach herdr'
 agy_fixture
 if GEMINI_API_KEY=synthetic ps --kind agy "AGY API" "Synthetic task" >/dev/null 2>"$SANDBOX/err"; then fail 'API override must refuse AGY'; fi
 no_herdr 'API override does not reach herdr'
+CAPTURE_LAUNCH=1 GOOGLE_APPLICATION_CREDENTIALS=/synthetic/parent-adc.json ps --kind agy "AGY inherited ADC" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'caller ADC must not block a subscription-only child with cleared credentials'
+has '--kind agy' 'caller ADC still selects AGY'
+jq -e '.env.GOOGLE_APPLICATION_CREDENTIALS == ""' "$SANDBOX/launch.json" >/dev/null || fail 'caller ADC must never enter the AGY child'
 echo agy-only > "$SANDBOX/home/.local/state/agent-quota/policy"
 workers_up
 is_main
