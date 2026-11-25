@@ -43,18 +43,33 @@ case "\$1 \$2" in
   "agent prompt") [ ! -f "$SANDBOX/prompt-fails" ] || exit 1
     [ "\$4" != /clear ] || echo sid-refreshed > "$SANDBOX/cur-sid"
     # /exit returns before the process ends (EXIT_DELAY); exit-ignored: it never does.
-    # bg-dialog: background tasks make Claude ask first, with the cursor on the line in that file.
+    # bg-dialog: background tasks make Claude ask first (the dialog as 2.1.332 draws it); Esc is "Stay".
+    # quoted-dialog: the conversation only quotes that dialog, above the input box and status line.
+    [ "\$4" != /exit ] || [ ! -f "$SANDBOX/quoted-dialog" ] ||
+      printf '   ❯ 1. Exit and stop tasks\n   Enter to confirm · Esc to cancel\n───\n❯ \n───\n  -- INSERT --\n' > "$SANDBOX/screen"
     if [ "\$4" = /exit ] && [ -f "$SANDBOX/bg-dialog" ]; then
-      printf '   Background work is running\n   The following will stop when you exit:\n%s\n' "\$(cat "$SANDBOX/bg-dialog")" > "$SANDBOX/screen"
+      printf '   Background work is running\n   The following will stop when you exit:\n\n   shell · sleep 600\n\n   ❯ 1. Exit and stop tasks\n     2. Stay\n\n   Enter to confirm · Esc to cancel\n\n' > "$SANDBOX/screen"
+      echo blocked > "$SANDBOX/status"
     elif [ "\$4" = /exit ] && [ ! -f "$SANDBOX/exit-ignored" ]; then
       ( sleep "\${EXIT_DELAY:-0}"; : > "$SANDBOX/agent"; echo unknown > "$SANDBOX/status"; : > "$SANDBOX/cur-sid" ) >/dev/null 2>&1 &
     fi
     # LATE_ON_EXIT: the 05:00 run's clock passes 07:00 while claude exits.
     [ "\$4" != /exit ] || [ -z "\${LATE_ON_EXIT:-}" ] || echo 09 > "$SANDBOX/hour" ;;
   "pane read") cat "$SANDBOX/screen" 2>/dev/null ;;
-  "agent send-keys") # Enter on "Exit and stop tasks" ends the process; Enter elsewhere is logged as unsafe.
-    if [ "\$4" = enter ] && grep -q '❯ 1\. Exit and stop tasks' "$SANDBOX/screen" 2>/dev/null; then
-      rm -f "$SANDBOX/screen"; : > "$SANDBOX/agent"; echo unknown > "$SANDBOX/status"; : > "$SANDBOX/cur-sid"
+  "agent send-keys") # Enter would take "Exit and stop tasks": the tasks die with the process.
+    if [ "\$4" = esc ] && grep -q 'Exit and stop tasks' "$SANDBOX/screen" 2>/dev/null; then
+      [ ! -f "$SANDBOX/esc-ignored" ] || exit 0
+      rm -f "$SANDBOX/screen"; echo idle > "$SANDBOX/status"
+      # A cancelled /exit leaves these lines in the transcript (2.1.332).
+      printf '%s\n' '{"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>c</local-command-caveat>"}}' \
+        '{"type":"user","message":{"content":"<command-name>/exit</command-name>\\n<command-args></command-args>"}}' \
+        '{"type":"user","message":{"content":"<local-command-stdout>(no content)</local-command-stdout>"}}' >> "$SANDBOX/sid-main.jsonl"
+      if [ -n "\${TASK_ENDS_AT_ESC:-}" ] && [ ! -f "$SANDBOX/task-ended" ]; then
+        : > "$SANDBOX/task-ended"
+        echo '{"type":"user","message":{"content":"<task-notification>done</task-notification>"}}' >> "$SANDBOX/sid-main.jsonl"
+      fi
+    elif [ "\$4" = enter ]; then
+      echo tasks-killed >> "$SANDBOX/unsafe-run"; rm -f "$SANDBOX/screen"; : > "$SANDBOX/agent"; echo unknown > "$SANDBOX/status"; : > "$SANDBOX/cur-sid"
     else echo "keys-without-dialog \$4" >> "$SANDBOX/unsafe-run"; fi ;;
   "pane run") [ -z "\$(cat "$SANDBOX/agent" 2>/dev/null || echo claude)" ] || echo typed-into-agent >> "$SANDBOX/unsafe-run"
     [ ! -f "$SANDBOX/run-fails" ] || exit 1
@@ -205,7 +220,7 @@ mr() { # every call is sandboxed: state dir, herdr, pane-tell
   rm -f "$SANDBOX/lock-waited" "$SANDBOX/unsafe-lock"
   rm -f "$SANDBOX/query-started"
   rm -f "$SANDBOX/cur-sid"
-  rm -f "$SANDBOX/agent" "$SANDBOX/unsafe-run" "$SANDBOX/screen"
+  rm -f "$SANDBOX/agent" "$SANDBOX/unsafe-run" "$SANDBOX/screen" "$SANDBOX/task-ended"
   rm -f "$SANDBOX/told" "$SANDBOX/herdr-log" "$SANDBOX/box-n" "$SANDBOX/request-n" "$SANDBOX/ready-get-n" "$SANDBOX/unsafe-request" "$SANDBOX/pending-once" "$S/orchestrator/refresh.log"; : > "$SANDBOX/alerts"; : > "$SANDBOX/errors"
   env HOME="$SH_" XDG_STATE_HOME="$S" HERDR_BIN_PATH="$SANDBOX/herdr" HERDR_ERROR_NOTIFY="$SANDBOX/error-notify" MAIN_REFRESH_PANE_TELL="$SANDBOX/pane-tell" \
     MAIN_REFRESH_POLL=0.05 MAIN_REFRESH_QUIET=0 MAIN_REFRESH_RETRY_QUIET=0 MAIN_REFRESH_DEADLINE="${MAIN_REFRESH_DEADLINE:-60}" MAIN_REFRESH_HANDOFF_WAIT="${MAIN_REFRESH_HANDOFF_WAIT:-60}" \
@@ -549,18 +564,33 @@ check "a failed start reaches the failing command" "$(grep -c '^pane run' "$SAND
 check "a failed start alerts with the way back" "$(grep -c 'CLAUDE_STARTUP_PROFILE=full claude' "$SANDBOX/errors")" 1
 check "a failed start keeps the handoff for the session the way back starts" \
   "$([ -s "$S/agent-handoff/w5:p3.md" ] && echo kept)|$([ -f "$S/agent-handoff/w5:p3.md.skipped" ] && echo skipped)" "kept|"
-# Background tasks make /exit ask first (seen on the main pane 11/13). The handoff lists them with their restart commands,
-# so the default "Exit and stop tasks" is taken; any other selected line is left alone and the wait times out.
-rm_stamp; set_main; status idle; echo '   ❯ 1. Exit and stop tasks' > "$SANDBOX/bg-dialog"
+# Background tasks make /exit ask first. One may be a job that must not be cut off (a production cleanup was, api#1546),
+# so the dialog is closed (Stay) and the pane is only cleared: tasks outlive /clear.
+unsafe() { [ -f "$SANDBOX/unsafe-run" ] && paste -sd, "$SANDBOX/unsafe-run" || true; }
+escs() { grep -c '^agent send-keys w5:p3 esc$' "$SANDBOX/herdr-log" 2>/dev/null || true; }
+restarts() { grep -cxF "pane run w5:p3 $RESTART_LINE" "$SANDBOX/herdr-log" 2>/dev/null || true; }
+held() { [ -f "$S/orchestrator/refresh-delivery.json" ] && echo held || true; }
+rm_stamp; set_main; status idle; touch "$SANDBOX/bg-dialog"
 restart MAIN_REFRESH_HOUR=09
-check "--restart confirms the background-work dialog's default and starts claude again" \
-  "$(grep -c '^agent send-keys w5:p3 enter$' "$SANDBOX/herdr-log")|$(grep -cxF "pane run w5:p3 $RESTART_LINE" "$SANDBOX/herdr-log")|$([ -f "$SANDBOX/unsafe-run" ] && cat "$SANDBOX/unsafe-run")" "1|1|"
-check "the log says the background tasks were stopped" "$(grep -c 'Exit and stop tasks를 고름 (1번째)' "$S/orchestrator/refresh.log")" 1
-rm_stamp; set_main; status idle; echo '   ❯ 3. Stay' > "$SANDBOX/bg-dialog"
-restart MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=2
-check "a dialog with another line selected gets no key and no restart" \
-  "$(grep -c '^agent send-keys' "$SANDBOX/herdr-log")|$(grep -c '^pane run' "$SANDBOX/herdr-log")|$(grep -c '끝나지 않아' "$SANDBOX/errors")" "0|0|1"
-rm -f "$SANDBOX/bg-dialog"
+check "--restart with background tasks never picks Exit: it closes the dialog and only clears" \
+  "$(unsafe)|$(escs)|$(restarts)|$(cleared)" "|1|0|1"
+check "the log says background tasks kept it from restarting" \
+  "$(grep -c '백그라운드 작업이 돌고 있어 다시 켜지 않고' "$S/orchestrator/refresh.log")|$(grep -c '다시 켬' "$S/orchestrator/refresh.log")" "1|0"
+check "that clear releases the relay hold and the request" "$(held)|$([ -f "$S/agent-handoff/main-refresh.refresh-request" ] && echo kept)" "|"
+check "the restart request says running tasks are not stopped" "$(grep 'handoff save' "$SANDBOX/told" | grep -c '돌고 있으면 다시 켜지 않고')" 1
+rm_stamp; set_main; status idle
+restart MAIN_REFRESH_HOUR=09 TASK_ENDS_AT_ESC=1
+check "--restart: a task ending while the dialog is up is handed off again before the clear" \
+  "$(unsafe)|$(cat "$SANDBOX/request-n")|$(restarts)|$(cleared)" "|2|0|1"
+rm_stamp; set_main; status idle; touch "$SANDBOX/esc-ignored"
+restart MAIN_REFRESH_HOUR=09 MAIN_REFRESH_DEADLINE=8
+rm -f "$SANDBOX/esc-ignored" "$SANDBOX/bg-dialog"
+check "a dialog that will not close: no Exit, no restart, no /clear, an alert, relays released" \
+  "$(unsafe)|$(restarts)|$(cleared)|$(grep -c '확인 창을 닫지 못해' "$SANDBOX/errors")|$(held)" "|0|0|1|"
+rm_stamp; set_main; status idle; touch "$SANDBOX/quoted-dialog"
+restart MAIN_REFRESH_HOUR=09 EXIT_DELAY=0.3
+rm -f "$SANDBOX/quoted-dialog"
+check "dialog text quoted in the conversation gets no key" "$(unsafe)|$(escs)|$(restarts)|$(cleared)" "|0|1|0"
 set_main; status idle
 
 # main-startup: the inputs a /clear keeps, since claude loads them only when its process starts.
@@ -687,6 +717,22 @@ echo '# plain 5' > "$SH_/.claude/output-styles/plain.md"
 rm_stamp; set_main; status idle; echo 05 > "$SANDBOX/hour"
 mr PATH="$SANDBOX/bin:$PATH" LATE_ON_EXIT=1 EXIT_DELAY=0.3
 check "a 05:00 restart whose exit runs past 07:00 still starts claude" "$(exits)|$(runs)|$([ -f "$STAMP" ] && echo stamped)" "1|1|stamped"
+started
+# 05:00 with background tasks: only clear, and leave the restart owed to a later 05:00 with none (api#1546).
+echo '# plain 6' > "$SH_/.claude/output-styles/plain.md"
+rm_stamp; set_main; status idle; echo 05 > "$SANDBOX/hour"; touch "$SANDBOX/bg-dialog"
+mr
+check "05:00 with changed start settings and background tasks only clears" \
+  "$(unsafe)|$(runs)|$(cleared)|$([ -f "$STAMP" ] && echo stamped)" "|0|1|stamped"
+check "that restart is still owed" "$(chg)" changed
+rm_stamp; set_main; status idle
+mr TASK_ENDS_AT_ESC=1
+check "05:00: a task ending while the dialog is up: no /clear, no alert, relays released" \
+  "$(unsafe)|$(cleared)|$(cat "$SANDBOX/errors")|$(held)|$([ -f "$STAMP" ] && echo stamped)" "|0|||"
+rm -f "$SANDBOX/bg-dialog"
+rm_stamp; set_main; status idle
+mr
+check "so a later 05:00 with no task restarts" "$(cleared)|$(exits)|$(runs)" "0|1|1"
 started
 set_main; status idle
 

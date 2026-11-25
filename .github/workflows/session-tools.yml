@@ -31,6 +31,7 @@ on:
       - 'tools/agent-hooks/test_startup_estimate.py'
       - 'scripts/claude-online*'
       - 'tools/agent-hooks/main-startup'
+      - 'tools/agent-hooks/main-refresh*'
       - 'tools/claude/hooks/slack-format-check.py'
       - 'tools/claude/hooks/test_slack_wording.py'
       - '.github/workflows/session-tools.yml'
@@ -66,6 +67,7 @@ on:
       - 'tools/agent-hooks/test_startup_estimate.py'
       - 'scripts/claude-online*'
       - 'tools/agent-hooks/main-startup'
+      - 'tools/agent-hooks/main-refresh*'
       - 'tools/claude/hooks/slack-format-check.py'
       - 'tools/claude/hooks/test_slack_wording.py'
       - '.github/workflows/session-tools.yml'
@@ -118,5 +120,8 @@ jobs:
       - run: bash tools/agent-hooks/codex-deferred.test.sh
       - run: python3 -m unittest discover -s tools/agent-hooks -p test_auto_check_relay.py
       - run: bash scripts/claude-online.test.sh
+      - run: bash tools/agent-hooks/main-refresh.test.sh
+      - run: python3 tools/agent-hooks/main-refresh-race.test.py
+      - run: python3 tools/agent-hooks/main-refresh-recovery.test.py
       - run: python3 -m unittest discover -s tools/claude/hooks -p test_slack_wording.py
       - run: python3 tools/claude/hooks/slack-format-check.py --selftest
