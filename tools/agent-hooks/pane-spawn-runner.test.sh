@@ -8,7 +8,7 @@ policy="$XDG_STATE_HOME/agent-quota/policy"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 run() { bash "$here/agent-runner" "$@"; }
 
-out=$(run); grep -q '^runner: agy$' <<<"$out" || fail "no local file shows the installed default: $out"
+out=$(run); grep -q '^runner: claude$' <<<"$out" || fail "no local file shows the installed default: $out"
 grep -q 'installed default' <<<"$out" || fail "the source is named: $out"
 for pair in claude:claude-first codex:codex-only auto:quota-aware agy:agy-only; do
   name=${pair%%:*} value=${pair##*:}
@@ -29,7 +29,7 @@ if run purple >/dev/null 2>"$box/err"; then fail "an unknown runner must be refu
 grep -q 'claude|codex|auto' "$box/err" || fail "usage names the choices"
 if run claude codex >/dev/null 2>&1; then fail "extra arguments are refused"; fi
 run auto >/dev/null; rm -f "$policy"
-out=$(run); grep -q '^runner: agy$' <<<"$out" || fail "removing the file restores the default"
+out=$(run); grep -q '^runner: claude$' <<<"$out" || fail "removing the file restores the default"
 echo "ok: agent-runner"
 
 # AGY-only workers never fall back to Codex, including legacy/pinned callers.
@@ -49,6 +49,7 @@ echo "ok: agent-runner"
   rm "$SANDBOX/home/.config/munice/host-role"
   ps "Default worker" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'default worker must open'
   has '--kind agy' 'default worker uses AGY'
+  has '--model gemini-4-hydrogen-xhigh' 'default worker uses the highest Hydrogen effort'
   ps --kind codex "Legacy worker" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'legacy caller must open AGY'
   has '--kind agy' 'explicit legacy runner does not select Codex'
   is_main

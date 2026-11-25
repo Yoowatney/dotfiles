@@ -34,6 +34,21 @@ elif kind == "codex":  # the last › line unless its mark is dim (an old prompt
     while i < len(lines) and "\x1b[48;" in lines[i]:
         box.append(lines[i])
         i += 1
+elif kind == "agy":
+    # AGY has an ASCII prompt between two rules. Require the model footer to
+    # distinguish the composer from history, permission dialogs and pickers.
+    rules = [i for i, line in enumerate(lines) if re.fullmatch(r"─{10,}", plain(line))]
+    if len(rules) < 2:
+        sys.exit(1)
+    start, end = rules[-2:]
+    footer = [plain(line) for line in lines[end + 1:] if plain(line)]
+    if len(footer) != 1 or not re.fullmatch(
+            r"\? for shortcuts\s+.*Gemini 4 (Hydrogen|Neon|Carbon)\s*·\s*(low|medium|high|xhigh|max)", footer[0]):
+        sys.exit(1)
+    box = [plain(line) for line in lines[start + 1:end]]
+    if not box or not box[0].startswith('>'):
+        sys.exit(1)
+    box[0] = box[0][1:]
 else:
     sys.exit(1)
 sys.exit(1 if any(plain(line) for line in box) else 0)

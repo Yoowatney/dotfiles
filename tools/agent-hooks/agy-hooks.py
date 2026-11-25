@@ -60,6 +60,15 @@ def translate(event):
         key = {'list_dir': 'DirectoryPath', 'find_by_name': 'SearchDirectory', 'grep_search': 'SearchPath'}[name]
         tool, inp = 'Grep', {'path': nonempty(args.get(key)), 'pattern': args.get('Query', args.get('Pattern', '')),
                              'output_mode': 'content' if name == 'grep_search' else 'files_with_matches'}
+    elif name == 'write_file':
+        if not isinstance(args.get('Content'), str):
+            raise ValueError('invalid file content')
+        tool, inp = 'Write', {'file_path': nonempty(args.get('Path')), 'content': args['Content']}
+    elif name == 'edit_file':
+        if not isinstance(args.get('Target'), str) or not isinstance(args.get('Replacement'), str):
+            raise ValueError('invalid file replacement')
+        tool, inp = 'Edit', {'file_path': nonempty(args.get('Path')),
+                             'old_string': args['Target'], 'new_string': args['Replacement']}
     elif name == 'write_to_file':
         tool, inp = 'Write', {'file_path': nonempty(args.get('TargetFile')), 'content': args.get('CodeContent', '')}
     elif name == 'replace_file_content':
@@ -97,18 +106,128 @@ def settings():
     return rules, groups
 
 
+def expanded_path(raw, cwd):
+    raw = raw.replace('${HOME}', str(HOME)).replace('$HOME', str(HOME))
+    if raw == '~' or raw.startswith('~/'):
+        raw = str(HOME) + raw[1:]
+    return Path(cwd, raw).resolve()
+
+
+def shell_paths(command, cwd):
+    """Inspect literal shell paths; this is not an arbitrary-code sandbox."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|<>()\n')
+    lexer.whitespace = ' \t\r'
+    lexer.whitespace_split = True
+    lexer.commenters = ''
+    segments, segment = [], []
+    for word in lexer:
+        if word and all(c in ';&|()\n' for c in word):
+            if segment:
+                segments.append(segment)
+            segment = []
+        else:
+            segment.append(word)
+    if segment:
+        segments.append(segment)
+    previous = cwd
+    for words in segments:
+        # Redirection operands are paths even for echo/printf.
+        args, redirections = [], []
+        redirect = False
+        for word in words:
+            if word and all(c in '<>' for c in word):
+                redirect = True
+            elif redirect:
+                redirections.append(word)
+                redirect = False
+            else:
+                args.append(word)
+        for word in redirections:
+            yield word, cwd, False
+        while args and re.match(r'^[A-Za-z_][A-Za-z_0-9]*=', args[0]):
+            args.pop(0)
+        if not args:
+            continue
+        name = Path(args[0]).name
+        operands = [word for word in args[1:] if not word.startswith('-')]
+        if name == 'cd':
+            target = operands[0] if operands else str(HOME)
+            target = previous if target == '-' else str(expanded_path(target, cwd))
+            yield target, cwd, False
+            previous, cwd = cwd, target
+            continue
+        if name in ('echo', 'printf', 'pwd'):
+            continue
+        recursive = name in ('rg', 'find', 'tar', 'du') or (
+            name in ('grep', 'ls', 'cp') and any(
+                word in ('--recursive', '--dereference-recursive') or
+                (word.startswith('-') and not word.startswith('--') and
+                 any(c in word[1:] for c in ('rR' if name != 'ls' else 'R')))
+                for word in args[1:]))
+        if name in ('rg', 'grep'):
+            # -e/--regexp makes its following value the query instead of the
+            # first positional operand. Drop option values before path checks.
+            values, skip = [], False
+            query_option = False
+            for word in args[1:]:
+                if skip:
+                    skip = False
+                    continue
+                if word in ('-e', '--regexp', '-f', '--file', '-g', '--glob', '-t', '--type'):
+                    skip = True
+                    query_option |= word in ('-e', '--regexp', '-f', '--file')
+                elif not word.startswith('-'):
+                    values.append(word)
+            operands = values if query_option else values[1:]
+            if not operands and recursive:
+                operands = ['.']
+        elif name == 'ls' and not operands:
+            operands = ['.']
+        for word in operands:
+            if '://' not in word and not any(c.isspace() for c in word):
+                yield word, cwd, recursive
+
+
 def policy_problem(payload, rules):
     tool, inp = payload['tool_name'], payload['tool_input']
+    # The session Mac may run without a terminal sandbox. Keep explicit source
+    # credential reads, glob spellings and recursive parent searches denied in
+    # the native hook as well. This is command policy, not filesystem isolation.
+    protected = (HOME / '.config/gcloud', HOME / '.gemini/oauth_creds.json',
+                 HOME / '.local/state/antigravity-worker/gcp-auth',
+                 HOME / '.ssh', HOME / '.aws', HOME / '.gnupg',
+                 HOME / '.config/gh/hosts.yml')
+    def private_path(raw, recursive=False, cwd=None):
+        candidate = str(expanded_path(raw, cwd or payload['cwd'])).casefold()
+        wildcard = any(c in candidate for c in '*?[')
+        for source in protected:
+            source = str(source.resolve()).casefold()
+            if (candidate == source or candidate.startswith(source + '/')
+                    or (recursive and source.startswith(candidate.rstrip('/') + '/'))
+                    or (wildcard and any(fnmatch.fnmatchcase(str(parent), candidate)
+                                         for parent in (Path(source), *Path(source).parents)))
+                    or (wildcard and fnmatch.fnmatchcase(source, '/'.join(
+                        candidate.split('/')[:len(source.split('/'))])))):
+                return True
+        return False
+    if tool == 'Bash':
+        command = inp['command']
+        if any(private_path(path, recursive=recursive, cwd=cwd)
+               for path, cwd, recursive in shell_paths(command, payload['cwd'])):
+            return 'Source authentication files cannot be accessed by worker tools.'
+    elif tool in ('Read', 'Grep', 'Write', 'Edit', 'MultiEdit'):
+        if private_path(inp.get('file_path', inp.get('path', '')), recursive=tool == 'Grep'):
+            return 'Source authentication files cannot be accessed by worker tools.'
     # OAuth belongs to the CLI authentication layer, never model tools.
     # The terminal sandbox separately excludes this file from its mounts.
     if tool == 'Bash' and re.search(r'oauth_creds(?:\.json)?', inp['command'], re.I):
         return 'Subscription OAuth credentials cannot be accessed by worker tools.'
     if tool in ('Read', 'Grep', 'Write', 'Edit', 'MultiEdit'):
         target = inp.get('file_path', inp.get('path', ''))
-        resolved = Path(payload['cwd'], os.path.expanduser(target)).resolve()
-        credential = (HOME / '.gemini/oauth_creds.json').resolve()
-        if (resolved == credential or resolved.name == 'oauth_creds.json'
-                or (tool == 'Grep' and resolved in credential.parents)):
+        resolved = str(expanded_path(target, payload['cwd'])).casefold()
+        credential = str((HOME / '.gemini/oauth_creds.json').resolve()).casefold()
+        if (resolved == credential or Path(resolved).name == 'oauth_creds.json'
+                or (tool == 'Grep' and credential.startswith(resolved.rstrip('/') + '/'))):
             return 'Subscription OAuth credentials cannot be accessed by worker tools.'
     # Only the SDK may consume the short-lived token. The model must not print it
     # or alter it; recursive searches of parent directories are denied too.
@@ -138,11 +257,13 @@ def policy_problem(payload, rules):
             raise ValueError('invalid deny rule')
         match = re.fullmatch(r'([^()]+)\((.*)\)', rule)
         if not match:
-            if rule == tool or fnmatch.fnmatchcase(tool, rule + '*'):
+            if rule == tool or fnmatch.fnmatchcase(tool, rule + '*') or (
+                    rule == 'Edit' and tool in ('Write', 'MultiEdit')):
                 return 'Shared deny policy blocks this tool.'
             continue
         target, pattern = match.groups()
-        if target != tool and not (target == 'Read' and tool == 'Grep'):
+        if target != tool and not (target == 'Read' and tool == 'Grep') and not (
+                target == 'Edit' and tool in ('Write', 'MultiEdit')):
             continue
         if tool == 'Bash':
             # Native hooks below also inspect nested shells and tokenized git options.
@@ -153,8 +274,8 @@ def policy_problem(payload, rules):
         else:
             value = inp.get('file_path', inp.get('path', inp.get('url', '')))
             if value and not value.startswith(('http://', 'https://')):
-                value = str(Path(payload['cwd'], os.path.expanduser(value)).resolve())
-                pattern = os.path.expanduser(pattern)
+                value = str(expanded_path(value, payload['cwd'])).casefold()
+                pattern = str(expanded_path(pattern, payload['cwd'])).casefold()
             if fnmatch.fnmatchcase(value, pattern):
                 return 'Shared deny policy blocks this target.'
     return None

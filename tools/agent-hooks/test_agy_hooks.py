@@ -19,6 +19,97 @@ def event(name='run_command', **args):
 
 
 class NativeHooksTest(unittest.TestCase):
+    def test_edit_deny_covers_every_native_write_tool(self):
+        for folder, name in (('.ssh', 'authorized_keys'), ('.aws', 'credentials'),
+                             ('.gnupg', 'gpg.conf'), ('.config/gh', 'hosts.yml')):
+            target = str(Path.home() / folder / name)
+            rules = ['Edit(' + str(Path.home() / folder) + '/**)']
+            for native in (event('write_file', Path=target, Content='synthetic'),
+                           event('write_to_file', TargetFile=target, CodeContent='synthetic'),
+                           event('multi_replace_file_content', TargetFile=target, ReplacementChunks=[])):
+                with self.subTest(target=target, tool=native['toolCall']['name']):
+                    self.assertIsNotNone(hooks.policy_problem(hooks.translate(native), rules))
+                    self.assertIsNotNone(hooks.policy_problem(hooks.translate(native), []))
+
+        # Edit semantics also apply to paths not covered by authentication policy.
+        for native in (event('write_file', Path='/tmp/locked/example.txt', Content='synthetic'),
+                       event('write_to_file', TargetFile='/tmp/locked/example.txt', CodeContent='synthetic'),
+                       event('multi_replace_file_content', TargetFile='/tmp/locked/example.txt', ReplacementChunks=[])):
+            self.assertIsNotNone(hooks.policy_problem(hooks.translate(native), ['Edit(/tmp/locked/**)']))
+            self.assertIsNotNone(hooks.policy_problem(hooks.translate(native), ['Edit']))
+
+    def test_protected_paths_are_case_insensitive(self):
+        for target in ('~/.gemini/OAuth_creds.json', '~/.CONFIG/gcloud/credentials.db',
+                       '~/.local/state/antigravity-worker/GCP-AUTH/access-token'):
+            for native in (event('view_file', AbsolutePath=target),
+                           event('edit_file', Path=target, Target='a', Replacement='b'),
+                           event('write_file', Path=target, Content='synthetic')):
+                with self.subTest(target=target, tool=native['toolCall']['name']):
+                    self.assertIsNotNone(hooks.policy_problem(hooks.translate(native), []))
+        for target in ('~/.GEMINI', '~/.CONFIG/gcloud'):
+            self.assertIsNotNone(hooks.policy_problem(hooks.translate(
+                event('grep_search', SearchPath=target, Query='synthetic')), []))
+        for cmd in ('cat ~/.gemini/OAUTH_C*',
+                    'cat ~/.local/state/antigravity-worker/GCP-A*/access-token'):
+            self.assertIsNotNone(hooks.policy_problem(hooks.translate(event(CommandLine=cmd)), []))
+        self.assertIsNotNone(hooks.policy_problem(hooks.translate(event(
+            'write_file', Path='~/.SSH/authorized_keys', Content='synthetic')),
+            ['Edit(' + str(Path.home()) + '/.ssh/**)']))
+
+    def test_shell_tracks_home_relative_paths_and_recursive_defaults(self):
+        cases = [(cmd, '/tmp') for cmd in (
+            'grep -r x $HOME', 'grep -r x "${HOME}"', 'rg -uuu x $HOME',
+            'cd ~; cat .gemini/oa*', 'cd; grep -r x .gemini',
+            'cd; tar cf /tmp/x.tgz .config',
+            'cd ~/.local/state/antigravity-worker/GCP-AUTH; cat access-token',
+            'cd ~;cat .gemini/OAUTH_C*', 'cd "$HOME" && cat .gemini/oa*')]
+        cases += [('grep -r x .', str(Path.home())), ('rg -uuu x', str(Path.home())),
+                  ('grep -r x ..', str(Path.home() / 'work'))]
+        for cmd, cwd in cases:
+            with self.subTest(command=cmd, cwd=cwd):
+                self.assertIsNotNone(hooks.policy_problem(hooks.translate(event(CommandLine=cmd, Cwd=cwd)), []))
+
+    def test_shell_allows_nonrecursive_home_listing_and_literal_slashes(self):
+        for cmd in ('echo a / b', 'ls ~', "sed 's/ //' /tmp/input.txt", 'pwd',
+                    'rg -uuu x /tmp/synthetic-repo', 'cd /tmp; rg x .',
+                    'git -C /tmp/repository status', 'printf "%s" /'):
+            with self.subTest(command=cmd):
+                self.assertIsNone(hooks.policy_problem(hooks.translate(event(CommandLine=cmd)), []))
+
+    def test_current_file_tools_use_shared_write_and_edit_guards(self):
+        cases = [
+            (event('write_file', Path='/tmp/agy-fixture.txt', Content='before', Overwrite=True),
+             'Write', {'file_path': '/tmp/agy-fixture.txt', 'content': 'before'}),
+            (event('write_file', Path='/tmp/agy-fixture.txt', Content='', Append=True),
+             'Write', {'file_path': '/tmp/agy-fixture.txt', 'content': ''}),
+            (event('edit_file', Path='/tmp/agy-fixture.txt', Target='before', Replacement='after'),
+             'Edit', {'file_path': '/tmp/agy-fixture.txt', 'old_string': 'before', 'new_string': 'after'}),
+        ]
+        for native, name, inputs in cases:
+            with self.subTest(name=name, inputs=inputs):
+                with patch.object(hooks, 'settings', return_value=([], [{'hooks': [
+                        {'type': 'command', 'command': 'shared-guard'}]}])), \
+                     patch.object(hooks, 'run_guard', return_value=None) as guard:
+                    self.assertEqual(hooks.pre_tool(native)['decision'], 'allow')
+                    payload = guard.call_args.args[1]
+                    self.assertEqual(payload['tool_name'], name)
+                    self.assertEqual(payload['tool_input'], inputs)
+
+    def test_current_file_tools_preserve_denials_and_reject_bad_payloads(self):
+        for native in [event('write_file', Path='/tmp/agy-fixture.txt', Content='test'),
+                       event('edit_file', Path='/tmp/agy-fixture.txt', Target='a', Replacement='b')]:
+            with self.subTest(native=native), patch.object(hooks, 'settings', return_value=(
+                    [f"{tool}({Path('/tmp/agy-fixture.txt').resolve()})" for tool in ('Write', 'Edit')], [])):
+                self.assertEqual(hooks.pre_tool(native)['decision'], 'deny')
+        protected = str(Path.home() / '.gemini/oauth_creds.json')
+        for native in [event('write_file', Path=protected, Content='test'),
+                       event('edit_file', Path=protected, Target='a', Replacement='b'),
+                       event('write_file', Path='/tmp/test', Content=None),
+                       event('edit_file', Path='/tmp/test', Target='a', Replacement=None),
+                       event('edit_file', Path='/tmp/test', Target=None, Replacement='a')]:
+            with self.subTest(native=native):
+                self.assertEqual(hooks.pre_tool(native)['decision'], 'deny')
+
     def test_gcloud_exposes_only_a_cached_agent_access_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -145,6 +236,18 @@ class NativeHooksTest(unittest.TestCase):
         for payload in cases:
             with self.subTest(payload=payload):
                 self.assertEqual(hooks.pre_tool(payload)['decision'], 'deny')
+
+    def test_source_auth_globs_and_recursive_searches_are_denied_without_sandbox(self):
+        for command in ('cat ~/.gemini/oa* >/dev/null',
+                        'cat ~/.config/gcloud/application_d* >/dev/null',
+                        'grep -R synthetic ~/.gemini',
+                        'rg synthetic "$HOME/.config/gcloud"',
+                        'cat ${HOME}/.config/gcloud/credentials.db >/dev/null'):
+            with self.subTest(command=command):
+                self.assertEqual(hooks.pre_tool(event(CommandLine=command))['decision'], 'deny')
+        for path in ('~/.config/gcloud', '~/.config/gcloud/credentials.db', '~/.gemini/oa*'):
+            with self.subTest(path=path):
+                self.assertEqual(hooks.pre_tool(event('view_file', AbsolutePath=path))['decision'], 'deny')
 
     def test_existing_gcp_guard_blocks_native_identity_change(self):
         result = hooks.pre_tool(event(CommandLine='gcloud auth login'))

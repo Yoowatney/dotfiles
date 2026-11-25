@@ -6,7 +6,7 @@
 # It marks the calling pane 👑 unless it is already 🫡, opens the split or tab, names the pane 🫡, starts the agent, waits for its session and
 # hands over the instruction. The agent's herdr name is what lets the pane close itself when its work ends (pane-label).
 # Agents cannot run `herdr agent start` or `herdr pane split` themselves: the hook no-sed-inplace.py sends them here.
-#   pane-spawn [--new-tab] [--kind claude|codex|auto|agy] [--complexity simple|normal|complex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
+#   pane-spawn [--new-tab] [--kind claude|codex|auto|agy] [--complexity simple|normal|complex | --carbon] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
 #   pane-spawn --complexity complex "api#1 설계" "지시"
 # Three callers stay where they are and open beside themselves: a pane under a lead (🫡), a job tab (`pane-tell` refuses a job pane,
 # so a hidden child could reach nobody), and a pane on any server but default. So does a lead when workers cannot take the pane
@@ -34,9 +34,9 @@
 # and returns to Codex once Claude's measured usage passes its reserve. Checks never follow the policy. The local policy codex-only
 # restores the previous Codex-only routing before Python runs. Forwarded arguments and ambient-runner stay on Codex.
 # A quota lookup exceeding six seconds warns once and retains the previous Codex routing.
-# Policy agy-only overrides every normal worker request, including explicit kinds and ambient callers.
+# Optional policy agy-only overrides every normal worker request, including explicit kinds and ambient callers.
 # It requires safe AGY subscription quota, refuses unsupported forwarded options and never falls back.
-# The legacy routing above applies only when a non-AGY rollback policy is explicitly selected.
+# The installed default is claude-first; AGY-only requires an explicit local policy choice.
 # Startup/readiness responses provide no verified current quota-block signal: failures never switch runners.
 # A lead opens a pane for code, tests or docs with it (요유 2026-11-05). The main pane posts to Slack; its work panes only report results.
 # The main pane opens a Claude pane that does the job only with --why, the reason Codex cannot do it (api#1036). A missing
@@ -52,21 +52,26 @@
 # (load-guard.py: it waited 90 s and opened nothing; try again in a few minutes).
 original_args=("$@")
 H=${HERDR_BIN_PATH:-herdr}
-USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full] [--opus] [--artifact] [--skills] [--kind claude|codex|auto|agy] [--complexity simple|normal|complex] [--why <reason>] [--cwd <dir>] [--] "<work name>" "<instruction>" [-- <agent arguments>]
+USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full] [--opus] [--artifact] [--skills] [--kind claude|codex|auto|agy] [--complexity simple|normal|complex | --carbon] [--why <reason>] [--cwd <dir>] [--] "<work name>" "<instruction>" [-- <agent arguments>]
   Work name and instruction must contain non-whitespace text. Agent configuration/model/effort/sandbox/approval
     options cannot be work names; put agent options after both task operands and a second --.
   --task-type code|research|media|office|full: worker startup catalog; unknown tasks retain full context.
   --complexity simple|normal|complex: AGY model, independent of the task-type catalog; normal is the default.
-    simple uses Hydrogen, normal Neon, complex Carbon. AGY accepts no forwarded agent options and requires
+    simple uses Hydrogen medium, normal Hydrogen xhigh, complex Neon high.
+  --carbon: Carbon high, only when the user explicitly requested Carbon for this task.
+    Cannot combine with --complexity or --check; only valid for an AGY worker.
+    AGY accepts no forwarded agent options and requires
     known personal subscription quota and safe authentication settings. It never falls back to another runner.
   --job-id ID: keep the original job id for a check or reassignment; otherwise a new id is generated.
   --phase NAME: which phase of the job (--job-id, else the calling job) this pane works on, for the allowed-Mac check below.
   --allow-duplicate: intentionally start another worker with the same instruction. Otherwise an open worker from the
     same caller and folder is reused for ten minutes. Checks always start fresh.
-  AGY-only policy: every normal worker uses AGY, including omitted/explicit kinds and ambient callers.
+  Optional AGY-only policy: every normal worker uses AGY, including omitted/explicit kinds and ambient callers.
     Unsupported forwarded options are refused; use --complexity for AGY model selection. Checks remain Claude.
+    On the session Mac, workers run without a terminal sandbox and retain native safety hooks.
+    Other host roles retain the sandbox. Command hooks are not filesystem isolation for arbitrary code.
   --kind auto: choose a normal worker from subscription quota and weekly pace; unknown/paid usage is excluded.
-    The following legacy routing applies only after explicitly selecting a non-AGY rollback policy.
+    The installed default is claude-first. AGY-only requires an explicit local policy choice.
     claude-first can reuse a same-week Codex reading up to 24h old at <=80%, with the same login/billing/API guards.
     If neither runner qualifies, no pane opens. Set the agent-quota policy to codex-only for the previous routing.
     When that is for usage, the refusal asks the main pane to have 요유 switch the account or spend a reset ticket, never to wait for the reset.
@@ -98,7 +103,7 @@ USAGE_BLOCK_NOTE="Never put the work off until the usage reset (요유 2026-11-2
 # starts that way made an ordinary pane unreachable (요유 2026-11-05), so no tab it names starts that way.
 tab_name() { case "$1" in "자동 "* | "알아서 "*) echo "일 $1" ;; *) echo "$1" ;; esac; }
 
-same= new_tab= check= check_level= allow_duplicate= opus= artifact= skills= kind= why= opener= task_type= job_id= phase= complexity=normal cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
+same= new_tab= check= check_level= allow_duplicate= opus= artifact= skills= carbon= complexity_given= kind= why= opener= task_type= job_id= phase= complexity=normal cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
 while [ $# -gt 0 ]; do
   case "$1" in
     --same-tab) same=1; shift ;;
@@ -106,18 +111,20 @@ while [ $# -gt 0 ]; do
     --check) check=1; shift ;;
     --allow-duplicate) allow_duplicate=1; shift ;;
     --opus) opus=1; shift ;;
+    --carbon) carbon=1; shift ;;
     --artifact) artifact=1; shift ;;
     --skills) skills=1; shift ;;
     -h | --help) echo "$USAGE"; exit 0 ;;
     --kind | --cwd | --why | --opener | --task-type | --job-id | --phase | --check-level | --complexity)
       [ $# -ge 2 ] || die "$USAGE"
-      case "$1" in --check-level) case "$2" in none|figures|full) check_level=$2 ;; *) die "--check-level takes none, figures or full" ;; esac ;; --complexity) case "$2" in simple|normal|complex) complexity=$2 ;; *) die "--complexity takes simple, normal or complex" ;; esac ;; --kind) kind=$2 ;; --cwd) cwd=$2 ;; --why) why=$2 ;; --opener) opener=${2#term_}; [[ "$opener" =~ ^[0-9A-Za-z]+$ ]] || die "$USAGE" ;; --task-type) task_type=$2 ;; --job-id) job_id=$2 ;; --phase) phase=$2 ;; esac
+      case "$1" in --check-level) case "$2" in none|figures|full) check_level=$2 ;; *) die "--check-level takes none, figures or full" ;; esac ;; --complexity) complexity_given=1; case "$2" in simple|normal|complex) complexity=$2 ;; *) die "--complexity takes simple, normal or complex" ;; esac ;; --kind) kind=$2 ;; --cwd) cwd=$2 ;; --why) why=$2 ;; --opener) opener=${2#term_}; [[ "$opener" =~ ^[0-9A-Za-z]+$ ]] || die "$USAGE" ;; --task-type) task_type=$2 ;; --job-id) job_id=$2 ;; --phase) phase=$2 ;; esac
       shift 2 ;;
     --) shift; break ;;
     --*) die "$USAGE" ;;
     *) break ;;
   esac
 done
+[ -z "$carbon" ] || [ -z "$complexity_given$check" ] || die "--carbon cannot combine with --complexity or --check"
 [ $# -ge 2 ] || die "$USAGE"
 [[ "$1" =~ [^[:space:]] ]] && [[ "$2" =~ [^[:space:]] ]] || die "$USAGE"
 # A leading -- can introduce literal names, but must not turn forwarded agent
@@ -239,8 +246,9 @@ elif [ "$asked" = auto ] && [ -z "$check" ]; then
     fi
   fi
 fi
+[ -z "$carbon" ] || [ "$kind" = agy ] || die "--carbon requires an AGY worker"
 if [ "$kind" = agy ]; then
-  # Options cannot override the model, subscription-only settings or sandbox.
+    # Options cannot override the model, subscription-only settings or host policy.
   [ $# -eq 0 ] && [ -z "$opus$artifact$skills" ] || die "AGY uses --complexity and fixed safety settings; forwarded agent options and Claude-only flags are refused"
   # Parent GCP tooling may use ADC; the AGY child explicitly clears it below.
   # Keep API-key and project-override checks intact for subscription admission.
@@ -326,10 +334,18 @@ case "$kind" in
   agy) ready='.result.agent.interactive_ready'
     case "$complexity" in
       simple) agy_model=gemini-4-hydrogen-medium ;;
-      normal) agy_model=gemini-4-neon-high ;;
-      complex) agy_model=gemini-4-carbon-high ;;
+      normal) agy_model=gemini-4-hydrogen-xhigh ;;
+      complex) agy_model=gemini-4-neon-high ;;
     esac
-    set -- --sandbox --model "$agy_model" --settings '{"useG1Credits":false,"modelProvider":"","allowNonWorkspaceAccess":false,"enableTerminalSandbox":true,"agentMode":"auto","toolPermission":"proceed-in-sandbox"}'
+    [ -z "$carbon" ] || agy_model=gemini-4-carbon-high
+    # Match the interactive shell's positive session-Mac identification.
+    # Missing/unknown markers and dangling role links retain the sandbox.
+    if [ ! -e "$HOME/.config/munice/host-role" ] && [ ! -L "$HOME/.config/munice/host-role" ] &&
+       [ "$(head -1 "$HOME/.config/munice/ambient-company-host" 2>/dev/null)" = yoyoo-session ]; then
+      set -- --model "$agy_model" --settings '{"useG1Credits":false,"modelProvider":"","allowNonWorkspaceAccess":false,"enableTerminalSandbox":false,"agentMode":"accept-edits","toolPermission":"always-proceed"}'
+    else
+      set -- --sandbox --model "$agy_model" --settings '{"useG1Credits":false,"modelProvider":"","allowNonWorkspaceAccess":false,"enableTerminalSandbox":true,"agentMode":"auto","toolPermission":"proceed-in-sandbox"}'
+    fi
     # Herdr's server can retain credentials absent from this caller. Override
     # them in the new pane as well as checking the caller during admission.
     env_args=(--env HERDR_AGY_STARTUP_ROLE=worker --env "HERDR_AGY_TASK_TYPE=$task_type"
