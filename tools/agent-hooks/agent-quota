@@ -167,6 +167,9 @@ def invalid(reason):
 API_ENV = {"OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY",
            "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK",
            "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"}
+AGY_API_ENV = {"GEMINI_API_KEY", "GOOGLE_API_KEY", "AGY_ADC_AUTH", "GOOGLE_APPLICATION_CREDENTIALS",
+               "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT_ID", "GOOGLE_CLOUD_QUOTA_PROJECT",
+               "GOOGLE_GENAI_USE_VERTEXAI"}
 
 
 def subscription_settings(kind, root, cwd):
@@ -284,10 +287,47 @@ def claude_quota(now, cwd, first=False):
     return normalize(epoch(snap.get("observed_at")), snap.get("five_hour"), snap.get("seven_day"), now, "used_percentage", "used_percentage", 80, optional_short=first)
 
 
+def agy_quota(now, cwd):
+    # This cache contains only statusLine metadata, never OAuth tokens or email.
+    # Its collector is separate from admission: a display refresh is not permission
+    # to use API credentials, paid credits, unknown plans or an expired window.
+    if any(os.environ.get(key) for key in AGY_API_ENV):
+        return invalid("API/project environment override")
+    try:
+        settings = json.loads((Path.home() / ".gemini/antigravity-cli/settings.json").read_text())
+    except (OSError, ValueError):
+        return invalid("subscription settings unavailable")
+    if not isinstance(settings, dict):
+        return invalid("subscription settings invalid")
+    # AGY removes default-valued keys on save; absent means its native false/empty default.
+    if ("useG1Credits" in settings and settings["useG1Credits"] is not False) or ("modelProvider" in settings and settings["modelProvider"] != ""):
+        return invalid("subscription settings unknown/overridden")
+    snap = read_json(state_dir() / "agy.json")
+    if snap.get("plan_tier") not in ("Google AI Pro", "Google AI Ultra"):
+        return invalid("personal subscription plan unknown")
+    quotas = snap.get("quota")
+    if not isinstance(quotas, dict):
+        return invalid("missing limit window")
+    windows = []
+    for key in ("gemini-5h", "gemini-weekly"):
+        window = quotas.get(key)
+        if not isinstance(window, dict):
+            return invalid("missing limit window")
+        fraction = window.get("remaining_fraction")
+        if not isinstance(fraction, (int, float)) or isinstance(fraction, bool) or not math.isfinite(fraction) or not 0 <= fraction <= 1:
+            return invalid("invalid remaining fraction")
+        windows.append({"used_percent": round(100 * (1 - fraction), 10), "resets_at": window.get("reset_time")})
+    return normalize(epoch(snap.get("captured_at")), *windows, now, "used_percent", "used_percent", 95)
+
+
 def select(now, policy, cwd=None):
     result = {"kind": None, "policy": policy, "reason": "invalid policy"}
     if policy == "codex-only":
         return dict(result, kind="codex", reason="legacy policy; quota routing bypassed")
+    if policy == "agy-only":
+        agy = agy_quota(now, Path(cwd or Path.cwd()).resolve())
+        return dict(result, kind="agy" if agy["eligible"] else None, agy=agy,
+                    reason="agy only: " + agy["reason"])
     if policy not in ("quota-aware", "claude-first"):
         return result
     cwd = Path(cwd or Path.cwd()).resolve()
@@ -364,6 +404,10 @@ def main():
         result = claude_quota(now, Path(sys.argv[2] if len(sys.argv) == 3 else Path.cwd()).resolve(), first=True)
         print(json.dumps(result, allow_nan=False))
         return 0 if result["eligible"] else 3 if result["reason"] == "reserve reached" else 1
+    if command == "agy-reserve":
+        result = agy_quota(now, Path(sys.argv[2] if len(sys.argv) == 3 else Path.cwd()).resolve())
+        print(json.dumps(result, allow_nan=False))
+        return 0 if result["eligible"] else 3 if result["reason"] == "reserve reached" else 1
     if command == "codex-week":
         # The display wrapper supplies its clock, also used by its reset wording.
         if len(sys.argv) == 3:
@@ -379,7 +423,7 @@ def main():
                         print(f"{0 if reset <= now else used:g}\t{int(reset)}\t{int(at)}")
                         return 0
         return 1
-    print("usage: agent-quota select|capture-claude|claude-reserve|codex-week", file=sys.stderr)
+    print("usage: agent-quota select|capture-claude|claude-reserve|agy-reserve|codex-week", file=sys.stderr)
     return 2
 
 

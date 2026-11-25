@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""Translate AGY lifecycle events to the existing local worker safeguards."""
+from __future__ import annotations
+
+import fnmatch
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+HOME = Path.home()
+CLAUDE = HOME / '.claude'
+REQUIRED = ('secret-print-guard.py', 'gcp-account-guard.py', 'no-sed-inplace.py',
+            'secret-scan-push.sh', 'slack-format-check.py', 'host_guard.py',
+            'dispatch/guard.sh', 'harness-guards/guard.py')
+SLACK_WRITE = re.compile(r'(?:chat[._](?:post|update|delete|schedule)|slack[\w./-]*(?:send|post|reply|edit)|'
+                         r'hooks\.slack\.com|main-channel\.py\s+(?:post|reply|decide)|'
+                         r'(?:reply|post)\.sh)', re.I)
+
+
+def deny(reason):
+    return {'decision': 'deny', 'reason': reason}
+
+
+def nonempty(value):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError('required string is missing')
+    return value
+
+
+def translate(event):
+    call = event['toolCall']
+    name, args = nonempty(call['name']), call['args']
+    if not isinstance(args, dict):
+        raise ValueError('invalid tool arguments')
+    cwd = args.get('Cwd') or event.get('cwd') or (event.get('workspacePaths') or [None])[0]
+    cwd = nonempty(cwd)
+    base = {'session_id': nonempty(event.get('conversationId')), 'cwd': cwd,
+            'transcript_path': event.get('transcriptPath') or '', 'hook_event_name': 'PreToolUse'}
+    if name == 'run_command':
+        if args.get('RequestedTerminalID'):
+            raise ValueError('cross-terminal execution is not supported')
+        tool, inp = 'Bash', {'command': nonempty(args.get('CommandLine')),
+                             'run_in_background': bool(args.get('RunPersistent'))}
+    elif name in ('view_file', 'read_file'):
+        tool, inp = 'Read', {'file_path': nonempty(args.get('AbsolutePath') or args.get('Path'))}
+    elif name in ('list_dir', 'find_by_name', 'grep_search'):
+        key = {'list_dir': 'DirectoryPath', 'find_by_name': 'SearchDirectory', 'grep_search': 'SearchPath'}[name]
+        tool, inp = 'Grep', {'path': nonempty(args.get(key)), 'pattern': args.get('Query', args.get('Pattern', '')),
+                             'output_mode': 'content' if name == 'grep_search' else 'files_with_matches'}
+    elif name == 'write_to_file':
+        tool, inp = 'Write', {'file_path': nonempty(args.get('TargetFile')), 'content': args.get('CodeContent', '')}
+    elif name == 'replace_file_content':
+        tool, inp = 'Edit', {'file_path': nonempty(args.get('TargetFile')),
+                             'old_string': args.get('TargetContent', ''), 'new_string': args.get('ReplacementContent', '')}
+    elif name == 'multi_replace_file_content':
+        chunks = args.get('ReplacementChunks')
+        if not isinstance(chunks, list) or not all(isinstance(c, dict) for c in chunks):
+            raise ValueError('invalid replacement chunks')
+        tool, inp = 'MultiEdit', {'file_path': nonempty(args.get('TargetFile')),
+            'edits': [{'old_string': c.get('TargetContent', ''), 'new_string': c.get('ReplacementContent', '')} for c in chunks]}
+    elif name == 'read_url_content':
+        tool, inp = 'WebFetch', {'url': nonempty(args.get('Url'))}
+    elif name == 'search_web':
+        tool, inp = 'WebSearch', {'query': nonempty(args.get('query'))}
+    elif name in ('command_status', 'wait', 'wait_5_seconds', 'list_permissions', 'finish'):
+        tool, inp = 'Status', args
+    elif name == 'manage_task' and args.get('Action') in ('list', 'status'):
+        tool, inp = 'Status', args
+    else:
+        raise ValueError('unsupported tool; no unguarded fallback')
+    base.update(tool_name=tool, tool_input=inp)
+    return base
+
+
+def settings():
+    data = json.loads((CLAUDE / 'settings.json').read_text())
+    rules = data.get('permissions', {}).get('deny')
+    groups = data.get('hooks', {}).get('PreToolUse')
+    if not isinstance(rules, list) or not isinstance(groups, list):
+        raise ValueError('shared safety configuration is missing')
+    configured = '\n'.join(h.get('command', '') for g in groups for h in g.get('hooks', []))
+    if any(name not in configured for name in REQUIRED):
+        raise ValueError('a required shared safeguard is missing')
+    return rules, groups
+
+
+def policy_problem(payload, rules):
+    tool, inp = payload['tool_name'], payload['tool_input']
+    if tool == 'Bash' and SLACK_WRITE.search(inp['command']):
+        return 'Worker Slack publication must go through the lead.'
+    if tool == 'Bash':
+        source = CLAUDE / 'hooks/no-sed-inplace.py'
+        spec = importlib.util.spec_from_file_location('agy_shell_policy', source)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.CLAUDE = {'claude', 'cl', 'cla', 'codex', 'agy', 'agy-personal', 'gemini'}
+        if module.claude_model_command(inp['command']):
+            return 'Nested model execution must go through the lead and guarded pane-spawn.'
+    for rule in rules:
+        if not isinstance(rule, str):
+            raise ValueError('invalid deny rule')
+        match = re.fullmatch(r'([^()]+)\((.*)\)', rule)
+        if not match:
+            if rule == tool or fnmatch.fnmatchcase(tool, rule + '*'):
+                return 'Shared deny policy blocks this tool.'
+            continue
+        target, pattern = match.groups()
+        if target != tool and not (target == 'Read' and tool == 'Grep'):
+            continue
+        if tool == 'Bash':
+            # Native hooks below also inspect nested shells and tokenized git options.
+            value = inp['command']
+            pattern = pattern.replace(':*', '*')
+            if fnmatch.fnmatchcase(value, pattern):
+                return 'Shared deny policy blocks this command.'
+        else:
+            value = inp.get('file_path', inp.get('path', inp.get('url', '')))
+            if value and not value.startswith(('http://', 'https://')):
+                value = str(Path(payload['cwd'], os.path.expanduser(value)).resolve())
+                pattern = os.path.expanduser(pattern)
+            if fnmatch.fnmatchcase(value, pattern):
+                return 'Shared deny policy blocks this target.'
+    return None
+
+
+def run_guard(command, payload, timeout=10):
+    child_env = dict(os.environ)
+    if 'gcp-account-guard.py' in command:
+        command = f'{sys.executable} -I {CLAUDE / "hooks/gcp-account-guard.py"} --judge'
+        child_env.pop('MUNICE_GCP_ADMIN', None)
+        child_env['MUNICE_AUTO_DISPATCH'] = '1'
+        child_env.pop('MUNICE_AMBIENT', None)
+    try:
+        result = subprocess.run(command, shell=True, input=json.dumps(payload), text=True,
+                                capture_output=True, cwd=payload['cwd'], env=child_env, timeout=timeout)
+        if result.returncode:
+            return 'Shared safety hook failed; the tool remains blocked.'
+        for line in result.stdout.splitlines():
+            output = json.loads(line)
+            if not isinstance(output, dict) or output.get('continue') is False:
+                return 'Shared safety hook rejected the operation.'
+            if output and not set(output).intersection(('hookSpecificOutput', 'decision', 'continue', 'systemMessage')):
+                return 'Shared safety hook returned an invalid response.'
+            decision = output.get('hookSpecificOutput', {}).get('permissionDecision')
+            if decision == 'deny' or output.get('decision') in ('deny', 'block'):
+                # Existing guards intentionally report categories, never secret values.
+                return output.get('hookSpecificOutput', {}).get('permissionDecisionReason') or 'Shared safety hook denied the tool.'
+            if decision not in (None, 'allow', 'ask'):
+                return 'Shared safety hook returned an unsupported decision.'
+            if decision == 'ask':
+                return 'Shared safety hook requires lead approval.'
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return 'Shared safety hook could not be checked; the tool remains blocked.'
+    return None
+
+
+def ponytail(event, state_dir=None):
+    conversation = nonempty(event.get('conversationId'))
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', conversation):
+        raise ValueError('invalid conversation id')
+    directory = Path(state_dir) if state_dir else HOME / '.local/state/antigravity-worker/ponytail'
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = directory / (conversation + '.json')
+    previous = json.loads(path.read_text()).get('mode') if path.exists() else None
+    plugin = CLAUDE / 'plugins/marketplaces/ponytail'
+    if not (plugin / 'skills/ponytail/SKILL.md').is_file():
+        raise ValueError('Ponytail source is missing')
+    # Reuse the plugin's canonical instruction builder and mode normalization.
+    script = r'''
+const fs=require('fs'), p=JSON.parse(fs.readFileSync(0,'utf8'));
+const c=require(p.plugin+'/hooks/ponytail-config');
+const builder=require(p.plugin+'/hooks/ponytail-instructions');
+let mode=c.normalizePersistedMode(p.previous)||c.getDefaultMode();
+const prompt=String(p.prompt||'').trim().toLowerCase();
+if(c.isDeactivationCommand(prompt)) mode='off';
+const words=prompt.split(/\s+/), command=words[0].replace(/^[@$]/,'/');
+if(command==='/ponytail-review'||command==='/ponytail:ponytail-review') mode='review';
+if(command==='/ponytail'||command==='/ponytail:ponytail') mode=c.normalizeMode(words[1])||c.getDefaultMode();
+console.log(JSON.stringify({mode,text:mode==='off'?'PONYTAIL MODE OFF':builder.getPonytailInstructions(mode)}));
+'''
+    result = subprocess.run(['node', '-e', script], text=True, capture_output=True, timeout=5,
+                            input=json.dumps({'plugin': str(plugin), 'previous': previous,
+                                              'prompt': event.get('lastUserInput', '')}))
+    if result.returncode:
+        raise ValueError('Ponytail instruction generation failed')
+    built = json.loads(result.stdout)
+    temp = path.with_suffix('.tmp')
+    temp.write_text(json.dumps({'mode': built['mode']}))
+    temp.chmod(0o600)
+    temp.replace(path)
+    if event.get('hookEventName') == 'PreInvocation' and previous == built['mode']:
+        return {'injectSteps': []}
+    return {'injectSteps': [{'systemMessage': {'systemMessage': nonempty(built['text'])}}]}
+
+
+def pre_tool(event):
+    try:
+        payload = translate(event)
+        rules, groups = settings()
+        reason = policy_problem(payload, rules)
+        if reason:
+            return deny(reason)
+        for group in groups:
+            matcher = group.get('matcher') or '*'
+            if matcher != '*' and not re.search(matcher, payload['tool_name']):
+                continue
+            for handler in group.get('hooks', []):
+                if handler.get('type') != 'command':
+                    return deny('Unsupported shared safety hook type.')
+                reason = run_guard(nonempty(handler.get('command')), payload,
+                                   timeout=min(float(handler.get('timeout', 10)), 30))
+                if reason:
+                    return deny(reason)
+        return {'decision': 'allow'}  # Delegate to AGY policy; never auto-approve.
+    except Exception:
+        return deny('AGY safety input or configuration is invalid; the tool remains blocked.')
+
+
+def load_completion():
+    spec = importlib.util.spec_from_file_location('agy_completion', Path(__file__).with_name('auto-tab-close.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def completion(event, env=None):
+    env = os.environ if env is None else env
+    if env.get('HERDR_AGY_STARTUP_ROLE') == 'worker':
+        load_completion().handle_stop(event, env)
+    return {'decision': 'allow'}
+
+
+def main():
+    event_name = sys.argv[1] if len(sys.argv) > 1 else 'PreToolUse'
+    try:
+        event = json.load(sys.stdin)
+        if event_name == 'PreToolUse':
+            result = pre_tool(event)
+        elif event_name in ('SessionStart', 'PreInvocation'):
+            result = ponytail(event)
+        elif event_name == 'Stop':
+            result = completion(event)
+        else:
+            result = deny('Unsupported lifecycle event.')
+    except Exception:
+        if event_name in ('SessionStart', 'PreInvocation'):
+            result = {'terminationBehavior': 'terminate', 'injectSteps': [{'errorMessage': {
+                'userMessage': 'AGY shared instructions could not be loaded.'}}]}
+        else:
+            result = deny('AGY safety event could not be read; the tool remains blocked.')
+    print(json.dumps(result, ensure_ascii=False))
+
+
+if __name__ == '__main__':
+    main()

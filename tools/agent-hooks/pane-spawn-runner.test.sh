@@ -10,7 +10,7 @@ run() { bash "$here/agent-runner" "$@"; }
 
 out=$(run); grep -q '^runner: auto$' <<<"$out" || fail "no local file shows the installed default: $out"
 grep -q 'installed default' <<<"$out" || fail "the source is named: $out"
-for pair in claude:claude-first codex:codex-only auto:quota-aware; do
+for pair in claude:claude-first codex:codex-only auto:quota-aware agy:agy-only; do
   name=${pair%%:*} value=${pair##*:}
   out=$(run "$name")
   [ "$(cat "$policy")" = "$value" ] || fail "$name writes $value, got: $(cat "$policy")"

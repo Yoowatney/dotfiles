@@ -376,6 +376,80 @@ class RoutingTests(unittest.TestCase):
         self.capture(tick=102)
         self.assertEqual(self.q.read_json(self.q.state_dir() / "claude.json")["observed_at"], self.now)
 
+    def agy_fixture(self, remaining=0.9, age=0, plan="Google AI Ultra"):
+        self.write(".gemini/antigravity-cli/settings.json", {"useG1Credits": False, "modelProvider": ""})
+        return self.write("state/agent-quota/agy.json", {
+            "captured_at": self.now - age, "plan_tier": plan,
+            "quota": {
+                "gemini-5h": {"remaining_fraction": remaining, "reset_time": self.now + 1000},
+                "gemini-weekly": {"remaining_fraction": 0.8, "reset_time": self.now + 302400},
+                "3p-5h": {"remaining_fraction": 0, "reset_time": 0},
+            }})
+
+    def test_agy_only_uses_gemini_subscription_windows(self):
+        self.agy_fixture()
+        result = self.select("agy-only")
+        self.assertEqual(result["kind"], "agy")
+        self.assertAlmostEqual(result["agy"]["short"], 10)
+        self.assertAlmostEqual(result["agy"]["week"], 20)
+
+    def test_agy_reads_statusline_rfc3339_resets(self):
+        path = self.agy_fixture()
+        snap = json.loads(path.read_text())
+        for key in ("gemini-5h", "gemini-weekly"):
+            reset = snap["quota"][key]["reset_time"]
+            snap["quota"][key]["reset_time"] = datetime.datetime.fromtimestamp(reset, datetime.timezone.utc).isoformat()
+        path.write_text(json.dumps(snap))
+        self.assertEqual(self.select("agy-only")["kind"], "agy")
+
+    def test_agy_only_does_not_fall_back_on_stale_or_unknown_usage(self):
+        for age in (601, -6):
+            self.agy_fixture(age=age)
+            self.assertIsNone(self.select("agy-only")["kind"])
+        (self.home / "state/agent-quota/agy.json").unlink()
+        self.assertIsNone(self.select("agy-only")["kind"])
+
+    def test_agy_only_rejects_limit_and_invalid_fraction(self):
+        for remaining in (0.2, 0, -0.1, 1.1, True, "0.9"):
+            self.agy_fixture(remaining=remaining)
+            self.assertIsNone(self.select("agy-only")["kind"], remaining)
+
+    def test_agy_only_rejects_unknown_or_free_plan(self):
+        for plan in (None, "", "Free", "Enterprise"):
+            self.agy_fixture(plan=plan)
+            self.assertIsNone(self.select("agy-only")["kind"])
+
+    def test_agy_only_rejects_paid_or_adc_overrides(self):
+        self.agy_fixture()
+        for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "AGY_ADC_AUTH", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT"):
+            with patch.dict(os.environ, {key: "synthetic"}):
+                self.assertIsNone(self.select("agy-only")["kind"], key)
+        for settings in ({"useG1Credits": True}, {"useG1Credits": "false"}, {"useG1Credits": None}, {"modelProvider": None}, {"useG1Credits": False, "modelProvider": "gemini"}):
+            self.write(".gemini/antigravity-cli/settings.json", settings)
+            self.assertIsNone(self.select("agy-only")["kind"])
+
+    def test_agy_accepts_native_pruned_default_settings(self):
+        self.agy_fixture()
+        self.write(".gemini/antigravity-cli/settings.json", {})
+        self.assertEqual(self.select("agy-only")["kind"], "agy")
+
+    def test_agy_rejects_unreadable_or_malformed_settings(self):
+        self.agy_fixture()
+        path = self.home / ".gemini/antigravity-cli/settings.json"
+        for content in ("{", "[]", "null"):
+            path.write_text(content)
+            self.assertIsNone(self.select("agy-only")["kind"])
+        path.unlink()
+        self.assertIsNone(self.select("agy-only")["kind"])
+
+    def test_agy_only_rejects_expired_windows(self):
+        path = self.agy_fixture()
+        for key in ("gemini-5h", "gemini-weekly"):
+            data = json.loads(path.read_text())
+            data["quota"][key]["reset_time"] = self.now
+            path.write_text(json.dumps(data))
+            self.assertIsNone(self.select("agy-only")["kind"])
+
 
 if __name__ == "__main__":
     unittest.main()

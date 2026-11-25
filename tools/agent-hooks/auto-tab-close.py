@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stop hook (Claude Code and Codex): a pane an agent opened closes itself when its report says nothing is left there.
+"""Stop hook (Claude Code, Codex and AGY): close an agent-opened pane after its report is delivered.
 
 The global rule asks a dispatch tab (MUNICE_AUTO_DISPATCH=1) or a Slack ambient tab (MUNICE_AMBIENT=1) to end with
 `세션: 닫음` and `pane-label --close` as its last tool call. Sessions kept writing `세션: 닫아도 됨` and stopping, so 요유
@@ -277,7 +277,67 @@ def hidden_agents(env) -> list | None:
     return herdr(env, "agent", "list", socket=sock).get("agents") if sock else []
 
 
+def agy_stop(payload: dict) -> bool:
+    """Native AGY payloads use camelCase; never infer their idle state from a report."""
+    return "conversationId" in payload or "transcriptPath" in payload
+
+
+def agy_transcript(path: str) -> tuple[str, str]:
+    """Read AGY's native transcript, not tool output or an earlier unfinished turn."""
+    text = ""
+    with open(path, "rb") as stream:
+        raw = stream.read()
+    for line in raw.splitlines():
+        record = json.loads(line)
+        if not isinstance(record, dict):
+            text = ""
+            continue
+        # Only the final completed model response is a report. A new user input,
+        # tool step or unfinished response makes an older report ineligible.
+        text = (record.get("content") or "") if (
+            record.get("source") == "MODEL" and record.get("type") == "PLANNER_RESPONSE"
+            and record.get("status") == "DONE" and isinstance(record.get("content"), str)
+        ) else ""
+    return text, hashlib.sha256(raw).hexdigest()
+
+
+def agy_final_text(path: str) -> str:
+    return agy_transcript(path)[0]
+
+
+def agy_idle_mark(path: str, digest: str = ""):
+    """A sweep needs native fullyIdle evidence for this exact transcript snapshot."""
+    mark = path + ".munice-idle"
+    try:
+        os.unlink(mark)
+    except FileNotFoundError:
+        pass
+    if digest:
+        temporary = mark + "." + str(time.time_ns())
+        try:
+            with open(temporary, "x", encoding="ascii") as stream:
+                os.chmod(temporary, 0o600)
+                stream.write(digest)
+            os.replace(temporary, mark)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+
+def agy_idle_reply(path: str) -> str:
+    try:
+        with open(path + ".munice-idle", encoding="ascii") as stream:
+            digest = stream.read()
+        text, actual = agy_transcript(path)
+        return text if actual == digest else ""
+    except (OSError, ValueError):
+        return ""
+
+
 def reply_of(payload: dict):
+    if agy_stop(payload):
+        path = payload.get("transcriptPath")
+        return agy_final_text(path) if isinstance(path, str) and path else ""
     text = payload.get("last_assistant_message")
     if text is None and payload.get("transcript_path"):
         text = share.final_text(payload["transcript_path"])  # unreadable transcript raises: fail open
@@ -301,6 +361,9 @@ def decide(payload: dict, env) -> str | None:
     """The reply to act on when the turn ends, or None: one that closes this pane, or a report that keeps it open and still has
     to reach the pane above. The nested claude -p inherits this pane's env but is not its session."""
     if env.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
+        return None
+    if agy_stop(payload) and (payload.get("fullyIdle") is not True
+            or payload.get("terminationReason") != "model_stop" or payload.get("error")):
         return None
     text = reply_of(payload)
     if not isinstance(text, str):
@@ -547,7 +610,8 @@ def source_transcripts(me, env):
         return []
     home = env.get("HOME") or os.path.expanduser("~")
     return (glob.glob(f"{home}/.claude/projects/*/{glob.escape(session)}.jsonl")
-            + glob.glob(f"{home}/.codex/sessions/*/*/*/rollout-*-{glob.escape(session)}.jsonl"))
+            + glob.glob(f"{home}/.codex/sessions/*/*/*/rollout-*-{glob.escape(session)}.jsonl")
+            + glob.glob(f"{home}/.gemini/antigravity-cli/brain/{glob.escape(session)}/.system_generated/logs/transcript.jsonl"))
 
 
 REQUEST_CAP = 6000  # characters of source requests quoted into a check prompt (11/16: median 5.3k); the transcript has the rest
@@ -569,7 +633,11 @@ def source_requests(me, env):
                     content = None
                     if not all(isinstance(record.get(field) or {}, dict) for field in ("origin", "message", "attachment", "payload")):
                         continue
-                    if record.get("type") == "user" and (record.get("origin") or {}).get("kind", "human") == "human":
+                    if record.get("type") == "USER_INPUT" and record.get("source") == "USER_EXPLICIT":
+                        wrapped = record.get("content")
+                        request = re.search(r"\A<USER_REQUEST>\s*\n?(.*?)\n?</USER_REQUEST>(?:\s|$)", wrapped, re.S) if isinstance(wrapped, str) else None
+                        content = request.group(1).strip() if request else None
+                    elif record.get("type") == "user" and (record.get("origin") or {}).get("kind", "human") == "human":
                         content = (record.get("message") or {}).get("content")
                     elif record.get("type") == "attachment":
                         queued = record.get("attachment") or {}
@@ -1315,7 +1383,7 @@ def after_turn(token: str, env):
 
 
 def last_reply(session: str, home: str = "") -> str:
-    """The last reply of a finished session, from its Claude transcript or its Codex log."""
+    """The last reply of a finished session, from its native runtime transcript."""
     home = home or os.path.expanduser("~")
     for path in glob.glob(f"{home}/.claude/projects/*/{session}.jsonl"):
         return share.final_text(path)
@@ -1327,7 +1395,35 @@ def last_reply(session: str, home: str = "") -> str:
                     return ""
                 if payload.get("type") == "task_complete":
                     return payload.get("last_agent_message") or ""
+    for path in glob.glob(f"{home}/.gemini/antigravity-cli/brain/{glob.escape(session)}/.system_generated/logs/transcript.jsonl"):
+        return agy_idle_reply(path)
     return ""
+
+
+def handle_stop(payload: dict, env):
+    """Keep native runtime handling at the entry point shared by direct hooks and adapters."""
+    sync_mark(payload, env)
+    if agy_stop(payload):
+        try:
+            path = payload.get("transcriptPath")
+            if isinstance(path, str) and path:
+                agy_idle_mark(path)
+                with open(path, "rb") as stream:
+                    digest = hashlib.sha256(stream.read()).hexdigest()
+            reply = decide(payload, env)
+            if reply and isinstance(path, str) and path:
+                # Changed while the hook ran: the next Stop owns it.
+                with open(path, "rb") as stream:
+                    if hashlib.sha256(stream.read()).hexdigest() != digest:
+                        reply = None
+                if reply:
+                    agy_idle_mark(path, digest)
+        except (OSError, ValueError, TypeError):
+            reply = None  # An unreadable later Stop must retire an earlier close token.
+        defer(reply, env)
+        return
+    if not no_new_report(payload):
+        defer(decide(payload, env), env)
 
 
 def sweep(env, apply: bool):
@@ -2275,9 +2371,7 @@ if __name__ == "__main__":
         sys.exit(redeliver_check(sys.argv[2] if len(sys.argv) > 2 else "", os.environ))
     try:
         payload = json.load(sys.stdin)
-        sync_mark(payload, os.environ)  # first: a stale 🔴 would also keep a finished job pane from closing
-        if not no_new_report(payload):
-            defer(decide(payload, os.environ), os.environ)
+        handle_stop(payload, os.environ)
     except Exception:  # never break a session
         pass
     sys.exit(0)
