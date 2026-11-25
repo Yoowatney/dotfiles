@@ -394,14 +394,23 @@ check_receipt() { # delivered payload name
 }
 deliver() { # message file, receiver's terminal (a moved pane gets a new pane id), its session when queued, sender's terminal,
   # sender's socket, predecessor payload (if any)
-  local list row pane kind sid label result t0=$SECONDS
+  local list row pane kind sid label result t0=$SECONDS listing_since=
   export PANE_TELL_YOYOO_WORDS=0
   if [ "$(jq -r '.yoyoo_words // false' "$STATE/delivery-origins/$(basename "$1")" 2>/dev/null)" = true ]; then
     export PANE_TELL_YOYOO_WORDS=1
   fi
   while (( SECONDS - t0 < ${PANE_TELL_WAIT:-86400} )); do
     sleep "${PANE_TELL_POLL:-5}"
-    list=$("$H" pane list 2>/dev/null) || continue # herdr restarting is not the receiver gone
+    if ! list=$("$H" pane list 2>/dev/null); then # herdr restarting is not the receiver gone
+      # A lasting failure also holds every later message for this pane: one line per streak says why (2026-11-26).
+      listing_since=${listing_since:-$SECONDS}
+      if [ "$listing_since" != logged ] && (( SECONDS - listing_since >= ${PANE_TELL_LIST_ALERT:-60} )); then
+        echo "$(date '+%F %T') list-failing $(basename "$1") for $2 after $((SECONDS - listing_since))s: $("$H" pane list 2>&1 >/dev/null | head -n 1)" >> "$STATE/log"
+        listing_since=logged
+      fi
+      continue
+    fi
+    listing_since=
     row=$(printf '%s\n' "$list" | jq -r --arg t "$2" '.result.panes[] | select(.terminal_id == $t)
       | [.pane_id, (.agent // ""), (.agent_session.value // ""), (.label // "이름 없는 칸")] | @tsv') || continue
     pane=$(printf '%s\n' "$row" | cut -f1); kind=$(printf '%s\n' "$row" | cut -f2); sid=$(printf '%s\n' "$row" | cut -f3); label=$(printf '%s\n' "$row" | cut -f4)

@@ -84,6 +84,10 @@ exit 92
         # herdr 0.9.0 fails every command with EINVAL on a socket path that is set but empty.
         (self.root / "herdr").write_text('''#!/bin/bash
 [ -z "${HERDR_SOCKET_PATH+set}" ] || [ -n "$HERDR_SOCKET_PATH" ] || exit 1
+if [ "$1 $2" = 'pane list' ]; then
+  echo >> "$FIXTURE/list-calls"
+  [ ! -f "$FIXTURE/fail-list" ] || { echo 'Error: fixture list failure' >&2; exit 1; }
+fi
 case "$1 $2" in
  'pane get') printf '%s' '{"result":{"pane":{"agent_status":"idle"}}}' ;;
  'pane list') printf '%s' '{"result":{"panes":[{"pane_id":"w1:pM","terminal_id":"term_M","agent":"claude","agent_session":{"value":"sM"}}]}}' ;;
@@ -655,6 +659,44 @@ exec /bin/mv "$@"
         self.assertEqual(self.call("--recover-batch").returncode, 0)
         self.wait_prompt([b"first"])
         self.assertEqual((self.root / "sockets").read_text(), "default\n")
+
+    def start_with_failing_list(self, **env):
+        (self.root / "fail-list").touch()
+        self.open()
+        self.due()
+        self.assertEqual(self.call("--recover-batch", **env).returncode, 0)
+
+    def wait_until(self, condition):
+        end = time.monotonic() + 20
+        while not condition() and time.monotonic() < end:
+            time.sleep(.01)
+        self.assertTrue(condition())
+
+    def list_failure_lines(self):
+        path = self.state / "log"
+        return [line for line in path.read_text().splitlines() if " list-failing " in line] if path.exists() else []
+
+    def list_calls(self):
+        path = self.root / "list-calls"
+        return len(path.read_text()) if path.exists() else 0
+
+    def test_lasting_pane_list_failure_is_logged_once_and_delivery_still_resumes(self):
+        # 2026-11-26: a worker retried `pane list` for three hours and the log said nothing about it.
+        self.start_with_failing_list(PANE_TELL_LIST_ALERT="1")
+        self.wait_until(self.list_failure_lines)
+        calls = self.list_calls()
+        self.wait_until(lambda: self.list_calls() > calls + 5)
+        [line] = self.list_failure_lines()
+        self.assertRegex(line, r"^\S+ \S+ list-failing batch-\w+ for term_M after \d+s: Error: fixture list failure$")
+        (self.root / "fail-list").unlink()
+        self.wait_prompt([b"first"])
+
+    def test_short_pane_list_failure_is_not_logged(self):
+        self.start_with_failing_list() # the default threshold is 60 s
+        self.wait_until(lambda: self.list_calls() > 5)
+        (self.root / "fail-list").unlink()
+        self.wait_prompt([b"first"])
+        self.assertEqual(self.list_failure_lines(), [])
 
     def test_recovery_restores_recorded_workers_route(self):
         socket = "/private/fixture/sessions/workers/herdr.sock"
