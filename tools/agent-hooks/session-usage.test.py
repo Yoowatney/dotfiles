@@ -138,6 +138,32 @@ class UsageTest(unittest.TestCase):
         self.assertEqual(usage.session_start(dict(session_id='x', transcript_path=str(self.claude())), self.env), '')
         self.assertFalse((self.state / 'main-context-current.json').exists())
 
+    def test_claude_start_precedes_new_transcript_creation(self):
+        old = self.claude()
+        new = self.root / 'not-yet-created.jsonl'
+        env = dict(self.env, CLAUDE_CODE_ENTRYPOINT='cli')
+        def start():
+            result = subprocess.run(['bash', str(HERE / 'handoff'), 'session'], env=env,
+                input=json.dumps(dict(session_id='new', transcript_path=str(new), source='clear')),
+                text=True, capture_output=True, check=True)
+            return result.stdout
+        pending = self.root / 'state/agent-handoff'
+        pending.mkdir(parents=True)
+        (pending / 'p1.md.transcript').write_text(str(old))
+        out = start()
+        self.assertIn('tool_output:Bash', out)
+        current = usage.read_json(self.state / 'main-context-current.json')
+        self.assertEqual(current['transcript_path'], str(new))
+        new.write_text('{}\n')
+        start()
+        self.assertEqual(len((self.state / 'main-context-history.jsonl').read_text().splitlines()), 1)
+
+    def test_initial_start_records_identity_before_transcript_exists(self):
+        new = self.root / 'initial-not-yet-created.jsonl'
+        self.assertEqual(usage.session_start(dict(session_id='new', transcript_path=str(new)), self.env), '')
+        self.assertEqual(usage.read_json(self.state / 'main-context-current.json').get('session_id'), 'new')
+        self.assertFalse((self.state / 'main-context-history.jsonl').exists())
+
     def test_handoff_hook_preserves_saved_context_and_adds_restart_accounting(self):
         old = self.claude()
         new = self.transcript([], 'new')
