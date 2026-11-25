@@ -10,7 +10,8 @@
 ## Global Constraints
 - 기본 normal은 gemini-4-hydrogen-xhigh, simple은 gemini-4-hydrogen-medium, complex는 gemini-4-neon-high이다.
 - Carbon은 사용자가 시킨 작업의 명시적 --carbon에만 gemini-4-carbon-high를 쓴다. --check는 Claude를 유지한다.
-- OAuth와 원본 GCP 자격 증명의 명시적 도구·셸·글롭·검색 접근은 훅으로 거절한다. Slack 게시 금지와 기존 보호 훅은 유지한다. Sandbox가 없으므로 임의 코드 내부의 파일 읽기까지 차단하는 격리 경계라고 주장하지 않는다.
+- OAuth와 원본 자격 파일의 도구 경로, 셸의 리터럴 경로·글롭·알려진 재귀 검색을 훅으로 검사한다. 대소문자와 cd 뒤 상대 경로도 검사한다. Slack 게시 금지와 기존 보호 훅은 유지한다. 임의 코드·계산한 경로·모든 셸 문법을 해석하는 격리 경계가 아니며, sandbox 없이 모든 파일 접근을 차단한다고 주장하지 않는다.
+- 기본 실행 정책은 claude-first이다. AGY는 명시적으로 고른 작업에서만 사용하며 --check는 Claude를 유지한다.
 - 진행 중인 다른 칸의 입력은 건드리지 않는다. 알 수 없는 입력 상태는 전달을 보류한다.
 - 기존 사용량 검사·보고·종료 흐름을 유지한다.
 

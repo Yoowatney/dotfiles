@@ -34,9 +34,9 @@
 # and returns to Codex once Claude's measured usage passes its reserve. Checks never follow the policy. The local policy codex-only
 # restores the previous Codex-only routing before Python runs. Forwarded arguments and ambient-runner stay on Codex.
 # A quota lookup exceeding six seconds warns once and retains the previous Codex routing.
-# Policy agy-only overrides every normal worker request, including explicit kinds and ambient callers.
+# Optional policy agy-only overrides every normal worker request, including explicit kinds and ambient callers.
 # It requires safe AGY subscription quota, refuses unsupported forwarded options and never falls back.
-# The legacy routing above applies only when a non-AGY rollback policy is explicitly selected.
+# The installed default is claude-first; AGY-only requires an explicit local policy choice.
 # Startup/readiness responses provide no verified current quota-block signal: failures never switch runners.
 # A lead opens a pane for code, tests or docs with it (요유 2026-11-05). The main pane posts to Slack; its work panes only report results.
 # The main pane opens a Claude pane that does the job only with --why, the reason Codex cannot do it (api#1036). A missing
@@ -66,12 +66,12 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full]
   --phase NAME: which phase of the job (--job-id, else the calling job) this pane works on, for the allowed-Mac check below.
   --allow-duplicate: intentionally start another worker with the same instruction. Otherwise an open worker from the
     same caller and folder is reused for ten minutes. Checks always start fresh.
-  AGY-only policy: every normal worker uses AGY, including omitted/explicit kinds and ambient callers.
+  Optional AGY-only policy: every normal worker uses AGY, including omitted/explicit kinds and ambient callers.
     Unsupported forwarded options are refused; use --complexity for AGY model selection. Checks remain Claude.
     On the session Mac, workers run without a terminal sandbox and retain native safety hooks.
     Other host roles retain the sandbox. Command hooks are not filesystem isolation for arbitrary code.
   --kind auto: choose a normal worker from subscription quota and weekly pace; unknown/paid usage is excluded.
-    The following legacy routing applies only after explicitly selecting a non-AGY rollback policy.
+    The installed default is claude-first. AGY-only requires an explicit local policy choice.
     claude-first can reuse a same-week Codex reading up to 24h old at <=80%, with the same login/billing/API guards.
     If neither runner qualifies, no pane opens. Set the agent-quota policy to codex-only for the previous routing.
     When that is for usage, the refusal asks the main pane to have 요유 switch the account or spend a reset ticket, never to wait for the reset.
@@ -338,9 +338,10 @@ case "$kind" in
       complex) agy_model=gemini-4-neon-high ;;
     esac
     [ -z "$carbon" ] || agy_model=gemini-4-carbon-high
-    # No host-role file is the session Mac (same convention as task-ledger).
-    # Other/unknown roles retain their existing sandbox, including synced hosts.
-    if [ ! -e "$HOME/.config/munice/host-role" ]; then
+    # Match the interactive shell's positive session-Mac identification.
+    # Missing/unknown markers and dangling role links retain the sandbox.
+    if [ ! -e "$HOME/.config/munice/host-role" ] && [ ! -L "$HOME/.config/munice/host-role" ] &&
+       [ "$(head -1 "$HOME/.config/munice/ambient-company-host" 2>/dev/null)" = yoyoo-session ]; then
       set -- --model "$agy_model" --settings '{"useG1Credits":false,"modelProvider":"","allowNonWorkspaceAccess":false,"enableTerminalSandbox":false,"agentMode":"accept-edits","toolPermission":"always-proceed"}'
     else
       set -- --sandbox --model "$agy_model" --settings '{"useG1Credits":false,"modelProvider":"","allowNonWorkspaceAccess":false,"enableTerminalSandbox":true,"agentMode":"auto","toolPermission":"proceed-in-sandbox"}'

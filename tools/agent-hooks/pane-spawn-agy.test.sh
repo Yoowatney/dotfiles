@@ -9,6 +9,8 @@ agy_fixture() {
 }
 no_herdr() { [ ! -s "$SANDBOX/log" ] || fail "$1: $(log)"; }
 agy_fixture
+mkdir -p "$SANDBOX/home/.config/munice"
+printf 'yoyoo-session\n' > "$SANDBOX/home/.config/munice/ambient-company-host"
 for pair in simple:gemini-4-hydrogen-medium normal:gemini-4-hydrogen-xhigh complex:gemini-4-neon-high; do
   complexity=${pair%%:*} model=${pair#*:}
   ps --kind agy --complexity "$complexity" "AGY $complexity" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail "AGY $complexity should open"
@@ -31,6 +33,18 @@ for role in portable ambient-runner unknown; do
   jq -e '.args as $a | ($a | index("--settings")) as $i | ($a[$i+1] | fromjson) | .enableTerminalSandbox == true and .toolPermission == "proceed-in-sandbox" and .agentMode == "auto"' "$SANDBOX/launch.json" >/dev/null || fail 'other host settings changed'
 done
 rm "$SANDBOX/home/.config/munice/host-role"
+for state in missing unknown dangling; do
+  rm -f "$SANDBOX/home/.config/munice/ambient-company-host" "$SANDBOX/home/.config/munice/host-role"
+  case "$state" in
+    unknown) printf 'unknown\n' > "$SANDBOX/home/.config/munice/ambient-company-host" ;;
+    dangling) printf 'yoyoo-session\n' > "$SANDBOX/home/.config/munice/ambient-company-host"
+      ln -s "$SANDBOX/missing-role" "$SANDBOX/home/.config/munice/host-role" ;;
+  esac
+  CAPTURE_LAUNCH=1 ps --kind agy "AGY unverified host" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'unverified host should open with sandbox'
+  has '--sandbox' 'missing markers, unknown host and dangling roles must retain sandbox'
+done
+rm -f "$SANDBOX/home/.config/munice/host-role"
+printf 'yoyoo-session\n' > "$SANDBOX/home/.config/munice/ambient-company-host"
 ps --kind agy --carbon "Explicit Carbon" "User explicitly requested Carbon for this synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'explicit Carbon should open'
 has '--model gemini-4-carbon-high' 'explicit opt-in chooses Carbon'
 for level in simple normal complex; do
