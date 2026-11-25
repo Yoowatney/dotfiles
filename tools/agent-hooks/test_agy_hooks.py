@@ -146,6 +146,18 @@ class NativeHooksTest(unittest.TestCase):
             with self.subTest(payload=payload):
                 self.assertEqual(hooks.pre_tool(payload)['decision'], 'deny')
 
+    def test_source_auth_globs_and_recursive_searches_are_denied_without_sandbox(self):
+        for command in ('cat ~/.gemini/oa* >/dev/null',
+                        'cat ~/.config/gcloud/application_d* >/dev/null',
+                        'grep -R synthetic ~/.gemini',
+                        'rg synthetic "$HOME/.config/gcloud"',
+                        'cat ${HOME}/.config/gcloud/credentials.db >/dev/null'):
+            with self.subTest(command=command):
+                self.assertEqual(hooks.pre_tool(event(CommandLine=command))['decision'], 'deny')
+        for path in ('~/.config/gcloud', '~/.config/gcloud/credentials.db', '~/.gemini/oa*'):
+            with self.subTest(path=path):
+                self.assertEqual(hooks.pre_tool(event('view_file', AbsolutePath=path))['decision'], 'deny')
+
     def test_existing_gcp_guard_blocks_native_identity_change(self):
         result = hooks.pre_tool(event(CommandLine='gcloud auth login'))
         self.assertEqual(result['decision'], 'deny')

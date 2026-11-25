@@ -49,6 +49,7 @@ echo "ok: agent-runner"
   rm "$SANDBOX/home/.config/munice/host-role"
   ps "Default worker" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'default worker must open'
   has '--kind agy' 'default worker uses AGY'
+  has '--model gemini-4-hydrogen-xhigh' 'default worker uses the highest Hydrogen effort'
   ps --kind codex "Legacy worker" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'legacy caller must open AGY'
   has '--kind agy' 'explicit legacy runner does not select Codex'
   is_main

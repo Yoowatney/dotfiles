@@ -1094,7 +1094,7 @@ fi
 [ "$pane" != "$me" ] || [ -n "$there" ] || die "\"$1\" is this pane"
 why=$(auto_reason "$tab" "$sid")
 [ -z "$why" ] || die "$pane ($name) $why"
-case "$kind" in claude | codex) ;; *) die "$pane ($name) runs no Claude or Codex, so its input box cannot be read" ;; esac
+case "$kind" in claude | codex | agy) ;; *) die "$pane ($name) runs no Claude, Codex or AGY, so its input box cannot be read" ;; esac
 from=$(printf '%s\n' "$mine" | awk -F'\t' -v me="$me" '$1 == me {print $2}')
 export PANE_TELL_SOURCE_PANE=${me:-unknown}
 export PANE_TELL_SOURCE_SERVER=$(srv "$here")

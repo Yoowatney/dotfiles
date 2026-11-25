@@ -9,20 +9,38 @@ agy_fixture() {
 }
 no_herdr() { [ ! -s "$SANDBOX/log" ] || fail "$1: $(log)"; }
 agy_fixture
-for pair in simple:gemini-4-hydrogen-medium normal:gemini-4-neon-high complex:gemini-4-carbon-high; do
+for pair in simple:gemini-4-hydrogen-medium normal:gemini-4-hydrogen-xhigh complex:gemini-4-neon-high; do
   complexity=${pair%%:*} model=${pair#*:}
   ps --kind agy --complexity "$complexity" "AGY $complexity" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail "AGY $complexity should open"
   has '--kind agy' 'AGY runtime is selected'
   has "--model $model" "complexity $complexity uses the requested model"
-  has '--sandbox' 'AGY keeps the terminal sandbox'
+  hasnt '--sandbox' 'session Mac AGY uses native guards without the terminal sandbox'
   has 'useG1Credits' 'AGY pins subscription-only settings'
   hasnt '--ask-for-approval' 'Codex options do not enter AGY'
 done
 CAPTURE_LAUNCH=1 ps --kind agy --task-type research "AGY default" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'normal complexity is default'
-has '--model gemini-4-neon-high' 'default complexity is normal'
+has '--model gemini-4-hydrogen-xhigh' 'default is highest Hydrogen effort'
 has 'HERDR_AGY_TASK_TYPE=research' 'task catalog is independent of complexity'
 jq -e '.env as $env | ["GEMINI_API_KEY", "GOOGLE_API_KEY", "AGY_ADC_AUTH", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT_ID", "GOOGLE_CLOUD_QUOTA_PROJECT", "GOOGLE_GENAI_USE_VERTEXAI"] | all(.[]; . as $key | ($env | has($key)) and $env[$key] == "")' "$SANDBOX/launch.json" >/dev/null || fail 'all AGY authentication overrides must be cleared in the pane environment'
-jq -e '.args as $args | ($args | index("--settings")) as $i | ($args[$i+1] | fromjson) == {useG1Credits:false,modelProvider:"",allowNonWorkspaceAccess:false,enableTerminalSandbox:true,agentMode:"auto",toolPermission:"proceed-in-sandbox"}' "$SANDBOX/launch.json" >/dev/null || fail 'safe AGY settings must be pinned exactly without replacing statusLine'
+jq -e '.args as $args | ($args | index("--settings")) as $i | ($args[$i+1] | fromjson) == {useG1Credits:false,modelProvider:"",allowNonWorkspaceAccess:false,enableTerminalSandbox:false,agentMode:"accept-edits",toolPermission:"always-proceed"}' "$SANDBOX/launch.json" >/dev/null || fail 'session Mac settings must disable the sandbox without replacing statusLine'
+mkdir -p "$SANDBOX/home/.config/munice"
+for role in portable ambient-runner unknown; do
+  printf '%s\n' "$role" > "$SANDBOX/home/.config/munice/host-role"
+  CAPTURE_LAUNCH=1 ps --kind agy "AGY remote host" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'other host should retain existing sandbox settings'
+  has '--sandbox' 'other hosts retain the terminal sandbox'
+  jq -e '.args as $a | ($a | index("--settings")) as $i | ($a[$i+1] | fromjson) | .enableTerminalSandbox == true and .toolPermission == "proceed-in-sandbox" and .agentMode == "auto"' "$SANDBOX/launch.json" >/dev/null || fail 'other host settings changed'
+done
+rm "$SANDBOX/home/.config/munice/host-role"
+ps --kind agy --carbon "Explicit Carbon" "User explicitly requested Carbon for this synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'explicit Carbon should open'
+has '--model gemini-4-carbon-high' 'explicit opt-in chooses Carbon'
+for level in simple normal complex; do
+  if ps --carbon --complexity "$level" "Conflicting Carbon" "Synthetic task" >/dev/null 2>"$SANDBOX/err"; then fail 'Carbon and complexity must be mutually exclusive'; fi
+  no_herdr 'conflicting model options open nothing'
+done
+is_main
+if ps --carbon --check "Carbon check" "Synthetic task" >/dev/null 2>"$SANDBOX/err"; then fail 'Carbon never overrides Claude checks'; fi
+no_herdr 'Carbon check opens nothing'
+not_main
 for option in '--model alternate' '--settings {}' '--no-sandbox'; do
   if ps --kind agy "AGY unsafe" "Synthetic task" -- $option >/dev/null 2>"$SANDBOX/err"; then fail "AGY forwarded options must be rejected: $option"; fi
   no_herdr 'bad options do not reach herdr'

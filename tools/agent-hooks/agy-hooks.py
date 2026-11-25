@@ -99,6 +99,34 @@ def settings():
 
 def policy_problem(payload, rules):
     tool, inp = payload['tool_name'], payload['tool_input']
+    # The session Mac may run without a terminal sandbox. Keep explicit source
+    # credential reads, glob spellings and recursive parent searches denied in
+    # the native hook as well. This is command policy, not filesystem isolation.
+    protected = (HOME / '.config/gcloud', HOME / '.gemini/oauth_creds.json',
+                 HOME / '.local/state/antigravity-worker/gcp-auth')
+    def private_path(raw, recursive=False):
+        raw = raw.replace('${HOME}', str(HOME)).replace('$HOME', str(HOME))
+        if raw == '~' or raw.startswith('~/'):
+            raw = str(HOME) + raw[1:]
+        candidate = Path(payload['cwd'], raw).resolve()
+        for source in protected:
+            source = source.resolve()
+            if (candidate == source or source in candidate.parents
+                    or (recursive and candidate in source.parents)
+                    or any(fnmatch.fnmatchcase(str(parent), str(candidate))
+                           for parent in (source, *source.parents))):
+                return True
+        return False
+    if tool == 'Bash':
+        command = inp['command']
+        paths = shlex.split(command)
+        paths.extend(re.findall(r'(?:~|\$HOME|\$\{HOME\})?/[^\s\'\";|<>]+', command))
+        if any(private_path(path.rstrip('),]}'), recursive=True)
+               for path in paths if '/' in path or path == '~'):
+            return 'Source authentication files cannot be accessed by worker tools.'
+    elif tool in ('Read', 'Grep', 'Write', 'Edit', 'MultiEdit'):
+        if private_path(inp.get('file_path', inp.get('path', '')), recursive=tool == 'Grep'):
+            return 'Source authentication files cannot be accessed by worker tools.'
     # OAuth belongs to the CLI authentication layer, never model tools.
     # The terminal sandbox separately excludes this file from its mounts.
     if tool == 'Bash' and re.search(r'oauth_creds(?:\.json)?', inp['command'], re.I):
