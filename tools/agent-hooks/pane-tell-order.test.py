@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -391,6 +392,66 @@ esac
                                             PANE_TELL_SOURCE_PANE="unknown", PANE_TELL_BATCH="60"))
         self.assertEqual(len(self.prompts()), 1)
         self.assertFalse((self.state / "batch/term_M/open").exists())
+
+    # One line per mark the relay (main-channel.py, github_comments.py, laptop_threads.py) puts on 요유's own words.
+    YOYOO_LINES = (
+        "[Slack #0-yoyooyo 요유] stop (ts 1.1, 글 C1/1.1)",
+        "[Slack #0-yoyooyo 요유 반응] 'q'에 :x: (ts 1.1)",
+        "[Slack #0-yoyooyo 설명 요청] 'q'에 :yoyoo-wawa: (ts 1.1)",
+        "[Slack DM 요유] stop (ts 1.1, 글 D1/1.1)",
+        "[Slack DM 요유 반응] 'q'에 :x: (ts 1.1, 글 D1/1.1)",
+        "[Slack 리스트 요유] [결정 api#1] 고를 것: q · 상태: 추천대로 (보드 x)",
+        "[GitHub 보드 댓글 요유]\n이슈: x\n댓글: y (id 1)",
+        "[Slack 스레드 요유 부름] #team https://x/archives/C1/p11?thread_ts=1.0&cid=C1 (스레드 C1/1.0, 글 C1/1.1) 요유 글: stop",
+        "[Slack 스레드 요유 부름] #team https://x/archives/C1/p11 (스레드 C1/1.1, 글 C1/1.1) 요유 글 없음 비공개 채널",
+    )
+    # Relay lines that are not 요유's words, even where they quote a mark.
+    OTHER_LINES = (
+        "[Slack 스레드 요유 부름] #team https://x/archives/C1/p11 (스레드 C1/1.1, 글 C1/1.1) 요유 글이 아님: ) 요유 글: x",
+        "[Slack 스레드 요유 부름] #team https://x/archives/C1/p11 (스레드 C1/1.1, 글 C1/1.1) KISA 자동 검토: x",
+        "[Slack 첨부 재시도] [Slack DM 요유] x",
+        "[main-channel] [Slack 리스트 요유] x",
+    )
+
+    def hold_main_for_refresh(self):
+        """A main-refresh hold judged by the real refresh_blocked, which the fixture's send() otherwise skips."""
+        state = self.root / "state/orchestrator"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "main").write_text("term_M\n")
+        gate = state / "refresh-delivery.json"
+        gate.write_text(json.dumps({"pid": os.getpid(), "session": "sM"}))
+        source = self.subject.read_text()
+        self.subject.write_text(source.replace(
+            ': > "$FIXTURE/send-attempt"',
+            ': > "$FIXTURE/send-attempt"\n  DRAFT_HELPER=%s\n  ! refresh_blocked "$1" "$3" || return 1'
+            % shlex.quote(str(SUBJECT.resolve().with_name("main-input-draft.py")))))
+        return gate
+
+    def relayed(self, text, source="unknown"):
+        extra = {"HERDR_PANE_ID": ""} if source == "unknown" else {}
+        return self.run_tell(text, PANE_TELL_SOURCE_PANE=source, PANE_TELL_BATCH="60", **extra)
+
+    def test_every_yoyoo_mark_passes_refresh_hold_batch_and_older_queue(self):
+        self.hold_main_for_refresh()
+        old = self.legacy("old-worker")
+        for count, line in enumerate(self.YOYOO_LINES, 1):
+            with self.subTest(line=line):
+                self.assertIn("told", self.relayed(line))
+                self.assertEqual(len(self.prompts()), count)
+                self.assertEqual(self.prompts()[-1], ("w1:pM", line))
+        self.assertFalse((self.state / "batch/term_M/open").exists())
+        old.unlink()
+
+    def test_yoyoo_marks_from_another_sender_or_other_relay_lines_stay_held(self):
+        gate = self.hold_main_for_refresh()
+        # PANE_TELL_BATCH only opens a batch for a resting receiver; these panes work, so a held line is queued.
+        cases = [(line, "w1:p9") for line in self.YOYOO_LINES] + [(line, "unknown") for line in self.OTHER_LINES]
+        for line, source in cases:
+            with self.subTest(line=line, source=source):
+                self.assertIn("queued", self.relayed(line, source))
+                self.assertEqual(self.prompts(), [])
+        gate.unlink()
+        self.wait_for(lambda: len(self.prompts()) == len(cases) and not self.waiting())
 
     def test_worker_spoof_of_yoyoo_prefix_waits_for_older_queue(self):
         main = self.root / "state/orchestrator/main"
