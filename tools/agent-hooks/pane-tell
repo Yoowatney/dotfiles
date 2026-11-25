@@ -891,9 +891,10 @@ relay() { # pane, kind, message, terminal, session, sender, sender socket, shown
   local pane=$1 kind=$2 msg=$3 terminal=$4 sid=$5 sender=$6 sender_socket=$7 shown=$8 name=$9 body=${10}
   local batch_target dir
   # Every mark the Slack/GitHub relay puts on 요유's own words; a new mark goes here and into
-  # pane-tell-order.test.py. A thread call counts only with her words after its ids: teammates' calls share the label.
+  # pane-tell-order.test.py. A thread call counts only with the owner's words or emoji call after its ids:
+  # teammates' calls share the label.
   local yoyoo_mark='^\[(Slack #0-yoyooyo (요유|요유 반응|설명 요청)|Slack DM (요유|요유 반응)|Slack 리스트 요유|GitHub 보드 댓글 요유)\]'
-  local yoyoo_call='^\[Slack 스레드 요유 부름\] [^(]*\(스레드 [^)]*\) 요유 글(:| 없음)'
+  local yoyoo_call='^\[Slack 스레드 요유 부름\] [^(]*\(스레드 [^)]*\) (요유 글(:| 없음)|요유 이모지 부름,)'
   export PANE_TELL_YOYOO_WORDS=0
   if [[ $body =~ $yoyoo_mark || $body =~ $yoyoo_call ]] &&
     [ "${PANE_TELL_SOURCE_PANE:-unknown}" = unknown ] && is_main "$terminal"; then

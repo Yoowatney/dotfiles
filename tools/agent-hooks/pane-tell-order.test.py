@@ -404,10 +404,12 @@ esac
         "[GitHub 보드 댓글 요유]\n이슈: x\n댓글: y (id 1)",
         "[Slack 스레드 요유 부름] #team https://x/archives/C1/p11?thread_ts=1.0&cid=C1 (스레드 C1/1.0, 글 C1/1.1) 요유 글: stop",
         "[Slack 스레드 요유 부름] #team https://x/archives/C1/p11 (스레드 C1/1.1, 글 C1/1.1) 요유 글 없음 비공개 채널",
+        "[Slack 스레드 요유 부름] #team https://x/archives/C1/p11 (스레드 C1/1.1, 글 C1/1.1) 요유 이모지 부름, 요유 글이 아님: x",
     )
     # Relay lines that are not 요유's words, even where they quote a mark.
     OTHER_LINES = (
         "[Slack 스레드 요유 부름] #team https://x/archives/C1/p11 (스레드 C1/1.1, 글 C1/1.1) 요유 글이 아님: ) 요유 글: x",
+        "[Slack 스레드 요유 부름] #team https://x/archives/C1/p11 (스레드 C1/1.1, 글 C1/1.1) 요유 글이 아님: ) 요유 이모지 부름, x",
         "[Slack 스레드 요유 부름] #team https://x/archives/C1/p11 (스레드 C1/1.1, 글 C1/1.1) KISA 자동 검토: x",
         "[Slack 첨부 재시도] [Slack DM 요유] x",
         "[main-channel] [Slack 리스트 요유] x",
