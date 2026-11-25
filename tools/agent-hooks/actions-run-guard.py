@@ -106,6 +106,18 @@ def command_denied(words: list[str], depth: int, watch_only: bool = False) -> bo
             if key == REASON:
                 reason = value
             i += 1
+        elif name in ('timeout', 'gtimeout', 'nice', 'gnice', 'stdbuf', 'gstdbuf'):
+            i += 1
+            value_flags = {'-k', '--kill-after', '-s', '--signal'} if name.endswith('timeout') else (
+                {'-n', '--adjustment'} if name.endswith('nice') else
+                {'-i', '--input', '-o', '--output', '-e', '--error'})
+            while i < len(words) and words[i].startswith('-'):
+                flag = words[i]
+                i += 2 if flag in value_flags else 1
+                if flag == '--':
+                    break
+            if name.endswith('timeout'):
+                i += 1  # The duration precedes the wrapped command.
         elif name in ('env', 'command', 'exec', 'sudo', 'nohup', 'time'):
             i += 1
             while i < len(words) and words[i].startswith('-'):
