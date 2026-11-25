@@ -124,7 +124,7 @@ for reason in gcp GCP "gcloud로 배포 상태 확인" "bq 조회" "BigQuery 집
     rc=0
     ps ${opts[@]+"${opts[@]}"} --why "$reason" "GCP 확인" "지시" >"$SANDBOX/out" 2>"$SANDBOX/err" || rc=$?
     [ "$rc" = 2 ] || fail "the main pane rejects --why [$reason] ($kind_args): expected exit 2, got $rc"
-    grep -qF -- "GCP 명령도 Codex 칸이 합니다" "$SANDBOX/err" || fail "GCP refusal says Codex runs it: $(cat "$SANDBOX/err")"
+    grep -qF -- "GCP 명령도 AGY 칸이 합니다" "$SANDBOX/err" || fail "GCP refusal says AGY runs it: $(cat "$SANDBOX/err")"
     grep -qF -- "--kind auto" "$SANDBOX/err" || fail "GCP refusal points to --kind auto: $(cat "$SANDBOX/err")"
     hasnt "agent start" "a GCP reason starts no agent"
   done

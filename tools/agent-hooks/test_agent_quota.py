@@ -113,6 +113,7 @@ class RoutingTests(unittest.TestCase):
         folder = self.q.state_dir()
         log = folder / "decisions.jsonl"
         log.write_text((json.dumps({"reason": "x" * 2000}) + "\n") * 1100)
+        (folder / "policy").write_text("quota-aware\n")
         with patch.object(sys, "argv", [str(SCRIPT), "select"]), patch.object(self.q.time, "time", return_value=self.now), patch("sys.stdout", new_callable=io.StringIO):
             self.assertEqual(self.q.main(), 0)
         self.assertLessEqual(log.stat().st_size, 1048576)
@@ -375,6 +376,142 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse((self.q.state_dir() / "claude.json").exists())
         self.capture(tick=102)
         self.assertEqual(self.q.read_json(self.q.state_dir() / "claude.json")["observed_at"], self.now)
+
+    def agy_fixture(self, remaining=0.9, age=0, plan="Google AI Ultra"):
+        self.write(".gemini/antigravity-cli/settings.json", {"useG1Credits": False, "modelProvider": ""})
+        return self.write("state/agent-quota/agy.json", {
+            "captured_at": self.now - age, "plan_tier": plan,
+            "quota": {
+                "gemini-5h": {"remaining_fraction": remaining, "reset_time": self.now + 1000},
+                "gemini-weekly": {"remaining_fraction": 0.8, "reset_time": self.now + 302400},
+                "3p-5h": {"remaining_fraction": 0, "reset_time": 0},
+            }})
+
+    def test_agy_only_uses_gemini_subscription_windows(self):
+        self.agy_fixture()
+        result = self.select("agy-only")
+        self.assertEqual(result["kind"], "agy")
+        self.assertAlmostEqual(result["agy"]["short"], 10)
+        self.assertAlmostEqual(result["agy"]["week"], 20)
+
+    def test_agy_reads_statusline_rfc3339_resets(self):
+        path = self.agy_fixture()
+        snap = json.loads(path.read_text())
+        for key in ("gemini-5h", "gemini-weekly"):
+            reset = snap["quota"][key]["reset_time"]
+            snap["quota"][key]["reset_time"] = datetime.datetime.fromtimestamp(reset, datetime.timezone.utc).isoformat()
+        path.write_text(json.dumps(snap))
+        self.assertEqual(self.select("agy-only")["kind"], "agy")
+
+    def test_agy_only_does_not_fall_back_on_stale_or_unknown_usage(self):
+        for age in (601, -6):
+            self.agy_fixture(age=age)
+            self.assertIsNone(self.select("agy-only")["kind"])
+        (self.home / "state/agent-quota/agy.json").unlink()
+        self.assertIsNone(self.select("agy-only")["kind"])
+
+    def test_agy_only_rejects_limit_and_invalid_fraction(self):
+        for remaining in (0.2, 0, -0.1, 1.1, True, "0.9"):
+            self.agy_fixture(remaining=remaining)
+            self.assertIsNone(self.select("agy-only")["kind"], remaining)
+
+    def test_agy_only_rejects_unknown_or_free_plan(self):
+        for plan in (None, "", "Free", "Enterprise"):
+            self.agy_fixture(plan=plan)
+            self.assertIsNone(self.select("agy-only")["kind"])
+
+    def test_agy_only_rejects_paid_or_adc_overrides(self):
+        self.agy_fixture()
+        for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "AGY_ADC_AUTH", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT"):
+            with patch.dict(os.environ, {key: "synthetic"}):
+                self.assertIsNone(self.select("agy-only")["kind"], key)
+        for settings in ({"useG1Credits": True}, {"useG1Credits": "false"}, {"useG1Credits": None}, {"modelProvider": None}, {"useG1Credits": False, "modelProvider": "gemini"}):
+            self.write(".gemini/antigravity-cli/settings.json", settings)
+            self.assertIsNone(self.select("agy-only")["kind"])
+
+    def test_agy_accepts_native_pruned_default_settings(self):
+        self.agy_fixture()
+        self.write(".gemini/antigravity-cli/settings.json", {})
+        self.assertEqual(self.select("agy-only")["kind"], "agy")
+
+    def test_agy_rejects_unreadable_or_malformed_settings(self):
+        self.agy_fixture()
+        path = self.home / ".gemini/antigravity-cli/settings.json"
+        for content in ("{", "[]", "null"):
+            path.write_text(content)
+            self.assertIsNone(self.select("agy-only")["kind"])
+        path.unlink()
+        self.assertIsNone(self.select("agy-only")["kind"])
+
+    def test_agy_only_rejects_expired_windows(self):
+        path = self.agy_fixture()
+        for key in ("gemini-5h", "gemini-weekly"):
+            data = json.loads(path.read_text())
+            data["quota"][key]["reset_time"] = self.now
+            path.write_text(json.dumps(data))
+            self.assertIsNone(self.select("agy-only")["kind"])
+
+    def test_agy_prepare_skips_fresh_cache_and_auth_overrides(self):
+        self.agy_fixture()
+        with patch.object(self.q, "refresh_agy_metadata") as refresh:
+            self.q.prepare_agy(self.now, self.home)
+            refresh.assert_not_called()
+            with patch.dict(os.environ, {"GEMINI_API_KEY": "synthetic"}):
+                self.q.prepare_agy(self.now + 700, self.home)
+            refresh.assert_not_called()
+
+    def test_agy_prepare_refreshes_missing_stale_or_incomplete_metadata(self):
+        path = self.agy_fixture()
+        with patch.object(self.q, "refresh_agy_metadata", return_value=False) as refresh:
+            self.q.prepare_agy(self.now + 700, self.home)
+            refresh.assert_called_once_with(self.home)
+            path.unlink()
+            self.q.prepare_agy(self.now, self.home)
+            self.assertEqual(refresh.call_count, 2)
+            self.write("state/agent-quota/agy.json", {"captured_at": self.now, "plan_tier": "", "quota": {}})
+            self.q.prepare_agy(self.now, self.home)
+            self.assertEqual(refresh.call_count, 3)
+
+    def test_agy_refresh_uses_no_prompt_and_discards_terminal_output(self):
+        self.agy_fixture()
+        binary = self.home / ".local/bin/agy"
+        binary.parent.mkdir(parents=True)
+        binary.touch()
+        process = unittest.mock.Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        with patch.object(self.q.subprocess, "Popen", return_value=process) as popen, \
+             patch.object(self.q.pty, "openpty", return_value=(100, 101)), \
+             patch.object(self.q.os, "close"), \
+             patch.object(self.q.select_io, "select", return_value=([], [], [])), \
+             patch.object(self.q.time, "monotonic", side_effect=[0, 20]):
+            self.assertFalse(self.q.refresh_agy_metadata(self.home))
+        args = popen.call_args.args[0]
+        self.assertNotIn("-p", args)
+        self.assertNotIn("--prompt", args)
+        settings = json.loads(args[args.index("--settings") + 1])
+        self.assertIs(settings["useG1Credits"], False)
+        self.assertEqual(settings["toolPermission"], "proceed-in-sandbox")
+        self.assertEqual(popen.call_args.kwargs["stdin"], 101)
+        self.assertIs(popen.call_args.kwargs["start_new_session"], False)
+        process.terminate.assert_called_once()
+
+    def test_agy_refresh_does_not_accept_initial_empty_statusline(self):
+        path = self.agy_fixture(plan=None)
+        os.utime(path, (self.now, self.now))
+        binary = self.home / ".local/bin/agy"
+        binary.parent.mkdir(parents=True)
+        binary.touch()
+        process = unittest.mock.Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        with patch.object(self.q.subprocess, "Popen", return_value=process), \
+             patch.object(self.q.pty, "openpty", return_value=(100, 101)), \
+             patch.object(self.q.os, "close"), \
+             patch.object(self.q.select_io, "select", return_value=([], [], [])), \
+             patch.object(self.q.time, "time", return_value=self.now), \
+             patch.object(self.q.time, "monotonic", side_effect=[0, 1, 20]):
+            self.assertFalse(self.q.refresh_agy_metadata(self.home))
 
 
 if __name__ == "__main__":

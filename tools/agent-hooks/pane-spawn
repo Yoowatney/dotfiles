@@ -6,8 +6,8 @@
 # It marks the calling pane 👑 unless it is already 🫡, opens the split or tab, names the pane 🫡, starts the agent, waits for its session and
 # hands over the instruction. The agent's herdr name is what lets the pane close itself when its work ends (pane-label).
 # Agents cannot run `herdr agent start` or `herdr pane split` themselves: the hook no-sed-inplace.py sends them here.
-#   pane-spawn [--new-tab] [--kind claude|codex|auto] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
-#   pane-spawn "api#1 설계" "지시" -- --model opus --effort high
+#   pane-spawn [--new-tab] [--kind claude|codex|auto|agy] [--complexity simple|normal|complex] [--cwd <dir>] "<work name>" "<instruction>" [-- <agent arguments>]
+#   pane-spawn --complexity complex "api#1 설계" "지시"
 # Three callers stay where they are and open beside themselves: a pane under a lead (🫡), a job tab (`pane-tell` refuses a job pane,
 # so a hidden child could reach nobody), and a pane on any server but default. So does a lead when workers cannot take the pane
 # (no such server on 집맥, down or stuck): it says so on stderr and exits 0. Beside the caller the tallest pane of the rightmost column
@@ -22,18 +22,21 @@
 # or data, and changes nothing (요유 2026-11-05, api#1002). The agent name carries `chk`, which a rename does not change, so its
 # report asks for no other check (auto-tab-close.py). Only a pane herdr_peers.delegates_checks says yes to may open one (the main
 # pane today); any other lead checks results itself, so there it is bad usage and opens nothing. Every check is Claude Sonnet,
-# with the checked folder protected by Seatbelt, whatever the runner policy says, and --check --kind codex is refused
+# with the checked folder protected by Seatbelt, whatever the runner policy says; explicit Codex or AGY checks are refused
 # (요유 2026-11-19: no Codex reviews; that day a quota lookup past its six seconds sent automatic checks to Codex).
 # Past Claude's measured usage reserve no check opens, and nothing waits for one (lead decision 2026-11-19, 요유 2026-11-20): the caller
 # looks again with one command or hands a read-only recheck to an ordinary worker; an unknown, stale or slow reading opens the check on Claude.
 # A refusal for usage never means "wait for the reset": USAGE_BLOCK_NOTE tells the main pane to ask 요유 to switch the account or spend a
 # reset ticket and reopen at once, and a pane under a lead to report that this request is needed (요유 2026-11-20).
 # --kind auto selects a normal worker using local subscription quota (agent-quota); tools/agent-hooks/agent-runner shows or
-# switches the policy (claude | codex | auto). Policy quota-aware keeps Codex unless its week
+# switches the policy (claude | codex | auto | agy). Policy quota-aware keeps Codex unless its week
 # runs ahead of pace; claude-first (one local policy value, e.g. while Codex quota is short) picks Claude first
 # and returns to Codex once Claude's measured usage passes its reserve. Checks never follow the policy. The local policy codex-only
 # restores the previous Codex-only routing before Python runs. Forwarded arguments and ambient-runner stay on Codex.
 # A quota lookup exceeding six seconds warns once and retains the previous Codex routing.
+# Policy agy-only overrides every normal worker request, including explicit kinds and ambient callers.
+# It requires safe AGY subscription quota, refuses unsupported forwarded options and never falls back.
+# The legacy routing above applies only when a non-AGY rollback policy is explicitly selected.
 # Startup/readiness responses provide no verified current quota-block signal: failures never switch runners.
 # A lead opens a pane for code, tests or docs with it (요유 2026-11-05). The main pane posts to Slack; its work panes only report results.
 # The main pane opens a Claude pane that does the job only with --why, the reason Codex cannot do it (api#1036). A missing
@@ -49,15 +52,21 @@
 # (load-guard.py: it waited 90 s and opened nothing; try again in a few minutes).
 original_args=("$@")
 H=${HERDR_BIN_PATH:-herdr}
-USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full] [--opus] [--artifact] [--skills] [--kind claude|codex|auto] [--why <reason>] [--cwd <dir>] [--] "<work name>" "<instruction>" [-- <agent arguments>]
+USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full] [--opus] [--artifact] [--skills] [--kind claude|codex|auto|agy] [--complexity simple|normal|complex] [--why <reason>] [--cwd <dir>] [--] "<work name>" "<instruction>" [-- <agent arguments>]
   Work name and instruction must contain non-whitespace text. Agent configuration/model/effort/sandbox/approval
     options cannot be work names; put agent options after both task operands and a second --.
   --task-type code|research|media|office|full: worker startup catalog; unknown tasks retain full context.
+  --complexity simple|normal|complex: AGY model, independent of the task-type catalog; normal is the default.
+    simple uses Hydrogen, normal Neon, complex Carbon. AGY accepts no forwarded agent options and requires
+    known personal subscription quota and safe authentication settings. It never falls back to another runner.
   --job-id ID: keep the original job id for a check or reassignment; otherwise a new id is generated.
   --phase NAME: which phase of the job (--job-id, else the calling job) this pane works on, for the allowed-Mac check below.
   --allow-duplicate: intentionally start another worker with the same instruction. Otherwise an open worker from the
     same caller and folder is reused for ten minutes. Checks always start fresh.
+  AGY-only policy: every normal worker uses AGY, including omitted/explicit kinds and ambient callers.
+    Unsupported forwarded options are refused; use --complexity for AGY model selection. Checks remain Claude.
   --kind auto: choose a normal worker from subscription quota and weekly pace; unknown/paid usage is excluded.
+    The following legacy routing applies only after explicitly selecting a non-AGY rollback policy.
     claude-first can reuse a same-week Codex reading up to 24h old at <=80%, with the same login/billing/API guards.
     If neither runner qualifies, no pane opens. Set the agent-quota policy to codex-only for the previous routing.
     When that is for usage, the refusal asks the main pane to have 요유 switch the account or spend a reset ticket, never to wait for the reset.
@@ -66,9 +75,10 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full]
     Startup, readiness and delivery errors never switch runners. Explicit work model/effort keeps its runner.
   --why: in the main pane, why a pane that does the job must be Claude, in one line. A Claude pane without one, or with a
     reason mentioning Slack, 슬랙, GCP, gcloud, bq or BigQuery (any case), is refused there: Codex runs GCP commands too.
+    GCP 작업과 재확인은 --kind auto로 여세요. AGY도 에이전트 계정으로 gcloud를 실행합니다.
     Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요
   --check: a fresh check (main pane only) on Claude, which cannot write the checked folder.
-    Always Claude, whatever the policy (요유 2026-11-19: no Codex reviews); --kind codex is refused. Past the measured Claude
+    Always Claude, whatever the policy (요유 2026-11-19: no Codex reviews); --kind codex and --kind agy are refused. Past the measured Claude
     usage reserve it opens nothing and exits 2: look again with one command, or open an ordinary read-only recheck pane (no --check;
     name it "<work name> [rc-<ac id>]" so its report comes straight back; if no session can open for usage, ask 요유 to switch the account
     or spend a reset ticket instead of waiting for the reset). An unknown usage reading still opens it.
@@ -88,7 +98,7 @@ USAGE_BLOCK_NOTE="Never put the work off until the usage reset (요유 2026-11-2
 # starts that way made an ordinary pane unreachable (요유 2026-11-05), so no tab it names starts that way.
 tab_name() { case "$1" in "자동 "* | "알아서 "*) echo "일 $1" ;; *) echo "$1" ;; esac; }
 
-same= new_tab= check= check_level= allow_duplicate= opus= artifact= skills= kind= why= opener= task_type= job_id= phase= cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
+same= new_tab= check= check_level= allow_duplicate= opus= artifact= skills= kind= why= opener= task_type= job_id= phase= complexity=normal cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
 while [ $# -gt 0 ]; do
   case "$1" in
     --same-tab) same=1; shift ;;
@@ -99,9 +109,9 @@ while [ $# -gt 0 ]; do
     --artifact) artifact=1; shift ;;
     --skills) skills=1; shift ;;
     -h | --help) echo "$USAGE"; exit 0 ;;
-    --kind | --cwd | --why | --opener | --task-type | --job-id | --phase | --check-level)
+    --kind | --cwd | --why | --opener | --task-type | --job-id | --phase | --check-level | --complexity)
       [ $# -ge 2 ] || die "$USAGE"
-      case "$1" in --check-level) case "$2" in none|figures|full) check_level=$2 ;; *) die "--check-level takes none, figures or full" ;; esac ;; --kind) kind=$2 ;; --cwd) cwd=$2 ;; --why) why=$2 ;; --opener) opener=${2#term_}; [[ "$opener" =~ ^[0-9A-Za-z]+$ ]] || die "$USAGE" ;; --task-type) task_type=$2 ;; --job-id) job_id=$2 ;; --phase) phase=$2 ;; esac
+      case "$1" in --check-level) case "$2" in none|figures|full) check_level=$2 ;; *) die "--check-level takes none, figures or full" ;; esac ;; --complexity) case "$2" in simple|normal|complex) complexity=$2 ;; *) die "--complexity takes simple, normal or complex" ;; esac ;; --kind) kind=$2 ;; --cwd) cwd=$2 ;; --why) why=$2 ;; --opener) opener=${2#term_}; [[ "$opener" =~ ^[0-9A-Za-z]+$ ]] || die "$USAGE" ;; --task-type) task_type=$2 ;; --job-id) job_id=$2 ;; --phase) phase=$2 ;; esac
       shift 2 ;;
     --) shift; break ;;
     --*) die "$USAGE" ;;
@@ -122,7 +132,7 @@ kind_arg=$kind runner_reason= # the receipt of an automatic check records the ru
 # 요유 2026-11-19 stopped Codex reviews: every check is Claude whatever the runner policy. auto-tab-close asks for
 # --kind auto, which is Claude here too.
 if [ -n "$check" ]; then
-  [ "$kind" != codex ] || die "checks open only on Claude (요유 2026-11-19: no Codex reviews); omit --kind codex"
+  case "$kind" in codex|agy) die "checks open only on Claude (요유 2026-11-19: no Codex reviews); omit --kind $kind" ;; esac
   kind=claude runner_reason='checks open only on Claude'
 fi
 [ "$kind" != auto ] || kind=codex
@@ -177,17 +187,26 @@ shift 2
 auto_claude=
 quota_limit=${PANE_SPAWN_QUOTA_LIMIT:-6}
 [[ "$quota_limit" =~ ^[1-9][0-9]*$ ]] || quota_limit=6
-# The lookup has no children. Reap it on timeout so slow reads cannot outlive the routing decision.
+# Isolate the lookup and its metadata refresh so neither can outlive a timeout.
 bounded() { # <seconds> <command...>: its exit code, 124 past the limit
   perl -e '
     my $limit = shift; my $pid = fork();
     defined $pid or exit 125;
-    if (!$pid) { exec @ARGV; exit 125; }
-    $SIG{ALRM} = sub { kill "KILL", $pid; waitpid($pid, 0); exit 124; };
+    if (!$pid) { setpgrp(0, 0); exec @ARGV; exit 125; }
+    $SIG{ALRM} = sub { kill "KILL", -$pid; kill "KILL", $pid; waitpid($pid, 0); exit 124; };
     alarm $limit; waitpid($pid, 0); my $rc = $?; alarm 0;
     exit($rc & 127 ? 128 + ($rc & 127) : $rc >> 8);
   ' "$@"
 }
+quota_dir=$helper_dir
+quota_policy_file=$state/agent-quota/policy
+[ -e "$quota_policy_file" ] || quota_policy_file=$quota_dir/agent-quota-policy
+quota_policy=$(cat "$quota_policy_file" 2>/dev/null)
+# A worker-only AGY policy also covers old callers, ambient work and omitted --kind.
+# Unsupported legacy options are rejected below; they never select another runtime.
+if [ -z "$check" ] && [ "$quota_policy" = agy-only ]; then
+  kind=agy asked=agy runner_reason='AGY-only worker policy'
+fi
 if [ -n "$request_child" ]; then
   # Retain the first routing decision; rechecking can change runners or warn twice.
   kind=$request_kind auto_claude=$request_auto_claude
@@ -205,6 +224,7 @@ elif [ "$asked" = auto ] && [ -z "$check" ]; then
     quota=$(bounded "$quota_limit" python3 -I "$quota_dir/agent-quota" select "$cwd")
     quota_rc=$?
     if [ "$quota_rc" = 124 ]; then
+      [ "$quota_policy" != agy-only ] || die "AGY subscription quota lookup timed out; no pane opened"
       echo 'pane-spawn: quota lookup timed out; using legacy Codex' >&2
       runner_reason='quota lookup timed out; legacy Codex'
     else
@@ -214,9 +234,24 @@ elif [ "$asked" = auto ] && [ -z "$check" ]; then
       echo "pane-spawn: auto ${quota_kind:-refused}: $quota_reason" >&2
       if [ "$quota_rc" != 0 ] && [[ "$quota_reason" == *reserve* ]]; then echo "pane-spawn: no session opened for usage. $USAGE_BLOCK_NOTE" >&2; fi
       [ "$quota_rc" = 0 ] || exit 1
-      case "$quota_kind" in claude) kind=claude auto_claude=1 ;; codex) kind=codex ;; *) exit 1 ;; esac
+      case "$quota_kind" in claude) kind=claude auto_claude=1 ;; codex) kind=codex ;; agy) kind=agy ;; *) exit 1 ;; esac
       runner_reason=$quota_reason
     fi
+  fi
+fi
+if [ "$kind" = agy ]; then
+  # Options cannot override the model, subscription-only settings or sandbox.
+  [ $# -eq 0 ] && [ -z "$opus$artifact$skills" ] || die "AGY uses --complexity and fixed safety settings; forwarded agent options and Claude-only flags are refused"
+  # Parent GCP tooling may use ADC; the AGY child explicitly clears it below.
+  # Keep API-key and project-override checks intact for subscription admission.
+  reserve=$(bounded "$quota_limit" env -u GOOGLE_APPLICATION_CREDENTIALS python3 -I "$helper_dir/agent-quota" agy-reserve "$cwd")
+  reserve_rc=$?
+  if [ "$reserve_rc" != 0 ]; then
+    reserve_reason=$(printf '%s' "$reserve" | jq -r '.reason // "quota unavailable"' 2>/dev/null)
+    [ -n "$reserve_reason" ] || reserve_reason='quota unavailable'
+    [ "$reserve_rc" != 124 ] || reserve_reason='quota lookup timed out'
+    [ "$reserve_rc" != 3 ] || echo "pane-spawn: no session opened for usage. $USAGE_BLOCK_NOTE" >&2
+    die "AGY subscription admission refused: $reserve_reason"
   fi
 fi
 # Lead decision 2026-11-19: Claude's usage reserve keeps room for the main pane on the same account, so past a measured
@@ -288,6 +323,20 @@ case "$kind" in
       --env "MISE_DATA_DIR=${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"
       --env "MISE_STATE_DIR=${MISE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/mise}"
       --env "MISE_CACHE_DIR=${MISE_CACHE_DIR:-$HOME/Library/Caches/mise}") ;;
+  agy) ready='.result.agent.interactive_ready'
+    case "$complexity" in
+      simple) agy_model=gemini-4-hydrogen-medium ;;
+      normal) agy_model=gemini-4-neon-high ;;
+      complex) agy_model=gemini-4-carbon-high ;;
+    esac
+    set -- --sandbox --model "$agy_model" --settings '{"useG1Credits":false,"modelProvider":"","allowNonWorkspaceAccess":false,"enableTerminalSandbox":true,"agentMode":"auto","toolPermission":"proceed-in-sandbox"}'
+    # Herdr's server can retain credentials absent from this caller. Override
+    # them in the new pane as well as checking the caller during admission.
+    env_args=(--env HERDR_AGY_STARTUP_ROLE=worker --env "HERDR_AGY_TASK_TYPE=$task_type"
+      --env GEMINI_API_KEY= --env GOOGLE_API_KEY= --env AGY_ADC_AUTH=
+      --env GOOGLE_APPLICATION_CREDENTIALS= --env GOOGLE_CLOUD_PROJECT=
+      --env GOOGLE_CLOUD_PROJECT_ID= --env GOOGLE_CLOUD_QUOTA_PROJECT=
+      --env GOOGLE_GENAI_USE_VERTEXAI=) ;;
   *) die "$USAGE" ;;
 esac
 # On 2026-11-05 a script in one pane looped through a mise shim and spawned processes until the user hit macOS's per-user limit
@@ -340,6 +389,7 @@ if [ -z "$check" ]; then
       */sessions/*/herdr.sock) estimate_server=${HERDR_SOCKET_PATH%/herdr.sock}; estimate_server=${estimate_server##*/} ;;
     esac
     prompt+=" Before starting work, send that estimate once to the lead with PANE_TELL_BATCH=0 pane-tell $estimate_server/$me and a message containing the assignment name and the same estimate. This bypasses the idle relay batching window for the startup estimate only. If pane-tell asks you to confirm a suspicious time, check the current KST date and time and send the corrected or confirmed estimate once more. A queued relay will be delivered automatically; continue work without resending it. This startup relay is authorized and does not request a check."
+    [ "$kind" != agy ] || env_args+=(--env "HERDR_AGY_LEAD=$estimate_server/$me")
   fi
 fi
 delegates=
@@ -364,7 +414,7 @@ if [ -z "$opener" ] && [ "term_$term" = "$(cat "$mainfile" 2>/dev/null)" ]; then
     case "$(printf '%s\n' "$why" | tr '[:upper:]' '[:lower:]')" in
       *slack* | *슬랙*) die "Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요" ;;
       # ponytail: words, so a reason that names gcloud to say why Codex failed is refused too; it says what failed instead.
-      *gcp* | *gcloud* | *bigquery* | *bq*) die "GCP 명령도 Codex 칸이 합니다(요유 2026-11-07): --kind auto로 여세요. 요유 계정 단계는 메인 칸에서 합니다. Codex로 안 되는 다른 이유가 있으면 그것을 --why에 한 줄로 쓰세요" ;;
+      *gcp* | *gcloud* | *bigquery* | *bq*) die "GCP 명령도 AGY 칸이 합니다: --kind auto로 여세요. 요유 계정 단계는 메인 칸에서 합니다. AGY로 안 되는 다른 이유가 있으면 그것을 --why에 한 줄로 쓰세요" ;;
     esac
   fi
   main=1 hidden=1
@@ -558,7 +608,7 @@ for try in $(seq 1 15); do # direnv and shell startup can hold the foreground pr
     *)
       # A timeout/transport failure does not prove that no input was sent.
       # Retyping can append another CLI to an unfinished shell input line.
-      [ "$kind" != codex ] || give_up "$kind start was not confirmed; command was not resent: $out"
+      case "$kind" in codex|agy) give_up "$kind start was not confirmed; command was not resent: $out" ;; esac
       [ "$try" -lt 3 ] || give_up "$kind did not start: $out" ;;
   esac
   sleep "${PANE_SPAWN_RETRY_WAIT:-3}"
