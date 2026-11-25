@@ -195,7 +195,9 @@ def session_start(payload, env, previous=None):
     if not main or pane.get('terminal_id') != main:
         return ''
     sid, path = payload.get('session_id'), payload.get('transcript_path')
-    if not isinstance(sid, str) or not re.fullmatch(r'[\w-]{1,128}', sid) or not isinstance(path, str) or not Path(path).is_file():
+    # Claude sends SessionStart before creating the new transcript. Only the
+    # previous transcript needs to exist for this transition to be counted.
+    if not isinstance(sid, str) or not re.fullmatch(r'[\w-]{1,128}', sid) or not isinstance(path, str) or not path:
         return ''
     folder = state_dir(env)
     folder.mkdir(parents=True, exist_ok=True)
