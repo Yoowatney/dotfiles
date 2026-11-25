@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""Behavior tests for bounded, privacy-preserving usage observations."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+HERE = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location('session_usage', HERE / 'session-usage.py')
+usage = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(usage)
+
+
+class UsageTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.env = dict(os.environ, HOME=str(self.root), XDG_STATE_HOME=str(self.root / 'state'),
+                        HERDR_PANE_ID='p1')
+        self.env.pop('HERDR_SOCKET_PATH', None)
+        self.env.pop('CODEX_THREAD_ID', None)
+        bash_env = self.root / 'bash-env'
+        bash_env.write_text('nohup() { return 0; }\ntrap wait EXIT\n')
+        self.env['BASH_ENV'] = str(bash_env)
+        self.state = self.root / 'state/orchestrator'
+        self.state.mkdir(parents=True)
+        (self.state / 'main').write_text('term_main')
+        self.herdr = self.root / 'herdr'
+        self.herdr.write_text('#!/bin/sh\nprintf \'%s\\n\' \'{"result":{"pane":{"terminal_id":"term_main"}}}\'\n')
+        self.herdr.chmod(0o755)
+        self.env['HERDR_BIN_PATH'] = str(self.herdr)
+
+    def transcript(self, rows, name='old'):
+        p = self.root / (name + '.jsonl')
+        p.write_text('\n'.join(json.dumps(x) for x in rows) + '\n')
+        return p
+
+    def claude(self):
+        return self.transcript([
+            dict(type='user', uuid='u', message=dict(role='user', content='hello')),
+            dict(type='assistant', uuid='a', message=dict(role='assistant', content=[
+                dict(type='tool_use', id='call', name='Bash', input=dict(command='gh issue list'))])),
+            dict(type='user', message=dict(role='user', content=[
+                dict(type='tool_result', tool_use_id='call', content='sensitive ' * 10)])),
+            dict(type='user', message=dict(role='user', content='more')),
+            dict(type='user', uuid='u', message=dict(role='user', content='hello')),
+        ])
+
+    def test_character_rank_and_no_uuid_records_are_not_dropped(self):
+        p = self.claude()
+        with p.open('a') as f:
+            f.write('{broken\n')
+        result = usage.summarize(p)
+        self.assertEqual(result['characters']['user'], 9)
+        self.assertEqual(result['ranked'][0], ['tool_output:Bash', 100])
+        self.assertEqual(result['gh_commands'], 1)
+        self.assertEqual(result['malformed_lines'], 1)
+        self.assertNotIn('sensitive', json.dumps(result))
+
+    def test_codex_counts_only_response_items_once_and_matches_call_output(self):
+        p = self.transcript([
+            dict(type='event_msg', payload=dict(type='user_message', message='duplicate')),
+            dict(type='response_item', payload=dict(type='message', role='user', content=[
+                dict(type='input_text', text='hello')])),
+            dict(type='response_item', payload=dict(type='function_call', name='exec_command',
+                call_id='c', arguments=json.dumps(dict(cmd='gh api rate_limit')))),
+            dict(type='response_item', payload=dict(type='function_call_output', call_id='c', output='abc')),
+        ])
+        r = usage.summarize(p)
+        self.assertEqual(r['characters']['user'], 5)
+        self.assertEqual(r['characters']['tool_output:exec_command'], 3)
+        self.assertEqual(r['gh_commands'], 1)
+
+    def test_command_count_does_not_count_echo_or_quoted_scripts(self):
+        cases = [('gh issue list && /opt/bin/gh api rate_limit', 2),
+                 ('echo "gh api rate_limit"', 0),
+                 ('python3 -c \'print("gh api")\'', 0),
+                 ('GH_HOST=github.com gh pr view', 1),
+                 ('env GH_HOST=github.com gh pr view', 1)]
+        for command, count in cases:
+            with self.subTest(command=command):
+                self.assertEqual(usage.gh_count(command), count)
+
+    def test_main_restart_records_once_and_carries_ranked_reduction(self):
+        old = self.claude()
+        new = self.transcript([], 'new')
+        self.assertEqual(usage.session_start(dict(session_id='old', transcript_path=str(old)), self.env), '')
+        note = usage.session_start(dict(session_id='new', transcript_path=str(new)), self.env)
+        self.assertIn('tool_output:Bash', note)
+        self.assertIn('글자', note)
+        self.assertLess(len(note), 450)
+        self.assertEqual(usage.session_start(dict(session_id='new', transcript_path=str(new)), self.env), '')
+        records = (self.state / 'main-context-history.jsonl').read_text().splitlines()
+        self.assertEqual(len(records), 1)
+        self.assertNotIn('sensitive', records[0])
+        self.assertNotIn('gh issue list', records[0])
+
+    def test_non_main_start_has_no_side_effect(self):
+        self.herdr.write_text('#!/bin/sh\necho \'{"result":{"pane":{"terminal_id":"other"}}}\'\n')
+        self.assertEqual(usage.session_start(dict(session_id='x', transcript_path=str(self.claude())), self.env), '')
+        self.assertFalse((self.state / 'main-context-current.json').exists())
+
+    def test_handoff_hook_preserves_saved_context_and_adds_restart_accounting(self):
+        old = self.claude()
+        new = self.transcript([], 'new')
+        env = dict(self.env, CLAUDE_CODE_ENTRYPOINT='cli')
+        def start(sid, path, source='startup'):
+            return subprocess.run(['bash', str(HERE / 'handoff'), 'session'], env=env,
+                input=json.dumps(dict(session_id=sid, transcript_path=str(path), source=source)),
+                text=True, capture_output=True, check=True).stdout
+        start('old', old)
+        pending = self.root / 'state/agent-handoff/p1.md'
+        pending.write_text('Existing handoff remains complete')
+        # No kick process is needed to test the synchronous hook output.
+        env['HANDOFF_KICK_DELAY'] = '0'
+        fake_nohup = self.root / 'nohup'
+        fake_nohup.write_text('#!/bin/sh\nexit 0\n')
+        fake_nohup.chmod(0o755)
+        env['PATH'] = str(self.root) + ':' + env['PATH']
+        out = json.loads(start('new', new, 'clear'))['hookSpecificOutput']['additionalContext']
+        self.assertIn('Existing handoff remains complete', out)
+        self.assertIn('tool_output:Bash', out)
+        self.assertEqual(len((self.state / 'main-context-history.jsonl').read_text().splitlines()), 1)
+
+    def test_codex_hook_records_clear_and_excludes_exec_child(self):
+        def transcript(sid, source='cli'):
+            return self.transcript([dict(type='session_meta', payload=dict(id=sid, source=source,
+                originator='codex-tui')), dict(type='response_item', payload=dict(type='message', role='user',
+                content=[dict(type='input_text', text='hello')]))], sid)
+        def start(sid, source='cli'):
+            return subprocess.run(['bash', str(HERE / 'handoff'), 'session', 'codex'], env=self.env,
+                input=json.dumps(dict(session_id=sid, transcript_path=str(transcript(sid, source)))),
+                text=True, capture_output=True, check=True).stdout
+        start('old')
+        start('nested', 'exec')
+        self.assertFalse((self.state / 'main-context-history.jsonl').exists())
+        out = start('new')
+        self.assertIn('글자', out)
+        self.assertEqual(len((self.state / 'main-context-history.jsonl').read_text().splitlines()), 1)
+
+    def test_nested_claude_does_not_record_a_main_restart(self):
+        env = dict(self.env, CLAUDE_CODE_ENTRYPOINT='sdk-cli')
+        result = subprocess.run(['bash', str(HERE / 'handoff'), 'session'], env=env,
+            input=json.dumps(dict(session_id='child', transcript_path=str(self.claude()))),
+            text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse((self.state / 'main-context-current.json').exists())
+
+    def test_scan_is_bounded_and_marks_partial(self):
+        p = self.transcript([dict(type='user', message=dict(role='user', content='x' * 200))])
+        result = usage.summarize(p, max_bytes=100)
+        self.assertTrue(result['partial'])
+
+    def test_malformed_identifiers_do_not_discard_remaining_records(self):
+        p = self.transcript([
+            dict(uuid=[], message=dict(role='assistant', content=[dict(type='tool_use', id={}, name='Bash', input={})])),
+            dict(message=dict(role='user', content=[dict(type='tool_result', tool_use_id={}, content='abc')])),
+            dict(message=dict(role='user', content='valid')),
+        ])
+        self.assertEqual(usage.summarize(p)['characters']['user'], 5)
+
+    def test_attribution_budget_is_shared_across_sources(self):
+        paths = [('one', self.claude()), ('two', self.claude())]
+        detail = {}
+        usage.attribution(paths, 0, diagnostics=detail, max_bytes=100)
+        self.assertEqual(detail['scanned_files'], 1)
+        self.assertEqual(detail['skipped_files'], 1)
+        self.assertEqual(detail['partial_files'], 1)
+
+    def response(self, remaining=999, reset=9000):
+        return dict(resources=dict(core=dict(limit=5000, remaining=remaining, reset=reset),
+                                   graphql=dict(limit=5000, remaining=4000, reset=reset)))
+
+    def test_quota_five_minute_gate_and_reset_deduplication(self):
+        calls, messages = [], []
+        def fetch():
+            calls.append(1)
+            return self.response()
+        send = lambda text: messages.append(text) or True
+        for now in [1000, 1001, 1299, 1300]:
+            usage.quota_tick(self.env, now, fetch=fetch, send=send, sources=[])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(messages), 1)
+        self.assertIn('999/5000', messages[0])
+        self.assertIn('관측', messages[0])
+        usage.quota_tick(self.env, 1600, fetch=lambda: self.response(reset=10000), send=send, sources=[])
+        self.assertEqual(len(messages), 2)
+
+    def test_failure_consumes_interval_and_does_not_report_zero(self):
+        calls, messages = [], []
+        def fail():
+            calls.append(1)
+            raise RuntimeError('secret response body')
+        for now in [1000, 1001]:
+            usage.quota_tick(self.env, now, fetch=fail, send=lambda text: messages.append(text), sources=[])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(messages, [])
+        state = (self.state / 'github-quota.json').read_text()
+        self.assertNotIn('secret', state)
+        self.assertNotIn('remaining', state)
+        self.assertIn('error', state)
+
+    def test_corrupt_cached_fields_do_not_disable_future_samples(self):
+        usage.write_json(self.state / 'github-quota.json', dict(attempt_at='bad', pending=[], notified=None))
+        usage.quota_tick(self.env, 1000, fetch=self.response, send=lambda _: True, sources=[])
+        self.assertEqual(usage.read_json(self.state / 'github-quota.json')['status'], 'ok')
+
+    def test_delivery_failure_is_retried_without_another_api_call(self):
+        calls, messages = [], []
+        def fetch():
+            calls.append(1)
+            return self.response()
+        usage.quota_tick(self.env, 1000, fetch=fetch, send=lambda _: False, sources=[])
+        usage.quota_tick(self.env, 1001, fetch=fetch, send=lambda text: messages.append(text) or True, sources=[])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(messages), 1)
+
+    def test_lock_contention_does_not_read_quota(self):
+        import fcntl
+        with (self.state / 'github-quota.lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            with patch.object(usage.subprocess, 'run') as run:
+                usage.quota_tick(self.env, 1000, sources=[])
+                run.assert_not_called()
+
+    def test_expired_pending_alert_is_not_sent(self):
+        usage.quota_tick(self.env, 8900, fetch=lambda: self.response(reset=9000), send=lambda _: False, sources=[])
+        sent = []
+        usage.quota_tick(self.env, 9001, fetch=lambda: self.response(reset=9000), send=lambda t: sent.append(t), sources=[])
+        self.assertEqual(sent, [])
+
+    def test_invalid_quota_is_an_error_and_exact_threshold_is_not_low(self):
+        for value in [None, {}, {'resources': {'core': {'limit': 5, 'remaining': -1, 'reset': 1}}}]:
+            with self.assertRaises(ValueError):
+                usage.validate_quota(value)
+        sent = []
+        usage.quota_tick(self.env, 1000, fetch=lambda: self.response(1000), send=lambda t: sent.append(t), sources=[])
+        self.assertEqual(sent, [])
+
+    def test_source_counts_are_windowed_and_do_not_claim_request_attribution(self):
+        p = self.transcript([
+            dict(type='assistant', timestamp='1970-01-01T00:20:00Z', message=dict(content=[
+                dict(type='tool_use', id='a', name='Bash', input=dict(command='gh pr view'))])),
+            dict(type='assistant', timestamp='1970-01-01T00:00:00Z', message=dict(content=[
+                dict(type='tool_use', id='b', name='Bash', input=dict(command='gh issue view'))])),
+        ])
+        sources = usage.attribution([('workers/p2', p)], 1000)
+        self.assertEqual(sources, [{'source': 'workers/p2', 'gh_commands': 1}])
+        self.assertNotIn('gh pr view', json.dumps(sources))
+
+    def test_real_watcher_entrypoint_runs_bounded_quota_poll_and_removes_debug(self):
+        fake = self.root / 'gh'
+        fake.write_text('#!/usr/bin/env python3\nimport json, os, sys\n'
+            'assert sys.argv[1:] == ["api", "--hostname", "github.com", "rate_limit"]\n'
+            'assert "GH_DEBUG" not in os.environ\n'
+            'with open(os.environ["HOME"] + "/quota-calls", "a") as f: f.write("call\\n")\n'
+            'print(' + repr(json.dumps(self.response(4000))) + ')\n')
+        fake.chmod(0o755)
+        env = dict(self.env, PATH=str(self.root) + ':' + self.env['PATH'], GH_DEBUG='api',
+                   WORKERS_WATCH_MOVE='/usr/bin/true', WORKERS_WATCH_PANE_TELL='/usr/bin/true')
+        for now in (1000, 1001, 1300):
+            subprocess.run([os.sys.executable, '-I', str(HERE / 'workers-watch.py')],
+                env=dict(env, WORKERS_WATCH_NOW=str(now)), check=True, capture_output=True, timeout=20)
+        self.assertEqual((self.root / 'quota-calls').read_text().splitlines(), ['call', 'call'])
+        self.assertEqual(usage.read_json(self.state / 'github-quota.json')['status'], 'ok')
+
+
+if __name__ == '__main__':
+    unittest.main()
