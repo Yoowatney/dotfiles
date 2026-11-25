@@ -59,6 +59,7 @@ batch_event() {
 }
 send() {
   printf '%s\\0' "$3" >> "$FIXTURE/prompts"
+  [ -z "${SEND_RECORD_DELAY:-}" ] || /bin/sleep "$SEND_RECORD_DELAY"
   printf '%s\\n' "${HERDR_SOCKET_PATH:-default}" >> "$FIXTURE/sockets"
   [ -z "${SEND_RETURN_DELAY:-}" ] || /bin/sleep "$SEND_RETURN_DELAY"
 }
@@ -384,6 +385,12 @@ exec /usr/bin/nohup "$@"
         return first, second
 
     def test_owner_sigkill_is_observed_and_originals_recover_in_order(self):
+        self.assert_owner_sigkill_recovery(stop_delivery=False)
+
+    def test_stopped_delivery_is_killed_and_originals_recover_in_order(self):
+        self.assert_owner_sigkill_recovery(stop_delivery=True)
+
+    def assert_owner_sigkill_recovery(self, *, stop_delivery):
         first, second = self.private_ordered_pair()
         (self.root / "spawn-descendant").touch()
         worker = subprocess.Popen(["/bin/bash", str(self.subject), "--deliver", str(second),
@@ -412,6 +419,12 @@ exec /usr/bin/nohup "$@"
             delivery = int(re.search(r"worker-start 101.second .*delivery=(\d+)", text)[1])
             self.assertEqual(os.getpgid(descendant), delivery)
             self.assertEqual(self.prompts(), [])
+            # Exercise SIGKILL deterministically as well as normal cleanup.
+            # Either path may skip the EXIT marker, so track this known PID
+            # and require actual termination instead of the fixture marker.
+            if stop_delivery:
+                os.kill(delivery, signal.SIGSTOP)
+            self.killed_timers.add(str(delivery))
             os.kill(owner, signal.SIGKILL)
             self.assertNotEqual(worker.wait(timeout=12), 0)
             self.assertEqual(second.read_text(), "second")
@@ -429,8 +442,11 @@ exec /usr/bin/nohup "$@"
                                  if "worker-exit 101.second" in line and "observed_by=" in line)
             self.assertIn("pid=" + str(delivery), delivery_line)
             self.assertRegex(delivery_line, r"signal=(SIGTERM|SIGKILL)")
+            if stop_delivery:
+                self.assertIn("signal=SIGKILL", delivery_line)
             self.assertRegex(text, r"supervisor-signal 101.second .*signal=SIGTERM actor=\d+")
             self.assertIn("reason=delivery-cleanup action=attempt", text)
+            self.assertFalse(self.timer_alive(delivery), "delivery survived owner death")
             self.assertFalse(self.timer_alive(descendant), "delivery descendant survived owner death")
         finally:
             (self.root / "spawn-descendant").unlink()
@@ -628,12 +644,21 @@ exec /bin/mv "$@"
 
     def test_recovery_restores_recorded_workers_route(self):
         socket = "/private/fixture/sessions/workers/herdr.sock"
+        self.env["SEND_RECORD_DELAY"] = ".2"
         result = self.call("fixture-open", "workers", HERDR_SOCKET_PATH=socket)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.due()
         self.assertEqual(self.call("--recover-batch").returncode, 0)
-        self.wait_prompt([b"workers"])
-        self.assertEqual((self.root / "sockets").read_text().strip(), socket)
+        # send records the prompt before the route; wait for the complete
+        # route record instead of treating prompt visibility as send completion.
+        recorded = self.root / "sockets"
+        end = time.monotonic() + 30
+        while time.monotonic() < end:
+            if recorded.exists() and recorded.read_text().endswith("\n"):
+                break
+            time.sleep(.01)
+        self.assertEqual(self.prompts(), [b"workers"])
+        self.assertEqual(recorded.read_text().strip(), socket)
 
     def test_default_scheduler_waits_60_before_flushing(self):
         self.open()
