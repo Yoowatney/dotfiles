@@ -10,7 +10,6 @@ terraform = "latest"
 # Global npm packages
 # claude-code는 native installer 사용 (curl -fsSL https://claude.ai/install.sh | sh)
 "npm:@google/clasp" = "latest"
-"npm:@google/gemini-cli" = "latest"
 "npm:@openai/codex" = "latest"
 "npm:ccusage" = "latest"
 "npm:firebase-tools" = "latest"
