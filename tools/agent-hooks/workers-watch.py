@@ -1589,6 +1589,13 @@ def main():
         run_tick(os.environ, float(os.environ.get("WORKERS_WATCH_NOW") or time.time()))
     except Exception:
         pass
+    try:
+        spec = importlib.util.spec_from_file_location("session_usage", os.path.join(HERE, "session-usage.py"))
+        usage = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(usage)
+        usage.quota_tick(dict(os.environ), float(os.environ.get("WORKERS_WATCH_NOW") or time.time()))
+    except Exception:
+        pass
     # What moved panes said on 집맥 reaches the main pane here; with no open move it returns at once. Detached, never killed at a
     # timeout: one cut between a send and its save would send it again or open a second check pane (Claude review). bridge.lock
     # keeps one at a time.

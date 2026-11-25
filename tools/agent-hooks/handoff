@@ -53,10 +53,18 @@ case "${1:-}" in
     mkdir -p "$dir" || exit
     prev=$(cat "$f.transcript" 2>/dev/null)
     jq -r '.transcript_path // empty' <<<"$in" > "$f.transcript"
+    usage=$(printf '%s' "$in" | python3 "$HERE/session-usage.py" start "$prev" 2>/dev/null)
     out=$(bash "$0" load)
-    if [ -n "$out" ]; then printf '%s\n' "$out"; exit; fi
-    [ "$(jq -r '.source // empty' <<<"$in")" = clear ] || exit 0
-    [ -f "$prev" ] || exit 0
+    emit() {
+      local combined
+      combined=$(printf '%s' "$1" | python3 "$HERE/session-usage.py" append "$usage" 2>/dev/null)
+      printf '%s\n' "${combined:-$1}"
+    }
+    if [ -n "$out" ]; then emit "$out"; exit; fi
+    if [ "$(jq -r '.source // empty' <<<"$in")" != clear ] || [ ! -f "$prev" ]; then
+      [ -z "$usage" ] || emit ""
+      exit 0
+    fi
     # ponytail: only the last 2000 lines; the transcript path is there for anything older
     last=$(tail -n 2000 "$prev" | jq -rs '
       [.[] | select(.type == "user" and .isMeta != true and .isCompactSummary != true and (.message.content | type) == "string")
@@ -65,7 +73,8 @@ case "${1:-}" in
       | "요유의 마지막 메시지:\n\(($u[-1] // "(없음)")[0:600])\n\n유요의 마지막 답:\n\(($a[-1] // "(없음)")[0:1500])"
         + ([$a[] | scan("남은 것:[^\n]*")] | last | if . then "\n\n마지막 남은 것 줄:\n\(.)" else "" end)') || exit 0
     head="필수 항목 미확인. 이전 검증을 그대로 사용할 수 없음. The previous session in this pane ended with /clear without saving a handoff. Its full transcript is $prev; read its end with jq if you need more than the excerpt below. Unless 요유's first message asks for something else, pick up where it left off: the 유요 몫 in its last 남은 것 line. $typed"
-    jq -n --arg ctx "$head"$'\n\n'"$last" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}' || exit
+    out=$(jq -n --arg ctx "$head"$'\n\n'"$last" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}') || exit
+    emit "$out"
     # 요유 only types /clear, saved or not (10/23).
     kick "세션 시작 때 받은 직전 세션 기록을 보고, 유요 몫으로 남은 일을 이어서 진행하세요. 남은 일이 없으면 이어받은 내용만 짧게 알리세요."
     ;;
