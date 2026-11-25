@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import concurrent.futures
 import configparser
 import fcntl
 import importlib.util
@@ -464,6 +465,7 @@ def pre_tool(event):
         reason = policy_problem(payload, rules)
         if reason:
             return deny(reason)
+        handlers = []
         for group in groups:
             matcher = group.get('matcher') or '*'
             if matcher != '*' and not re.search(matcher, payload['tool_name']):
@@ -471,10 +473,14 @@ def pre_tool(event):
             for handler in group.get('hooks', []):
                 if handler.get('type') != 'command':
                     return deny('Unsupported shared safety hook type.')
-                reason = run_guard(nonempty(handler.get('command')), payload,
-                                   timeout=min(float(handler.get('timeout', 10)), 30))
-                if reason:
-                    return deny(reason)
+                handlers.append((nonempty(handler.get('command')), min(float(handler.get('timeout', 10)), 30)))
+        # The guards are separate processes; running them together costs the slowest one, not their sum,
+        # on every AGY tool call (about 1.2 s with ten guards one after another). The first deny in order wins.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(handlers), 1)) as pool:
+            reasons = list(pool.map(lambda h: run_guard(h[0], payload, timeout=h[1]), handlers))
+        reason = next((r for r in reasons if r), None)
+        if reason:
+            return deny(reason)
         result = {'decision': 'allow'}  # Delegate to AGY policy; never auto-approve.
         if payload['tool_name'] == 'Bash':
             control = control_command(payload['tool_input']['command'])
