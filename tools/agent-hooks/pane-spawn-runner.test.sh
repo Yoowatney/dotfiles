@@ -8,7 +8,7 @@ policy="$XDG_STATE_HOME/agent-quota/policy"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 run() { bash "$here/agent-runner" "$@"; }
 
-out=$(run); grep -q '^runner: auto$' <<<"$out" || fail "no local file shows the installed default: $out"
+out=$(run); grep -q '^runner: agy$' <<<"$out" || fail "no local file shows the installed default: $out"
 grep -q 'installed default' <<<"$out" || fail "the source is named: $out"
 for pair in claude:claude-first codex:codex-only auto:quota-aware agy:agy-only; do
   name=${pair%%:*} value=${pair##*:}
@@ -29,5 +29,5 @@ if run purple >/dev/null 2>"$box/err"; then fail "an unknown runner must be refu
 grep -q 'claude|codex|auto' "$box/err" || fail "usage names the choices"
 if run claude codex >/dev/null 2>&1; then fail "extra arguments are refused"; fi
 run auto >/dev/null; rm -f "$policy"
-out=$(run); grep -q '^runner: auto$' <<<"$out" || fail "removing the file restores the default"
+out=$(run); grep -q '^runner: agy$' <<<"$out" || fail "removing the file restores the default"
 echo "ok: agent-runner"
