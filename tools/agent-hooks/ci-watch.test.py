@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """Exercise the real CLI with a local gh stand-in; no network or Actions starts."""
+import contextlib
+import fcntl
+import importlib.util
+import io
 import json
 import os
 import signal
@@ -10,8 +14,12 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 ENTRY = Path(__file__).with_name('ci-watch.py')
+SPEC = importlib.util.spec_from_file_location('ci_watch', ENTRY)
+WATCH = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(WATCH)
 
 
 class WatchTests(unittest.TestCase):
@@ -64,7 +72,46 @@ sys.exit(int(os.environ.get('RESULT', '0')))
         self.assertFalse(status['active'])
         self.assertEqual(status['conclusion'], 'not_started')
         self.assertIsNone(status['returncode'])
+        self.assertIsNone(status['wrapper_pid'])
+        self.assertIsNone(status['gh_pid'])
         self.assertFalse((self.root / 'calls').exists())
+
+    def test_state_save_failure_after_start_preserves_child_exit(self):
+        real_save = WATCH.save_state
+        for failed_save in (2, 3):
+            for result in (0, 17):
+                with self.subTest(failed_save=failed_save, result=result):
+                    calls = 0
+
+                    def save(path, state):
+                        nonlocal calls
+                        calls += 1
+                        if calls == failed_save:
+                            raise PermissionError('synthetic-sensitive-detail')
+                        real_save(path, state)
+
+                    err = io.StringIO()
+                    children = []
+                    real_popen = subprocess.Popen
+
+                    def start(*args, **kwargs):
+                        child = real_popen(*args, **kwargs)
+                        children.append(child)
+                        return child
+
+                    try:
+                        with patch.dict(os.environ, {**self.env, 'RESULT': str(result)}, clear=True), \
+                                patch.object(sys, 'argv', [str(ENTRY), '--repo', 'owner/repo', '123']), \
+                                patch.object(WATCH, 'save_state', side_effect=save), \
+                                patch.object(WATCH.subprocess, 'Popen', side_effect=start), \
+                                contextlib.redirect_stderr(err):
+                            self.assertEqual(WATCH.main(), result)
+                    finally:
+                        for child in children:
+                            child.wait(timeout=5)
+                    self.assertIn('PermissionError', err.getvalue())
+                    self.assertNotIn('synthetic-sensitive-detail', err.getvalue())
+                    self.assertFalse(self.status()['active'])
 
     def test_mirror_and_unknown_hosts_cannot_start_a_second_watcher(self):
         config = Path(self.env['HOME']) / '.config' / 'munice'
@@ -203,6 +250,32 @@ sys.exit(int(os.environ.get('RESULT', '0')))
         self.assertEqual(status['conclusion'], 'unknown')
         self.assertIsNone(status['returncode'])
         self.assertEqual(len((self.root / 'calls').read_text().splitlines()), 1)
+
+    def test_boolean_result_is_unknown(self):
+        child = self.start()
+        child.communicate(timeout=5)
+        state = next((self.root / 'state' / 'ci-watch').glob('*.json'))
+        state.write_text(json.dumps({'returncode': True}))
+        status = self.status()
+        self.assertEqual(status['conclusion'], 'unknown')
+        self.assertIsNone(status['returncode'])
+        self.assertIsNone(status['wrapper_pid'])
+        self.assertIsNone(status['gh_pid'])
+
+    def test_status_reads_result_after_observing_released_lock(self):
+        lock_path, state_path = self.root / 'watch.lock', self.root / 'watch.json'
+        lock_path.touch()
+        state_path.write_text(json.dumps({'returncode': None}))
+        real_flock = fcntl.flock
+
+        def finishing_watch(lock, operation):
+            state_path.write_text(json.dumps({'returncode': 17}))
+            return real_flock(lock, operation)
+
+        with patch.object(WATCH.fcntl, 'flock', side_effect=finishing_watch):
+            status = WATCH.status(lock_path, state_path)
+        self.assertEqual(status['returncode'], 17)
+        self.assertEqual(status['conclusion'], 'completed')
 
 
 if __name__ == '__main__':

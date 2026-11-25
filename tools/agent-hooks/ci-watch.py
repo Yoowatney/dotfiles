@@ -23,24 +23,27 @@ import time
 
 
 def save_state(path: Path, state: dict):
-    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as temp:
-        json.dump(state, temp)
-        temporary = Path(temp.name)
+    temporary = None
     try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as temp:
+            temporary = Path(temp.name)
+            json.dump(state, temp)
         temporary.replace(path)
     finally:
-        temporary.unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def read_state(path: Path) -> dict:
+    try:
+        state = json.loads(path.read_text())
+        return state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
 def status(lock_path: Path, state_path: Path) -> dict:
-    state = {}
     found = state_path.exists() or lock_path.exists()
-    try:
-        state = json.loads(state_path.read_text())
-        if not isinstance(state, dict):
-            state = {}
-    except (OSError, ValueError):
-        pass
     active = False
     try:
         with lock_path.open('r') as lock:
@@ -48,16 +51,25 @@ def status(lock_path: Path, state_path: Path) -> dict:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 active = True
+            state = read_state(state_path)
     except FileNotFoundError:
-        pass
+        state = read_state(state_path)
     result = state.get('returncode')
     # A persisted result never outweighs a currently held lock.
-    if active:
+    if active or type(result) is not int:
         result = None
-    return {**state, 'active': active, 'returncode': result,
+    return {'wrapper_pid': None, 'gh_pid': None, **state, 'active': active, 'returncode': result,
             'conclusion': 'running' if active else ('completed' if isinstance(result, int)
                           else ('unknown' if found else 'not_started')),
             'state_file': str(state_path)}
+
+
+def save_running_state(path: Path, state: dict):
+    # Once gh starts, a diagnostic write must not discard its actual exit status.
+    try:
+        save_state(path, state)
+    except OSError as error:
+        print(f'ci-watch: cannot save watch state ({type(error).__name__})', file=sys.stderr)
 
 
 def watch_host_allowed() -> bool:
@@ -111,11 +123,11 @@ def main():
             code = 127
         else:
             state['gh_pid'] = child.pid
-            save_state(state_path, state)
+            save_running_state(state_path, state)
             code = child.wait()
             code = code if code >= 0 else 128 - code
         state.update(returncode=code, finished_at=time.time())
-        save_state(state_path, state)
+        save_running_state(state_path, state)
         return code
 
 

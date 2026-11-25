@@ -79,7 +79,10 @@ def watches_run(args: list[str]) -> bool:
         elif arg.startswith('-i'):
             interval = arg[2:].removeprefix('=')
     try:
-        return watch and int(interval) < 60
+        # pflag uses Go's base-zero ParseInt: leading zero means octal.
+        digits = interval.lstrip('+-')
+        base = 8 if len(digits) > 1 and digits[0] == '0' and digits[1] not in 'xXoObB' else 0
+        return watch and int(interval, base) < 60
     except ValueError:
         return watch
 
