@@ -73,6 +73,9 @@ elif a[:2] == ["agent", "prompt"]:
     elif "[main-refresh]" in text:
         with (r / "old-session.jsonl").open("a") as f: f.write(json.dumps(dict(type="user", message=dict(content=text))) + "\\n")
         (r / "requested").touch()
+        if (r / "pause-retry").exists() and (r / "no-handoff").exists():
+            (r / "retry-inflight").touch()
+            while not (r / "retry-continue").exists(): time.sleep(.02)
         if not (r / "no-handoff").exists():
             time.sleep(.05)
             (r / "state/agent-handoff/w1:p1.md").write_text(text.split()[-1] + "\\nhandoff")
@@ -98,6 +101,7 @@ else: raise SystemExit(2)
     def tearDown(self):
         (self.root / "clear-continue").touch()
         (self.root / "priority-continue").touch()
+        (self.root / "retry-continue").touch()
         (self.root / "full").unlink(missing_ok=True)
         (self.root / "status").write_text("idle")
         if self.proc and self.proc.poll() is None:
@@ -193,6 +197,7 @@ else: raise SystemExit(2)
     def test_inflight_priority_finishes_before_prepare_and_aborted_record_is_completed(self):
         (self.root / "hold-after-request").touch()
         (self.root / "pause-priority").touch()
+        (self.root / "pause-retry").touch()
         (self.root / "status").write_text("idle")
         self.start()
         until(lambda: (self.state / "agent-handoff/w1:p1.md").exists())
@@ -217,6 +222,11 @@ else: raise SystemExit(2)
             sender.communicate(timeout=10)
         self.assertEqual(sender.returncode, 0)
         until(lambda: list((self.state / "agent-handoff/refresh-recovery").glob("*/completed")))
+        # Completion is the abort boundary, not the end of --now: it may
+        # perform another readiness pass and handoff. Release that separate
+        # attempt only when the fixture reaches it (or the run budget ends).
+        until(lambda: (self.root / "retry-inflight").exists() or self.proc.poll() is not None)
+        (self.root / "retry-continue").touch()
         self.assertEqual(self.proc.wait(timeout=10), 0)
         self.assertNotIn("/clear", [text for _, text in self.prompts()])
         self.assertEqual([sid for sid, text in self.prompts() if text.endswith(message)],
