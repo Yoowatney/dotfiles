@@ -70,7 +70,8 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full]
     Startup, readiness and delivery errors never switch runners. Explicit work model/effort keeps its runner.
   --why: in the main pane, why a pane that does the job must be Claude, in one line. A Claude pane without one, or with a
     reason mentioning Slack, 슬랙, GCP, gcloud, bq or BigQuery (any case), is refused there: Codex runs GCP commands too.
-    Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요
+    GCP 작업과 재확인은 --kind codex로 여세요. AGY의 gcloud 인증 캐시 쓰기는 허용하지 않습니다.
+    Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind codex로 여세요
   --check: a fresh check (main pane only) on Claude, which cannot write the checked folder.
     Always Claude, whatever the policy (요유 2026-11-19: no Codex reviews); --kind codex and --kind agy are refused. Past the measured Claude
     usage reserve it opens nothing and exits 2: look again with one command, or open an ordinary read-only recheck pane (no --check;
@@ -205,7 +206,7 @@ elif [ "$asked" = auto ] && [ -z "$check" ]; then
   [ -e "$quota_policy_file" ] || quota_policy_file=$quota_dir/agent-quota-policy
   quota_policy=$(cat "$quota_policy_file" 2>/dev/null)
   # Recovery must work with a broken Python installation, quota script, or decision-log destination.
-  if { [ -z "$pinned" ] && [ "$quota_policy" != codex-only ]; } || [ "$quota_policy" = agy-only ]; then
+  if [ -z "$pinned" ] && [ "$quota_policy" != codex-only ]; then
     quota=$(bounded "$quota_limit" python3 -I "$quota_dir/agent-quota" select "$cwd")
     quota_rc=$?
     if [ "$quota_rc" = 124 ]; then
@@ -395,9 +396,9 @@ if [ -z "$opener" ] && [ "term_$term" = "$(cat "$mainfile" 2>/dev/null)" ]; then
   if [ -z "$check" ] && [ "$asked" = claude ]; then
     [[ "$why" == *[![:space:]]* ]] || die "the main pane opens a Claude pane only with --why \"<one line>\", the reason Codex cannot do the job. Any other pane: --kind auto (the agent-quota policy picks the runner)."
     case "$(printf '%s\n' "$why" | tr '[:upper:]' '[:lower:]')" in
-      *slack* | *슬랙*) die "Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요" ;;
+      *slack* | *슬랙*) die "Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind codex로 여세요" ;;
       # ponytail: words, so a reason that names gcloud to say why Codex failed is refused too; it says what failed instead.
-      *gcp* | *gcloud* | *bigquery* | *bq*) die "GCP 명령도 Codex 칸이 합니다(요유 2026-11-07): --kind auto로 여세요. 요유 계정 단계는 메인 칸에서 합니다. Codex로 안 되는 다른 이유가 있으면 그것을 --why에 한 줄로 쓰세요" ;;
+      *gcp* | *gcloud* | *bigquery* | *bq*) die "GCP 명령도 Codex 칸이 합니다(요유 2026-11-07): --kind codex로 여세요. 요유 계정 단계는 메인 칸에서 합니다. Codex로 안 되는 다른 이유가 있으면 그것을 --why에 한 줄로 쓰세요" ;;
     esac
   fi
   main=1 hidden=1

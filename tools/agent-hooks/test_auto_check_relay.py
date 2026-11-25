@@ -1295,7 +1295,7 @@ class RelayTests(unittest.TestCase):
 
     def test_unopened_check_tells_main_how_to_look_again(self):
         message = self.unopened_message()
-        for part in ("pane-spawn --kind auto", "[rc-", "읽기 전용", "직접 실행", "운영 쓰기 승인", "'확인:' 줄", "열지 못했다는 말은 쓰지 마세요",
+        for part in ("pane-spawn --kind codex", "[rc-", "읽기 전용", "직접 실행", "운영 쓰기 승인", "'확인:' 줄", "열지 못했다는 말은 쓰지 마세요",
                      "팀 스레드·돈·운영 글"):
             self.assertIn(part, message)
         self.assertIn(auto.share.UNOPENED_NOTE, message)

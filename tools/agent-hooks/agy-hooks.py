@@ -96,6 +96,16 @@ def settings():
 
 def policy_problem(payload, rules):
     tool, inp = payload['tool_name'], payload['tool_input']
+    # OAuth belongs to the CLI authentication layer, never model tools.
+    # The terminal sandbox separately excludes this file from its mounts.
+    if tool == 'Bash' and re.search(r'oauth_creds(?:\.json)?', inp['command'], re.I):
+        return 'Subscription OAuth credentials cannot be accessed by worker tools.'
+    if tool in ('Read', 'Grep', 'Write', 'Edit', 'MultiEdit'):
+        target = inp.get('file_path', inp.get('path', ''))
+        resolved = Path(payload['cwd'], os.path.expanduser(target)).resolve()
+        credential = (HOME / '.gemini/oauth_creds.json').resolve()
+        if resolved == credential or resolved.name == 'oauth_creds.json':
+            return 'Subscription OAuth credentials cannot be accessed by worker tools.'
     if tool == 'Bash' and SLACK_WRITE.search(inp['command']):
         return 'Worker Slack publication must go through the lead.'
     if tool == 'Bash':

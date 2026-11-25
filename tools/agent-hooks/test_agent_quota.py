@@ -113,6 +113,7 @@ class RoutingTests(unittest.TestCase):
         folder = self.q.state_dir()
         log = folder / "decisions.jsonl"
         log.write_text((json.dumps({"reason": "x" * 2000}) + "\n") * 1100)
+        (folder / "policy").write_text("quota-aware\n")
         with patch.object(sys, "argv", [str(SCRIPT), "select"]), patch.object(self.q.time, "time", return_value=self.now), patch("sys.stdout", new_callable=io.StringIO):
             self.assertEqual(self.q.main(), 0)
         self.assertLessEqual(log.stat().st_size, 1048576)

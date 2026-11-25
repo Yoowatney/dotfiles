@@ -31,3 +31,24 @@ if run claude codex >/dev/null 2>&1; then fail "extra arguments are refused"; fi
 run auto >/dev/null; rm -f "$policy"
 out=$(run); grep -q '^runner: agy$' <<<"$out" || fail "removing the file restores the default"
 echo "ok: agent-runner"
+
+# Default-AGY routing keeps explicit Codex arguments and ambient work on Codex.
+(
+  source "$here/pane-spawn-test-fixture.sh"
+  echo agy-only > "$SANDBOX/home/.local/state/agent-quota/policy"
+  workers_up
+  ps --kind auto "Pinned worker" "Synthetic task" -- --model codex-fixture >/dev/null 2>"$SANDBOX/err" || fail 'forwarded Codex arguments must still open'
+  has '--kind codex' 'forwarded arguments retain Codex under AGY policy'
+  has '--model codex-fixture' 'forwarded arguments reach Codex'
+  mkdir -p "$SANDBOX/home/.config/munice"
+  echo ambient-runner > "$SANDBOX/home/.config/munice/host-role"
+  ps --kind auto "Ambient worker" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'ambient worker must still open'
+  has '--kind codex' 'ambient routing retains Codex under AGY policy'
+  rm "$SANDBOX/home/.config/munice/host-role"
+  is_main
+  if ps --kind claude --why gcp "GCP worker" "Synthetic task" >/dev/null 2>"$SANDBOX/err"; then fail 'GCP cannot justify Claude work'; fi
+  grep -qF -- '--kind codex' "$SANDBOX/err" || fail 'GCP refusal must name the working Codex route'
+  grep -qF -- 'GCP 작업과 재확인은 --kind codex' "$SUBJECT" || fail 'help must name the GCP Codex route'
+  grep -qF -- 'pane-spawn --kind codex' "$here/yoyoo-share-guard.py" || fail 'recheck guidance must retain a working GCP route'
+)
+echo 'ok: default AGY routing regressions'

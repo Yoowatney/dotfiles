@@ -125,7 +125,7 @@ for reason in gcp GCP "gcloud로 배포 상태 확인" "bq 조회" "BigQuery 집
     ps ${opts[@]+"${opts[@]}"} --why "$reason" "GCP 확인" "지시" >"$SANDBOX/out" 2>"$SANDBOX/err" || rc=$?
     [ "$rc" = 2 ] || fail "the main pane rejects --why [$reason] ($kind_args): expected exit 2, got $rc"
     grep -qF -- "GCP 명령도 Codex 칸이 합니다" "$SANDBOX/err" || fail "GCP refusal says Codex runs it: $(cat "$SANDBOX/err")"
-    grep -qF -- "--kind auto" "$SANDBOX/err" || fail "GCP refusal points to --kind auto: $(cat "$SANDBOX/err")"
+    grep -qF -- "--kind codex" "$SANDBOX/err" || fail "GCP refusal points to --kind codex: $(cat "$SANDBOX/err")"
     hasnt "agent start" "a GCP reason starts no agent"
   done
 done
@@ -137,7 +137,7 @@ for reason in slack "Slack에 답글" "슬랙에 답글" "SLACK에 답글"; do
     rc=0
     ps ${opts[@]+"${opts[@]}"} --why "$reason" "Slack 답글" "지시" >"$SANDBOX/out" 2>"$SANDBOX/err" || rc=$?
     [ "$rc" = 2 ] || fail "the main pane rejects --why [$reason] ($kind_args): expected exit 2, got $rc"
-    grep -qF -- "Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요" "$SANDBOX/err" || fail "Slack refusal explains who posts: $(cat "$SANDBOX/err")"
+    grep -qF -- "Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind codex로 여세요" "$SANDBOX/err" || fail "Slack refusal explains who posts: $(cat "$SANDBOX/err")"
     hasnt "tab create" "a Slack reason opens no pane"
     hasnt "pane-label --lead" "a Slack reason marks nothing"
     hasnt "agent start" "a Slack reason starts no agent"

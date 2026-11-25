@@ -47,8 +47,8 @@ has '--kind claude' 'AGY policy never changes check runtime'
 not_main
 ps --kind auto "AGY policy" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'explicit AGY policy chooses AGY'
 has '--kind agy' 'auto honors explicit AGY policy'
-if ps --kind auto "AGY unsafe policy" "Synthetic task" -- --model alternate >/dev/null 2>"$SANDBOX/err"; then fail 'AGY policy must not use Codex for forwarded options'; fi
-no_herdr 'AGY policy with forwarded options opens no pane'
+ps --kind auto "Pinned Codex policy" "Synthetic task" -- --model alternate >/dev/null 2>"$SANDBOX/err" || fail 'forwarded options retain Codex'
+has '--kind codex' 'AGY policy preserves the explicitly pinned Codex runner'
 rm "$SANDBOX/home/.local/state/agent-quota/agy.json"
 if ps --kind auto "AGY unavailable" "Synthetic task" >/dev/null 2>"$SANDBOX/err"; then fail 'AGY policy does not fall back when quota is unknown'; fi
 no_herdr 'AGY-only refusal opens no fallback pane'

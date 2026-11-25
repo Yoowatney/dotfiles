@@ -63,6 +63,17 @@ class NativeHooksTest(unittest.TestCase):
             self.assertEqual(result['decision'], 'deny')
             self.assertIn('secret-print-guard', result['reason'])
 
+    def test_subscription_oauth_file_is_never_read_or_changed(self):
+        target = str(Path.home() / '.gemini/oauth_creds.json')
+        cases = [event('view_file', AbsolutePath=target),
+                 event('grep_search', SearchPath=target, Query='.'),
+                 event('write_to_file', TargetFile=target, CodeContent='fixture'),
+                 event(CommandLine='cat ~/.gemini/oauth_creds.json'),
+                 event(CommandLine='cat "${HOME}/.gemini/oauth_creds.json"')]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                self.assertEqual(hooks.pre_tool(payload)['decision'], 'deny')
+
     def test_existing_gcp_guard_blocks_native_identity_change(self):
         result = hooks.pre_tool(event(CommandLine='gcloud auth login'))
         self.assertEqual(result['decision'], 'deny')

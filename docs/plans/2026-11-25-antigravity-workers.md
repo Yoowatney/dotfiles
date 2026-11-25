@@ -19,3 +19,9 @@ Use subscription-authenticated Antigravity CLI for worker sessions while preserv
 
 ## Rollback
 Restore the previous local worker policy and settings snapshot, and remove only the AGY customization links introduced by this change. Existing Claude and Codex guards remain intact.
+
+## Initial rollout constraints
+- Open GCP CLI work and general fallback rechecks with `--kind codex`: AGY cannot write the gcloud credential cache within its terminal sandbox.
+- Pinned Codex arguments and ambient-runner calls keep the Codex route even under the AGY default policy.
+- Model tools cannot read or modify the subscription OAuth credential file. CLI authentication remains local.
+- Install native customization and authenticate on each host before adopting the AGY default. Missing quota or customization must never trigger a paid fallback.
