@@ -720,18 +720,18 @@ check "a 05:00 restart whose exit runs past 07:00 still starts claude" "$(exits)
 started
 # 05:00 with background tasks: only clear, and leave the restart owed to a later 05:00 with none (api#1546).
 echo '# plain 6' > "$SH_/.claude/output-styles/plain.md"
-rm_stamp; set_main; status idle; echo 05 > "$SANDBOX/hour"; touch "$SANDBOX/bg-dialog"
-mr
+rm_stamp; set_main; status idle; touch "$SANDBOX/bg-dialog"
+mr MAIN_REFRESH_HOUR=05
 check "05:00 with changed start settings and background tasks only clears" \
   "$(unsafe)|$(runs)|$(cleared)|$([ -f "$STAMP" ] && echo stamped)" "|0|1|stamped"
 check "that restart is still owed" "$(chg)" changed
 rm_stamp; set_main; status idle
-mr TASK_ENDS_AT_ESC=1
+mr MAIN_REFRESH_HOUR=05 TASK_ENDS_AT_ESC=1
 check "05:00: a task ending while the dialog is up: no /clear, no alert, relays released" \
   "$(unsafe)|$(cleared)|$(cat "$SANDBOX/errors")|$(held)|$([ -f "$STAMP" ] && echo stamped)" "|0|||"
 rm -f "$SANDBOX/bg-dialog"
 rm_stamp; set_main; status idle
-mr
+mr MAIN_REFRESH_HOUR=05
 check "so a later 05:00 with no task restarts" "$(cleared)|$(exits)|$(runs)" "0|1|1"
 started
 set_main; status idle
