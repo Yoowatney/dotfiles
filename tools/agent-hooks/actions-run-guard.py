@@ -13,6 +13,11 @@ import re
 import shlex
 
 REASON = 'ACTIONS_RUN_REASON'
+WATCH_DENY = (
+    'actions-run-guard: CI 감시는 60초 간격과 같은 run의 중복 방지를 적용하는 공용 진입점을 쓰세요: '
+    'uv run --no-project python3 ~/.dotfiles/tools/agent-hooks/ci-watch.py --repo OWNER/REPO RUN_ID. '
+    '이미 감시 중이면 종료 코드 75를 반환합니다. CI 성공으로 해석하지 마세요.'
+)
 DENY = (
     'actions-run-guard: GitHub Actions 사용량이 이미 초과되어 확인만을 위한 새 실행을 막습니다. '
     '기존 실행의 로그를 확인하거나 로컬에서 시험하세요. 꼭 필요한 실행은 해당 명령 앞에 '
@@ -35,10 +40,7 @@ def reason_ok(value: str) -> bool:
     return len(value.strip()) >= 8 and not any(c in value for c in '$`')
 
 
-def starts_actions(args: list[str]) -> bool:
-    """Recognize gh CLI operations and equivalent REST writes, never perform them."""
-    if '--help' in args or '-h' in args:
-        return False
+def command_args(args: list[str]) -> list[str]:
     # gh accepts persistent repository/host options between command words too.
     cleaned = []
     i = 0
@@ -51,7 +53,18 @@ def starts_actions(args: list[str]) -> bool:
             continue
         cleaned.append(args[i])
         i += 1
-    args = cleaned
+    return cleaned
+
+
+def watches_run(args: list[str]) -> bool:
+    return not any(a in args for a in ('--help', '-h')) and command_args(args)[:2] == ['run', 'watch']
+
+
+def starts_actions(args: list[str]) -> bool:
+    """Recognize gh CLI operations and equivalent REST writes, never perform them."""
+    if '--help' in args or '-h' in args:
+        return False
+    args = command_args(args)
     if len(args) >= 2 and ((args[0] == 'workflow' and args[1] in ('run', 'enable'))
                            or args[:2] == ['run', 'rerun']):
         return True
@@ -81,7 +94,7 @@ def starts_actions(args: list[str]) -> bool:
     return endpoint and (method or ('POST' if data else 'GET')) in ('POST', 'PUT', 'PATCH')
 
 
-def command_denied(words: list[str], depth: int) -> bool:
+def command_denied(words: list[str], depth: int, watch_only: bool = False) -> bool:
     """Judge a simple command; reason assignments apply only to that command."""
     reason = ''
     i = 0
@@ -108,11 +121,11 @@ def command_denied(words: list[str], depth: int) -> bool:
     name = os.path.basename(words[i])
     args = words[i + 1:]
     if name == 'gh':
-        return starts_actions(args) and not reason_ok(reason)
+        return watches_run(args) or (not watch_only and starts_actions(args) and not reason_ok(reason))
     if name in ('bash', 'sh', 'zsh'):
         for n, arg in enumerate(args[:-1]):
             if arg.startswith('-') and not arg.startswith('--') and 'c' in arg[1:]:
-                return denied(args[n + 1], depth + 1)
+                return denied(args[n + 1], depth + 1, watch_only)
     return False
 
 
@@ -143,7 +156,7 @@ def substitutions(command: str):
         i += 1
 
 
-def denied(command: str, depth: int = 0) -> bool:
+def denied(command: str, depth: int = 0, watch_only: bool = False) -> bool:
     if depth > 8:
         return True
     # A heredoc sent to cat is data; a heredoc sent to a shell is executable.
@@ -160,7 +173,7 @@ def denied(command: str, depth: int = 0) -> bool:
         return after + '\n'
 
     command = heredoc.sub(body, command)
-    if any(denied(inner, depth + 1) for inner in substitutions(command)):
+    if any(denied(inner, depth + 1, watch_only) for inner in substitutions(command)):
         return True
     lexer = shlex.shlex(command.replace('\\\n', ''), posix=True, punctuation_chars=';|&()\n')
     lexer.whitespace = ' \t\r'
@@ -169,12 +182,12 @@ def denied(command: str, depth: int = 0) -> bool:
     try:
         for word in lexer:
             if word and set(word) <= BOUNDARY:
-                if command_denied(words, depth):
+                if command_denied(words, depth, watch_only):
                     return True
                 words = []
             else:
                 words.append(word)
-        return command_denied(words, depth)
+        return command_denied(words, depth, watch_only)
     except ValueError:
         return True  # A malformed Actions command must be split or corrected.
 
@@ -184,6 +197,8 @@ def check(payload: dict, env: dict) -> str | None:
         return None
     command = str((payload.get('tool_input') or {}).get('command') or '')
     # Keep unrelated commands cheap and do not parse their shell syntax.
-    if not re.search(r'\bgh\b', command) or not re.search(r'workflow|rerun|dispatches|/enable', command):
+    if not re.search(r'\bgh\b', command) or not re.search(r'workflow|rerun|dispatches|/enable|watch', command):
         return None
+    if 'watch' in command and denied(command, watch_only=True):
+        return WATCH_DENY
     return DENY if denied(command) else None
