@@ -387,7 +387,7 @@ if [ -z "$check" ]; then
   estimate_scope='to finish the assigned work and report it. Do not add buffer.'
   recheck_re='\[rc-[0-9a-f]{16}\]'
   if [ -n "$delegates" ] && [ "$check_level" != none ] && [[ ! "$name" =~ $recheck_re ]]; then
-    # 2026-11-25 pane-reports [ac-*] delta: mean 5.05m (27 pairs), afternoon median ~5m, p75 7.4m / heavy checks ~7-9m.
+    # 2026-11-25 pane-reports [ac-*] delta (27 pairs): overall mean 5.05m / median 3.53m, afternoon 14-pair median 5.58m, p75 7.43m / heavy checks ~7-9m.
     estimate_scope='until both your assigned work and the post-report automatic check session finish (add 5 minutes for the automatic check, or 8 minutes if checking runs test suites, builds, or multi-repo/DB inspections; do not add extra buffer beyond that).'
   fi
   prompt+=$'\n\nAt the start of each assignment, your first response line must be `끝날 예상: HH:MM KST`, using your own earliest realistic time '"$estimate_scope"' Times in the assignment are upper bounds, never reasons to wait. Start immediately and report immediately when your own work finishes; revise the estimate when a delay becomes apparent. The startup estimate is not a completion report; keep the final report first-line contract.'
