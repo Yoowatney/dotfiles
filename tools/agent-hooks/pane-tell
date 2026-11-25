@@ -870,6 +870,9 @@ for d in directories:
             if route not in routes: routes.append(route)
         for terminal, socket in routes:
             env = dict(os.environ, HERDR_SOCKET_PATH=socket)
+            # "" records the default server, but herdr refuses an empty socket path: the worker started with one
+            # retried pane list for hours, with every later message for that pane behind it (2026-11-26).
+            if not socket: del env["HERDR_SOCKET_PATH"]
             child = subprocess.Popen(["/bin/bash", script, "--recover-one", str(d), terminal],
                                      env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL, start_new_session=True)
