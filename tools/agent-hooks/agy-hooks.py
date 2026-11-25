@@ -446,6 +446,17 @@ def gcloud_environment():
             'CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=']
 
 
+def worker_gcloud_environment():
+    """Hosts without the agent GCP setup (집맥) still run tools; gcloud gets an empty config and no account."""
+    try:
+        return gcloud_environment()
+    except ValueError:
+        empty = HOME / '.local/state/antigravity-worker/no-gcloud'
+        empty.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return ['CLOUDSDK_CONFIG=' + str(empty), 'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=',
+                'CLOUDSDK_AUTH_ACCESS_TOKEN_FILE=', 'CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=']
+
+
 def pre_tool(event):
     try:
         payload = translate(event)
@@ -475,7 +486,7 @@ def pre_tool(event):
                 ['/usr/bin/env', *[part for key in (*AUTH_OVERRIDES,
                      'CLOUDSDK_CORE_ACCOUNT', 'CLOUDSDK_ACTIVE_CONFIG_NAME',
                      'CLOUDSDK_AUTH_ACCESS_TOKEN', 'CLOUDSDK_AUTH_ACCESS_TOKEN_FILE') for part in ('-u', key)],
-                 *gcloud_environment(),
+                 *worker_gcloud_environment(),
                  '/bin/zsh', '-f', '-c', payload['tool_input']['command']])}
         return result
     except Exception:
