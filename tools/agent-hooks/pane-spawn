@@ -329,7 +329,7 @@ case "$kind" in
       normal) agy_model=gemini-4-neon-high ;;
       complex) agy_model=gemini-4-carbon-high ;;
     esac
-    set -- --sandbox --model "$agy_model" --settings '{"useG1Credits":false,"modelProvider":"","allowNonWorkspaceAccess":false,"enableTerminalSandbox":true,"agentMode":"auto","toolPermission":"proceed-in-sandbox"}'
+    set -- --model "$agy_model" --settings '{"useG1Credits":false,"modelProvider":"","allowNonWorkspaceAccess":false,"enableTerminalSandbox":false,"agentMode":"auto","toolPermission":"always-proceed"}'
     # Herdr's server can retain credentials absent from this caller. Override
     # them in the new pane as well as checking the caller during admission.
     env_args=(--env HERDR_AGY_STARTUP_ROLE=worker --env "HERDR_AGY_TASK_TYPE=$task_type"

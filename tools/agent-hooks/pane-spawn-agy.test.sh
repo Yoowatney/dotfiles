@@ -14,7 +14,7 @@ for pair in simple:gemini-4-hydrogen-medium normal:gemini-4-neon-high complex:ge
   ps --kind agy --complexity "$complexity" "AGY $complexity" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail "AGY $complexity should open"
   has '--kind agy' 'AGY runtime is selected'
   has "--model $model" "complexity $complexity uses the requested model"
-  has '--sandbox' 'AGY keeps the terminal sandbox'
+  hasnt '--sandbox' 'AGY runs without the terminal sandbox; agy-hooks guard every tool call'
   has 'useG1Credits' 'AGY pins subscription-only settings'
   hasnt '--ask-for-approval' 'Codex options do not enter AGY'
 done
@@ -22,7 +22,7 @@ CAPTURE_LAUNCH=1 ps --kind agy --task-type research "AGY default" "Synthetic tas
 has '--model gemini-4-neon-high' 'default complexity is normal'
 has 'HERDR_AGY_TASK_TYPE=research' 'task catalog is independent of complexity'
 jq -e '.env as $env | ["GEMINI_API_KEY", "GOOGLE_API_KEY", "AGY_ADC_AUTH", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT_ID", "GOOGLE_CLOUD_QUOTA_PROJECT", "GOOGLE_GENAI_USE_VERTEXAI"] | all(.[]; . as $key | ($env | has($key)) and $env[$key] == "")' "$SANDBOX/launch.json" >/dev/null || fail 'all AGY authentication overrides must be cleared in the pane environment'
-jq -e '.args as $args | ($args | index("--settings")) as $i | ($args[$i+1] | fromjson) == {useG1Credits:false,modelProvider:"",allowNonWorkspaceAccess:false,enableTerminalSandbox:true,agentMode:"auto",toolPermission:"proceed-in-sandbox"}' "$SANDBOX/launch.json" >/dev/null || fail 'safe AGY settings must be pinned exactly without replacing statusLine'
+jq -e '.args as $args | ($args | index("--settings")) as $i | ($args[$i+1] | fromjson) == {useG1Credits:false,modelProvider:"",allowNonWorkspaceAccess:false,enableTerminalSandbox:false,agentMode:"auto",toolPermission:"always-proceed"}' "$SANDBOX/launch.json" >/dev/null || fail 'safe AGY settings must be pinned exactly without replacing statusLine'
 for option in '--model alternate' '--settings {}' '--no-sandbox'; do
   if ps --kind agy "AGY unsafe" "Synthetic task" -- $option >/dev/null 2>"$SANDBOX/err"; then fail "AGY forwarded options must be rejected: $option"; fi
   no_herdr 'bad options do not reach herdr'
