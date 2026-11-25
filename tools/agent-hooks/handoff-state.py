@@ -243,14 +243,24 @@ def codex_session(payload):
     except (OSError, ValueError):
         previous = {}
     atomic_write(record, json.dumps(dict(session_id=sid, transcript_path=transcript)))
+    note = ""
+    try:
+        spec = importlib.util.spec_from_file_location("session_usage", Path(__file__).with_name("session-usage.py"))
+        usage = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(usage)
+        note = usage.session_start(dict(session_id=sid, transcript_path=transcript), dict(os.environ), previous)
+    except Exception:
+        pass  # Observability must not interfere with loading a handoff.
+    def with_usage(value):
+        return usage.append_context(value, note) if note else value
     result = load()
     if result:
-        return result
+        return with_usage(result)
     if previous.get("session_id") == sid or not previous.get("transcript_path"):
-        return ""
+        return with_usage("")
     # Do not replay an exec transcript left by older hook versions.
     if not interactive_codex_transcript(previous["transcript_path"], previous.get("session_id")):
-        return ""
+        return with_usage("")
     path = Path(previous["transcript_path"])
     try:
         # Bounded tail, including malformed/interrupted last lines.
@@ -279,12 +289,12 @@ def codex_session(payload):
             elif message.get("role") == "assistant" and text:
                 answers.append(text)
         if not users and not answers:
-            return ""
+            return with_usage("")
         last = next((line for answer in reversed(answers) for line in reversed(answer.splitlines())
                      if line.startswith("남은 것:")), "")
-        return context(f"필수 항목 미확인. 이전 검증을 그대로 사용할 수 없음. The previous Codex session ended without saving a handoff. Its full transcript is {path}. {TYPED}\n요유의 마지막 메시지:\n{(users[-1] if users else '(없음)')[:600]}\n유요의 마지막 답:\n{(answers[-1] if answers else '(없음)')[:1500]}\n{last}")
+        return with_usage(context(f"필수 항목 미확인. 이전 검증을 그대로 사용할 수 없음. The previous Codex session ended without saving a handoff. Its full transcript is {path}. {TYPED}\n요유의 마지막 메시지:\n{(users[-1] if users else '(없음)')[:600]}\n유요의 마지막 답:\n{(answers[-1] if answers else '(없음)')[:1500]}\n{last}"))
     except OSError:
-        return ""
+        return with_usage("")
 
 
 def load():
