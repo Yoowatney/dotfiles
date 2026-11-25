@@ -443,6 +443,9 @@ handoff_contract() {
   case "$request" in *"감시 중인 Slack 스레드"*"재감시 명령"*) ;; *) fail "$mode keeps watched threads and restart commands" ;; esac
   case "$request" in *"답을 기다리는 요유 질문"*"회사 결정은 보드 링크"*"개인 결정은 파일 위치"*) ;; *) fail "$mode locates unanswered questions and company/personal decisions" ;; esac
   case "$request" in *"백그라운드로 도는 작업(main-refresh 자신은 빼고)"*"재시작 명령(명령 전문"*"pgrep -f"*) ;; *) fail "$mode keeps background restart commands and skips running copies" ;; esac
+  # A one-shot job started again from its command runs twice: a delete, a write (api#1546).
+  case "$request" in *"한 번만 돌아야 하는 작업"*"데이터 쓰기·삭제·이전"*"재시작 명령 대신 '다시 걸지 않음'"*"끝났는지 확인하는 방법"*) ;; *) fail "$mode asks for no restart command for a one-shot job" ;; esac
+  case "$request" in *"'다시 걸지 않음'이 아닌 것만 다시 겁니다"*) ;; *) fail "$mode tells the next session not to start a one-shot job again" ;; esac
   case "$request" in *"오늘 남은 일"*"아직 처리하지 않은 요청은 원문 포함"*) ;; *) fail "$mode keeps the remaining work and unprocessed original requests" ;; esac
   case "$request" in *"배운 요령은 인계에도 운영 메모에도 쓰지 마세요"*) ;; *) fail "$mode keeps lessons out of both the handoff and the operational memo" ;; esac
   case "$request" in *"Ongoing operational notes"*|*"없는 요령만"*|*"operational-notes.md"*) fail "$mode must not tell the main session to read or append to the operational memo" ;; esac
