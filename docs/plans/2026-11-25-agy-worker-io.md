@@ -4,7 +4,7 @@
 
 **Goal:** AGY 작업 칸에서 개발용 네트워크와 후속 지시를 받고, 지정한 모델 정책을 따른다.
 **Architecture:** 세션맥의 새 AGY 부하 세션은 사용자 지시에 따라 terminal sandbox 없이 실행한다. 다른 호스트는 기존 sandbox를 유지한다. 입력 전달은 기존 잠금·큐를 유지하며 AGY의 실제 빈 입력창만 인식한다. 모델 선택은 pane-spawn 한곳에서 처리한다.
-**Tech Stack:** Bash, Python, AGY 1.5.16.
+**Tech Stack:** Bash, Python, AGY 1.5.16/1.5.17.
 **Spec:** 이 문서의 요구와 제약.
 
 ## Global Constraints
@@ -27,15 +27,15 @@
 ### Task 1: Model selection
 **Files:** tools/agent-hooks/pane-spawn, tools/agent-hooks/pane-spawn-agy.test.sh, tools/agent-hooks/pane-spawn-runner.test.sh.
 **Interfaces:** pane-spawn --complexity and --carbon produce the selected native model argument.
-- [ ] Add tests for the three complexity levels, explicit Carbon, invalid combinations and unchanged Claude checks; run to observe failures.
-- [ ] Update option parsing, help and mapping; run all pane-spawn tests.
+- [x] Add tests for the three complexity levels, explicit Carbon, invalid combinations and unchanged Claude checks; run to observe failures.
+- [x] Update option parsing, help and mapping; run all pane-spawn tests.
 - [ ] Commit the tested change.
 
 ### Task 2: AGY input delivery
 **Files:** tools/agent-hooks/pane-input-box.py, tools/agent-hooks/pane-tell, tools/agent-hooks/pane-tell-agy.test.sh, tools/agent-hooks/test_pane_input_box.py.
 **Interfaces:** pane-input-box.py agy exits 0 only for a live empty AGY input; pane-tell accepts herdr agent kind agy.
-- [ ] Capture the native input frame, add parser and routing tests for empty/draft/dialog/scroll/queue cases; observe failures.
-- [ ] Add the bounded parser and permit AGY receivers without changing other runtimes; run pane-tell tests.
+- [x] Capture the native input frame, add parser and routing tests for empty/draft/dialog/scroll/queue cases; observe failures.
+- [x] Add the bounded parser and permit AGY receivers without changing other runtimes; run pane-tell tests.
 - [ ] Commit and test an actual AGY follow-up message after review.
 
 ### Task 3: Session Mac sandbox policy and authentication guards
@@ -44,3 +44,9 @@
 - [ ] Reproduce GitHub and Slack 403 and config denial with no sensitive output; save only statuses.
 - [ ] Disable the sandbox only for the session Mac, retain hooks and explicit credential denial. Test git fetch, gh read and Slack attachment read in a real worker.
 - [ ] Verify auth-read, Slack publication, sandbox-bypass and GCP-switch denial; request independent Claude review, apply reviewed changes, run final worker probe.
+
+### Task 4: Native file-edit tool compatibility
+**Files:** tools/agent-hooks/agy-hooks.py, tools/agent-hooks/test_agy_hooks.py.
+- [x] Capture current write_file(Path, Content) and edit_file(Path, Target, Replacement) schemas.
+- [x] Reproduce unsupported-tool denial and translate both into the existing shared Write/Edit guards.
+- [ ] Test an actual repository fixture edit and gh pr view in a fresh worker, with cleanup.

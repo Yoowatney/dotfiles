@@ -19,6 +19,40 @@ def event(name='run_command', **args):
 
 
 class NativeHooksTest(unittest.TestCase):
+    def test_current_file_tools_use_shared_write_and_edit_guards(self):
+        cases = [
+            (event('write_file', Path='/tmp/agy-fixture.txt', Content='before', Overwrite=True),
+             'Write', {'file_path': '/tmp/agy-fixture.txt', 'content': 'before'}),
+            (event('write_file', Path='/tmp/agy-fixture.txt', Content='', Append=True),
+             'Write', {'file_path': '/tmp/agy-fixture.txt', 'content': ''}),
+            (event('edit_file', Path='/tmp/agy-fixture.txt', Target='before', Replacement='after'),
+             'Edit', {'file_path': '/tmp/agy-fixture.txt', 'old_string': 'before', 'new_string': 'after'}),
+        ]
+        for native, name, inputs in cases:
+            with self.subTest(name=name, inputs=inputs):
+                with patch.object(hooks, 'settings', return_value=([], [{'hooks': [
+                        {'type': 'command', 'command': 'shared-guard'}]}])), \
+                     patch.object(hooks, 'run_guard', return_value=None) as guard:
+                    self.assertEqual(hooks.pre_tool(native)['decision'], 'allow')
+                    payload = guard.call_args.args[1]
+                    self.assertEqual(payload['tool_name'], name)
+                    self.assertEqual(payload['tool_input'], inputs)
+
+    def test_current_file_tools_preserve_denials_and_reject_bad_payloads(self):
+        for native in [event('write_file', Path='/tmp/agy-fixture.txt', Content='test'),
+                       event('edit_file', Path='/tmp/agy-fixture.txt', Target='a', Replacement='b')]:
+            with self.subTest(native=native), patch.object(hooks, 'settings', return_value=(
+                    [f"{tool}({Path('/tmp/agy-fixture.txt').resolve()})" for tool in ('Write', 'Edit')], [])):
+                self.assertEqual(hooks.pre_tool(native)['decision'], 'deny')
+        protected = str(Path.home() / '.gemini/oauth_creds.json')
+        for native in [event('write_file', Path=protected, Content='test'),
+                       event('edit_file', Path=protected, Target='a', Replacement='b'),
+                       event('write_file', Path='/tmp/test', Content=None),
+                       event('edit_file', Path='/tmp/test', Target='a', Replacement=None),
+                       event('edit_file', Path='/tmp/test', Target=None, Replacement='a')]:
+            with self.subTest(native=native):
+                self.assertEqual(hooks.pre_tool(native)['decision'], 'deny')
+
     def test_gcloud_exposes_only_a_cached_agent_access_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

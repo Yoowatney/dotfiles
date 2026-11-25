@@ -60,6 +60,15 @@ def translate(event):
         key = {'list_dir': 'DirectoryPath', 'find_by_name': 'SearchDirectory', 'grep_search': 'SearchPath'}[name]
         tool, inp = 'Grep', {'path': nonempty(args.get(key)), 'pattern': args.get('Query', args.get('Pattern', '')),
                              'output_mode': 'content' if name == 'grep_search' else 'files_with_matches'}
+    elif name == 'write_file':
+        if not isinstance(args.get('Content'), str):
+            raise ValueError('invalid file content')
+        tool, inp = 'Write', {'file_path': nonempty(args.get('Path')), 'content': args['Content']}
+    elif name == 'edit_file':
+        if not isinstance(args.get('Target'), str) or not isinstance(args.get('Replacement'), str):
+            raise ValueError('invalid file replacement')
+        tool, inp = 'Edit', {'file_path': nonempty(args.get('Path')),
+                             'old_string': args['Target'], 'new_string': args['Replacement']}
     elif name == 'write_to_file':
         tool, inp = 'Write', {'file_path': nonempty(args.get('TargetFile')), 'content': args.get('CodeContent', '')}
     elif name == 'replace_file_content':
