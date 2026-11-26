@@ -111,6 +111,22 @@ quota_fixture 10 85 true
 is_main
 # Lead decision 2026-11-19: past Claude's measured reserve, kept for the main pane on the same account, no check opens;
 # nothing waits for one: the caller looks again or hands a read-only recheck out (요유 2026-11-20). Codex never stands in.
+board="$SANDBOX/home/work/munice/.agents/skills/agent-board"
+mkdir -p "$board/ambient"
+echo 'YOYOO_DM = "D0FIXTURE"' > "$board/ambient/collect.py"
+asked_file="$SANDBOX/home/.local/state/pane-spawn/check-usage-asked"
+refused() { # <label>: a check past the reserve; its refusal is left in $SANDBOX/err
+  if ps --check "$1" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "$1: a check past the Claude reserve must not open"; fi
+}
+# What auto-tab-close passes to the main pane is the first 1200 characters of the refusal (automatic-check-start.py).
+asks() {
+  python3 -c 'import sys; sys.stdout.write(open(sys.argv[1], encoding="utf-8").read().strip()[:1200])' "$SANDBOX/err" >"$SANDBOX/head"
+  grep -qF "python3 $board/main/main-channel.py post --channel D0FIXTURE --new <file>" "$SANDBOX/head" || fail "$1: the main pane gets the DM command"
+}
+asks_nothing() {
+  grep -q 'do not ask a second time' "$SANDBOX/err" || fail "$1: the refusal says not to ask again"
+  ! grep -q 'main-channel.py post' "$SANDBOX/err" || fail "$1: no second request command"
+}
 if PANE_SPAWN_CHECK_RECEIPT="$SANDBOX/over-receipt.json" ps --check "over" "instruction" >/dev/null 2>"$SANDBOX/err"; then
   fail "a check past the Claude reserve must not open"
 fi
@@ -122,10 +138,52 @@ grep -q 'Team threads, money and operations posts are the same' "$SANDBOX/err" |
 grep -q 'production write approval' "$SANDBOX/err" || fail "the other gates stay"
 # 요유 2026-11-20: a usage refusal asks for an account switch or a reset ticket and never tells the caller to wait for the reset.
 grep -q 'switch the account or spend a reset ticket' "$SANDBOX/err" || fail "the check refusal asks 요유 to switch the account or spend a reset ticket"
-grep -q "ask 요유, in that work's thread or in #0" "$SANDBOX/err" || fail "the check refusal tells the main pane where to ask"
-grep -q 'report to the lead that this request is needed' "$SANDBOX/err" || fail "the check refusal tells a pane under a lead to report it"
+grep -q "Never put the work off until the usage reset" "$SANDBOX/err" || fail "the check refusal forbids waiting for the reset"
+# 요유 2026-11-26: the first usage refusal of a window has the main pane ask once, in their backend-bot DM; later ones ask nothing.
+asks "first refusal"
+grep -q 'backend-bot DM' "$SANDBOX/err" || fail "the request goes to the backend-bot DM"
+! grep -q 'in #0' "$SANDBOX/err" || fail "the check refusal no longer sends the request to a thread or #0"
+refused "second"
+asks_nothing "second refusal in the window"
+quota_fixture 10 85 true # a new weekly reset time: a new window
+refused "new window"
+asks "new window"
+quota_fixture 10 40 true
+ps --check "room again" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "a check within the reserve opens"
+[ ! -e "$asked_file" ] || fail "a reading within the reserve ends the window"
+quota_fixture 10 85 true
+refused "blocked again"
+asks "blocked again after room"
+# The five-hour window is its own window: a weekly reset time that moves meanwhile does not ask again.
+snap="$SANDBOX/home/.local/state/agent-quota/claude.json"
+five_hour_over() { # <five-hour reset epoch> <weekly reset epoch>
+  jq --argjson f "$1" --argjson w "$2" '.five_hour = {used_percentage: 90, resets_at: $f} | .seven_day = {used_percentage: 40, resets_at: $w}' "$snap" >"$snap.new" && mv "$snap.new" "$snap"
+}
+now=$(date +%s)
+five_hour_over $((now + 1000)) $((now + 300000))
+refused "five-hour"
+asks "five-hour window"
+five_hour_over $((now + 1000)) $((now + 300100))
+refused "five-hour again"
+asks_nothing "same five-hour window"
+five_hour_over $((now + 2000)) $((now + 300100))
+refused "next five-hour"
+asks "next five-hour window"
+# --check from any other pane is refused later in the launcher; past the reserve it must not use up the main pane's one request.
+rm -f "$asked_file"
+not_main
+refused "another pane"
+[ ! -e "$asked_file" ] || fail "another pane's refusal does not use up the window's request"
+! grep -q 'main-channel.py post' "$SANDBOX/err" || fail "another pane is not told to ask 요유"
+is_main
+refused "main after another pane"
+asks "main after another pane"
+rm -f "$board/ambient/collect.py" "$asked_file"
+refused "no board"
+grep -qF -- '--channel <YOYOO_DM in' "$SANDBOX/err" || fail "an unreadable DM id names where to read it"
+quota_fixture 10 85 true
 ! grep -q 'unchecked' "$SANDBOX/err" || fail "the refusal no longer sends the report on unchecked"
-[ ! -e "$SANDBOX/log" ] || fail "a check past the reserve must not even query herdr"
+! grep -vF ' pane get ' "$SANDBOX/log" || fail "a check past the reserve only asks herdr which pane called it"
 rm -f "$SANDBOX/home/.local/state/agent-quota/claude.json"
 quota_fixture 99 90 true
 if ps --kind auto "none" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "claude-first refuses when neither runner has room"; fi
