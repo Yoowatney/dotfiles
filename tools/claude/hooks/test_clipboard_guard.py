@@ -58,6 +58,19 @@ class ClipboardGuard(unittest.TestCase):
                 with self.subTest(command=source + suffix):
                     self.assertIsNotNone(guard.bash_problem(source + suffix))
 
+    def test_a_comment_or_hash_does_not_hide_a_later_write(self):
+        # shlex drops from # to the end of the line, newline included, so the writer became an argument.
+        self.turn('claude', 'Write a reply draft for me.')
+        for command in ('true # c\npbcopy < x.txt', 'echo ${#a}; pbcopy < x.txt', 'echo a#b; pbcopy < x.txt',
+                        "true # it's done\nslackcopy draft.md", 'true # c \\\npbcopy < x.txt',
+                        "bash -c 'true # c\npbcopy < x.txt'", 'echo `date # d`; pbcopy < x.txt'):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.reason(command))
+        for command in ('true # pbcopy < x.txt', 'true # c; slackcopy draft.md', 'ls;# pbcopy',
+                        'echo "# not a comment" # | pbcopy'):
+            with self.subTest(command=command):
+                self.assertIsNone(self.reason(command))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

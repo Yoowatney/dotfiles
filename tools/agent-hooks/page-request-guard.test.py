@@ -100,6 +100,29 @@ class PageRequestTest(unittest.TestCase):
                     self.assertNotEqual(output.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny',
                                         result.stdout)
 
+    def test_a_comment_or_hash_does_not_hide_a_later_page_command(self):
+        # shlex drops from # to the end of the line, newline included, so the command became an argument.
+        for command in ('true # c\nexplain-page write result facts.md', 'echo ${#a}; explain-page write result facts.md',
+                        'echo a#b; explain-page publish result', 'true # c\ncat draft > ~/explain/result.html',
+                        "bash -c 'true # c\nexplain-page write result facts.md'"):
+            with self.subTest(command=command):
+                self.assertTrue(PAGE.writes_explainer(self.payload(command)))
+        for command in ('true # explain-page write result facts.md', 'true # c; explain-page publish result',
+                        'ls # > ~/explain/result.html'):
+            with self.subTest(command=command):
+                self.assertFalse(PAGE.writes_explainer(self.payload(command)))
+
+    def test_a_command_substitution_does_not_crash_the_judgement(self):
+        # A match object was passed on as the command; the TypeError became "allowed" in the caller.
+        for command in ('explain-page write result facts.md "$(date)"', 'echo `date`; explain-page publish result',
+                        'echo "$(explain-page write result facts.md)"',
+                        'echo `date # d`; explain-page write result facts.md'):
+            with self.subTest(command=command):
+                self.assertTrue(PAGE.writes_explainer(self.payload(command)))
+        for command in ('echo "$(cat notes.html)"', 'git log -1 --format="$(echo %H)" -- docs/explain.md'):
+            with self.subTest(command=command):
+                self.assertFalse(PAGE.writes_explainer(self.payload(command)))
+
     def test_reads_documentation_deletes_and_unrelated_files_pass(self):
         self.record('이건 어디에서 봐?')
         cases = [self.payload(c) for c in [
