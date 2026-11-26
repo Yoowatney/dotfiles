@@ -2,7 +2,7 @@
 """Local character/command estimates, plus a five-minute GitHub quota sample.
 
 Not token or HTTP accounting. Only counts, safe tool names, local source
-identifiers and short command labels (program plus subcommand, or the script's
+identifiers and short command labels (known program plus subcommand, or the script's
 own description) are persisted. Transcript bodies and command arguments never are.
 """
 import collections
@@ -25,6 +25,14 @@ INTERVAL = 300
 MAX_BYTES = 32 * 1024 * 1024
 SOURCE_BYTES = 2 * 1024 * 1024
 SUBCOMMAND_TOOLS = ('bq', 'docker', 'firebase', 'gcloud', 'gh', 'git', 'herdr', 'kubectl', 'npm', 'terraform', 'uv')
+# The only program names ever stored. The shell reading below is approximate and can put an
+# argument (maybe a secret) where a command starts; an unlisted word is dropped.
+PROGRAMS = frozenset(SUBCOMMAND_TOOLS + tuple('''
+awk bash brew cargo cat chmod cp curl cut date diff du env find go graphify grep head jest jq kill
+launchctl ln ls lsof make mkdir mv node npx open pane-label pane-spawn pane-tell perl pgrep pkill
+pnpm ps pytest python python3 rg rm rsync ruby scp security sed sh sleep sort sqlite3 ssh stat stripe
+swift tail tar tee timeout touch tr tsc uniq wc which xargs xcodebuild yarn zsh
+'''.split()))
 
 
 def load_module(name, filename):
@@ -60,6 +68,8 @@ def write_json(path, value):
 
 def command_words(command):
     """Words of each shell command, assignment/env prefixes removed; [] if unreadable."""
+    # Backslash-newline continues the same command (an even run of backslashes does not).
+    command = re.sub(r'(?<!\\)((?:\\\\)*)\\\r?\n', r'\1', command)
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()\n')
         lexer.whitespace = ' \t\r'
@@ -67,9 +77,16 @@ def command_words(command):
         tokens = list(lexer)
     except ValueError:
         return []
-    start, found = True, []
+    start, found, depth, previous = True, [], 0, ''
     for token in tokens:
-        if token and all(c in ';&|()\n' for c in token):
+        before, previous = previous, token
+        separator = token and all(c in ';&|()\n' for c in token)
+        if depth or (separator and token.startswith('(') and re.fullmatch(r'[A-Za-z_]\w*\+?=', before)):
+            # Inside NAME=( ... ) every line is a value, not a command.
+            if separator:
+                depth = max(0, depth + token.count('(') - token.count(')'))
+                start = not depth
+        elif separator:
             start = True
         elif start:
             if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', token) or token in ('env', 'command', 'exec'):
@@ -89,14 +106,14 @@ def gh_count(command):
 
 
 def command_names(commands):
-    """Up to three distinct program names; arguments are never part of a name."""
+    """Up to three distinct programs from PROGRAMS, with a subcommand for multi-command tools."""
     names = []
     for command in commands:
         for words in command_words(command.split('<<')[0]):
             while words[1:] and words[0] in ('do', 'else', 'if', 'then', 'until', 'while'):
                 words = words[1:]
             name = Path(words[0]).name
-            if name in ('cd', 'done', 'echo', 'export', 'fi', 'for', 'set') or not re.fullmatch(r'[A-Za-z][\w.-]{0,39}', name):
+            if name not in PROGRAMS:
                 continue
             rest = words[3:] if words[1:2] == ['-C'] else words[1:]
             if name in SUBCOMMAND_TOOLS and rest and re.fullmatch(r'[a-z][a-z-]{0,20}', rest[0]):

@@ -208,6 +208,37 @@ class UsageTest(unittest.TestCase):
     def test_unterminated_script_string_does_not_backtrack_forever(self):
         self.assertEqual(usage.command_label('exec', 'tools.exec_command({cmd: "' + '\\' * 80, {}), 'exec')
 
+    def test_continued_line_argument_is_not_stored_for_either_runtime(self):
+        command = 'curl -s -X POST \\\n  https://hooks.example.test/services/T000/B000/FakeWebhookSecret123'
+        claude = [
+            dict(message=dict(role='assistant', content=[
+                dict(type='tool_use', id='a', name='Bash', input=dict(command=command))])),
+            dict(message=dict(role='user', content=[dict(type='tool_result', tool_use_id='a', content='ok')])),
+        ]
+        codex = [
+            dict(type='response_item', payload=dict(type='function_call', name='exec_command', call_id='a',
+                                                    arguments=json.dumps(dict(cmd=command)))),
+            dict(type='response_item', payload=dict(type='function_call_output', call_id='a', output='ok')),
+        ]
+        for rows, label in ((claude, 'Bash: curl'), (codex, 'exec_command: curl')):
+            with self.subTest(label=label):
+                self.assertEqual(usage.summarize(self.transcript(rows))['top_commands'], [[label, 2]])
+
+    def test_array_lines_are_not_commands(self):
+        self.assertEqual(usage.command_names(['ITEMS=(\n  FakeArrayArg\n)']), '')
+        # even an array element that spells a real program ran nothing
+        self.assertEqual(usage.command_names(['ITEMS+=(\n  curl\n  rm\n)\ngit status']), 'git status')
+        self.assertEqual(usage.command_names(['X=$(date); ls']), 'date, ls')
+
+    def test_only_known_program_names_are_ever_stored(self):
+        for command, names in (('grep ";" FakeArg', 'grep'),
+                               ('X=`security FakeArg -w`', ''),
+                               ('[[ -n $x && FakeArg == $y ]]', ''),
+                               ('case $x in\n FakeArg) ls ;;\nesac', 'ls'),
+                               ('./FakeScriptName.sh && git log', 'git log')):
+            with self.subTest(command=command):
+                self.assertEqual(usage.command_names([command]), names)
+
     def test_shell_keywords_are_not_reported_as_commands(self):
         self.assertEqual(usage.command_names(['for f in a b; do cat "$f"; done']), 'cat')
         self.assertEqual(usage.command_names(['if rg -q x; then git status; fi']), 'rg, git status')
