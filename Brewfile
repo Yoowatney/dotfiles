@@ -113,7 +113,6 @@ cask "macs-fan-control"
 cask "aldente"  # 충전 한도 80% (chargeVal in macos/aldente/aldente.xml); 도우미 설치는 첫 실행 때 관리자 승인 1회
 cask "orbstack"
 cask "paseo"
-cask "visual-studio-code"
 cask "vrew"
 
 # ===========================================
