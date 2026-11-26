@@ -76,11 +76,15 @@ def local_rules(cwd, home):
     if not main:
         return []
     seen = {(p / 'CLAUDE.local.md').resolve() for p in [cwd, *cwd.parents]}
+    root = next(p for p in [cwd, *cwd.parents] if (p / '.git').is_file())
     found = []
     for folder in reversed(under(main, home)):
         path = folder / 'CLAUDE.local.md'
-        if path.is_file() and path.resolve() not in seen:
-            seen.add(path.resolve())
+        real = path.resolve()
+        # A repo that tracks the file (or the one a link points to) gives the worktree its own copy.
+        own = main in real.parents and (root / real.relative_to(main)).is_file()
+        if path.is_file() and real not in seen and not own:
+            seen.add(real)
             found.append(path)
     return found
 

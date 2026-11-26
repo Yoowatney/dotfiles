@@ -45,6 +45,17 @@ class ProjectScopeTest(unittest.TestCase):
             self.assertEqual(scope.inherited(cwd, self.home), {'team@x': True, 'near@x': True}, cwd)
             self.assertEqual(scope.local_rules(cwd, self.home), [self.team / 'CLAUDE.local.md'], cwd)
 
+    def test_a_worktree_with_its_own_copy_does_not_read_the_rules_twice(self):
+        # The project folder links its CLAUDE.local.md into the repo that tracks it; the worktree has that file itself.
+        (self.team / 'CLAUDE.local.md').unlink()
+        (self.repo / 'CLAUDE.local.md').write_text('Team rules\n')
+        (self.team / 'CLAUDE.local.md').symlink_to('repo/CLAUDE.local.md')
+        wt = self.worktree(self.home / 'work/team-wt/job')
+        (wt / 'CLAUDE.local.md').write_text('Team rules\n')
+        (wt / 'src').mkdir()
+        for cwd in (wt, wt / 'src'):
+            self.assertEqual(scope.local_rules(cwd, self.home), [], cwd)
+
     def test_a_worktree_outside_home_still_finds_its_project(self):
         wt = self.worktree(Path(self.tmp.name).resolve() / 'elsewhere/job')
         self.assertEqual(scope.inherited(wt, self.home), {'team@x': True, 'near@x': True})
