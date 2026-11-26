@@ -5,6 +5,8 @@ Rides on the already registered gcp-account-guard, like pane-fit/job-host/fix-ro
 so open sessions do not need a new hook registration or Codex trust approval.
 This prevents accidental starts, not arbitrary code hidden in scripts or aliases.
 Release creation and git push deliberately remain outside this guard.
+It also protects the shared REST quota: no sub-minute REST polling loop, and a per-session hourly budget.
+A loop written in the calling script (one command per iteration) is only caught by the budget.
 It also refuses to rerun a pull_request run that is not of the PR's current head, reason or not:
 under cancel-in-progress the old run cancels the newer commit's checks.
 """
@@ -12,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import re
 import shlex
 import subprocess
@@ -30,6 +33,26 @@ DENY = (
     "ACTIONS_RUN_REASON='필요한 실행의 구체적인 이유'를 붙이세요(8자 이상인 직접 적은 이유). "
     '예: ACTIONS_RUN_REASON=\'required release recovery\' gh workflow run build.yml. '
     '이 예외는 실행 필요성을 기록하며 배포 승인이나 다른 안전 훅을 대신하지 않습니다.'
+)
+# The REST core quota (5,000/h) is shared by every session of one account. Fetching hundreds of job logs
+# one call at a time, or polling every few seconds, can spend it and stop everyone else.
+REST_REASON = 'GH_REST_REASON'
+REST_BUDGET = 300  # per session per hour; ordinary work stays well below it
+REST_POLL = 60  # seconds, the same floor as CI watching
+POLLING = {'call', 'short'}  # a loop holding exactly these (no long sleep) polls too fast
+ALTERNATIVES = (
+    'PR 검사는 gh pr checks --watch --interval 60, Actions run은 '
+    'uv run --no-project python3 ~/.dotfiles/tools/agent-hooks/ci-watch.py --repo OWNER/REPO RUN_ID, '
+    '여러 PR·issue 조회는 gh pr view --json이나 gh api graphql 한 번으로 묶으세요(GraphQL도 시간당 한도는 따로 있습니다).'
+)
+LOOP_DENY = (
+    f'actions-run-guard: gh REST 호출을 {REST_POLL}초보다 짧은 간격으로 반복하면 모든 세션이 함께 쓰는 '
+    '시간당 5,000회 한도가 바닥납니다. ' + ALTERNATIVES + f' 꼭 REST로 반복해야 하면 sleep {REST_POLL} 이상을 쓰세요.'
+)
+BUDGET_DENY = (
+    f'actions-run-guard: 이 세션이 최근 1시간에 gh REST를 {REST_BUDGET}회 넘게 부르려 합니다. 한도(시간당 5,000회)는 '
+    '모든 세션이 함께 씁니다. 이미 받은 결과(로그, job 목록)는 파일로 남겨 다시 쓰고, 표본만 받거나 GraphQL로 묶으세요. '
+    + ALTERNATIVES + f" 꼭 필요하면 명령 앞에 {REST_REASON}='구체적인 이유'(8자 이상)를 붙이세요."
 )
 STALE_DENY = (
     'actions-run-guard: run {run}은 PR #{number}의 옛 커밋({old})을 검사한 것입니다. 지금 head는 {new}입니다. '
@@ -55,6 +78,8 @@ ENDPOINT = re.compile(
     r'actions/(?:runs/[^/]+/)?jobs/[^/]+/rerun|dispatches)/?$'
 )
 BOUNDARY = set(';|&()\n')
+# A comment outside quotes; shlex would also swallow its newline and glue the next `done` to this command.
+COMMENT = re.compile(r"""('[^']*'|"(?:\\.|[^"\\])*"|\\.)|(?<![^\s;&|()])#[^\n]*""")
 
 
 def reason_ok(value: str) -> bool:
@@ -204,9 +229,41 @@ def stale_rerun(cwd: str, env: dict) -> str | None:
     return None
 
 
-def command_denied(words: list[str], depth: int, watch_only: bool = False) -> bool:
-    """Judge a simple command; reason assignments apply only to that command."""
-    reason = ''
+def uses_rest(args: list[str]) -> bool:
+    """gh subcommands that spend the REST core quota. gh pr/issue use GraphQL; rate_limit is free."""
+    if '--help' in args or '-h' in args:
+        return False
+    args = command_args(args)
+    if args[:1] == ['run']:
+        return args[1:2] != [] and args[1] in ('list', 'view', 'download', 'rerun', 'cancel')
+    if args[:1] == ['workflow']:
+        return args[1:2] != [] and args[1] in ('list', 'view', 'run', 'enable')
+    if args[:1] != ['api']:
+        return False
+    i = 1
+    while i < len(args):
+        if args[i] in ('-X', '--method', '-f', '-F', '--field', '--raw-field', '--input', '-H', '--header',
+                       '--cache', '-q', '--jq', '-t', '--template', '-p', '--preview'):
+            i += 2
+        elif args[i].startswith('-'):
+            i += 1
+        else:
+            return args[i].strip('/') not in ('graphql', 'rate_limit')
+    return False
+
+
+def short_sleep(value: str) -> bool:
+    match = re.fullmatch(r'(\d+(?:\.\d+)?)([smhd]?)', value)
+    # An interval the hook cannot read (a variable) counts as short.
+    return not match or float(match[1]) * {'m': 60, 'h': 3600, 'd': 86400}.get(match[2], 1) < REST_POLL
+
+
+def command_denied(words: list[str], depth: int, watch_only: bool = False, seen: dict | None = None) -> bool:
+    """Judge a simple command; reason assignments apply only to that command.
+
+    With seen, only collect REST calls and polling loops and deny nothing.
+    seen['blocks'] holds the open loops (what each one contains) and open cases (None)."""
+    reason = rest_reason = ''
     i = 0
     while i < len(words):
         word = words[i]
@@ -215,6 +272,8 @@ def command_denied(words: list[str], depth: int, watch_only: bool = False) -> bo
             key, value = word.split('=', 1)
             if key == REASON:
                 reason = value
+            elif key == REST_REASON:
+                rest_reason = value
             i += 1
         elif name in ('timeout', 'gtimeout', 'nice', 'gnice', 'stdbuf', 'gstdbuf'):
             i += 1
@@ -234,14 +293,49 @@ def command_denied(words: list[str], depth: int, watch_only: bool = False) -> bo
                 # env -u/--unset must not turn its operand into the command.
                 flag = words[i]
                 i += 2 if flag in ('-u', '--unset', '-C', '--chdir') else 1
-        elif word in ('then', 'do', 'if', 'elif', 'while', 'until', '!', '{'):
+        elif word in ('then', 'do', 'if', 'elif', 'else', 'while', 'until', '!', '{'):
             i += 1
         else:
             break
+    if seen is not None:
+        if {'while', 'until'} & set(words[:i]):
+            seen['blocks'].append(set())  # before its condition, which runs every round
+        # A substitution is judged where it stands, so a loop owns only what it contains.
+        # A `for` list is read once, so it is judged before that loop opens.
+        for number in re.findall(r'__SUB(\d+)__', ' '.join(words)):
+            if int(number) < len(seen['subs']):
+                # Judged once, even when a `bash -c "..."` string carries the placeholder again.
+                inner, seen['subs'][int(number)] = seen['subs'][int(number)], ''
+                denied(inner, depth + 1, watch_only, seen)
     if i >= len(words):
         return False
     name = os.path.basename(words[i])
     args = words[i + 1:]
+    if seen is not None:
+        blocks = seen['blocks']
+        loops = [block for block in blocks if block is not None]
+        if name == 'for':
+            blocks.append(set())
+        elif name == 'case':
+            blocks.append(None)
+        elif name == 'esac' and blocks and blocks[-1] is None:
+            blocks.pop()
+        elif name == 'done' and blocks and blocks[-1] is not None:  # inside a case, `done)` is a pattern
+            seen['poll'] |= blocks.pop() == POLLING
+        elif name == 'sleep' and args:
+            for loop in loops:
+                loop.add('short' if short_sleep(args[0]) else 'long')
+        elif name == 'watch' and 'gh' in args:
+            head = args[:args.index('gh')]
+            interval = next((a[2:] or b for a, b in zip(head, head[1:] + ['']) if a.startswith('-n')), '2')
+            name, args = 'gh', args[args.index('gh') + 1:]
+            seen['poll'] |= uses_rest(args) and short_sleep(interval.lstrip('='))
+        if name == 'gh':
+            if uses_rest(args):
+                seen['calls'].append(reason_ok(rest_reason))
+                for loop in loops:
+                    loop.add('call')
+            return False
     if name == 'gh':
         refused = watches_run(args) or (not watch_only and starts_actions(args) and not reason_ok(reason))
         if not watch_only and not refused and starts_actions(args) and (target := rerun_target(args)):
@@ -250,12 +344,12 @@ def command_denied(words: list[str], depth: int, watch_only: bool = False) -> bo
     if name in ('bash', 'sh', 'zsh'):
         for n, arg in enumerate(args[:-1]):
             if arg.startswith('-') and not arg.startswith('--') and 'c' in arg[1:]:
-                return denied(args[n + 1], depth + 1, watch_only)
+                return denied(args[n + 1], depth + 1, watch_only, seen)
     return False
 
 
 def substitutions(command: str):
-    """Extract common shell substitutions without executing text quoted as data."""
+    """Match common shell substitutions without executing text quoted as data."""
     pattern = re.compile(r'\$\(([^()]*)\)|`([^`]*)`')
     quote = ''
     i = 0
@@ -275,13 +369,13 @@ def substitutions(command: str):
         elif quote != "'":
             match = pattern.match(command, i)
             if match:
-                yield match.group(1) or match.group(2) or ''
+                yield match
                 i = match.end()
                 continue
         i += 1
 
 
-def denied(command: str, depth: int = 0, watch_only: bool = False) -> bool:
+def denied(command: str, depth: int = 0, watch_only: bool = False, seen: dict | None = None) -> bool:
     if depth > 8:
         return True
     # A heredoc sent to cat is data; a heredoc sent to a shell is executable.
@@ -294,27 +388,71 @@ def denied(command: str, depth: int = 0, watch_only: bool = False) -> bool:
         if re.search(shell, before) or re.search(r'\|\s*(?:bash|sh|zsh)\s*$', after):
             return after + '\n' + match.group(4) + '\n'
         if not match.group(1):
-            return after + '\n' + '\n'.join(substitutions(match.group(4))) + '\n'
+            return after + '\n' + '\n'.join(m[1] or m[2] or '' for m in substitutions(match.group(4))) + '\n'
         return after + '\n'
 
     command = heredoc.sub(body, command)
-    if any(denied(inner, depth + 1, watch_only) for inner in substitutions(command)):
-        return True
+    if seen is not None:
+        command = COMMENT.sub(lambda m: m[1] or '', command)
+    found = list(substitutions(command))
+    if seen is None:
+        if any([denied(m[1] or m[2] or '', depth + 1, watch_only) for m in found]):
+            return True
+    else:  # leave a placeholder; command_denied judges the inner command when it reaches it
+        for number, m in reversed(list(enumerate(found, len(seen['subs'])))):
+            command = f'{command[:m.start()]}__SUB{number}__{command[m.end():]}'
+        seen['subs'] += [m[1] or m[2] or '' for m in found]
     lexer = shlex.shlex(command.replace('\\\n', ''), posix=True, punctuation_chars=';|&()\n')
+    if seen is not None:
+        lexer.commenters = ''
     lexer.whitespace = ' \t\r'
     lexer.wordchars += '{}'
     words = []
     try:
         for word in lexer:
             if word and set(word) <= BOUNDARY:
-                if command_denied(words, depth, watch_only):
+                if command_denied(words, depth, watch_only, seen):
                     return True
                 words = []
             else:
                 words.append(word)
-        return command_denied(words, depth, watch_only)
+        return command_denied(words, depth, watch_only, seen)
     except ValueError:
         return True  # A malformed Actions command must be split or corrected.
+
+
+def over_budget(session: str, calls: list[bool], env: dict) -> bool:
+    """Record this command's REST calls; True refuses it. Calls with a reason are recorded and never refused.
+
+    ponytail: one small file per session and no lock, so parallel calls may overshoot by a few; --paginate and
+    loops inside one command count as one call. Machine-wide accounting if one-session limits stop being enough."""
+    try:
+        directory = Path(env['HOME']) / '.local/state/gh-rest-budget'
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / re.sub(r'[^\w-]', '_', session)
+        now = int(time.time())
+        text = path.read_text() if path.exists() else ''
+        recent = [line for line in text.split() if line.isdigit() and int(line) > now - 3600]
+        if not all(calls) and len(recent) + len(calls) > REST_BUDGET:
+            return True
+        path.write_text(''.join(f'{line}\n' for line in recent + [str(now)] * len(calls)))
+    except (OSError, KeyError):
+        pass  # accounting trouble never blocks work
+    return False
+
+
+def rest_problem(command: str, session: str, env: dict) -> str | None:
+    seen = {'calls': [], 'subs': [], 'blocks': [], 'poll': False}
+    denied(command, seen=seen)
+    if not seen['calls']:
+        return None
+    # An unclosed loop runs to the end of the command. A slow poll may still pause briefly before
+    # exiting, so one long enough sleep in the same loop passes it.
+    if seen['poll'] or POLLING in seen['blocks']:
+        return LOOP_DENY
+    if session and over_budget(session, seen['calls'], env):
+        return BUDGET_DENY
+    return None
 
 
 def check(payload: dict, env: dict) -> str | None:
@@ -322,11 +460,16 @@ def check(payload: dict, env: dict) -> str | None:
         return None
     command = str((payload.get('tool_input') or {}).get('command') or '')
     # Keep unrelated commands cheap and do not parse their shell syntax.
-    if not re.search(r'\bgh\b', command) or not re.search(r'workflow|rerun|dispatches|/enable|watch', command):
+    if not re.search(r'\bgh\b', command):
         return None
-    if 'watch' in command and denied(command, watch_only=True):
-        return WATCH_DENY
     RERUNS.clear()
-    if denied(command):
-        return DENY
-    return stale_rerun(str(payload.get('cwd') or ''), env)
+    if re.search(r'workflow|rerun|dispatches|/enable|watch', command):
+        if 'watch' in command and denied(command, watch_only=True):
+            return WATCH_DENY
+        if denied(command):
+            return DENY
+        if stale := stale_rerun(str(payload.get('cwd') or ''), env):
+            return stale
+    if not re.search(r'\b(?:api|run|workflow)\b', command):
+        return None
+    return rest_problem(command, str(payload.get('session_id') or ''), env)

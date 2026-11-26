@@ -53,7 +53,7 @@
 # (load-guard.py: it waited 90 s and opened nothing; try again in a few minutes).
 original_args=("$@")
 H=${HERDR_BIN_PATH:-herdr}
-USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full] [--opus] [--artifact] [--skills] [--kind claude|codex|auto|agy] [--complexity simple|normal|complex | --carbon] [--why <reason>] [--cwd <dir>] [--] "<work name>" "<instruction>" [-- <agent arguments>]
+USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full] [--opus] [--artifact] [--skills] [--analysis] [--kind claude|codex|auto|agy] [--complexity simple|normal|complex | --carbon] [--why <reason>] [--cwd <dir>] [--] "<work name>" "<instruction>" [-- <agent arguments>]
   Work name and instruction must contain non-whitespace text. Agent configuration/model/effort/sandbox/approval
     options cannot be work names; put agent options after both task operands and a second --.
   --task-type code|research|media|office|full: worker startup catalog; unknown tasks retain full context.
@@ -95,6 +95,7 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full]
     With --check, figures gives the check pane the figures-only brief.
   --artifact: keep the Artifact tool in a Claude pane (a job that publishes a page); every Claude pane starts without it otherwise.
   --skills: keep the design (taste-skill), office-file (docx/pdf/pptx/xlsx) and Claude-API skills in a Claude pane (UI or office-file job).
+  --analysis: keep the honeycomb and Amplitude connections and the stripe plugin in a Claude pane (an investigation or analysis job).
   --opus: opt out of the main pane Claude work trial (Sonnet 5.5/high); use global model/effort defaults for heavy work.
     Checks, Codex, dispatch, ambient and other callers keep their existing model policy. Explicit agent arguments win.'
 MIN_ROWS=${PANE_SPAWN_MIN_ROWS:-16} # a 46-row window holds 4 panes of 11-12 rows, which still show about 5 lines of work (2026-11-04); a fifth would leave 5-6
@@ -105,7 +106,7 @@ USAGE_BLOCK_NOTE="Never put the work off until the usage reset (요유 2026-11-2
 # starts that way made an ordinary pane unreachable (요유 2026-11-05), so no tab it names starts that way.
 tab_name() { case "$1" in "자동 "* | "알아서 "*) echo "일 $1" ;; *) echo "$1" ;; esac; }
 
-same= new_tab= check= check_level= allow_duplicate= opus= artifact= skills= carbon= complexity_given= kind= why= opener= task_type= job_id= phase= complexity=normal cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
+same= new_tab= check= check_level= allow_duplicate= opus= artifact= skills= analysis= carbon= complexity_given= kind= why= opener= task_type= job_id= phase= complexity=normal cwd=$PWD state=${XDG_STATE_HOME:-$HOME/.local/state}
 while [ $# -gt 0 ]; do
   case "$1" in
     --same-tab) same=1; shift ;;
@@ -116,6 +117,7 @@ while [ $# -gt 0 ]; do
     --carbon) carbon=1; shift ;;
     --artifact) artifact=1; shift ;;
     --skills) skills=1; shift ;;
+    --analysis) analysis=1; shift ;;
     -h | --help) echo "$USAGE"; exit 0 ;;
     --kind | --cwd | --why | --opener | --task-type | --job-id | --phase | --check-level | --complexity)
       [ $# -ge 2 ] || die "$USAGE"
@@ -251,7 +253,7 @@ fi
 [ -z "$carbon" ] || [ "$kind" = agy ] || die "--carbon requires an AGY worker"
 if [ "$kind" = agy ]; then
     # Options cannot override the model, subscription-only settings or host policy.
-  [ $# -eq 0 ] && [ -z "$opus$artifact$skills" ] || die "AGY uses --complexity and fixed safety settings; forwarded agent options and Claude-only flags are refused"
+  [ $# -eq 0 ] && [ -z "$opus$artifact$skills$analysis" ] || die "AGY uses --complexity and fixed safety settings; forwarded agent options and Claude-only flags are refused"
   # Parent GCP tooling may use ADC; the AGY child explicitly clears it below.
   # Keep API-key and project-override checks intact for subscription admission.
   reserve=$(bounded "$quota_limit" env -u GOOGLE_APPLICATION_CREDENTIALS python3 -I "$helper_dir/agent-quota" agy-reserve "$cwd")
@@ -312,7 +314,9 @@ case "$kind" in
     # a job that publishes a page, such as a client hand-off, opens with --artifact. Codex panes have no such tool.
     [ -z "$artifact" ] || env_args+=(--env CLAUDE_STARTUP_ARTIFACT=1)
     # The worker profile also cuts skills a pane almost never calls (api#1066); --skills keeps them. A UI job needs it: the global rules say to call taste-skill first.
-    [ -z "$skills" ] || env_args+=(--env CLAUDE_STARTUP_SKILLS=1) ;;
+    [ -z "$skills" ] || env_args+=(--env CLAUDE_STARTUP_SKILLS=1)
+    # honeycomb, Amplitude and stripe are off in a pane unless its job is an investigation or analysis (요유 2026-11-26).
+    [ -z "$analysis" ] || env_args+=(--env CLAUDE_STARTUP_ANALYSIS=1) ;;
   # Codex reports no session id before its first prompt. It runs commands with mise's shims first on PATH, so a test that swaps HOME
   # hid mise's config and installs: python3 re-ran its own shim for ever, or failed on mise's trust check (2026-11-05). mise's
   # folders by absolute path keep what it reads the same under any HOME. Codex hands a command only the variables its config lists

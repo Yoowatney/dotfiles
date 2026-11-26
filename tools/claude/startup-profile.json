@@ -51,6 +51,16 @@
         ]
       },
       "enableArtifact": false,
+      "analysisOff": {
+        "deniedMcpServers": [
+          { "serverName": "honeycomb" },
+          { "serverName": "Amplitude" },
+          { "serverName": "plugin:stripe:stripe" }
+        ],
+        "enabledPlugins": {
+          "stripe@anthropic-plugin-directory": false
+        }
+      },
       "dietSkills": {
         "enabledPlugins": {
           "taste-skill@taste-skill": false

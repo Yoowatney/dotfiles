@@ -794,6 +794,8 @@ def permission_retry(context, context_path, reply, me, lead, to, path, entry, en
     spawn = env.get("AUTO_TAB_CLOSE_PANE_SPAWN") or os.path.join(HERE, "pane-spawn")
     args = [spawn, "--check", "--kind", "claude", "--why", "permission-blocked check portion",
             "--cwd", context["cwd"], "--", f"{context['job']} [ac-{key}] [permission-retry]", prompt]
+    if context.get("analysis"):
+        args.insert(1, "--analysis")
     if context.get("task_id"):
         args[1:1] = ["--job-id", context["task_id"]]
     address, error = check_start.start(args, receiver_env, context_path + ".permission-retry.start", retry,
@@ -939,6 +941,8 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
                            worker_terminal=me.get("terminal_id"),
                            cwd=me.get("cwd") or os.path.expanduser("~"), kind=kind, kind_reason=kind_reason,
                            report_received_at=time.time(), recording_policy=recording_restrictions(me, env), check_level=level)
+            if env.get("CLAUDE_STARTUP_ANALYSIS"):
+                context["analysis"] = True  # the check re-runs an analysis pane's queries with the same connections
             task_id = env.get("HERDR_TASK_ID", "")
             if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", task_id):
                 context["task_id"] = task_id  # Accounting only; routing/check policy is unchanged.
@@ -992,6 +996,8 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
             receiver_env.pop(inherited, None)
         spawn = env.get("AUTO_TAB_CLOSE_PANE_SPAWN") or os.path.join(HERE, "pane-spawn")
         args = [spawn, "--check", *(["--check-level", "figures"] if figures else []), "--kind", context["kind"], "--cwd", context["cwd"], "--", f"{context['job']} [ac-{key}]", prompt]
+        if context.get("analysis"):
+            args.insert(1, "--analysis")
         if context.get("task_id"):
             args[1:1] = ["--job-id", context["task_id"]]
         # Startup gets one bounded retry. Delivery retries retain the same attempt receipts.
@@ -2018,8 +2024,8 @@ esac''')
     # figures and full: a check pane opens. full (unset, 'full', or a value nobody defined) is the old brief; figures re-runs the commands behind the numbers.
     ok_spawn = script("pane-spawn-ok", f'printf "%s\\n" "$@" > {sandbox}/spawn-args\necho w1:p2')
 
-    def spawned_args(level):
-        env = {**on_workers, "AUTO_TAB_CLOSE_PANE_SPAWN": ok_spawn, **({"HERDR_CHECK_LEVEL": level} if level is not None else {})}
+    def spawned_args(level, **extra):
+        env = {**on_workers, "AUTO_TAB_CLOSE_PANE_SPAWN": ok_spawn, **({"HERDR_CHECK_LEVEL": level} if level is not None else {}), **extra}
         run(reported, env)
         args = open(f"{sandbox}/spawn-args").read()
         os.unlink(f"{sandbox}/spawn-args")
@@ -2034,6 +2040,9 @@ esac''')
     assert "--check\n" in args and "--check-level\nfigures\n" in args, "figures: the check pane is told its level too"
     assert "숫자를 낸 명령만 다시 돌려" in args and "보고 전체를 다시 읽지" in args and old_brief not in args, "figures: only the commands behind the numbers"
     assert "[ac-" in args and "TASK_CHECK" in args, "figures: the check still reports a verdict under its [ac-ID]"
+    assert "--analysis" not in args, "a check pane starts without the analysis connections"
+    # An analysis pane's numbers can only be re-run with the same connections (pane-spawn --analysis, 요유 2026-11-26).
+    assert "--analysis\n" in spawned_args(None, CLAUDE_STARTUP_ANALYSIS="1"), "the check of an analysis pane keeps them"
     # A recheck worker's report, or a report with no result to check, keeps going straight to main whatever the level.
     herdr_says_on("workers", {"name": "spawn-M-1"}, [me], wagents)
     assert run(json.dumps({"last_assistant_message": keep[0]}), {**on_workers, "HERDR_CHECK_LEVEL": "figures"})[2] == "tell default/w5:p3\n"

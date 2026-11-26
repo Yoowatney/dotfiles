@@ -65,6 +65,13 @@ has "--env CLAUDE_STARTUP_SKILLS=1" "--skills keeps the cut skills in a Claude p
 has "--env CLAUDE_STARTUP_ROLE=worker" "--skills keeps the rest of the worker profile"
 SESSIONLESS=1 ps --skills --kind codex "조사" "지시" >/dev/null
 hasnt "CLAUDE_STARTUP_SKILLS" "Codex panes are unaffected by --skills"
+# 요유 2026-11-26: a pane starts without honeycomb, Amplitude and stripe; --analysis keeps them for an investigation job.
+ps "구현 작업" "지시" >/dev/null
+hasnt "CLAUDE_STARTUP_ANALYSIS" "a Claude pane starts without the analysis connections unless it asks"
+ps --analysis "분석 작업" "지시" >/dev/null
+has "--env CLAUDE_STARTUP_ANALYSIS=1" "--analysis keeps the analysis connections in a Claude pane, through clear"
+SESSIONLESS=1 ps --analysis --kind codex "조사" "지시" >/dev/null
+hasnt "CLAUDE_STARTUP_ANALYSIS" "Codex panes are unaffected by --analysis"
 
 # Typed workers receive context metadata, without changing runner or permissions.
 SESSIONLESS=1 ps --kind codex --task-type code --job-id test-job "test" "Run tests" >/dev/null

@@ -537,7 +537,6 @@ post_install() {
         google-chrome|Google Chrome
         hammerspoon|Hammerspoon
         mongodb-compass|MongoDB Compass
-        mysqlworkbench|MySQLWorkbench
         ngrok|ngrok
         notion|Notion
         postman|Postman
