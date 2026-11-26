@@ -18,6 +18,44 @@ COMMON = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(COMMON)
 
 
+# No test reaches GitHub: every lookup the guard makes goes to this stand-in for gh.
+# Rerunning a pull_request run of an older commit cancels the newer commit's checks under cancel-in-progress.
+FAKE_GH = '''#!/usr/bin/env python3
+import json, os, sys, time
+args = sys.argv[1:]
+if 'FAKE_GH_LOG' in os.environ:
+    with open(os.environ['FAKE_GH_LOG'], 'a') as log:
+        log.write(json.dumps([os.environ.get('GH_REPO'), args]) + chr(10))
+runs = {'1': ('push', 'main', 'old'), '123': ('push', 'main', 'old'), '333': ('push', 'main', 'old'),
+        '111': ('pull_request', 'bump', 'old'), '222': ('pull_request', 'bump', 'new'),
+        '444': ('pull_request', 'gone', 'old')}
+if args[:2] == ['run', 'view']:
+    if args[2] == '555':
+        time.sleep(30)
+    if args[2] not in runs:
+        sys.exit(1)
+    print(json.dumps(dict(zip(('event', 'headBranch', 'headSha'), runs[args[2]]))))
+elif args[:2] == ['pr', 'list']:
+    branch = args[args.index('--head') + 1]
+    print(json.dumps([{'number': 7, 'headRefOid': 'new'}] if branch == 'bump' else []))
+elif args[0] == 'api' and args[1].endswith('/actions/jobs/9'):
+    print(json.dumps({'run_id': 111}))
+else:
+    sys.exit(1)
+'''
+
+
+def setUpModule():
+    directory = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(directory.cleanup)
+    gh = Path(directory.name) / 'gh'
+    gh.write_text(FAKE_GH)
+    gh.chmod(0o755)
+    path = unittest.mock.patch.dict(os.environ, {'PATH': directory.name + os.pathsep + os.environ['PATH']})
+    path.start()
+    unittest.addModuleCleanup(path.stop)
+
+
 class ActionsGuardTest(unittest.TestCase):
     def verdict(self, command, tool='Bash'):
         return COMMON.riders({'tool_name': tool, 'tool_input': {'command': command}})
@@ -244,6 +282,51 @@ class ActionsGuardTest(unittest.TestCase):
     def test_unwritable_budget_state_never_blocks(self):
         with tempfile.NamedTemporaryFile() as not_a_directory:
             self.assertIsNone(self.budget_verdict('gh api repos/o/a', not_a_directory.name))
+    REASONED = "ACTIONS_RUN_REASON='required recovery' "
+
+    def rerun_verdict(self, command):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'log'
+            with unittest.mock.patch.dict(os.environ, {'FAKE_GH_LOG': str(log)}):
+                reason = COMMON.riders({'tool_name': 'Bash', 'cwd': directory, 'tool_input': {'command': command}})
+            return reason, [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def test_rerun_of_an_older_commit_of_an_open_pr_is_denied(self):
+        for command in [
+            'gh run rerun 111 -R owner/repo --failed 2>&1',
+            'gh -Rowner/repo run rerun --failed 111',
+            'gh run rerun --job 9 --repo=owner/repo',
+            'gh run rerun -R owner/repo --job=9 2>&1 | tail -3',
+            'gh api -X POST repos/owner/repo/actions/runs/111/rerun-failed-jobs',
+            'gh api -X POST repos/owner/repo/actions/jobs/9/rerun',
+            'if true; then ' + self.REASONED + 'gh run rerun 111 -R owner/repo; fi',
+            'gh run rerun 222 -R owner/repo; ' + self.REASONED + 'gh run rerun 111 -R owner/repo',
+        ]:
+            with self.subTest(command=command):
+                reason, calls = self.rerun_verdict(self.REASONED + command if command.startswith('gh') else command)
+                self.assertIn('#7', reason or '', command)
+                self.assertIn('new', reason)
+                self.assertTrue(all(repo == 'owner/repo' for repo, _ in calls), calls)
+
+    def test_rerun_of_the_current_head_a_push_run_or_a_closed_branch_passes(self):
+        for command in ['gh run rerun 222 -R owner/repo --failed', 'gh run rerun 333 -R owner/repo',
+                        'gh run rerun 444 -R owner/repo', 'gh run rerun 222', 'gh run rerun --help']:
+            with self.subTest(command=command):
+                self.assertIsNone(self.rerun_verdict(self.REASONED + command)[0])
+
+    def test_rerun_that_cannot_be_verified_is_denied_within_the_hook_timeout(self):
+        for command in ['gh run rerun "$RUN" -R owner/repo', 'gh run rerun -R owner/repo',
+                        'gh run rerun 999 -R owner/repo', 'gh run rerun 555 -R owner/repo']:
+            with self.subTest(command=command):
+                started = time.monotonic()
+                reason = self.rerun_verdict(self.REASONED + command)[0] or ''
+                self.assertIn('-R OWNER/REPO', reason, command)
+                self.assertLess(time.monotonic() - started, 7)  # the registered hook is cut at 10 s
+
+    def test_rerun_without_a_reason_is_denied_before_any_lookup(self):
+        reason, calls = self.rerun_verdict('gh run rerun 111 -R owner/repo')
+        self.assertIn('ACTIONS_RUN_REASON', reason)
+        self.assertEqual(calls, [])
 
     def test_both_runtime_payloads_receive_native_deny_and_allow(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith(('HERDR_', 'MUNICE_'))}
