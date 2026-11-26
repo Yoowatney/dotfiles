@@ -35,7 +35,7 @@ cat >"$box/home/work/munice/CLAUDE.local.md" <<'MD'
 ## SKIP_LOCAL
 <!-- /pane:skip -->
 MD
-run() { env -u CLAUDECODE PATH="$box/bin:$PATH" CLAUDE_BIN="$box/bin/claude" HOME="$box/home" XDG_STATE_HOME="${STATE:-$box/state}" HERDR_PANE_ID=w1:p1 CLAUDE_STARTUP_ROLE="${ROLE:-}" CLAUDE_STARTUP_PROFILE="${PROFILE:-}" CLAUDE_STARTUP_ARTIFACT="${ARTIFACT:-}" CLAUDE_STARTUP_SKILLS="${SKILLS:-}" bash "$ROOT/scripts/claude-online" "$@"; }
+run() { env -u CLAUDECODE CLAUDE_STARTUP_ANALYSIS="${ANALYSIS:-}" PATH="$box/bin:$PATH" CLAUDE_BIN="$box/bin/claude" HOME="$box/home" XDG_STATE_HOME="${STATE:-$box/state}" HERDR_PANE_ID=w1:p1 CLAUDE_STARTUP_ROLE="${ROLE:-}" CLAUDE_STARTUP_PROFILE="${PROFILE:-}" CLAUDE_STARTUP_ARTIFACT="${ARTIFACT:-}" CLAUDE_STARTUP_SKILLS="${SKILLS:-}" bash "$ROOT/scripts/claude-online" "$@"; }
 fail() { echo "FAIL: $1"; exit 1; }
 arg_after() { awk -v f="$1" 'p { print; exit } $0 == f { p = 1 }'; }
 settings_json() { local path; path=$(arg_after --settings); [ -f "$path" ] || fail 'settings is not a path'; cat "$path"; }
@@ -70,7 +70,15 @@ jq -e '(has("dietSkills") | not) and .skillOverrides["hiring-panel"] == "off" an
 # Deny rules merge with every other source, so they only narrow; nothing here may allow, ask or change the mode.
 jq -e '(.permissions | keys) == ["deny"] and (.permissions.deny | index("AskUserQuestion"))' <<<"$settings" >/dev/null || fail 'worker permissions only deny: a pane never asks 요유'
 jq -e '.enabledPlugins["core-skills@hyperframes"] == false and (.deniedMcpServers | index({serverName: "rea"})) and .env.ENABLE_CLAUDEAI_MCP_SERVERS == "false" and .skillOverrides["hiring-panel"] == "off" and (has("paneRules") | not)' <<<"$settings" >/dev/null || fail 'worker drops unused plugins, MCP servers, claude.ai connectors and skills'
-jq -e '([.deniedMcpServers[].serverName] | sort) == ["obsidian", "rea"]' <<<"$settings" >/dev/null || fail 'worker blocks a connection needed by delegated work'
+# 요유 2026-11-26: a pane starts without honeycomb, Amplitude and stripe, and an investigation or analysis job opts in
+# (pane-spawn --analysis). Every other connection a delegated job needs stays.
+jq -e '([.deniedMcpServers[].serverName] | sort) == ["Amplitude", "honeycomb", "obsidian", "plugin:stripe:stripe", "rea"] and .enabledPlugins["stripe@anthropic-plugin-directory"] == false and (has("analysisOff") | not)' <<<"$settings" >/dev/null || fail 'worker starts without the analysis connections and blocks no other'
+analysis=$(cd "$box/home/work/munice/sub" && ROLE=worker ANALYSIS=1 run)
+jq -e '([.deniedMcpServers[].serverName] | sort) == ["obsidian", "rea"] and (.enabledPlugins | has("stripe@anthropic-plugin-directory") | not) and .enableArtifact == false and (has("analysisOff") | not) and (.claudeMdExcludes | length) == 2' <<<"$(settings_json <<<"$analysis")" >/dev/null || fail '--analysis brings back only the analysis connections'
+mkdir -p "$box/home/.config/agent-harness"; echo v0.1.0 >"$box/home/.config/agent-harness/version"
+old=$(cd "$box/home/work/munice/sub" && ROLE=worker run)
+jq -e '([.deniedMcpServers[].serverName] | sort) == ["obsidian", "rea"] and (has("analysisOff") | not)' <<<"$(settings_json <<<"$old")" >/dev/null || fail 'harness v0.1.0 keeps the analysis connections off'
+rm "$box/home/.config/agent-harness/version"
 jq -e --arg g "$box/home/.codex/AGENTS.md" --arg l "$box/home/work/munice/CLAUDE.local.md" '.claudeMdExcludes == [$g, $l]' <<<"$settings" >/dev/null || fail 'worker excludes the full rule files it loads filtered'
 rules=$(arg_after --append-system-prompt-file <<<"$out")
 [ -f "$rules" ] || fail 'worker gets no filtered rule file'

@@ -27,7 +27,7 @@ class StartupContextTest(unittest.TestCase):
             env = dict(os.environ, HOME=str(home), XDG_STATE_HOME=str(home / 'state'),
                        PATH=str(bin_) + os.pathsep + os.environ['PATH'], HERDR_PANE_ID='',
                        CLAUDE_STARTUP_ROLE=role, CLAUDE_STARTUP_PROFILE='',
-                       CLAUDE_STARTUP_ARTIFACT='', CLAUDE_STARTUP_SKILLS='',
+                       CLAUDE_STARTUP_ARTIFACT='', CLAUDE_STARTUP_SKILLS='', CLAUDE_STARTUP_ANALYSIS='',
                        CLAUDE_CHECK_TARGET='')
             args = subprocess.check_output(['bash', str(ROOT / 'scripts/claude-online')],
                                            cwd=home, env=env, text=True).splitlines()
@@ -65,10 +65,11 @@ class StartupContextTest(unittest.TestCase):
                 self.assertNotIn('hooks', settings)
                 self.assertNotEqual(settings['enabledPlugins'].get('ponytail@ponytail'), False)
 
-    def test_worker_does_not_block_delegated_amplitude_notion_or_figma_connections(self):
+    def test_worker_leaves_analysis_connections_off_and_blocks_no_other(self):
+        # 요유 2026-11-26: honeycomb, Amplitude and stripe are off unless a job opts in; notion and figma stay.
         settings = self.launch_settings('worker')
         self.assertEqual({s['serverName'] for s in settings['deniedMcpServers']},
-                         {'rea', 'obsidian'})
+                         {'rea', 'obsidian', 'honeycomb', 'Amplitude', 'plugin:stripe:stripe'})
         self.assertNotIn('hooks', settings)
         self.assertEqual(settings['permissions'],
                          {'deny': ['AskUserQuestion', 'ScheduleWakeup', 'SendFeedback']})

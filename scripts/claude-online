@@ -108,6 +108,13 @@ case "$role" in
       # dietSkills (worker only): skills a pane under a lead almost never calls (api#1066). pane-spawn --skills keeps them; the key never reaches claude.
       if [ -n "${CLAUDE_STARTUP_SKILLS:-}" ]; then settings=$(jq -c 'del(.dietSkills)' <<<"$settings") || exit 1
       else settings=$(jq -c '(. * (.dietSkills // {})) | del(.dietSkills)' <<<"$settings") || exit 1; fi
+      # analysisOff (worker only): connections only an investigation or analysis job needs (요유 2026-11-26). pane-spawn
+      # --analysis keeps them, and so does harness v0.1.0; the key never reaches claude.
+      if [ -n "${CLAUDE_STARTUP_ANALYSIS:-}" ] || [ "$(cat "$HOME/.config/agent-harness/version" 2>/dev/null)" = v0.1.0 ]; then
+        settings=$(jq -c 'del(.analysisOff)' <<<"$settings") || exit 1
+      else
+        settings=$(jq -c '(.analysisOff // {}) as $off | del(.analysisOff) | if $off == {} then . else .deniedMcpServers += $off.deniedMcpServers | .enabledPlugins += $off.enabledPlugins end' <<<"$settings") || exit 1
+      fi
       [ "$(jq -r 'has("paneRules")' <<<"$settings")" != true ] || worker_view=1
       pane_rules || exit 1
     fi ;;
