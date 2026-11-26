@@ -71,6 +71,13 @@ class ClipboardGuard(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNone(self.reason(command))
 
+    def test_a_line_continued_inside_double_quotes_keeps_its_hash_as_text(self):
+        self.turn('claude', 'Write a reply draft for me.')
+        for command in ('echo "a \\\n# b"; pbcopy < x.txt', 'gh pr create --body "first \\\n# Title" && pbcopy < x.txt'):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.reason(command))
+        self.assertIsNone(self.reason('git commit -m "clipboard \\\n#12" && git status'))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

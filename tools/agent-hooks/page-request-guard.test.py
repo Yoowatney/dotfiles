@@ -112,6 +112,12 @@ class PageRequestTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertFalse(PAGE.writes_explainer(self.payload(command)))
 
+    def test_a_line_continued_inside_double_quotes_keeps_its_hash_as_text(self):
+        for command in ('echo "a \\\n# b"; explain-page write result facts.md',
+                        'gh pr create --body "first \\\n# Title" && explain-page publish result'):
+            with self.subTest(command=command):
+                self.assertTrue(PAGE.writes_explainer(self.payload(command)))
+
     def test_a_command_substitution_does_not_crash_the_judgement(self):
         # A match object was passed on as the command; the TypeError became "allowed" in the caller.
         for command in ('explain-page write result facts.md "$(date)"', 'echo `date`; explain-page publish result',

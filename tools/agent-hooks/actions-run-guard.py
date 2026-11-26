@@ -79,7 +79,7 @@ ENDPOINT = re.compile(
 )
 BOUNDARY = set(';|&()\n')
 # A comment outside quotes; shlex would also swallow its newline and glue the next command to this one.
-COMMENT = re.compile(r"""('[^']*'|"(?:\\.|[^"\\])*"|\\.)|(?<![^\s;&|()])#[^\n]*""")
+COMMENT = re.compile(r"""('[^']*'|"(?:`(?:\\.|[^`\\])*`|\\.|[^"\\`])*"|\\.)|(?<![^\s;&|()])(?<![^ \t]\\\n)#[^\n]*""", re.S)  # a continued line is not a word break
 
 
 def reason_ok(value: str) -> bool:

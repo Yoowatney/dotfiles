@@ -123,6 +123,8 @@ class ActionsGuardTest(unittest.TestCase):
             'true # c\ngh workflow run build', 'echo ${#a} ; gh run rerun 1', 'echo a#b; gh workflow run build',
             "true # it's done\ngh workflow run build", 'x="$(true # c\ngh workflow run build)"',
             "bash -c 'true # c\ngh workflow run build'",
+            'echo a\\\n#b; gh workflow run build',  # joined to a#b, so no comment starts
+            'echo "`echo "a \\\n# b"; gh run rerun 1`"',  # quotes nested in backticks inside quotes
             'true # c \\\ngh workflow run build',  # a backslash does not continue a comment
         ]:
             with self.subTest(command=command):
@@ -131,6 +133,7 @@ class ActionsGuardTest(unittest.TestCase):
         for command in [
             'true # gh workflow run build', 'true # c; gh run rerun 1', 'true;# gh run watch 1',
             'ls # then $(gh workflow run build)\ntrue', 'echo "# not a comment" # gh workflow run build',
+            'git commit -m "x \\\n# gh workflow run build" && true',  # a continued line inside quotes is still quoted
         ]:
             with self.subTest(command=command):
                 self.assertIsNone(self.verdict(command), command)
