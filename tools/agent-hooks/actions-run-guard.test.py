@@ -135,6 +135,23 @@ class ActionsGuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNone(self.verdict(command), command)
 
+    def test_a_comment_inside_backticks_ends_at_the_closing_backtick(self):
+        # Removing the closing backtick with the comment left the command inside unjudged (regression of #173).
+        for command in ['x=`gh workflow run build # c`', 'echo `gh run rerun 1 # retry`',
+                        'echo "`gh run rerun 1 # c`"',
+                        'x=$(echo `gh run rerun 1 # c`)']:
+            with self.subTest(command=command):
+                self.assertIn('ACTIONS_RUN_REASON', self.verdict(command) or '', command)
+        self.assertIn('ci-watch.py', self.verdict('x=`gh run watch 1 # c`') or '')
+        self.assertIsNone(self.verdict("gh pr view 1 `# it's a note about rerun`"))
+
+    def test_an_unquoted_dollar_or_hash_in_an_assignment_hides_nothing(self):
+        # The value split at $ or #, so the rest was read as the command name.
+        for command in ['GH_TOKEN=$TOKEN gh workflow run build', 'ACTIONS_RUN_REASON=$REASON gh workflow run build',
+                        'FOO=a#b gh workflow run build']:
+            with self.subTest(command=command):
+                self.assertIn('ACTIONS_RUN_REASON', self.verdict(command) or '', command)
+
     def test_watch_requires_the_shared_locked_entry_even_with_a_reason(self):
         for command in ['gh run watch 123', 'gh -R owner/repo run watch 123 --interval 60',
                         "ACTIONS_RUN_REASON='required recovery' gh run watch 123",
