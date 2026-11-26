@@ -5,15 +5,15 @@
 	<key>autohide</key>
 	<true/>
 	<key>largesize</key>
-	<real>87</real>
+	<real>87.0</real>
 	<key>last-analytics-stamp</key>
 	<array>
 		<real>791292483.938326</real>
 	</array>
 	<key>last-messagetrace-stamp</key>
-	<real>654616786.07358098</real>
+	<real>654616786.073581</real>
 	<key>lastShowIndicatorTime</key>
-	<real>791824303.11845303</real>
+	<real>791824303.118453</real>
 	<key>loc</key>
 	<string>ko_KR:KR</string>
 	<key>magnification</key>
@@ -379,57 +379,6 @@
 				<false/>
 				<key>parent-mod-date</key>
 				<integer>12832900549941</integer>
-			</dict>
-			<key>tile-type</key>
-			<string>file-tile</string>
-		</dict>
-		<dict>
-			<key>GUID</key>
-			<integer>893399185</integer>
-			<key>tile-data</key>
-			<dict>
-				<key>book</key>
-				<data>
-				Ym9vazQCAAAAAAQQMAAAAAAAAAAAAAAAAAAAAAAAAAAA
-				AAAAAAAAAAAAAAAAAAAAVAEAAAQAAAADAwAAAAAAIAwA
-				AAABAQAAQXBwbGljYXRpb25zFAAAAAEBAABNeVNRTFdv
-				cmtiZW5jaCAyLmFwcAgAAAABBgAAEAAAACQAAAAIAAAA
-				BAMAALybJQAAAAAACAAAAAQDAABn7J8AAAAAAAgAAAAB
-				BgAAUAAAAGAAAAAIAAAAAAQAAEHHEJecgAAAGAAAAAEC
-				AAACAAAAAAAAAA8AAAAAAAAAAAAAAAAAAAAIAAAAAQkA
-				AGZpbGU6Ly8vDAAAAAEBAABNYWNpbnRvc2ggSEQIAAAA
-				BAMAAABQoRtzAAAACAAAAAAEAABBxuOahQAAACQAAAAB
-				AQAANDI0RDQ0QzEtOTAwQS00QzY2LTkwRkItQTUzMDE4
-				M0ExMjkxGAAAAAECAACBAAAAAQAAAO8TAAABAAAAAAAA
-				AAAAAAABAAAAAQEAAC8AAAAAAAAAAQUAAKgAAAD+////
-				AQAAAAAAAAANAAAABBAAAEAAAAAAAAAABRAAAHAAAAAA
-				AAAAEBAAAJAAAAAAAAAAQBAAAIAAAAAAAAAAAiAAAEAB
-				AAAAAAAABSAAALAAAAAAAAAAECAAAMAAAAAAAAAAESAA
-				APQAAAAAAAAAEiAAANQAAAAAAAAAEyAAAOQAAAAAAAAA
-				ICAAACABAAAAAAAAMCAAAEwBAAAAAAAAENAAAAQAAAAA
-				AAAA
-				</data>
-				<key>bundle-identifier</key>
-				<string>com.oracle.workbench.MySQLWorkbench</string>
-				<key>dock-extra</key>
-				<false/>
-				<key>file-data</key>
-				<dict>
-					<key>_CFURLString</key>
-					<string>file:///Applications/MySQLWorkbench.app/</string>
-					<key>_CFURLStringType</key>
-					<integer>15</integer>
-				</dict>
-				<key>file-label</key>
-				<string>MySQLWorkbench</string>
-				<key>file-mod-date</key>
-				<integer>3835078713</integer>
-				<key>file-type</key>
-				<integer>1</integer>
-				<key>is-beta</key>
-				<false/>
-				<key>parent-mod-date</key>
-				<integer>152861722697521</integer>
 			</dict>
 			<key>tile-type</key>
 			<string>file-tile</string>
@@ -1011,7 +960,7 @@
 	<key>showAppExposeGestureEnabled</key>
 	<true/>
 	<key>tilesize</key>
-	<real>52</real>
+	<real>52.0</real>
 	<key>trash-full</key>
 	<true/>
 	<key>version</key>
