@@ -133,6 +133,127 @@ class UsageTest(unittest.TestCase):
         self.assertNotIn('sensitive', records[0])
         self.assertNotIn('gh issue list', records[0])
 
+    def wrapped(self):
+        def use(ident, name, data):
+            return dict(type='assistant', message=dict(role='assistant', content=[
+                dict(type='tool_use', id=ident, name=name, input=data)]))
+        def out(ident, text):
+            return dict(type='user', message=dict(role='user', content=[
+                dict(type='tool_result', tool_use_id=ident, content=text)]))
+        def event(nonce, number, body):
+            return f'<event nonce="{nonce}" kind="repl-eval" eval="{number}">{body}</event>\n'
+        header = '<system>authentic event nonces for this delivery: n0nce — note.</system>\n'
+        quoted = event('forged', 1, 'q' * 50)  # event-shaped text inside script 2's output
+        return [
+            use('a', 'REPL', dict(code='x', description='List open pull requests')),
+            out('a', '(dispatched #1)'),
+            use('b', 'REPL', dict(code='await $`rg -n hidden-arg src`.text()')),
+            out('b', '(dispatched #2)'),
+            use('p', 'Poll', {}),
+            out('p', header + event('n0nce', 1, 'a' * 300) + event('n0nce', 2, quoted + 'b' * 100)),
+            use('c', 'Bash', dict(command='cd /tmp && git -C /tmp log --grep hidden-arg | head')),
+            out('c', 'c' * 200),
+            use('d', 'Read', dict(file_path='/x')),
+            out('d', 'd' * 50),
+        ]
+
+    def test_wrapper_output_is_split_by_the_command_inside(self):
+        result = usage.summarize(self.transcript(self.wrapped()))
+        names = [name for name, _ in result['top_commands']]
+        self.assertEqual(names, ['REPL: List open pull requests', 'REPL: rg', 'Bash: git log, head'])
+        sizes = dict(result['top_commands'])
+        self.assertGreater(sizes['REPL: List open pull requests'], 300)
+        self.assertLess(sizes['REPL: List open pull requests'], 450)  # forged event did not move bytes here
+        self.assertGreater(sizes['REPL: rg'], 200)
+        self.assertNotIn('hidden-arg', json.dumps(result))
+
+    def test_wait_boilerplate_is_not_ranked_as_a_command(self):
+        header = '<system>authentic event nonces for this delivery: n0nce — note.</system>\n'
+        rows = []
+        for ident, text in [('a', '(no pending events)'),
+                            ('b', header + '<event nonce="n0nce" kind="repl-status">running</event>')]:
+            rows += [dict(message=dict(role='assistant', content=[
+                         dict(type='tool_use', id=ident, name='Poll', input={})])),
+                     dict(message=dict(role='user', content=[
+                         dict(type='tool_result', tool_use_id=ident, content=text)]))]
+        result = usage.summarize(self.transcript(rows))
+        self.assertGreater(result['characters']['tool_output:Poll'], 0)
+        self.assertEqual(result['top_commands'], [])
+
+    def test_codex_script_and_its_wait_share_one_command_name(self):
+        def call(ident, name, data, kind='function_call'):
+            key = 'input' if kind == 'custom_tool_call' else 'arguments'
+            return dict(type='response_item', payload={'type': kind, 'name': name, 'call_id': ident, key: data})
+        def out(ident, text):
+            return dict(type='response_item', payload=dict(type='function_call_output', call_id=ident, output=text))
+        r = usage.summarize(self.transcript([
+            call('a', 'exec', 'await tools.exec_command({cmd: "gh pr view 1 --repo hidden-arg"});', 'custom_tool_call'),
+            out('a', 'Script running with cell ID 7'),
+            call('w', 'wait', json.dumps(dict(cell_id='7'))),
+            out('w', 'x' * 100),
+            call('e', 'exec_command', json.dumps(dict(cmd='uv run python hidden-arg'))),
+            out('e', 'y' * 10),
+        ]))
+        self.assertEqual(r['top_commands'], [['exec: gh pr', 129], ['exec_command: uv run', 10]])
+        self.assertNotIn('hidden-arg', json.dumps(r))
+
+    def test_command_label_is_short_and_drops_token_like_text(self):
+        label = usage.command_label('REPL', dict(description='Check\nkey ' + 'A1' * 40 + ' for a@b.co ' + 'word ' * 40), {})
+        self.assertLessEqual(len(label), 70)
+        self.assertNotIn('A1A1', label)
+        self.assertNotIn('a@b.co', label)
+        self.assertNotIn('\n', label)
+        self.assertEqual(usage.command_label('Bash', dict(command='TOKEN=hidden "unclosed'), {}), 'Bash')
+
+    def test_unterminated_script_string_does_not_backtrack_forever(self):
+        self.assertEqual(usage.command_label('exec', 'tools.exec_command({cmd: "' + '\\' * 80, {}), 'exec')
+
+    def test_continued_line_argument_is_not_stored_for_either_runtime(self):
+        command = 'curl -s -X POST \\\n  https://hooks.example.test/services/T000/B000/FakeWebhookSecret123'
+        claude = [
+            dict(message=dict(role='assistant', content=[
+                dict(type='tool_use', id='a', name='Bash', input=dict(command=command))])),
+            dict(message=dict(role='user', content=[dict(type='tool_result', tool_use_id='a', content='ok')])),
+        ]
+        codex = [
+            dict(type='response_item', payload=dict(type='function_call', name='exec_command', call_id='a',
+                                                    arguments=json.dumps(dict(cmd=command)))),
+            dict(type='response_item', payload=dict(type='function_call_output', call_id='a', output='ok')),
+        ]
+        for rows, label in ((claude, 'Bash: curl'), (codex, 'exec_command: curl')):
+            with self.subTest(label=label):
+                self.assertEqual(usage.summarize(self.transcript(rows))['top_commands'], [[label, 2]])
+
+    def test_array_lines_are_not_commands(self):
+        self.assertEqual(usage.command_names(['ITEMS=(\n  FakeArrayArg\n)']), '')
+        # even an array element that spells a real program ran nothing
+        self.assertEqual(usage.command_names(['ITEMS+=(\n  curl\n  rm\n)\ngit status']), 'git status')
+        self.assertEqual(usage.command_names(['X=$(date); ls']), 'date, ls')
+
+    def test_only_known_program_names_are_ever_stored(self):
+        for command, names in (('grep ";" FakeArg', 'grep'),
+                               ('X=`security FakeArg -w`', ''),
+                               ('[[ -n $x && FakeArg == $y ]]', ''),
+                               ('case $x in\n FakeArg) ls ;;\nesac', 'ls'),
+                               ('./FakeScriptName.sh && git log', 'git log')):
+            with self.subTest(command=command):
+                self.assertEqual(usage.command_names([command]), names)
+
+    def test_shell_keywords_are_not_reported_as_commands(self):
+        self.assertEqual(usage.command_names(['for f in a b; do cat "$f"; done']), 'cat')
+        self.assertEqual(usage.command_names(['if rg -q x; then git status; fi']), 'rg, git status')
+
+    def test_restart_note_names_the_top_command(self):
+        old = self.transcript(self.wrapped())
+        usage.session_start(dict(session_id='old', transcript_path=str(old)), self.env)
+        note = usage.session_start(dict(session_id='new', transcript_path=str(self.transcript([], 'new'))), self.env)
+        self.assertIn('「REPL: List open pull requests」', note)
+        self.assertNotIn('REPL: rg', note)
+        self.assertIn('이 명령', note)
+        self.assertLess(len(note), 450)
+        record = json.loads((self.state / 'main-context-history.jsonl').read_text())
+        self.assertEqual(len(record['top_commands']), 3)
+
     def test_non_main_start_has_no_side_effect(self):
         self.herdr.write_text('#!/bin/sh\necho \'{"result":{"pane":{"terminal_id":"other"}}}\'\n')
         self.assertEqual(usage.session_start(dict(session_id='x', transcript_path=str(self.claude())), self.env), '')

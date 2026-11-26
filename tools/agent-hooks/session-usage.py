@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Local character/command estimates, plus a five-minute GitHub quota sample.
 
-Not token or HTTP accounting. Only counts, safe tool names and local source
-identifiers are persisted. Transcript bodies and shell commands never are.
+Not token or HTTP accounting. Only counts, safe tool names, local source
+identifiers and short command labels (known program plus subcommand, or the script's
+own description) are persisted. Transcript bodies and command arguments never are.
 """
 import collections
 import datetime
@@ -23,6 +24,15 @@ HERE = Path(__file__).resolve().parent
 INTERVAL = 300
 MAX_BYTES = 32 * 1024 * 1024
 SOURCE_BYTES = 2 * 1024 * 1024
+SUBCOMMAND_TOOLS = ('bq', 'docker', 'firebase', 'gcloud', 'gh', 'git', 'herdr', 'kubectl', 'npm', 'terraform', 'uv')
+# The only program names ever stored. The shell reading below is approximate and can put an
+# argument (maybe a secret) where a command starts; an unlisted word is dropped.
+PROGRAMS = frozenset(SUBCOMMAND_TOOLS + tuple('''
+awk bash brew cargo cat chmod cp curl cut date diff du env find go graphify grep head jest jq kill
+launchctl ln ls lsof make mkdir mv node npx open pane-label pane-spawn pane-tell perl pgrep pkill
+pnpm ps pytest python python3 rg rm rsync ruby scp security sed sh sleep sort sqlite3 ssh stat stripe
+swift tail tar tee timeout touch tr tsc uniq wc which xargs xcodebuild yarn zsh
+'''.split()))
 
 
 def load_module(name, filename):
@@ -56,37 +66,117 @@ def write_json(path, value):
             os.unlink(temporary)
 
 
-def gh_count(command):
-    """Conservative shell estimate; quoted script bodies are not executed here."""
-    if not isinstance(command, str) or '<<' in command:
-        return 0
+def command_words(command):
+    """Words of each shell command, assignment/env prefixes removed; [] if unreadable."""
+    # Backslash-newline continues the same command (an even run of backslashes does not).
+    command = re.sub(r'(?<!\\)((?:\\\\)*)\\\r?\n', r'\1', command)
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()\n')
         lexer.whitespace = ' \t\r'
         lexer.whitespace_split = True
         tokens = list(lexer)
     except ValueError:
-        return 0
-    start, count = True, 0
+        return []
+    start, found, depth, previous = True, [], 0, ''
     for token in tokens:
-        if token and all(c in ';&|()\n' for c in token):
+        before, previous = previous, token
+        separator = token and all(c in ';&|()\n' for c in token)
+        if depth or (separator and token.startswith('(') and re.fullmatch(r'[A-Za-z_]\w*\+?=', before)):
+            # Inside NAME=( ... ) every line is a value, not a command.
+            if separator:
+                depth = max(0, depth + token.count('(') - token.count(')'))
+                start = not depth
+        elif separator:
             start = True
         elif start:
             if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', token) or token in ('env', 'command', 'exec'):
                 continue
-            count += Path(token).name == 'gh'
+            found.append([token])
             start = False
-    return count
+        else:
+            found[-1].append(token)
+    return found
+
+
+def gh_count(command):
+    """Conservative shell estimate; quoted script bodies are not executed here."""
+    if not isinstance(command, str) or '<<' in command:
+        return 0
+    return sum(Path(words[0]).name == 'gh' for words in command_words(command))
+
+
+def command_names(commands):
+    """Up to three distinct programs from PROGRAMS, with a subcommand for multi-command tools."""
+    names = []
+    for command in commands:
+        for words in command_words(command.split('<<')[0]):
+            while words[1:] and words[0] in ('do', 'else', 'if', 'then', 'until', 'while'):
+                words = words[1:]
+            name = Path(words[0]).name
+            if name not in PROGRAMS:
+                continue
+            rest = words[3:] if words[1:2] == ['-C'] else words[1:]
+            if name in SUBCOMMAND_TOOLS and rest and re.fullmatch(r'[a-z][a-z-]{0,20}', rest[0]):
+                name += ' ' + rest[0]
+            if name not in names:
+                names.append(name)
+    return ', '.join(names[:3])
+
+
+def command_label(name, data, wrapped):
+    """Name what ran inside a tool call. `wrapped` maps a running script's number to its label."""
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except ValueError:
+            pass  # a Codex exec script is source text, not JSON
+    detail = ''
+    if isinstance(data, dict):
+        if name == 'wait' and str(data.get('cell_id')) in wrapped:
+            return wrapped[str(data['cell_id'])]
+        command = data.get('command', data.get('cmd'))
+        if script_tool(name) and isinstance(data.get('description'), str):
+            detail = ' '.join(data['description'].split())
+            detail = re.sub(r'\S+@\S+|[A-Za-z0-9_+/=-]{24,}', '…', detail)
+            detail = ''.join(c for c in detail if c.isprintable())[:60]
+        if not detail and isinstance(command, str):
+            detail = command_names([command])
+        data = data.get('code')
+    if not detail and script_tool(name) and isinstance(data, str):
+        # Claude REPL: $`...`; Codex exec: {cmd: "..."}
+        detail = command_names(a or c for a, _, c in re.findall(
+            r'\$`([^`]*)`|\bcmd\s*:\s*(["\'`])((?:\\.|(?!\2)[^\\])*)\2', data))
+    return f'{name}: {detail}' if detail else name
+
+
+def split_poll(text, wrapped):
+    """Claude's Poll delivers many scripts' output; yield (label, characters) for each.
+
+    Headers, status lines and empty waits ran no command and are not yielded.
+    """
+    header = re.match(r'<system>authentic event nonces for this delivery: ([^—<]+)—', text)
+    nonces = set(re.findall(r'[\w-]+', header[1])) if header else set()
+    # Only the delivery's own nonces open an event; anything else is quoted output.
+    events = [m for m in re.finditer(r'<event nonce="([\w-]+)"([^>]*)>', text) if m[1] in nonces]
+    for index, event in enumerate(events):
+        number = re.search(r'\beval="(\d+)"', event[2])
+        end = events[index + 1].start() if index + 1 < len(events) else len(text)
+        if number:  # an unknown number means its dispatch fell outside the scanned bytes
+            yield wrapped.get(number[1], 'Poll'), end - event.start()
+
+
+def visible_text(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return ''.join(visible_text(x) for x in value)
+    if isinstance(value, dict):
+        return ''.join(visible_text(value.get(k)) for k in ('text', 'content', 'output'))
+    return ''
 
 
 def text_size(value):
-    if isinstance(value, str):
-        return len(value)
-    if isinstance(value, list):
-        return sum(text_size(x) for x in value)
-    if isinstance(value, dict):
-        return sum(text_size(value.get(k)) for k in ('text', 'content', 'output'))
-    return 0
+    return len(visible_text(value))
 
 
 def tool_name(value):
@@ -108,6 +198,22 @@ def timestamp(row):
 
 def summarize(path, since=None, max_bytes=MAX_BYTES):
     chars, calls, seen = collections.Counter(), {}, set()
+    commands, labels, wrapped = collections.Counter(), {}, {}
+
+    def count_output(ident, name, value):
+        text = visible_text(value)
+        chars['tool_output:' + name] += len(text)
+        label = labels.get(ident, name)
+        if name == 'Poll':
+            for part, size in split_poll(text, wrapped):
+                commands[part] += size
+            return
+        commands[label] += len(text)
+        # The number a later Poll (Claude) or wait (Codex) will refer to.
+        running = re.search(r'^\(dispatched #(\d+)\)|Script running with cell ID (\d+)', text[:300])
+        if running and (script_tool(name) or name == 'wait'):
+            wrapped[running[1] or running[2]] = label
+
     gh, unparsed, malformed, partial = 0, 0, 0, False
     with Path(path).open('rb') as stream:
         size = os.fstat(stream.fileno()).st_size
@@ -144,9 +250,10 @@ def summarize(path, since=None, max_bytes=MAX_BYTES):
                     kind = block.get('type')
                     if kind == 'tool_use':
                         name = tool_name(block.get('name'))
+                        data = block.get('input', {})
                         if isinstance(block.get('id'), str):
                             calls[block['id']] = name
-                        data = block.get('input', {})
+                            labels[block['id']] = command_label(name, data, wrapped)
                         chars['tool_input:' + name] += len(json.dumps(data, ensure_ascii=False))
                         if recent and name in ('Bash', 'exec_command') and isinstance(data, dict):
                             gh += gh_count(data.get('command', data.get('cmd')))
@@ -155,7 +262,7 @@ def summarize(path, since=None, max_bytes=MAX_BYTES):
                     elif kind == 'tool_result':
                         ident = block.get('tool_use_id')
                         name = calls.get(ident, 'unknown') if isinstance(ident, str) else 'unknown'
-                        chars['tool_output:' + name] += text_size(block.get('content'))
+                        count_output(ident if isinstance(ident, str) else None, name, block.get('content'))
                     else:
                         chars[role] += text_size(block)
             elif row.get('type') == 'response_item' and isinstance(row.get('payload'), dict):
@@ -166,9 +273,10 @@ def summarize(path, since=None, max_bytes=MAX_BYTES):
                     chars[role] += text_size(p.get('content'))
                 elif kind in ('function_call', 'custom_tool_call'):
                     name = tool_name(p.get('name'))
+                    data = p.get('arguments', p.get('input', ''))
                     if isinstance(p.get('call_id'), str):
                         calls[p['call_id']] = name
-                    data = p.get('arguments', p.get('input', ''))
+                        labels[p['call_id']] = command_label(name, data, wrapped)
                     chars['tool_input:' + name] += text_size(data)
                     if recent and name.endswith(('exec_command', 'Bash')):
                         try:
@@ -181,8 +289,9 @@ def summarize(path, since=None, max_bytes=MAX_BYTES):
                 elif kind in ('function_call_output', 'custom_tool_call_output'):
                     ident = p.get('call_id')
                     name = calls.get(ident, 'unknown') if isinstance(ident, str) else 'unknown'
-                    chars['tool_output:' + name] += text_size(p.get('output'))
+                    count_output(ident if isinstance(ident, str) else None, name, p.get('output'))
     return dict(characters=dict(chars), ranked=[list(x) for x in chars.most_common()],
+                top_commands=[list(x) for x in commands.most_common(3) if x[1]],
                 gh_commands=gh, unparsed_script_calls=unparsed, malformed_lines=malformed, partial=partial,
                 measure='visible_characters_and_gh_commands', hidden_context='not_observed')
 
@@ -215,7 +324,13 @@ def session_start(payload, env, previous=None):
                 biggest, count = result['ranked'][0]
                 action = ('이 도구의 반복 조회부터 줄이고 필요한 결과만 요약해서 읽으세요.'
                           if biggest.startswith('tool_') else '이 출처의 중복 인용부터 줄이고 필요한 부분만 읽으세요.')
-                note = (f'직전 대화의 보이는 글자 수: 가장 큰 항목 {biggest} {count:,}자. '
+                top = ''
+                if result['top_commands']:
+                    command, size = result['top_commands'][0]
+                    top = f'결과를 가장 많이 낸 명령은 「{command}」 {size:,}자입니다. '
+                    if biggest.startswith('tool_output:'):
+                        action = '이 명령의 반복 조회부터 줄이고 필요한 결과만 요약해서 읽으세요.'
+                note = (f'직전 대화의 보이는 글자 수: 가장 큰 항목 {biggest} {count:,}자. {top}'
                         f'{action} 원문·안전 지침은 보존하세요. 숨은 입력은 미관측이며 토큰 수가 아닙니다.'
                         + (' 일부 기록만 집계했습니다.' if result['partial'] else ''))
             with (folder / 'main-context-history.jsonl').open('a') as stream:
