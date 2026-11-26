@@ -63,6 +63,28 @@
   정해진 예산 안에서 나오므로, 몇 개를 꺼도 남은 스킬의 설명이 길어져 합계는 조금만 준다.
 - 메모리 목차는 배포·Slack·비밀값 규칙이 많아서 남겼다.
 
+## 2026-11-26에 뺀 honeycomb·Amplitude·stripe
+
+작업 세션과 확인 세션은 honeycomb 연결, Amplitude 연결, stripe 플러그인 없이 시작한다(요유,
+2026-11-26). 11/06에 Amplitude를 남긴 결정은 이 결정으로 바뀐다. 세 가지의 안내문과 설명은 합쳐
+약 6,500자이고, 최근 30일 대화 기록에서 honeycomb은 약 1%, Amplitude는 약 0.5%만 불렀으며 stripe를
+부른 기록은 찾지 못했다. 조사나 분석을 맡길 때는 `pane-spawn --analysis`로 연다. 이 옵션은
+`CLAUDE_STARTUP_ANALYSIS=1`을 넣고, `/clear` 뒤에도 유지된다. 그 세션의 자동 확인 세션도 같은
+연결로 열린다. 빼는 목록은 프로파일의 `roles.worker.analysisOff`다. 메인 세션은 전부터 셋 다
+꺼 두었고, Codex 세션과 손으로 연 세션은 영향이 없다.
+되돌리기: 프로파일에서 `roles.worker.analysisOff`를 지운다. 하네스를 v0.1.0으로 되돌려도 켜진다.
+
+## 하네스 v0.1.1: 회사·곰곰 설정은 프로젝트에
+
+회사 플러그인과 곰곰 플러그인은 전역이 아니라 각 프로젝트의 `.claude/settings.json`에서 켠다.
+Claude Code는 프로젝트 설정을 시작한 폴더에서만 읽으므로, 래퍼가
+[project-scope.py](../tools/agent-hooks/project-scope.py)로 상위 폴더와 워크트리의 원본 저장소 설정을
+찾아 `--settings`에 합친다. 홈 폴더 밖으로 뺀 워크트리에는 원본 저장소의 `CLAUDE.local.md`도
+넘긴다. Codex는 `codex-memory.py`가 같은 규칙 파일을 붙인다. 작업 세션 프로파일은 이 플러그인
+이름을 적지 않는다. 프로파일이 프로젝트 설정보다 우선해서, 적으면 프로젝트의 선택이 지워지기
+때문이다. 버전은 `~/.config/agent-harness/version`에 있고, 전환 명령은 비공개 저장소의
+`startup-context/harness.py use <version>`이다.
+
 ## 2026-11-07에 뺀 Artifact 도구 (api#1065)
 
 Artifact 도구는 스키마만 약 9k 토큰이라 모든 호출에 다시 실린다. 그래서 `roles.worker`에

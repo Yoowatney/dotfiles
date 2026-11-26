@@ -22,6 +22,7 @@ on:
       - 'tools/agent-hooks/handoff*'
       - 'tools/agent-hooks/install-handoff*'
       - 'tools/agent-hooks/codex-memory*'
+      - 'tools/agent-hooks/project-scope*'
       - 'tools/agent-hooks/install-codex-startup*'
       - 'tools/agent-hooks/check-permissions*'
       - 'tools/agent-hooks/task-ledger*'
@@ -58,6 +59,7 @@ on:
       - 'tools/agent-hooks/handoff*'
       - 'tools/agent-hooks/install-handoff*'
       - 'tools/agent-hooks/codex-memory*'
+      - 'tools/agent-hooks/project-scope*'
       - 'tools/agent-hooks/install-codex-startup*'
       - 'tools/agent-hooks/check-permissions*'
       - 'tools/agent-hooks/task-ledger*'
@@ -114,6 +116,7 @@ jobs:
       - run: python3 tools/agent-hooks/handoff-state.test.py
       - run: python3 tools/agent-hooks/install-handoff.test.py
       - run: python3 tools/agent-hooks/codex-memory.test.py
+      - run: python3 tools/agent-hooks/project-scope.test.py
       - run: python3 tools/agent-hooks/install-codex-startup.test.py
       - run: python3 tools/agent-hooks/check-permissions.test.py
       - run: python3 tools/agent-hooks/task-ledger.test.py

@@ -67,32 +67,37 @@ fi
 # leads and the main pane need. The full file goes in claudeMdExcludes and the filtered copy comes back through
 # --append-system-prompt-file, so the file stays the one source and sessions opened by hand still load it whole
 # (api#1031). Claude hides HTML comments from rule files it loads, so the markers cost those sessions nothing.
-pane_rules() { # Rewrites $settings; sets $rules_file when anything was filtered.
-  local file under excludes=() text=""
+pane_view() { # A rule file without its lead-only blocks.
+  # ponytail: one-line comments only; a marker inside a multi-line comment is not seen.
+  awk '
+    /^<!-- \/pane:skip -->$/ { skip = 0; next }
+    /^<!-- pane:skip -->$/ { skip = 1; next }
+    skip { next }
+    /^<!-- pane: .* -->$/ { sub(/^<!-- pane: /, ""); sub(/ -->$/, ""); print; next }
+    /^<!--.*-->$/ { next }
+    { print }' "$1"
+}
+rules_text=""
+pane_rules() { # Rewrites $settings; adds the filtered copies to $rules_text.
+  local file under excludes=()
   while IFS=$'\t' read -r file under; do
     file=${file/#\~/$HOME} under=${under/#\~/$HOME}
     [ -f "$file" ] || continue
     if [ -n "$under" ]; then case "$PWD/" in "$under"/*) ;; *) continue ;; esac; fi
     excludes+=("$file")
-    # ponytail: one-line comments only; a marker inside a multi-line comment is not seen.
-    text+="Contents of $file, as loaded in a pane under a lead:"$'\n\n'"$(awk '
-      /^<!-- \/pane:skip -->$/ { skip = 0; next }
-      /^<!-- pane:skip -->$/ { skip = 1; next }
-      skip { next }
-      /^<!-- pane: .* -->$/ { sub(/^<!-- pane: /, ""); sub(/ -->$/, ""); print; next }
-      /^<!--.*-->$/ { next }
-      { print }' "$file")"$'\n\n'
+    rules_text+="Contents of $file, as loaded in a pane under a lead:"$'\n\n'"$(pane_view "$file")"$'\n\n'
   done < <(jq -r '.paneRules[]? | [.file, .under // ""] | @tsv' <<<"$settings")
-  if [ -n "$text" ]; then
-    local dir="${XDG_STATE_HOME:-$HOME/.local/state}/claude-startup" sum
-    mkdir -p "$dir" || return 1
-    sum=$(printf '%s' "$text" | shasum -a 256 | cut -c1-16)
-    rules_file="$dir/pane-rules-$sum.md" # same text, same file: launches never pile up copies
-    [ -f "$rules_file" ] || { printf '%s' "$text" >"$rules_file.$$" && mv "$rules_file.$$" "$rules_file"; } || return 1
-  fi
   settings=$(jq -c 'del(.paneRules) | if $ARGS.positional == [] then . else .claudeMdExcludes = $ARGS.positional end' \
     --args ${excludes[@]+"${excludes[@]}"} <<<"$settings")
 }
+save_rules() { # $rules_text into $rules_file.
+  local dir="${XDG_STATE_HOME:-$HOME/.local/state}/claude-startup" sum
+  mkdir -p "$dir" || return 1
+  sum=$(printf '%s' "$rules_text" | shasum -a 256 | cut -c1-16)
+  rules_file="$dir/pane-rules-$sum.md" # same text, same file: launches never pile up copies
+  [ -f "$rules_file" ] || { printf '%s' "$rules_text" >"$rules_file.$$" && mv "$rules_file.$$" "$rules_file"; } || return 1
+}
+settings="" rules_file="" worker_view=""
 case "$role" in
   worker | main | general | check)
     if [ "${CLAUDE_STARTUP_PROFILE:-}" != full ]; then
@@ -103,14 +108,39 @@ case "$role" in
       # dietSkills (worker only): skills a pane under a lead almost never calls (api#1066). pane-spawn --skills keeps them; the key never reaches claude.
       if [ -n "${CLAUDE_STARTUP_SKILLS:-}" ]; then settings=$(jq -c 'del(.dietSkills)' <<<"$settings") || exit 1
       else settings=$(jq -c '(. * (.dietSkills // {})) | del(.dietSkills)' <<<"$settings") || exit 1; fi
-      rules_file=""
-      # A pane that cannot get the filtered copy starts with the full rule files rather than not at all.
-      pane_rules || { rules_file=""; settings=$(jq -c 'del(.paneRules)' <<<"$settings") || exit 1; }
-      settings_path=$(settings_file) || { echo 'claude-online: cannot save startup settings' >&2; exit 1; }
-      profile_args=(--settings "$settings_path")
-      [ -z "$rules_file" ] || profile_args+=(--append-system-prompt-file "$rules_file")
+      # analysisOff (worker only): connections only an investigation or analysis job needs (요유 2026-11-26). pane-spawn
+      # --analysis keeps them, and so does harness v0.1.0; the key never reaches claude.
+      if [ -n "${CLAUDE_STARTUP_ANALYSIS:-}" ] || [ "$(cat "$HOME/.config/agent-harness/version" 2>/dev/null)" = v0.1.0 ]; then
+        settings=$(jq -c 'del(.analysisOff)' <<<"$settings") || exit 1
+      else
+        settings=$(jq -c '(.analysisOff // {}) as $off | del(.analysisOff) | if $off == {} then . else .deniedMcpServers += $off.deniedMcpServers | .enabledPlugins += $off.enabledPlugins end' <<<"$settings") || exit 1
+      fi
+      [ "$(jq -r 'has("paneRules")' <<<"$settings")" != true ] || worker_view=1
+      pane_rules || exit 1
     fi ;;
 esac
+# Claude reads project settings only in the start folder and CLAUDE.local.md only above it. Hand a sub-folder or a
+# worktree its project's plugins and rules (project-scope.py), whatever the role or profile. The profile wins.
+scope=$(python3 -I "$(cd "$(dirname "$0")/.." && pwd)/tools/agent-hooks/project-scope.py" "$PWD" 2>/dev/null) || scope=""
+if [ -n "$scope" ]; then
+  [ "$(jq -r '.enabledPlugins == {}' <<<"$scope")" = true ] ||
+    settings=$(jq -c --argjson scope "$scope" '{enabledPlugins: $scope.enabledPlugins} * (. // {})' <<<"${settings:-null}") || exit 1
+  while IFS= read -r file; do
+    [ -f "$file" ] || continue
+    if [ -n "$worker_view" ]; then body=$(pane_view "$file"); else body=$(cat "$file"); fi
+    rules_text+="Contents of $file, the project rules of this worktree:"$'\n\n'"$body"$'\n\n'
+  done < <(jq -r '.localRules[]' <<<"$scope")
+fi
+if [ -n "$rules_text" ] && ! save_rules; then
+  # A pane that cannot get the filtered copy starts with the full rule files rather than not at all.
+  rules_file=""
+  [ -z "$settings" ] || settings=$(jq -c 'del(.claudeMdExcludes)' <<<"$settings") || exit 1
+fi
+if [ -n "$settings" ]; then
+  settings_path=$(settings_file) || { echo 'claude-online: cannot save startup settings' >&2; exit 1; }
+  profile_args=(--settings "$settings_path")
+fi
+[ -z "$rules_file" ] || profile_args+=(--append-system-prompt-file "$rules_file")
 # A Claude check needs process and network inspection too. Protect the checked
 # folder in the whole process tree, including Edit/Write and shell children;
 # Claude's Bash-only sandbox would leave its file tools outside that boundary.
