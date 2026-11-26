@@ -57,7 +57,10 @@ jq -e '(has("enableArtifact") | not)' <<<"$(cd "$box/home/work/munice/sub" && RO
 jq -e '.skillOverrides as $o | .enabledPlugins["taste-skill@taste-skill"] == false and (["docx","pdf","pptx","xlsx","code-review","claude-api","update-config","run","loop","init"] | all($o[.] == "off")) and (has("dietSkills") | not)' <<<"$settings" >/dev/null || fail 'worker starts without the unrelated skills'
 # Skills that the lead's instructions and the rule files call must stay: superpowers, codex-review, agent-board, writing-*, QA and release skills.
 jq -e '.skillOverrides as $o | ["codex-review","agent-board","writing-plain-korean","writing-as-yoyoo","html-explainer","ego-browser","agent-reach","work-log","release-diff","search-history","save-session","merge-and-deploy","release-notify","dataviz","simplify","security-review","plugin-authoring"] | all($o[.] == null)' <<<"$settings" >/dev/null || fail 'worker keeps the skills that instructions call'
-jq -e '.enabledPlugins as $p | ["superpowers@claude-plugins-official","commit-commands@claude-plugins-official","ponytail@ponytail","fluent-korean@fluent-korean","core@munice","compliance@munice","ux-writing@munice"] | all($p[.] != false)' <<<"$settings" >/dev/null || fail 'worker keeps the plugins whose skills or hooks instructions call'
+jq -e '.enabledPlugins as $p | ["superpowers@claude-plugins-official","commit-commands@claude-plugins-official","ponytail@ponytail","fluent-korean@fluent-korean"] | all($p[.] != false)' <<<"$settings" >/dev/null || fail 'worker keeps the plugins whose skills or hooks instructions call'
+# Project plugins are on only where a project's .claude/settings.json turns them on. --settings outranks project
+# settings, so the profile must not name them at all: false would hide them inside their own project.
+jq -e '.enabledPlugins as $p | ["core@munice","compliance@munice","ux-writing@munice","token-weather@munice-mods","gomgom-monitor@gomgom-mods"] | all(. as $k | $p | has($k) | not)' <<<"$settings" >/dev/null || fail 'worker profile overrides a project plugin'
 # pane-spawn --skills opts back in: only the api#1066 cut returns; every earlier cut and the rest of the worker profile stay.
 skills_in=$(cd "$box/home/work/munice/sub" && ROLE=worker SKILLS=1 run)
 jq -e '(.enabledPlugins | has("taste-skill@taste-skill") | not) and (.skillOverrides | has("docx") or has("claude-api") | not) and .skillOverrides["hiring-panel"] == "off" and .enabledPlugins["core-skills@hyperframes"] == false and .enableArtifact == false and (has("dietSkills") | not) and (.claudeMdExcludes | length) == 2' <<<"$(settings_json <<<"$skills_in")" >/dev/null || fail '--skills brings back only the api#1066 cut'
@@ -155,4 +158,30 @@ PY
   # Invalid targets must fail closed instead of opening an unprotected check.
   if CLAUDE_CHECK_TARGET="$box/missing" run >/dev/null 2>&1; then fail 'missing check target must refuse launch'; fi
 fi
-echo 'PASS: startup role, main detection, opt-out, arguments, safety settings, and filtered pane rules'
+# Claude reads .claude/settings.json only in the start folder and CLAUDE.local.md only above it, so the launcher hands a
+# sub-folder and a worktree their project's plugins and personal rules.
+proj="$box/home/work/proj"
+mkdir -p "$proj/.claude" "$proj/repo/.git/worktrees/job" "$proj/repo/src" "$box/home/work/proj-wt/job"
+printf '{"enabledPlugins":{"team@x":true,"context7@claude-plugins-official":true}}' >"$proj/.claude/settings.json"
+printf -- '- KEEP_TEAM\n<!-- pane:skip -->\n- SKIP_TEAM\n<!-- /pane:skip -->\n' >"$proj/CLAUDE.local.md"
+printf 'gitdir: %s\n' "$proj/repo/.git/worktrees/job" >"$box/home/work/proj-wt/job/.git"
+out=$(cd "$proj/repo/src" && run 'go on')
+jq -e '. == {"enabledPlugins":{"team@x":true,"context7@claude-plugins-official":true}}' <<<"$(settings_json <<<"$out")" >/dev/null || fail 'a hand-opened session in a sub-folder misses its project plugins'
+! grep -qx -- --append-system-prompt-file <<<"$out" || fail 'a sub-folder gets rules it already loads'
+[[ "$(tail -1 <<<"$out")" == 'go on' ]] || fail 'arguments pass through with inherited settings'
+out=$(cd "$box/home/work/proj-wt/job" && PROFILE=full ROLE=worker run)
+jq -e '.enabledPlugins["team@x"] == true' <<<"$(settings_json <<<"$out")" >/dev/null || fail 'a worktree misses its project plugins'
+grep -qF SKIP_TEAM "$(arg_after --append-system-prompt-file <<<"$out")" || fail 'a full session in a worktree gets its project rules whole'
+out=$(cd "$box/home/work/proj-wt/job" && ROLE=worker run)
+jq -e '.enabledPlugins["team@x"] == true and .enabledPlugins["context7@claude-plugins-official"] == false and .enableArtifact == false' <<<"$(settings_json <<<"$out")" >/dev/null || fail 'the worker profile outranks inherited plugins'
+rules=$(arg_after --append-system-prompt-file <<<"$out")
+for want in KEEP_TEAM KEEP_GLOBAL "$proj/CLAUDE.local.md"; do grep -qF -- "$want" "$rules" || fail "worktree rules miss $want"; done
+! grep -qF SKIP_TEAM "$rules" || fail 'a worktree pane keeps lead-only project rules'
+[ "$(grep -cx -- --append-system-prompt-file <<<"$out")" = 1 ] || fail 'rules go in one appended file'
+out=$(cd "$box/other" && run --version)
+[ "$out" = --version ] || fail 'a folder outside every project gets settings'
+mkdir -p "$box/home/.config/agent-harness"; echo v0.1.0 >"$box/home/.config/agent-harness/version"
+[ "$(cd "$box/home/work/proj-wt/job" && run --version)" = --version ] || fail 'harness v0.1.0 still inherits'
+rm "$box/home/.config/agent-harness/version"
+
+echo 'PASS: startup role, main detection, opt-out, arguments, safety settings, filtered pane rules, and project scope'

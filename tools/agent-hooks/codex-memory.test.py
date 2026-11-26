@@ -49,6 +49,24 @@ class MemoryHookTest(unittest.TestCase):
             self.assertIn('Main contact', memory.context(cwd, env))
             self.assertIn('[Video]', memory.context(cwd, env))
 
+    def test_a_worktree_elsewhere_reads_its_main_checkout_s_project_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            team = home / 'work/team'
+            (team / 'repo/.git/worktrees/job').mkdir(parents=True)
+            (team / 'CLAUDE.local.md').write_text('Team safety\n<!-- pane:skip -->\nMain contact\n<!-- /pane:skip -->\n')
+            wt = home / 'work/team-wt/job'
+            wt.mkdir(parents=True)
+            (wt / '.git').write_text('gitdir: ' + str(team / 'repo/.git/worktrees/job') + '\n')
+            env = {'HOME': str(home), 'HERDR_CODEX_STARTUP_ROLE': 'worker'}
+            text = memory.context(wt, env)
+            self.assertIn('Team safety', text)
+            self.assertNotIn('Main contact', text)
+            other = home / 'work/other'
+            other.mkdir()
+            self.assertNotIn('Team safety', memory.context(other, env))
+            self.assertEqual(memory.context(team / 'repo', env).count('Team safety'), 1)
+
     def test_global_role_lines_follow_the_role_not_the_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp).resolve()

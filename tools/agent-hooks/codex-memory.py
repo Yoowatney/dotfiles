@@ -10,6 +10,9 @@ import sys
 spec = importlib.util.spec_from_file_location('codex_startup', Path(__file__).with_name('codex-startup.py'))
 startup = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(startup)
+spec = importlib.util.spec_from_file_location('project_scope', Path(__file__).with_name('project-scope.py'))
+scope = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(scope)
 
 
 def global_role_rules(env, home, view):
@@ -49,7 +52,8 @@ def context(cwd, env):
         return '\n\n'.join(chunks)
     role_rules = global_role_rules(env, home, view)
     parents = rules([p / 'AGENTS.md' for p in reversed(root.parents) if p != Path('/')])
-    locals_ = rules([p / 'CLAUDE.local.md' for p in reversed(ancestors) if p != Path('/')])
+    # A worktree outside its project folder also reads the project's CLAUDE.local.md (project-scope.py).
+    locals_ = rules(scope.local_rules(cwd, home) + [p / 'CLAUDE.local.md' for p in reversed(ancestors) if p != Path('/')])
     def memory_path(path):
         return home / '.claude/projects' / re.sub('[^A-Za-z0-9]', '-', str(path)) / 'memory'
     indexes, files = [], []
