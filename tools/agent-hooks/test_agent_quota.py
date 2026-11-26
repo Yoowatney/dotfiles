@@ -167,13 +167,71 @@ class RoutingTests(unittest.TestCase):
         self.write(".claude/settings.json", {"env": {"ANTHROPIC_API_KEY": "synthetic"}})
         self.assertEqual(self.select("claude-first")["kind"], "codex")
 
-    def test_claude_first_stale_or_missing_usage_falls_back_to_codex(self):
-        snap = self.q.read_json(self.q.state_dir() / "claude.json")
-        snap["observed_at"] = self.now - 601
-        self.write("state/agent-quota/claude.json", snap)
+    def test_claude_first_too_old_or_missing_usage_falls_back_to_codex(self):
+        self.stale_claude(86401)
+        self.event(40)
         self.assertEqual(self.select("claude-first")["kind"], "codex")
         (self.q.state_dir() / "claude.json").unlink()
         self.assertEqual(self.select("claude-first")["kind"], "codex")
+
+    def stale_claude(self, age, used=14, short=None, week_reset=None, **kwargs):
+        # An overnight Claude reading (no session answered for hours) with Codex out of the way, as on 2026-11-27.
+        self.event(99)
+        at = self.now - age
+        self.write("state/agent-quota/claude.json", dict(
+            account=self.q.identity("test-claude"), machine=self.q.machine(), observed_at=at,
+            five_hour=short if short is not None else {"used_percentage": 20, "resets_at": at + 1000},
+            seven_day={"used_percentage": used, "resets_at": week_reset or self.now + 302400}, **kwargs))
+
+    def test_claude_first_reuses_low_stale_claude_in_same_week(self):
+        self.stale_claude(8 * 3600)
+        result = self.select("claude-first")
+        self.assertEqual(result["kind"], "claude")
+        self.assertIn("stale", result["claude"]["reason"])
+        self.assertIsNone(self.select("quota-aware")["claude"].get("week"), "other policies keep the ten-minute limit")
+
+    def test_stale_claude_age_and_weekly_headroom_boundaries(self):
+        for age, used, allowed in [(600, 80, True), (600, 80.01, False), (601, 65, True), (86400, 65, True),
+                                    (86401, 10, False), (601, 65.01, False), (-6, 10, False)]:
+            with self.subTest(age=age, used=used):
+                self.stale_claude(age, used)
+                self.assertEqual(self.select("claude-first")["kind"], "claude" if allowed else None)
+
+    def test_stale_claude_never_infers_zero_usage_after_a_reset(self):
+        # api#1081, api#1217: a window that has ended says nothing about the new one.
+        for reset in [self.now, self.now - 1, self.now + self.q.WEEK - 8 * 3600 + 1]:
+            with self.subTest(reset=reset):
+                self.stale_claude(8 * 3600, 0, week_reset=reset)
+                self.assertIsNone(self.select("claude-first")["kind"])
+        self.stale_claude(8 * 3600, 0, week_reset=self.now)
+        self.assertIn("expired", self.select("claude-first")["claude"]["reason"])
+
+    def test_stale_claude_five_hour_window_limit_and_expiry(self):
+        at = self.now - 3600
+        self.stale_claude(3600, short={"used_percentage": 80, "resets_at": at + 18000})
+        self.assertIsNone(self.select("claude-first")["kind"], "an open five-hour window keeps its reserve")
+        self.stale_claude(3600, short={"used_percentage": 99, "resets_at": at + 1000})
+        self.assertEqual(self.select("claude-first")["kind"], "claude", "an ended five-hour window is not judged")
+        self.stale_claude(3600, short={"used_percentage": 99, "resets_at": at - 1})
+        self.assertIsNone(self.select("claude-first")["kind"], "invalid at observation is not an ended valid window")
+
+    def test_stale_claude_keeps_account_billing_and_api_guards(self):
+        self.stale_claude(8 * 3600)
+        self.assertEqual(self.select("claude-first")["kind"], "claude")
+        self.write(".claude.json", {"oauthAccount": {"accountUuid": "other", "hasExtraUsageEnabled": False}})
+        self.assertIn("mismatch", self.select("claude-first")["claude"]["reason"])
+        self.write(".claude.json", {"oauthAccount": {"accountUuid": "test-claude"}})
+        self.assertIn("extra usage", self.select("claude-first")["claude"]["reason"])
+        self.claude_extra(False)
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "synthetic"}):
+            self.assertIn("API environment", self.select("claude-first")["claude"]["reason"])
+        self.write(".claude/settings.json", {"env": {"ANTHROPIC_BASE_URL": "synthetic"}})
+        self.assertIn("settings", self.select("claude-first")["claude"]["reason"])
+
+    def test_claude_reserve_for_checks_keeps_the_ten_minute_limit(self):
+        # A stale reading is unknown to pane-spawn --check (exit 1), never inside or past the reserve.
+        self.stale_claude(8 * 3600)
+        self.assertEqual(self.q.claude_quota(self.now, self.home, first=True)["reason"], "missing/stale/future observation")
 
     def test_claude_reserve_for_checks(self):
         # pane-spawn --check opens no check only for a measured reading past the reserve (exit 3); unknown is exit 1.
