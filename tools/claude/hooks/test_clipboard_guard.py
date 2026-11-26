@@ -77,6 +77,11 @@ class ClipboardGuard(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNotNone(self.reason(command))
         self.assertIsNone(self.reason('git commit -m "clipboard \\\n#12" && git status'))
+        for command in ('true;\\\n# it\'s done\npbcopy < x.txt', 'echo a\\\n\\\n#b; pbcopy < x.txt',
+                        'echo `date # d`; echo a\\\n#b; pbcopy < x.txt'):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.reason(command))
+        self.assertIsNone(self.reason('true;\\\n# pbcopy < x.txt'))
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

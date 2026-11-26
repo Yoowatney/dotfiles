@@ -220,8 +220,11 @@ def writes_explainer(payload: dict) -> bool:
                 return True
         command = heredoc.sub(lambda match: match[3] + '\n', command)
         # shlex drops the newline after a comment and cuts at ${#a}, so only real comments are removed first.
-        command = parser.COMMENT.sub(lambda match: match[1] or '', parser.strip_backtick_comments(command))
-        lexer = shlex.shlex(command.replace('\\\n', ''), posix=True, punctuation_chars=';|&()\n<>')
+        command = parser.uncommented(command)
+        # A continued line left inside quotes, or a lone backslash at the end (shlex cannot read it, so it would pass).
+        # An even run of backslashes is literal text and continues nothing.
+        command = re.sub(r'(?<!\\)((?:\\\\)*)\\(?:\n|\Z)', r'\1', command)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=';|&()\n<>')
         lexer.commenters = ''
         lexer.whitespace = ' \t\r'
         lexer.wordchars += '{}'

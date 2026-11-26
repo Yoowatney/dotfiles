@@ -84,7 +84,7 @@ def writes_clipboard(command, depth=0):
     if '#' in command:
         # shlex drops the newline after a comment and cuts at ${#a}; the Actions guard removes only real comments.
         shell = load('../../agent-hooks/actions-run-guard.py')
-        command = shell.COMMENT.sub(lambda m: m[1] or '', shell.strip_backtick_comments(command))
+        command = shell.uncommented(command)
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars='|;&()\n')
         lexer.whitespace = ' \t\r'

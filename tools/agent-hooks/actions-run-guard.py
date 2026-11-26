@@ -79,7 +79,12 @@ ENDPOINT = re.compile(
 )
 BOUNDARY = set(';|&()\n')
 # A comment outside quotes; shlex would also swallow its newline and glue the next command to this one.
-COMMENT = re.compile(r"""('[^']*'|"(?:`(?:\\.|[^`\\])*`|\\.|[^"\\`])*"|\\.)|(?<![^\s;&|()])(?<![^ \t]\\\n)#[^\n]*""", re.S)  # a continued line is not a word break
+# Backticks inside a double-quoted string are read as one piece, so quotes nested in them do not end the string.
+QUOTED = r"""'[^']*'|"(?:`(?:\\.|[^`\\])*`|\\.|[^"\\`])*\""""
+COMMENT_START = r'(?<![^\s;&|()])#[^\n]*'
+COMMENT = re.compile(rf'({QUOTED}|\\.)|{COMMENT_START}', re.S)
+# A backslash-newline outside quotes and comments, which the shell removes before it looks for comments.
+CONTINUED = re.compile(rf'({QUOTED}|{COMMENT_START}|\\[^\n])|\\\n', re.S)
 
 
 def reason_ok(value: str) -> bool:
@@ -375,15 +380,26 @@ def substitutions(command: str):
         i += 1
 
 
+def join_and_strip(command: str) -> str:
+    """Join continued lines, then remove the real comments."""
+    command = CONTINUED.sub(lambda m: m[1] or '', command)
+    return COMMENT.sub(lambda m: m[1] or '', command)
+
+
 def strip_backtick_comments(command: str) -> str:
     """A comment inside backticks ends at the closing backtick, so it is stripped there before COMMENT runs."""
     for m in reversed(list(substitutions(command))):
         if m[2] is not None:
-            inner = f'`{COMMENT.sub(lambda c: c[1] or "", m[2])}`'
+            inner = f'`{join_and_strip(m[2])}`'
         else:
             inner = f'$({strip_backtick_comments(m[1])})'  # m[1] holds no parentheses, only backticks
         command = f'{command[:m.start()]}{inner}{command[m.end():]}'
     return command
+
+
+def uncommented(command: str) -> str:
+    """The command as the shell reads it for comments: backtick contents first, then the whole line."""
+    return join_and_strip(strip_backtick_comments(command))
 
 
 def denied(command: str, depth: int = 0, watch_only: bool = False, seen: dict | None = None) -> bool:
@@ -403,7 +419,7 @@ def denied(command: str, depth: int = 0, watch_only: bool = False, seen: dict | 
         return after + '\n'
 
     command = heredoc.sub(body, command)
-    command = COMMENT.sub(lambda m: m[1] or '', strip_backtick_comments(command))
+    command = uncommented(command)
     found = list(substitutions(command))
     if seen is None:
         if any([denied(m[1] or m[2] or '', depth + 1, watch_only) for m in found]):

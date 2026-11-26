@@ -113,7 +113,11 @@ class PageRequestTest(unittest.TestCase):
                 self.assertFalse(PAGE.writes_explainer(self.payload(command)))
 
     def test_a_line_continued_inside_double_quotes_keeps_its_hash_as_text(self):
-        for command in ('echo "a \\\n# b"; explain-page write result facts.md',
+        for command in ('true;\\\n# it\'s done\nexplain-page write result facts.md',
+                        'true &&\\\n# it\'s done\nexplain-page write result facts.md',                        'echo \\\\\n# it\'s\nexplain-page write result facts.md',  # a literal backslash continues nothing
+                        'echo "a \\\n# b"; explain-page write result facts.md',
+                        'explain-page publish result\necho a#b\\',  # the shell drops a lone trailing backslash
+                        '"\\\n"explain-page publish result # c',  # a continuation inside quotes joins the word
                         'gh pr create --body "first \\\n# Title" && explain-page publish result'):
             with self.subTest(command=command):
                 self.assertTrue(PAGE.writes_explainer(self.payload(command)))
