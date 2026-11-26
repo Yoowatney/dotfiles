@@ -6,7 +6,10 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
+import unittest.mock
 
 ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / 'tools/claude/hooks/gcp-account-guard.py'
@@ -138,6 +141,75 @@ class ActionsGuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNone(self.verdict(command))
 
+    def test_rest_polling_loop_is_denied_with_alternatives(self):
+        for command in [
+            'for i in $(seq 1 19); do out=$(gh api repos/o/r/actions/runs/1 --jq .status); sleep 30; done',
+            'while true; do gh run view 1 --json status; sleep 25; done',
+            'until gh run view 1 --json status | grep -q completed; do sleep 10; done',
+            'bash -c "while :; do gh api repos/o/r/pulls/1; sleep 5; done"',
+            'while sleep 30; do gh -R o/r run list; done',
+            'for i in 1 2 3; do gh api repos/o/r/actions/runs/1; sleep "$INTERVAL"; done',
+            'watch -n 25 gh api repos/o/r/actions/runs/1',
+            'watch gh run view 1',
+            "bash <<'EOF'\nwhile :; do gh api repos/o/r; sleep 20; done\nEOF",
+        ]:
+            with self.subTest(command=command):
+                reason = self.verdict(command) or ''
+                self.assertIn('gh pr checks --watch --interval 60', reason, command)
+                self.assertIn('GraphQL', reason)
+
+    def test_single_reads_batches_slow_loops_and_graphql_pass(self):
+        for command in [
+            'gh api repos/o/r/actions/runs/1', 'gh run view 1 --log', 'sleep 5; gh api repos/o/r',
+            'for r in a b c; do gh api repos/o/$r; done',
+            'while :; do gh api repos/o/r/actions/runs/1; sleep 60; done',
+            'while :; do gh run view 1; sleep 2m; done',
+            'while :; do s=$(gh run view 1); case "$s" in done) ACTIONS_RUN_REASON="rerun lost job" gh run rerun 1; sleep 15; exit;; esac; sleep 60; done',
+            'while :; do gh api graphql -f query=q; sleep 5; done',
+            'while :; do gh api rate_limit; sleep 5; done',
+            'while :; do gh pr view 1 --json state; sleep 5; done',
+            'for f in a b; do sleep 1; done; gh --version',
+            "echo 'while :; do gh api repos/o/r; sleep 5; done'",
+            "cat <<'EOF' > x.sh\nwhile :; do gh api repos/o/r; sleep 5; done\nEOF",
+        ]:
+            with self.subTest(command=command):
+                self.assertIsNone(self.verdict(command), command)
+
+    def budget_verdict(self, command, home, session='s1'):
+        with unittest.mock.patch.dict(os.environ, {'HOME': home}):
+            return COMMON.riders({'tool_name': 'Bash', 'session_id': session, 'tool_input': {'command': command}})
+
+    def test_one_session_cannot_spend_the_shared_rest_quota(self):
+        """Hundreds of one-call-per-command log downloads must stop before they spend the whole quota."""
+        read = 'gh api repos/o/r/actions/jobs/1/logs'
+        with tempfile.TemporaryDirectory() as home:
+            for number in range(300):
+                self.assertIsNone(self.budget_verdict(read, home), number)
+            reason = self.budget_verdict(read, home) or ''
+            self.assertIn('GH_REST_REASON', reason)
+            self.assertIn('300', reason)
+            self.assertTrue(self.budget_verdict('gh run view 1', home))
+            self.assertTrue(self.budget_verdict("GH_REST_REASON=x " + read, home))
+            self.assertIsNone(self.budget_verdict("GH_REST_REASON='needed for incident triage' " + read, home))
+            for free in ['gh pr view 1', 'gh api graphql -f query=q', 'gh api rate_limit', 'gh api --help', 'ls']:
+                self.assertIsNone(self.budget_verdict(free, home), free)
+            self.assertIsNone(self.budget_verdict(read, home, session='s2'))
+
+    def test_budget_counts_each_call_in_a_command_and_forgets_after_an_hour(self):
+        three = 'gh api repos/o/a; gh api -X GET repos/o/b; x=$(gh run list)'
+        with tempfile.TemporaryDirectory() as home:
+            for _ in range(100):
+                self.assertIsNone(self.budget_verdict(three, home))
+            self.assertTrue(self.budget_verdict('gh api repos/o/a', home))
+            state = Path(home) / '.local/state/gh-rest-budget/s1'
+            state.write_text(''.join(f'{int(time.time()) - 3601}\n' for _ in range(300)))
+            self.assertIsNone(self.budget_verdict('gh api repos/o/a', home))
+            self.assertEqual(len(state.read_text().split()), 1)
+
+    def test_unwritable_budget_state_never_blocks(self):
+        with tempfile.NamedTemporaryFile() as not_a_directory:
+            self.assertIsNone(self.budget_verdict('gh api repos/o/a', not_a_directory.name))
+
     def test_both_runtime_payloads_receive_native_deny_and_allow(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith(('HERDR_', 'MUNICE_'))}
         env.pop('ACTIONS_RUN_REASON', None)
@@ -151,6 +223,7 @@ class ActionsGuardTest(unittest.TestCase):
                                     ('gh pr checks 12 --watch --interval 0060', True),
                                     ('gh pr checks 12 --watch --interval 0x3c', False),
                                     ('uv run --no-project python3 ~/.dotfiles/tools/agent-hooks/ci-watch.py --repo owner/repo 123', False),
+                                    ('while :; do gh api repos/o/r; sleep 5; done', True),
                                     ('git push origin feature', False)]:
                 with self.subTest(runtime=runtime, command=command):
                     payload = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash',
