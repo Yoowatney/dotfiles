@@ -5,12 +5,17 @@ Rides on the already registered gcp-account-guard, like pane-fit/job-host/fix-ro
 so open sessions do not need a new hook registration or Codex trust approval.
 This prevents accidental starts, not arbitrary code hidden in scripts or aliases.
 Release creation and git push deliberately remain outside this guard.
+It also refuses to rerun a pull_request run that is not of the PR's current head, reason or not:
+under cancel-in-progress the old run cancels the newer commit's checks.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
+import subprocess
+import time
 
 REASON = 'ACTIONS_RUN_REASON'
 WATCH_DENY = (
@@ -26,6 +31,22 @@ DENY = (
     '예: ACTIONS_RUN_REASON=\'required release recovery\' gh workflow run build.yml. '
     '이 예외는 실행 필요성을 기록하며 배포 승인이나 다른 안전 훅을 대신하지 않습니다.'
 )
+STALE_DENY = (
+    'actions-run-guard: run {run}은 PR #{number}의 옛 커밋({old})을 검사한 것입니다. 지금 head는 {new}입니다. '
+    '옛 run을 다시 돌리면 cancel-in-progress 설정이 최신 커밋의 검사를 취소할 수 있습니다. '
+    '최신 커밋의 run을 다시 돌리세요(gh pr checks {number}로 찾습니다).'
+)
+UNVERIFIED_DENY = (
+    'actions-run-guard: 다시 돌리려는 Actions run이 PR의 최신 커밋인지 확인하지 못했습니다. '
+    'run id를 숫자로 직접 쓰고 -R OWNER/REPO를 붙여 한 번에 하나씩 실행하세요.'
+)
+LOOKUP_SECONDS = 5  # all lookups of one command; the registered hook is cut at 10 s
+RERUN_ENDPOINT = re.compile(
+    r'(?:^|/)repos/(?P<repo>[^/]+/[^/]+)/actions/(?:'
+    r'runs/(?P<run>[^/]+)/(?:rerun|rerun-failed-jobs|jobs/[^/]+/rerun)|jobs/(?P<job>[^/]+)/rerun)/?$'
+)
+# (repo, run id, job id) of every rerun the current command would be allowed to start.
+RERUNS: list[tuple[str, str, str]] = []
 ASSIGNMENT = re.compile(r'^[A-Za-z_]\w*=')
 ENDPOINT = re.compile(
     r'(?:^|/)repos/[^/]+/[^/]+/(?:'
@@ -121,6 +142,68 @@ def starts_actions(args: list[str]) -> bool:
     return endpoint and (method or ('POST' if data else 'GET')) in ('POST', 'PUT', 'PATCH')
 
 
+def rerun_target(args: list[str]) -> tuple[str, str, str] | None:
+    """(repo, run id, job id) of a rerun. repo '' leaves gh to resolve it from the working directory."""
+    if '--help' in args or '-h' in args:
+        return None
+    repo = ''
+    for index, arg in enumerate(args):
+        if arg in ('-R', '--repo') and index + 1 < len(args):
+            repo = args[index + 1]
+        elif arg.startswith('--repo='):
+            repo = arg.split('=', 1)[1]
+        elif arg.startswith('-R') and len(arg) > 2:
+            repo = arg[2:].removeprefix('=')
+    rest = command_args(args)
+    if rest[:2] == ['run', 'rerun']:
+        run = job = ''
+        for index, arg in enumerate(rest[2:], 2):
+            if arg in ('-j', '--job') and index + 1 < len(rest):
+                job = rest[index + 1]
+            elif arg.startswith('--job='):
+                job = arg.split('=', 1)[1]
+            elif not run and rest[index - 1] not in ('-j', '--job') and (arg.isdigit() or '$' in arg):
+                if arg in ('1', '2') and rest[index + 1:index + 2] and rest[index + 1].startswith('>'):
+                    continue  # the file descriptor of 2>&1
+                run = arg
+        return repo, run, job
+    for arg in rest[1:]:
+        match = RERUN_ENDPOINT.search(arg.split('?', 1)[0])
+        if match:
+            named = match['repo']
+            return '' if '{' in named else named, match['run'] or '', match['job'] or ''
+    return None
+
+
+def stale_rerun(cwd: str, env: dict) -> str | None:
+    """Refusal for the first collected rerun that is stale or cannot be checked."""
+    deadline = time.monotonic() + LOOKUP_SECONDS
+
+    def gh(repo: str, *args: str):
+        result = subprocess.run(['gh', *args], env=dict(env, GH_REPO=repo) if repo else env, cwd=cwd or None,
+                                capture_output=True, text=True, check=True,
+                                timeout=max(0.1, deadline - time.monotonic()))
+        return json.loads(result.stdout)
+
+    for repo, run, job in RERUNS:
+        try:
+            if job and not run and job.isdigit():
+                run = str(gh(repo, 'api', f'repos/{{owner}}/{{repo}}/actions/jobs/{job}')['run_id'])
+            if not run.isdigit():
+                return UNVERIFIED_DENY
+            info = gh(repo, 'run', 'view', run, '--json', 'event,headBranch,headSha')
+            if info['event'] != 'pull_request':
+                continue
+            prs = gh(repo, 'pr', 'list', '--head', info['headBranch'], '--state', 'open',
+                     '--json', 'number,headRefOid')
+            if prs and all(pr['headRefOid'] != info['headSha'] for pr in prs):
+                return STALE_DENY.format(run=run, number=prs[0]['number'], old=info['headSha'][:8],
+                                         new=prs[0]['headRefOid'][:8])
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            return UNVERIFIED_DENY  # rider() would turn an exception into "allowed"
+    return None
+
+
 def command_denied(words: list[str], depth: int, watch_only: bool = False) -> bool:
     """Judge a simple command; reason assignments apply only to that command."""
     reason = ''
@@ -160,7 +243,10 @@ def command_denied(words: list[str], depth: int, watch_only: bool = False) -> bo
     name = os.path.basename(words[i])
     args = words[i + 1:]
     if name == 'gh':
-        return watches_run(args) or (not watch_only and starts_actions(args) and not reason_ok(reason))
+        refused = watches_run(args) or (not watch_only and starts_actions(args) and not reason_ok(reason))
+        if not watch_only and not refused and starts_actions(args) and (target := rerun_target(args)):
+            RERUNS.append(target)
+        return refused
     if name in ('bash', 'sh', 'zsh'):
         for n, arg in enumerate(args[:-1]):
             if arg.startswith('-') and not arg.startswith('--') and 'c' in arg[1:]:
@@ -240,4 +326,7 @@ def check(payload: dict, env: dict) -> str | None:
         return None
     if 'watch' in command and denied(command, watch_only=True):
         return WATCH_DENY
-    return DENY if denied(command) else None
+    RERUNS.clear()
+    if denied(command):
+        return DENY
+    return stale_rerun(str(payload.get('cwd') or ''), env)
