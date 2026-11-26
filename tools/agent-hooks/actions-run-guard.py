@@ -375,6 +375,17 @@ def substitutions(command: str):
         i += 1
 
 
+def strip_backtick_comments(command: str) -> str:
+    """A comment inside backticks ends at the closing backtick, so it is stripped there before COMMENT runs."""
+    for m in reversed(list(substitutions(command))):
+        if m[2] is not None:
+            inner = f'`{COMMENT.sub(lambda c: c[1] or "", m[2])}`'
+        else:
+            inner = f'$({strip_backtick_comments(m[1])})'  # m[1] holds no parentheses, only backticks
+        command = f'{command[:m.start()]}{inner}{command[m.end():]}'
+    return command
+
+
 def denied(command: str, depth: int = 0, watch_only: bool = False, seen: dict | None = None) -> bool:
     if depth > 8:
         return True
@@ -392,7 +403,7 @@ def denied(command: str, depth: int = 0, watch_only: bool = False, seen: dict | 
         return after + '\n'
 
     command = heredoc.sub(body, command)
-    command = COMMENT.sub(lambda m: m[1] or '', command)
+    command = COMMENT.sub(lambda m: m[1] or '', strip_backtick_comments(command))
     found = list(substitutions(command))
     if seen is None:
         if any([denied(m[1] or m[2] or '', depth + 1, watch_only) for m in found]):
@@ -404,7 +415,7 @@ def denied(command: str, depth: int = 0, watch_only: bool = False, seen: dict | 
     lexer = shlex.shlex(command.replace('\\\n', ''), posix=True, punctuation_chars=';|&()\n')
     lexer.commenters = ''  # COMMENT removed the real ones; shlex would also cut at ${#a} or a#b
     lexer.whitespace = ' \t\r'
-    lexer.wordchars += '{}'
+    lexer.wordchars += '{}#$'
     words = []
     try:
         for word in lexer:
