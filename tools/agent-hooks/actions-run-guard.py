@@ -35,6 +35,7 @@ DENY = (
 REST_REASON = 'GH_REST_REASON'
 REST_BUDGET = 300  # per session per hour; ordinary work stays well below it
 REST_POLL = 60  # seconds, the same floor as CI watching
+POLLING = {'call', 'short'}  # a loop holding exactly these (no long sleep) polls too fast
 ALTERNATIVES = (
     'PR 검사는 gh pr checks --watch --interval 60, Actions run은 '
     'uv run --no-project python3 ~/.dotfiles/tools/agent-hooks/ci-watch.py --repo OWNER/REPO RUN_ID, '
@@ -57,6 +58,8 @@ ENDPOINT = re.compile(
     r'actions/(?:runs/[^/]+/)?jobs/[^/]+/rerun|dispatches)/?$'
 )
 BOUNDARY = set(';|&()\n')
+# A comment outside quotes; shlex would also swallow its newline and glue the next `done` to this command.
+COMMENT = re.compile(r"""('[^']*'|"(?:\\.|[^"\\])*"|\\.)|(?<![^\s;&|()])#[^\n]*""")
 
 
 def reason_ok(value: str) -> bool:
@@ -176,7 +179,8 @@ def short_sleep(value: str) -> bool:
 def command_denied(words: list[str], depth: int, watch_only: bool = False, seen: dict | None = None) -> bool:
     """Judge a simple command; reason assignments apply only to that command.
 
-    With seen, only collect REST calls and polling-loop signs and deny nothing."""
+    With seen, only collect REST calls and polling loops and deny nothing.
+    seen['blocks'] holds the open loops (what each one contains) and open cases (None)."""
     reason = rest_reason = ''
     i = 0
     while i < len(words):
@@ -207,30 +211,48 @@ def command_denied(words: list[str], depth: int, watch_only: bool = False, seen:
                 # env -u/--unset must not turn its operand into the command.
                 flag = words[i]
                 i += 2 if flag in ('-u', '--unset', '-C', '--chdir') else 1
-        elif word in ('then', 'do', 'if', 'elif', 'while', 'until', '!', '{'):
+        elif word in ('then', 'do', 'if', 'elif', 'else', 'while', 'until', '!', '{'):
             i += 1
         else:
             break
-    if seen is not None and {'while', 'until'} & set(words[:i]):
-        seen['loop'] = True
+    if seen is not None:
+        if {'while', 'until'} & set(words[:i]):
+            seen['blocks'].append(set())  # before its condition, which runs every round
+        # A substitution is judged where it stands, so a loop owns only what it contains.
+        # A `for` list is read once, so it is judged before that loop opens.
+        for number in re.findall(r'__SUB(\d+)__', ' '.join(words)):
+            if int(number) < len(seen['subs']):
+                # Judged once, even when a `bash -c "..."` string carries the placeholder again.
+                inner, seen['subs'][int(number)] = seen['subs'][int(number)], ''
+                denied(inner, depth + 1, watch_only, seen)
     if i >= len(words):
         return False
     name = os.path.basename(words[i])
     args = words[i + 1:]
     if seen is not None:
+        blocks = seen['blocks']
+        loops = [block for block in blocks if block is not None]
         if name == 'for':
-            seen['loop'] = True
+            blocks.append(set())
+        elif name == 'case':
+            blocks.append(None)
+        elif name == 'esac' and blocks and blocks[-1] is None:
+            blocks.pop()
+        elif name == 'done' and blocks and blocks[-1] is not None:  # inside a case, `done)` is a pattern
+            seen['poll'] |= blocks.pop() == POLLING
         elif name == 'sleep' and args:
-            seen['short' if short_sleep(args[0]) else 'long'] = True
+            for loop in loops:
+                loop.add('short' if short_sleep(args[0]) else 'long')
         elif name == 'watch' and 'gh' in args:
             head = args[:args.index('gh')]
             interval = next((a[2:] or b for a, b in zip(head, head[1:] + ['']) if a.startswith('-n')), '2')
-            seen['loop'] = True
-            seen['short' if short_sleep(interval.lstrip('=')) else 'long'] = True
             name, args = 'gh', args[args.index('gh') + 1:]
+            seen['poll'] |= uses_rest(args) and short_sleep(interval.lstrip('='))
         if name == 'gh':
             if uses_rest(args):
                 seen['calls'].append(reason_ok(rest_reason))
+                for loop in loops:
+                    loop.add('call')
             return False
     if name == 'gh':
         return watches_run(args) or (not watch_only and starts_actions(args) and not reason_ok(reason))
@@ -242,7 +264,7 @@ def command_denied(words: list[str], depth: int, watch_only: bool = False, seen:
 
 
 def substitutions(command: str):
-    """Extract common shell substitutions without executing text quoted as data."""
+    """Match common shell substitutions without executing text quoted as data."""
     pattern = re.compile(r'\$\(([^()]*)\)|`([^`]*)`')
     quote = ''
     i = 0
@@ -262,7 +284,7 @@ def substitutions(command: str):
         elif quote != "'":
             match = pattern.match(command, i)
             if match:
-                yield match.group(1) or match.group(2) or ''
+                yield match
                 i = match.end()
                 continue
         i += 1
@@ -281,17 +303,23 @@ def denied(command: str, depth: int = 0, watch_only: bool = False, seen: dict | 
         if re.search(shell, before) or re.search(r'\|\s*(?:bash|sh|zsh)\s*$', after):
             return after + '\n' + match.group(4) + '\n'
         if not match.group(1):
-            return after + '\n' + '\n'.join(substitutions(match.group(4))) + '\n'
+            return after + '\n' + '\n'.join(m[1] or m[2] or '' for m in substitutions(match.group(4))) + '\n'
         return after + '\n'
 
     command = heredoc.sub(body, command)
-    inners = list(substitutions(command))
-    if any([denied(inner, depth + 1, watch_only, seen) for inner in inners]):
-        return True
     if seen is not None:
-        for inner in inners:  # counted above; the lexer below would see an unquoted one again
-            command = command.replace(f'$({inner})', 'SUB').replace(f'`{inner}`', 'SUB')
+        command = COMMENT.sub(lambda m: m[1] or '', command)
+    found = list(substitutions(command))
+    if seen is None:
+        if any([denied(m[1] or m[2] or '', depth + 1, watch_only) for m in found]):
+            return True
+    else:  # leave a placeholder; command_denied judges the inner command when it reaches it
+        for number, m in reversed(list(enumerate(found, len(seen['subs'])))):
+            command = f'{command[:m.start()]}__SUB{number}__{command[m.end():]}'
+        seen['subs'] += [m[1] or m[2] or '' for m in found]
     lexer = shlex.shlex(command.replace('\\\n', ''), posix=True, punctuation_chars=';|&()\n')
+    if seen is not None:
+        lexer.commenters = ''
     lexer.whitespace = ' \t\r'
     lexer.wordchars += '{}'
     words = []
@@ -329,12 +357,13 @@ def over_budget(session: str, calls: list[bool], env: dict) -> bool:
 
 
 def rest_problem(command: str, session: str, env: dict) -> str | None:
-    seen = {'calls': [], 'loop': False, 'short': False, 'long': False}
+    seen = {'calls': [], 'subs': [], 'blocks': [], 'poll': False}
     denied(command, seen=seen)
     if not seen['calls']:
         return None
-    # A slow poll may still pause briefly before exiting, so one long enough sleep passes the command.
-    if seen['loop'] and seen['short'] and not seen['long']:
+    # An unclosed loop runs to the end of the command. A slow poll may still pause briefly before
+    # exiting, so one long enough sleep in the same loop passes it.
+    if seen['poll'] or POLLING in seen['blocks']:
         return LOOP_DENY
     if session and over_budget(session, seen['calls'], env):
         return BUDGET_DENY

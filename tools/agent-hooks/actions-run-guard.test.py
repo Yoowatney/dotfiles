@@ -175,6 +175,36 @@ class ActionsGuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNone(self.verdict(command), command)
 
+    def test_loop_rule_judges_only_what_one_loop_contains(self):
+        """A loop elsewhere in the command must not turn a single read into polling."""
+        for command in [
+            'for f in a b; do echo $f; done; sleep 2; gh api repos/o/r',
+            'sleep 15; for r in 1 2; do gh run view $r -R o/r --json status; done',
+            'until false; do break; done; gh run view 1 -R o/r; sleep 45; gh run view 1 -R o/r',
+            'sleep $(( 3 )) && for j in a b c; do gh api repos/o/r/actions/jobs/$j/logs; done',
+            'for id in $(gh run list --json databaseId); do echo $id; sleep 1; done',
+            'for f in a b; do sleep 1; done # settle\ngh api repos/o/r',
+            'for f in a b; do\n  echo $f # name\ndone\nsleep 2\ngh api repos/o/r',
+            'gh api repos/o/r; while :; do sleep 5; break; done',
+            'for r in a b; do gh api repos/o/$r; done; for f in a b; do sleep 1; done',
+            'while :; do gh run view 1; if x; then sleep 5; exit; else sleep 60; fi; done',
+        ]:
+            with self.subTest(command=command):
+                self.assertIsNone(self.verdict(command), command)
+        for command in [
+            'sleep 90; while :; do gh api repos/o/r; sleep 5; done',
+            'while :; do for r in a b; do gh api repos/o/$r; done; sleep 5; done',
+            'while :; do gh api repos/o/r; for i in 1 2; do sleep 5; done; done',
+            'while [ "$(gh run view 1 --json status)" != done ]; do sleep 5; done',
+            'while :; do s="`gh run view 1`"; sleep 5; done',
+            'while :; do bash -c "gh api repos/o/r"; sleep 5; done',
+            'while :; do\n  gh api repos/o/r # poll\n  sleep 5 # short\ndone',
+            'while :; do s=$(gh run view 1); case $s in\n done) break;;\n esac; sleep 5; done',
+            '(while :; do gh api repos/o/r; sleep 5; done)',
+        ]:
+            with self.subTest(command=command):
+                self.assertIn('gh pr checks --watch --interval 60', self.verdict(command) or '', command)
+
     def budget_verdict(self, command, home, session='s1'):
         with unittest.mock.patch.dict(os.environ, {'HOME': home}):
             return COMMON.riders({'tool_name': 'Bash', 'session_id': session, 'tool_input': {'command': command}})
@@ -205,6 +235,11 @@ class ActionsGuardTest(unittest.TestCase):
             state.write_text(''.join(f'{int(time.time()) - 3601}\n' for _ in range(300)))
             self.assertIsNone(self.budget_verdict('gh api repos/o/a', home))
             self.assertEqual(len(state.read_text().split()), 1)
+            for count, command in [(1, 'bash -c "echo $(gh api repos/o/a)"'),
+                                   (2, 'x=$(gh api repos/o/a); y=$(gh api repos/o/a)')]:
+                state.write_text('')
+                self.assertIsNone(self.budget_verdict(command, home))
+                self.assertEqual(len(state.read_text().split()), count, command)
 
     def test_unwritable_budget_state_never_blocks(self):
         with tempfile.NamedTemporaryFile() as not_a_directory:
