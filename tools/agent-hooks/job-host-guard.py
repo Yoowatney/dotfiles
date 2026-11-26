@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """PreToolUse check (Claude Code and Codex): a recurring job about to land on 회사맥 is asked once where it should run.
 
-Company jobs do not belong on 회사맥, and a memory rule saying so failed twice in October. 회사맥 sleeps with its lid closed and
-goes offline on the commute, so such a job stops with nobody told. A hook cannot know where a job belongs, so it forces the
+Company jobs that must keep running do not belong on 회사맥 (세션맥), and a memory rule saying so failed twice in October: they
+go on 회사서버맥. A hook cannot know where a job belongs, so it forces the
 judgment: the first launchd, cron or watch-job change of a target in a session is refused with the question. Repeating the
 call passes, except in a job tab nobody has typed in: it stops there and leaves the question on the board.
 
@@ -25,7 +25,7 @@ import sys
 sys.dont_write_bytecode = True  # no __pycache__ in the dotfiles at every tool call
 EDITORS = {"Edit", "Write", "MultiEdit"}
 LAPTOP_MODEL = "Mac16,8"  # ponytail: a new 회사맥 silently turns this off, update the model then
-ASK = ("job-host: 세션맥에 정기 잡을 올리거나 바꾸기 직전입니다. 세션맥은 덮개를 닫거나 출퇴근하면 멈추므로, 계속 돌아야 하는 회사 잡은 "
+ASK = ("job-host: 세션맥에 정기 잡을 올리거나 바꾸기 직전입니다. 계속 돌아야 하는 회사 잡은 세션맥이 아니라 "
        "회사서버맥의 launchd에 둡니다. 세션맥에는 요유의 세션이나 세션맥 도구가 꼭 필요한 잡만 둡니다. "
        "요유가 세션맥을 지정했거나 이유가 분명하면 같은 호출을 그대로 다시 실행하고, 보고에 어느 머신에 왜 두었는지 적으세요. "
        "아니면 이 호출을 버리고 회사서버맥에 올리세요. 어디에 둘지 판단할 수 없으면 요유에게 물으세요.")
@@ -132,6 +132,7 @@ def selftest():
 
     with tempfile.TemporaryDirectory() as d:
         env = {"JOB_HOST_DIR": d, "JOB_HOST_MODEL": LAPTOP_MODEL}
+        assert not any(w in ASK for w in ("출퇴근", "덮개")), "the question gives no commute or lid as its reason"
 
         def bash(command, session="s1"):
             return {"session_id": session, "tool_name": "Bash", "tool_input": {"command": command}}

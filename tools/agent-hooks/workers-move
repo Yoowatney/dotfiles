@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """퇴근 hand-over, phase 1 of api#1049 (요유 2026-11-06): the main pane stays on the 회사맥, and its panes on the workers server
-carry on on 집맥 while the 회사맥 sleeps.
+carry on on 집맥.
+
+It was built for a Mac that slept on the way home. 세션맥 now stays on, so 퇴근 alone moves nothing: run go only when 요유 asks
+to move panes to 집맥.
 
     workers-move go             start the move in the background and return; its summary reaches the main pane by pane-tell
     workers-move list           the panes go would ask, changing nothing
     workers-move bridge         workers-watch runs it every minute on the 세션맥: what moved panes said on 집맥 reaches the main pane
     workers-move tell <pane> <text>   type into a moved pane on 집맥 (pane-tell there, over ssh)
     workers-move read <pane>    that pane's screen
-    workers-move resume         tell each pane go left on the 세션맥 to carry on (after 출근)
+    workers-move resume         tell each pane go left on the 세션맥 to carry on
     workers-move --selftest
 
 A move, per pane of the main pane on workers (agent name spawn-<main terminal>-, never a check pane or another lead's):
@@ -77,17 +80,17 @@ SYNCED = ("~/.dotfiles", "~/work/munice", "~/work/munice/munice-claude")  # 집�
 ENTRY = re.compile(r"^## (\d\d:\d\d:\d\d) (\S+)(?: (.*))?$", re.M)  # auto-tab-close.py's `## HH:MM:SS <address> <label>`
 SESSION_LINE = re.compile(r"^세션 (\S*), 폴더 .*\n+")
 REPORT_AGENT = re.compile(r"^세션 \S*, 폴더 [^\n]*, 에이전트 (\S+)\n+")
-ASK = ("[퇴근 인계] 요유가 퇴근해서 세션맥이 곧 잠듭니다. 지금 하던 도구 호출이 끝나면 새 단계를 시작하지 말고 다음만 하세요. "
+ASK = ("[퇴근 인계] 이 칸의 일을 집맥의 새 칸으로 넘깁니다. 지금 하던 도구 호출이 끝나면 새 단계를 시작하지 말고 다음만 하세요. "
        "1) 바뀐 파일이 있으면 이 일의 브랜치에 WIP 커밋을 만드세요. 기본 브랜치(main 등)에는 커밋하지 말고, 이 일과 상관없는 파일은 넣지 마세요. "
        "push는 이 칸을 넘기는 스크립트가 합니다. "
-       "2) Slack 스레드 감시는 멈추세요. 퇴근하는 동안 Slack 스레드는 집맥 ambient가 맡습니다. 옮길 칸이면 Monitor와 백그라운드 작업도 멈추세요. "
+       "2) 옮길 칸이면 Slack 스레드 감시, Monitor, 백그라운드 작업을 멈추세요. "
        "3) 답 맨 앞 줄을 `[인계 메모] 옮김` 또는 `[인계 메모] 옮기지 않음: <이유>`로 쓰고, 다음 줄에 `폴더: <이 일을 하던 폴더의 절대경로>`를 쓰세요. "
        "이어서 집맥의 새 칸이 이 일을 이어 가는 데 필요한 것을 모두 적으세요: 목표, 한 일, 남은 단계, 브랜치, 확인한 것과 못 한 것, 주의할 것. "
        "옮기지 않을 칸은 이렇습니다: 기다리기만 하는 칸(CI, 배포, 답을 기다림: 무엇을 기다리는지 적으세요), 브라우저(ego) QA가 남은 칸, "
-       "요유 계정이 필요한 GCP 단계가 남은 칸, 이미 끝난 칸. CI나 배포를 기다리는 칸은 Monitor를 그대로 두세요: 세션맥이 깨면 이어 갑니다. "
+       "요유 계정이 필요한 GCP 단계가 남은 칸, 이미 끝난 칸. CI나 배포를 기다리는 칸은 Monitor를 그대로 두세요: 이 칸에서 이어 갑니다. "
        "4) 마지막 줄은 `남은 것: 요유 몫: 없음 · 유요 몫: 인계 메모대로 · 세션: 닫으면 넘기는 일이 멈춤`으로 쓰세요. "
        "이 답은 리드에게 가지 않고 넘기는 스크립트가 읽습니다.")
-RESUME = "[퇴근 인계 끝] 세션맥이 다시 켜졌습니다. 인계 메모를 쓰느라 멈춘 일을 이어 가세요. 이어 갈 일이 없으면 짧게 보고하세요."
+RESUME = "[퇴근 인계 끝] 이 칸은 집맥으로 넘기지 않았습니다. 인계 메모를 쓰느라 멈춘 일을 이어 가세요. 이어 갈 일이 없으면 짧게 보고하세요."
 
 # Runs on 집맥 as `/usr/bin/python3 -I - <json>` (macOS's 3.9). One op per call; prints one JSON line.
 REMOTE = r'''
@@ -517,13 +520,13 @@ def note(env, rec, memo, g) -> str:
 
 
 def instruction(rec, g, made) -> str:
-    text = (f"[퇴근 인계] 세션맥 칸 '{plain_label(rec['label'])}'이 요유 퇴근 때 넘긴 일을 집맥에서 이어 갑니다. 먼저 {{memo}}를 Read로 끝까지 "
+    text = (f"[퇴근 인계] 세션맥 칸 '{plain_label(rec['label'])}'이 넘긴 일을 집맥에서 이어 갑니다. 먼저 {{memo}}를 Read로 끝까지 "
             f"읽으세요. 원래 지시와 인계 메모가 들어 있습니다. 폴더는 {rec['folder']}"
             + (f"이고 브랜치 {g['branch']}가 push되어 있습니다. " if g.get("git") else "입니다. ")
             + "집맥의 ego 사용 가능 여부는 ~/.local/bin/ego-browser nodejs에서 실제 출력으로 확인하세요. 앱이 없거나 최초 설정·사이트 로그인이 필요하면 멈추고 리드에게 보고하세요. "
             "요유 계정이 필요한 GCP 단계도 멈추고 보고하세요. 에이전트 계정의 읽기는 실제 명령으로 확인하고 권한이 없다고 추측하지 마세요. "
             "~/.claude, ~/.codex, ~/.dotfiles, munice-claude 원본 같은 전역 설정과 메모리는 고치지 마세요: 집맥은 세션맥에서 복사받습니다. "
-            "Slack 스레드는 감시하지 마세요: 퇴근하는 동안 Slack 스레드는 집맥 ambient가 맡습니다.")
+            "Slack 스레드는 감시하지 마세요: 회사 Slack은 세션맥의 메인 칸이 맡습니다.")
     if g.get("synced"):
         text += " 이 폴더는 집맥이 3분마다 pull하는 원본 체크아웃이니 커밋하거나 파일을 고치지 마세요. 고칠 일이면 워크트리를 따로 만드세요."
     if made:
@@ -592,7 +595,7 @@ def summary(moves, keys) -> str:
         lines.append("집맥 칸의 보고와 알림은 세션맥이 깨어 있을 때 1분 안에 이 칸에 옵니다. 집맥 칸에 답하기: "
                      "`workers-move tell <집맥 칸 id> \"<글>\"`, 화면 보기: `workers-move read <집맥 칸 id>`.")
     if kept:
-        lines.append("세션맥에 둔 칸은 인계 메모를 쓰고 멈춰 있습니다. 출근 뒤 `workers-move resume`으로 이어 가게 하세요.")
+        lines.append("세션맥에 둔 칸은 인계 메모를 쓰고 멈춰 있습니다. `workers-move resume`으로 이어 가게 하세요.")
     return "\n".join(lines)
 
 
@@ -649,7 +652,7 @@ def run(env) -> int:
     deadline, last = time.time() + float(env.get("WORKERS_MOVE_WAIT") or WAIT), time.time()
     try:
         while waiting := [k for k in keys if moves[k].get("step") == "asked"]:
-            if time.time() - last > poll + float(env.get("WORKERS_MOVE_SLEPT") or SLEPT):  # the lid closed during the wait: at 출근 nothing goes to 집맥 (Claude review)
+            if time.time() - last > poll + float(env.get("WORKERS_MOVE_SLEPT") or SLEPT):  # this Mac slept during the wait: on waking nothing goes to 집맥 (Claude review)
                 for k in waiting:
                     settle(env, moves, moves[k], "kept", "기다리는 동안 세션맥이 잠들어 옮기지 않았습니다")
                 break
@@ -953,6 +956,11 @@ def main(argv, env) -> int:
 
 
 def selftest() -> int:
+    kept = {"k": {"step": "kept", "label": "x", "pane": "p", "reason": "r"}}
+    said = [ASK, RESUME, summary(kept, ["k"]),
+            instruction({"label": "x", "folder": "/tmp"}, {}, False)]
+    for stale in ("퇴근해서", "곧 잠듭니다", "퇴근하는 동안", "퇴근 때", "출근 뒤", "다시 켜졌습니다"):
+        assert not any(stale in t for t in said), f"no message says 세션맥 sleeps or 요유's leaving moved the work: {stale}"
     import shutil
     import tempfile
 
@@ -1117,7 +1125,7 @@ if text.startswith("[퇴근 인계]") and addr in memos:
 
         # ssh down: nothing is asked, the main pane hears why
         assert run(dict(env, WORKERS_MOVE_SSH="false")) == 1
-        assert not any(t.startswith("[퇴근 인계] 요유가") for t in told()) and "닿지 못했" in told("w1:pM")[-1]
+        assert ASK not in told() and "닿지 못했" in told("w1:pM")[-1]
 
         assert run(env) == 0
         moves = load(env, "moves.json", {})

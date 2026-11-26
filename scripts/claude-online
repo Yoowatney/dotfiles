@@ -1,9 +1,8 @@
 #!/bin/bash
 # Launch Claude Code only once the network can actually resolve names.
 #
-# Why this exists: this Mac commutes closed (09:30 lid shut → 11:00 lid open).
-# The first command typed after the lid opens races Wi-Fi association and dies
-# with "API Error: Can't reach the API server (ENOTFOUND)".
+# Why this exists: the first command typed after a closed lid opens races Wi-Fi
+# association and dies with "API Error: Can't reach the API server (ENOTFOUND)".
 #
 # Why it does NOT copy GomGomBot's moderation-scan guard: that one checks
 # `scutil --dns` for a `nameserver[0]` line. This Mac has DNS statically set to
