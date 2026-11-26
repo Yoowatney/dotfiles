@@ -38,6 +38,12 @@ class EarlyAnswerHeadTests(unittest.TestCase):
             self.assertIn("'작업 중(확인 중):'", text)
             self.assertNotIn("'확인 중:'", text)
 
+    def test_the_unopened_note_leaves_where_to_ask_to_the_refusal(self):
+        # 요유 2026-11-26: the check refusal sends the account request to the backend-bot DM; the note in the same message
+        # must not send it to a thread or #0 as well
+        self.assertIn("거절문이 알려 주는 대로", guard.UNOPENED_NOTE)
+        self.assertNotIn("스레드나 #0", guard.UNOPENED_NOTE)
+
 
 class ProseTests(unittest.TestCase):
     """A report that mentions a fence in a sentence still has its `남은 것:` line (19:03 report of 2026-11-07 was dropped)."""

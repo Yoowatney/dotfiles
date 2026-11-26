@@ -26,8 +26,9 @@
 # (요유 2026-11-19: no Codex reviews; that day a quota lookup past its six seconds sent automatic checks to Codex).
 # Past Claude's measured usage reserve no check opens, and nothing waits for one (lead decision 2026-11-19, 요유 2026-11-20): the caller
 # looks again with one command or hands a read-only recheck to an ordinary worker; an unknown, stale or slow reading opens the check on Claude.
-# A refusal for usage never means "wait for the reset": USAGE_BLOCK_NOTE tells the main pane to ask 요유 to switch the account or spend a
-# reset ticket and reopen at once, and a pane under a lead to report that this request is needed (요유 2026-11-20).
+# A refusal for usage never means "wait for the reset" (요유 2026-11-20). For a work pane, USAGE_BLOCK_NOTE tells the main pane to ask 요유
+# to switch the account or spend a reset ticket and reopen at once, and a pane under a lead to report that this request is needed. A refused
+# check has the main pane ask in 요유's backend-bot DM, once per usage window (요유 2026-11-26).
 # --kind auto selects a normal worker using local subscription quota (agent-quota); tools/agent-hooks/agent-runner shows or
 # switches the policy (claude | codex | auto | agy). Policy quota-aware keeps Codex unless its week
 # runs ahead of pace; claude-first (one local policy value, e.g. while Codex quota is short) picks Claude first
@@ -85,8 +86,9 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full]
   --check: a fresh check (main pane only) on Claude, which cannot write the checked folder.
     Always Claude, whatever the policy (요유 2026-11-19: no Codex reviews); --kind codex and --kind agy are refused. Past the measured Claude
     usage reserve it opens nothing and exits 2: look again with one command, or open an ordinary read-only recheck pane (no --check;
-    name it "<work name> [rc-<ac id>]" so its report comes straight back; if no session can open for usage, ask 요유 to switch the account
-    or spend a reset ticket instead of waiting for the reset). An unknown usage reading still opens it.
+    name it "<work name> [rc-<ac id>]" so its report comes straight back). The first such refusal of a usage window also prints the
+    command that asks 요유, in the backend-bot DM, to switch the account or spend a reset ticket; later ones say not to ask again.
+    An unknown usage reading still opens it.
   --check-level: how far the automatic check of this pane result goes, chosen by the main pane. none: no check session; the report goes
     to the main pane, which posts it headed 끝남(확인 안 함): and opens a check only when asked. figures: the check re-runs only the commands
     that gave the numbers of the report. full (also what no level means): the whole report is checked, as before levels existed.
@@ -265,12 +267,31 @@ fi
 # Lead decision 2026-11-19: Claude's usage reserve keeps room for the main pane on the same account, so past a measured
 # reading over it no check opens; auto-tab-close then sends the report with the way to look again (UNOPENED_NOTE in
 # yoyoo-share-guard.py). An unknown, stale or slow reading is not past the reserve: the check opens on Claude.
+# 요유 2026-11-26: the first such refusal of a usage window has the main pane ask 요유 in their backend-bot DM at once; later ones in
+# that window ask nothing. The marker holds the account and the blocking window's reset time; a reading within the reserve
+# removes it. auto-tab-close passes on only the first 1200 characters and tries twice, so the request leads the refusal.
+# ponytail: no lock, two checks refused in the same instant could both ask.
 if [ -n "$check" ] && [ -z "$request_child" ]; then
+  asked_marker=$state/pane-spawn/check-usage-asked
   reserve=$(bounded "$quota_limit" python3 -I "$helper_dir/agent-quota" claude-reserve "$cwd")
   case $? in
-    0) ;;
-    3) read -r week five < <(printf '%s' "$reserve" | jq -r 'def p: if . == floor then floor else . end; "\(.week | p)% \(if .short == null then "none" else "\(.short | p)%" end)"' 2>/dev/null)
-       die "Claude is past its usage reserve (week ${week:-?}, five-hour ${five:-?}), kept for the main pane: no check opened, and nothing waits for one. If one command can show the claims again, run it yourself; otherwise open a read-only recheck pane that is no check: pane-spawn --kind auto \"<work name> [rc-<the [ac-] id of the report>]\" \"<what to re-read, the full report file>\". Its report comes straight back; post from it, citing its report entry time in the 확인: line as [재확인 HH:MM:SS]. Team threads, money and operations posts are the same. Other gates, such as production write approval, stay. If no session at all can open for usage: $USAGE_BLOCK_NOTE" ;;
+    0) rm -f "$asked_marker" ;;
+    3) read -r week five window < <(printf '%s' "$reserve" | jq -r 'def p: if . == floor then floor else . end; "\(.week | p)% \(if .short == null then "none" else "\(.short | p)%" end) \(if .week > 80 then "seven_day" else "five_hour" end)"' 2>/dev/null)
+       # Only the main pane may open a check (refused further down for any other), so only its refusal asks and uses the marker.
+       caller=$("$H" pane get "${HERDR_PANE_ID:-}" 2>/dev/null | jq -r '.result.pane.terminal_id // empty' 2>/dev/null)
+       request=
+       if python3 -I "$helper_dir/herdr_peers.py" --delegates-checks "$caller"; then
+         key=$(jq -r --arg w "${window:-seven_day}" '"\(.account) \($w) \(.[$w].resets_at)"' "$state/agent-quota/claude.json" 2>/dev/null)
+         if [ -n "$key" ] && [ "$(cat "$asked_marker" 2>/dev/null)" = "$key" ]; then
+           request="Account switch or reset ticket: the first refusal of this usage window already carried the request, so do not ask a second time (a usage refusal of the recheck pane is the same request)."
+         else
+           mkdir -p "${asked_marker%/*}" && printf '%s\n' "$key" >"$asked_marker"
+           board=$HOME/work/munice/.agents/skills/agent-board
+           dm=$(sed -n 's/^YOYOO_DM = "\([A-Za-z0-9]*\)".*/\1/p' "$board/ambient/collect.py" 2>/dev/null)
+           request="First usage refusal of this window: main pane, ask 요유 now, once, to switch the account or spend a reset ticket, in their backend-bot DM (not the work's thread or the main channel): python3 $board/main/main-channel.py post --channel ${dm:-<YOYOO_DM in $board/ambient/collect.py>} --new <file> (a usage refusal of the recheck pane is the same request)."
+         fi
+       fi
+       die "Claude is past its usage reserve (week ${week:-?}, five-hour ${five:-?}), kept for the main pane: no check opened, and nothing waits for one. $request Never put the work off until the usage reset (요유 2026-11-20); open the check again as soon as 요유 says it is done. If one command can show the claims again, run it yourself; otherwise open a read-only recheck pane that is no check: pane-spawn --kind auto \"<work name> [rc-<the [ac-] id of the report>]\" \"<what to re-read, the full report file>\". Its report comes straight back; post from it, citing its report entry time in the 확인: line as [재확인 HH:MM:SS]. Team threads, money and operations posts are the same. Other gates, such as production write approval, stay." ;;
     *) echo 'pane-spawn: Claude usage unknown; the check opens on Claude' >&2 ;;
   esac
 fi
