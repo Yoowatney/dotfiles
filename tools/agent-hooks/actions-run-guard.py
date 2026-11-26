@@ -78,7 +78,7 @@ ENDPOINT = re.compile(
     r'actions/(?:runs/[^/]+/)?jobs/[^/]+/rerun|dispatches)/?$'
 )
 BOUNDARY = set(';|&()\n')
-# A comment outside quotes; shlex would also swallow its newline and glue the next `done` to this command.
+# A comment outside quotes; shlex would also swallow its newline and glue the next command to this one.
 COMMENT = re.compile(r"""('[^']*'|"(?:\\.|[^"\\])*"|\\.)|(?<![^\s;&|()])#[^\n]*""")
 
 
@@ -392,8 +392,7 @@ def denied(command: str, depth: int = 0, watch_only: bool = False, seen: dict | 
         return after + '\n'
 
     command = heredoc.sub(body, command)
-    if seen is not None:
-        command = COMMENT.sub(lambda m: m[1] or '', command)
+    command = COMMENT.sub(lambda m: m[1] or '', command)
     found = list(substitutions(command))
     if seen is None:
         if any([denied(m[1] or m[2] or '', depth + 1, watch_only) for m in found]):
@@ -403,8 +402,7 @@ def denied(command: str, depth: int = 0, watch_only: bool = False, seen: dict | 
             command = f'{command[:m.start()]}__SUB{number}__{command[m.end():]}'
         seen['subs'] += [m[1] or m[2] or '' for m in found]
     lexer = shlex.shlex(command.replace('\\\n', ''), posix=True, punctuation_chars=';|&()\n')
-    if seen is not None:
-        lexer.commenters = ''
+    lexer.commenters = ''  # COMMENT removed the real ones; shlex would also cut at ${#a} or a#b
     lexer.whitespace = ' \t\r'
     lexer.wordchars += '{}'
     words = []

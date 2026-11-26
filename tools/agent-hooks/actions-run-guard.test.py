@@ -117,6 +117,24 @@ class ActionsGuardTest(unittest.TestCase):
                 self.assertIsNone(self.verdict(command))
         self.assertIsNone(self.verdict('gh workflow run x', tool='Read'))
 
+    def test_a_comment_or_hash_does_not_hide_the_next_command(self):
+        # shlex drops from # to the end of the line, newline included, so the next command became an argument.
+        for command in [
+            'true # c\ngh workflow run build', 'echo ${#a} ; gh run rerun 1', 'echo a#b; gh workflow run build',
+            "true # it's done\ngh workflow run build", 'x="$(true # c\ngh workflow run build)"',
+            "bash -c 'true # c\ngh workflow run build'",
+            'true # c \\\ngh workflow run build',  # a backslash does not continue a comment
+        ]:
+            with self.subTest(command=command):
+                self.assertIn('ACTIONS_RUN_REASON', self.verdict(command) or '', command)
+        self.assertIn('ci-watch.py', self.verdict('true # c\ngh run watch 1') or '')
+        for command in [
+            'true # gh workflow run build', 'true # c; gh run rerun 1', 'true;# gh run watch 1',
+            'ls # then $(gh workflow run build)\ntrue', 'echo "# not a comment" # gh workflow run build',
+        ]:
+            with self.subTest(command=command):
+                self.assertIsNone(self.verdict(command), command)
+
     def test_watch_requires_the_shared_locked_entry_even_with_a_reason(self):
         for command in ['gh run watch 123', 'gh -R owner/repo run watch 123 --interval 60',
                         "ACTIONS_RUN_REASON='required recovery' gh run watch 123",
