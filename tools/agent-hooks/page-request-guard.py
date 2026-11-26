@@ -209,7 +209,7 @@ def writes_explainer(payload: dict) -> bool:
     def shell(command, base, depth=0):
         if depth > 6:
             return False
-        if any(shell(inner, base, depth + 1) for inner in parser.substitutions(command)):
+        if any(shell(m[1] or m[2] or '', base, depth + 1) for m in parser.substitutions(command)):
             return True
         heredoc = re.compile(r"<<-?\s*(['\"]?)(\w+)\1([^\n]*)\n(.*?)\n[\t ]*\2\b", re.S)
         for match in heredoc.finditer(command):
@@ -219,7 +219,13 @@ def writes_explainer(payload: dict) -> bool:
             if re.search(r'\b(?:python3?|node|ruby|perl)\b', head) and script(match[4], base):
                 return True
         command = heredoc.sub(lambda match: match[3] + '\n', command)
-        lexer = shlex.shlex(command.replace('\\\n', ''), posix=True, punctuation_chars=';|&()\n<>')
+        # shlex drops the newline after a comment and cuts at ${#a}, so only real comments are removed first.
+        command = parser.uncommented(command)
+        # A continued line left inside quotes, or a lone backslash at the end (shlex cannot read it, so it would pass).
+        # An even run of backslashes is literal text and continues nothing.
+        command = re.sub(r'(?<!\\)((?:\\\\)*)\\(?:\n|\Z)', r'\1', command)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=';|&()\n<>')
+        lexer.commenters = ''
         lexer.whitespace = ' \t\r'
         lexer.wordchars += '{}'
         try:

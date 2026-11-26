@@ -70,12 +70,25 @@ def unwrap(words):
     return words
 
 
+def load(name):
+    path = Path(__file__).resolve().parent / name
+    spec = importlib.util.spec_from_file_location('clipboard_' + path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def writes_clipboard(command, depth=0):
     if depth > 8:
         return True
+    if '#' in command:
+        # shlex drops the newline after a comment and cuts at ${#a}; the Actions guard removes only real comments.
+        shell = load('../../agent-hooks/actions-run-guard.py')
+        command = shell.uncommented(command)
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars='|;&()\n')
         lexer.whitespace = ' \t\r'
+        lexer.commenters = ''
         tokens = list(lexer)
     except ValueError:
         # Unreadable shell text naming a clipboard writer must not slip through.
@@ -158,11 +171,7 @@ def reason(payload):
     try:
         # Reuse the identity guard's battle-tested Claude/Codex turn parsing.
         # This only reads the transcript; none of its identity exceptions apply.
-        path = Path(__file__).with_name('gcp-account-guard.py')
-        spec = importlib.util.spec_from_file_location('clipboard_human_turn', path)
-        parser = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(parser)
-        prompt = parser.latest_prompt(payload.get('transcript_path') or '')
+        prompt = load('gcp-account-guard.py').latest_prompt(payload.get('transcript_path') or '')
     except Exception:
         return DENY
     return None if requested(prompt) else DENY
