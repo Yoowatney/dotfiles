@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# prod-version: the production nightly_api version and any production deploy still running, in one line (api#1659).
+# It reads the deploy workflow's run history. A report's "운영 서버 버전" is this line's value, never a release list or an earlier report.
+# PROD_VERSION_RUNS=<file> reads that JSON instead of gh (tests).
+# ponytail: release-triggered runs only, so a patch workflow_dispatch deploy is not listed; add when a patch ships.
+set -euo pipefail
+if [ -n "${PROD_VERSION_RUNS:-}" ]; then runs=$(cat "$PROD_VERSION_RUNS")
+else runs=$(gh run list -R munice-dev/nightly_api --workflow deploy.yml --event release --limit 30 --json headBranch,status,conclusion,createdAt)
+fi
+jq -r '
+  def kst: (fromdateiso8601 + 32400 | strftime("%m-%d %H:%M")) + " KST";
+  [.[] | select(.headBranch | test("-rc") | not)] as $p
+  | ([$p[] | select(.status == "completed" and .conclusion == "success")][0]) as $ok
+  | [$p[] | select(.status != "completed")] as $run
+  | "운영 " + ($ok.headBranch // "알 수 없음") + (if $ok then " (시작 " + ($ok.createdAt | kst) + ", 성공)" else "" end)
+    + " · 진행 중인 운영 배포: " + (if ($run | length) == 0 then "없음" else ($run | map(.headBranch + " (시작 " + (.createdAt | kst) + ", " + .status + ")") | join(", ")) end)
+    + (if ($p[0] | .status == "completed" and .conclusion != "success" and .conclusion != "cancelled") then " · 가장 최근 운영 배포 " + $p[0].headBranch + " 실패(" + $p[0].conclusion + ")" else "" end)
+' <<<"$runs"
