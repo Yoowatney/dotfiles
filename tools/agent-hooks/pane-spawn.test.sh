@@ -95,7 +95,13 @@ NOUPDATE="-c check_for_update_on_startup=false"
 # sandbox let it write only its folder, so gcloud failed as it rewrote its login files and ps saw no other process. Like a
 # Claude pane it runs with no sandbox, guarded by the same PreToolUse hooks, and nobody answers an approval prompt.
 UNBOXED="--sandbox danger-full-access --ask-for-approval never"
-has "--kind codex --pane w1:new --timeout 120000 -- $UNBOXED $NOUPDATE -m gpt-5" "a codex work pane runs unsandboxed, skips its update prompt, then its arguments"
+# Worker-only Fast follows the shell's Ultrafast default; explicit caller config still comes last.
+has '-c service_tier="fast" -m gpt-5' "a Codex work pane defaults to Fast before caller arguments"
+SESSIONLESS=1 ps --kind codex "조사" "지시" -- -c 'service_tier="default"' >/dev/null
+has '-c service_tier="fast" -c service_tier="default"' "the caller's own service tier wins over worker Fast"
+FAST='-c service_tier="fast"'
+SESSIONLESS=1 ps --kind codex "조사" "지시" -- -m gpt-5 >/dev/null
+has "--kind codex --pane w1:new --timeout 120000 -- $UNBOXED $NOUPDATE $FAST -m gpt-5" "a codex work pane runs unsandboxed, skips its update prompt, then its arguments"
 # Codex refuses an option given twice (`cannot be used multiple times`, Codex 0.167), so the caller's own choice wins.
 for own in "--sandbox read-only" "--sandbox=read-only" "-s read-only" "-sread-only" "--full-auto" "--yolo" "--dangerously-bypass-approvals-and-sandbox"; do
   # shellcheck disable=SC2086
@@ -108,7 +114,7 @@ for own in "--ask-for-approval on-request" "--ask-for-approval=untrusted" "-a on
   hasnt "--ask-for-approval never" "the caller's approval policy wins ($own)"
 done
 SESSIONLESS=1 ps --kind codex "조사" "지시" -- -s read-only >/dev/null
-has "--ask-for-approval never -c check_for_update_on_startup=false -s read-only" "an approval the caller left out is still never"
+has "--ask-for-approval never $NOUPDATE $FAST -s read-only" "an approval the caller left out is still never"
 # On the 집맥 (host-role ambient-runner) the global config is the 회사맥's copy, and its guard (host_guard.py) refuses only
 # the Write and Edit tools: a Codex shell write or apply_patch there went through once the sandbox was gone (check pane,
 # 2026-11-08). So a Codex work pane there keeps workspace-write, with gcloud's folder added and the network on.
@@ -132,7 +138,7 @@ has "-- $UNBOXED $NOUPDATE" "another role is no 집맥"
 rm "$SANDBOX/home/.config/munice/host-role"
 # Only an option counts, not its name inside another argument's value (Codex review).
 SESSIONLESS=1 ps --kind codex "조사" "지시" -- -c 'developer_instructions="Explain how --full-auto and -s work."' >/dev/null
-has "-- $UNBOXED $NOUPDATE -c developer_instructions=" "an option named inside a value leaves the defaults in"
+has "-- $UNBOXED $NOUPDATE $FAST -c developer_instructions=" "an option named inside a value leaves the defaults in"
 has "agent prompt w1:new 지시" "codex gets the instruction"
 has "For investigations and comparisons" "Codex investigators get the same outcome contract"
 has "execute available read-only checks" "Codex must investigate material unknowns within scope"
@@ -140,6 +146,7 @@ hasnt "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" "a codex pane keeps its environment"
 
 # A Claude pane opened here runs without the advisor tool: the pane's shell gets the variable, so the agent and its subagents do.
 ps "조사" "지시" >/dev/null
+hasnt "service_tier=" "Claude work panes receive no Codex service tier"
 has "pane split --pane w7:p3 --direction right --cwd $PWD --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1" "a split pane has no advisor"
 hasnt "--model" "an ordinary pane keeps the caller's model"
 ps --new-tab "조사" "지시" >/dev/null
