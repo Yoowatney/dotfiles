@@ -95,7 +95,7 @@ def releases():
             shown = " · ".join("%s %s" % (k, g[k]) for k in ("release", "prerelease") if k in g)
             parts.append("%s%s" % ("`%s` " % name if name else "", shown))
         lines.append("- %s: %s" % (repo, "; ".join(parts) or "릴리스 없음"))
-    lines.append("- gh가 준 prerelease 표시를 그대로 적었습니다. 어느 버전이 배포돼 있는지는 각 리포 AGENTS.md의 배포 방식으로 확인합니다.")
+    lines.append("- gh가 준 prerelease 표시를 그대로 적었습니다. nightly_api 운영 서버 버전과 진행 중인 배포는 `prod-version` 한 줄로 확인합니다. 다른 서비스는 각 리포 AGENTS.md의 배포 방식으로 확인합니다.")
     return "\n".join(lines)
 
 
