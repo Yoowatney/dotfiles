@@ -34,6 +34,10 @@ hasnt 'automatic check session' "check-level none omits automatic check time"
 SESSIONLESS=1 ps --kind auto "재확인 [rc-0123456789abcdef]" "읽기 전용 재확인" >/dev/null
 has 'to finish the assigned work and report it. Do not add buffer.' "read-only recheck keeps work-only estimate"
 hasnt 'automatic check session' "read-only recheck omits automatic check time"
+has '--env HERDR_TASK_RECHECK=1' "read-only recheck is marked so harness-guards keeps it from typing into documents"
+
+SESSIONLESS=1 ps --kind auto "일반 작업" "할 일" >/dev/null
+hasnt 'HERDR_TASK_RECHECK' "an ordinary worker carries no recheck mark"
 
 # Check sessions themselves receive no startup estimate prompt.
 ps --check "확인 작업" "검증" >/dev/null
