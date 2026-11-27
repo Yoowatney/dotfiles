@@ -395,6 +395,8 @@ if [ -n "$check" ]; then
   env_args+=(--env HERDR_TASK_ROLE=check)
 else
   env_args+=(--env HERDR_TASK_ROLE=worker)
+  # A read-only recheck pane (name with [rc-<ac id>]) is no check but may not type into documents either: harness-guards reads this
+  if [[ "$name" =~ \[rc-[0-9a-f]{16}\] ]]; then env_args+=(--env HERDR_TASK_RECHECK=1); fi
   # auto-tab-close reads it when this pane reports; full is the unmarked default, so only a narrower level is written
   [ -z "$check_level" ] || [ "$check_level" = full ] || env_args+=(--env "HERDR_CHECK_LEVEL=$check_level")
   [ "$kind" != codex ] || env_args+=(--env HERDR_CODEX_STARTUP_ROLE=worker --env "HERDR_CODEX_TASK_TYPE=$task_type")
