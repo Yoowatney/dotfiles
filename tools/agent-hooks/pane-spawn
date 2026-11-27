@@ -338,7 +338,9 @@ case "$kind" in
         -a* | --ask-for-approval | --ask-for-approval=*) own_approval=1 ;;
       esac
     done
-    set -- -c check_for_update_on_startup=false "$@"
+    # Only spawned workers use Fast; the shell's earlier Ultrafast default stays for hand-opened sessions.
+    # Caller config follows this default and still wins.
+    set -- -c check_for_update_on_startup=false -c 'service_tier="fast"' "$@"
     [ -n "$own_approval" ] || set -- --ask-for-approval never "$@"
     if [ -n "$own_sandbox" ]; then :
     # The 집맥's global config is the 회사맥's copy, and its guard (host_guard.py) reads no shell write, so one there would
