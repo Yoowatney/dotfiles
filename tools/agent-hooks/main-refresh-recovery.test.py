@@ -56,6 +56,35 @@ class Recovery(unittest.TestCase):
         os.utime(self.gate, (old, old))
         self.assertTrue(recovery.blocked(self.gate, pane("working")))  # never during the /clear itself
 
+    def test_prepare_removes_only_completed_records_untouched_for_a_day(self):
+        root = self.folder.parent
+        def make(name, *marks, age=0):
+            folder = root / name
+            folder.mkdir()
+            (folder / "metadata.json").write_text("{}")
+            for mark in marks:
+                (folder / mark).write_text("x")
+            old = time.time() - age
+            for path in (*folder.iterdir(), folder):
+                os.utime(path, (old, old))
+            return folder
+        day = 86400 + 60
+        stale = make("stale", "completed", age=day)
+        fresh = make("fresh", "completed", age=3600)
+        unfinished = make("unfinished", age=day)
+        active = make("active", "completed", "active", age=day)
+        touched = make("touched", "completed", age=day)
+        (touched / "relays.jsonl").write_text("late relay")  # a relay arrived a moment ago
+        leftover = root / ".preparing-x"
+        leftover.mkdir()
+        os.utime(leftover, (time.time() - day, time.time() - day))
+        recovery.prepare(self.gate, self.memo, "w1:p1", time.time() + 30)
+        self.assertFalse(stale.exists())
+        for kept in (fresh, unfinished, active, touched, leftover, self.folder):
+            with self.subTest(kept=kept.name):
+                self.assertTrue(kept.exists())
+        self.assertTrue(Path(json.loads(self.gate.read_text())["recovery"]).exists())
+
     def test_old_sender_two_argument_blocked_call_still_holds(self):
         row = json.dumps(dict(result=dict(pane=dict(agent_session=dict(value="old")))))
         with patch.object(recovery.sys, "argv", ["main-refresh-recovery.py", "blocked", str(self.gate), row]):

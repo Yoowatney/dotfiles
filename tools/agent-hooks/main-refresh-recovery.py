@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Write-ahead recovery for a main refresh whose session never confirms.
 
-Records are private, retained indefinitely, and describe attempted delivery:
+Records are private and describe attempted delivery (a completed one is removed 24 h after its last write, see prune):
 herdr may accept a prompt and then fail. Never replay them automatically.
 """
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import time
@@ -35,6 +36,19 @@ def write(path, text):
             os.unlink(temporary)
 
 
+def prune(root, now=None, keep=86400):
+    """Remove completed records untouched for 24 h (about 13 pile up per hour). Active, unfinished and failed-preparation
+    folders stay. Pruning never fails a refresh."""
+    cutoff = (time.time() if now is None else now) - keep
+    try:
+        for folder in Path(root).iterdir():
+            files = {f.name: f.stat().st_mtime for f in folder.iterdir()} if not folder.name.startswith(".") else {}
+            if "completed" in files and "active" not in files and max(files.values()) < cutoff:
+                shutil.rmtree(folder, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def prepare(gate_path, memo, key, expires):
     gate_path, memo = Path(gate_path), Path(memo)
     gate = json.loads(gate_path.read_text())
@@ -54,6 +68,7 @@ def prepare(gate_path, memo, key, expires):
     published = root / identity
     os.replace(record, published)
     sync_dir(root)
+    prune(root)
     gate.update(clearing=True, expires_at=float(expires), recovery=str(published))
     write(gate_path, json.dumps(gate))
 
@@ -155,7 +170,7 @@ def notice(pending):
         metadata = json.loads((folder / "metadata.json").read_text())
         lines.append(f"Original handoff: {folder / 'handoff.md'}\nSubsequent relay attempts: {folder / 'relays.jsonl'}"
                      f"\nOriginal session: {metadata['session']}\nOriginal transcript: {metadata.get('transcript') or '(unavailable)'}"
-                     f"\nAfter reconciling, end this record (files are kept): python3 {Path(__file__).resolve()} resolve {folder}")
+                     f"\nAfter reconciling, end this record (files are kept for 24 h): python3 {Path(__file__).resolve()} resolve {folder}")
     if not lines:
         return ""
     return ("Refresh confirmation timed out. Read every recovery file below in full before continuing. "

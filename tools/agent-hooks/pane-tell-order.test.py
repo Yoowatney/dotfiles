@@ -91,6 +91,7 @@ exit 92
         (self.root / "herdr").write_text('''#!/bin/bash
 case "$1 $2" in
   "pane list")
+    echo >> "$FIXTURE/list-calls"
     cat "$FIXTURE/panes" ;;
   "pane get") cat "$FIXTURE/$3" ;;
   "pane read")
@@ -284,6 +285,25 @@ esac
         self.assertIn("prod 허용", self.prompts()[1][1])
         self.wait_for(lambda: not list((self.state / "receivers").glob("*")))
 
+    def test_message_behind_an_earlier_one_does_not_list_panes(self):
+        (self.root / "busy").touch()
+        (self.root / "hold-worker-start").touch()
+        self.enqueue("first-message", ORDER_TAG="first")
+        (self.root / "hold-first").touch()
+        self.enqueue("second-message", ORDER_TAG="second")
+        (self.root / "busy").unlink()
+        (self.root / "hold-worker-start").unlink()
+        # First is paused inside send(); second has decided it must wait and keeps polling every 20 ms.
+        self.wait_for(lambda: (self.root / "first-held").exists() and (self.root / "second-checked").exists())
+        calls = lambda: len((self.root / "list-calls").read_text().splitlines())
+        before = calls()
+        time.sleep(.4)
+        self.assertEqual(calls(), before)
+        (self.root / "hold-first").unlink()
+        self.wait_for(lambda: len(self.prompts()) == 2 and not self.waiting())
+        self.assertIn("second-message", self.prompts()[1][1])
+        self.wait_for(lambda: not list((self.state / "receivers").glob("*")))
+
     def test_legacy_multiple_wait_for_every_payload_and_ignore_other_receivers(self):
         first = self.legacy("000-first")
         last = self.legacy("999-last")
@@ -309,8 +329,10 @@ esac
     def test_cancelled_middle_does_not_disconnect_the_older_legacy_payload(self):
         oldest = self.legacy("oldest")
         (self.root / "hold-worker-start").touch()
-        self.enqueue("old-session-message", session="old-session", ORDER_TAG="first")
-        self.enqueue("new-session-message", ORDER_TAG="successor")
+        # The middle message is cancelled by its own deadline: behind the older payload it asks herdr nothing, so a
+        # changed session or a gone pane is only noticed once nothing is ahead of it.
+        self.enqueue("old-session-message", ORDER_TAG="first", PANE_TELL_WAIT="1")
+        self.enqueue("new-session-message", ORDER_TAG="successor", PANE_TELL_WAIT="60")
         self.assertEqual(len(self.waiting()), 3)
         (self.root / "hold-worker-start").unlink()
         self.wait_for(lambda: not any(p.read_text() == "old-session-message" for p in self.waiting()))

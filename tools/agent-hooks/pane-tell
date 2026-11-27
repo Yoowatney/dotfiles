@@ -402,6 +402,9 @@ deliver() { # message file, receiver's terminal (a moved pane gets a new pane id
   fi
   while (( SECONDS - t0 < ${PANE_TELL_WAIT:-86400} )); do
     sleep "${PANE_TELL_POLL:-5}"
+    # A message still behind an earlier one cannot be sent, so it asks herdr nothing: with 200 queued relays the 5 s
+    # `pane list` calls of all of them kept the host at load 150-280 (2026-11-27). The earlier one finds a gone receiver first.
+    predecessors_done "$1" "${6:-}" || continue
     if ! list=$("$H" pane list 2>/dev/null); then # herdr restarting is not the receiver gone
       # A lasting failure also holds every later message for this pane: one line per streak says why (2026-11-26).
       listing_since=${listing_since:-$SECONDS}
@@ -748,7 +751,7 @@ with open(state + "/batch-locks/" + os.path.basename(payload), "a") as lock:
                 else:
                     child.wait()
                 sys.exit(exitcode(status) if owner_status == exitcode(status) else exitcode(owner_status) or 1)
-            time.sleep(.01)
+            time.sleep(.1) # 10 ms made the supervisor of every waiting relay a busy loop; an exit is noticed within this
 ' "$1" "$2" "$0" "$STATE" "${3:-}" "${4:-}" "${5:-}" "${6:-}"
 }
 batch_start() { # batch dir, payload, terminal; registration is already durable
