@@ -578,6 +578,19 @@ class BrowserPageStateOutputTests(unittest.TestCase):
         "console.log(await page.evaluate(() => JSON.parse(document.querySelector('script#__NEXT_DATA__').textContent)));",
         NEXT_READ + "console.log('state', data.props.pageProps);",
         "console.log(await page.evaluate(function () {return window.__NUXT__;}));",
+        # api#1662: the event list and cookie reads carry IAP/session tokens in headers and values.
+        "console.log(page.events());",
+        "console.log(JSON.stringify(await page.events()));",
+        "const ev=await page.events(); console.log(ev);",
+        "const ev=page.events(); console.log(ev.slice(-5));",
+        "const ev=page.events(); const last=ev[ev.length-1]; console.log(last);",
+        "await page.events()",
+        "console.log(await page.evaluate(() => document.cookie));",
+        "const c=await page.evaluate('document.cookie'); console.log(c);",
+        "const r=await page.cdp('Network.getCookies'); console.log(r);",
+        "const r=await page.cdp(\"Network.getAllCookies\", {}); console.log(JSON.stringify(r.cookies));",
+        "const r=await task.cdp('Storage.getCookies'); r",
+        "const cs=await page.context().cookies(); console.log(cs);",
     )
     ALLOWED = (
         "await page.content()",
@@ -612,6 +625,14 @@ class BrowserPageStateOutputTests(unittest.TestCase):
         "const summary=await page.evaluate('({title:window.__INITIAL_STATE__.title})'); console.log(summary);",
         NEXT_READ + "console.log({title:data?.props?.pageProps?.title});",
         "console.log(await page.evaluate(function () {return {title:window.__NUXT__.title};}));",
+        "console.log(page.events().length);",
+        "const ev=page.events(); console.log({count:ev.length});",
+        "console.log(await page.evaluate(() => document.cookie.length));",
+        "console.log(await page.evaluate(() => typeof document.cookie));",
+        "const r=await page.cdp('Network.getCookies'); console.log({count:r.cookies.length});",
+        "console.log('page.events() and document.cookie are secret sources');",
+        "const r=await page.cdp('Page.getLayoutMetrics'); console.log(r);",
+        "await page.cdp('Network.clearBrowserCookies');",
     )
 
     def test_whole_page_state_and_child_objects_are_denied(self):
