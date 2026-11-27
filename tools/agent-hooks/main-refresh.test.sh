@@ -629,6 +629,10 @@ echo '{"permissions":{"allow":["Bash(ls)"]},"enabledPlugins":{"a@b":true}}' > "$
 check "a plugin switched on in the folder's settings.local.json" "$(chg)" changed; started
 echo '{"env":{"X":"1"}}' > "$SH_/work/.claude/settings.json"
 check "an env var in the folder's settings.json" "$(chg)" changed; started
+echo '{"model":"sonnet","enabledPlugins":{"a@b":false},"outputStyle":"plain","effortLevel":"high"}' > "$SH_/.claude/settings.json"
+check "the effort level in settings.json" "$(chg)" changed; started
+echo '{"model":"sonnet","enabledPlugins":{"a@b":false},"outputStyle":"plain","effortLevel":"high","modelSettings":{"opus":{"effortLevel":"high"}}}' > "$SH_/.claude/settings.json"
+check "a per-model effort level in settings.json" "$(chg)" changed; started
 jq '.roles.main.enableArtifact = true' "$SANDBOX/repo/tools/claude/startup-profile.json" > "$SANDBOX/p.tmp" && mv "$SANDBOX/p.tmp" "$SANDBOX/repo/tools/claude/startup-profile.json"
 check "the main role's --settings" "$(chg)" changed
 ms restarting "$(ms changed)"
