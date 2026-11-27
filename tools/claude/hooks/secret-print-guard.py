@@ -172,7 +172,16 @@ INTERPRETER = re.compile(r"(?:^|[\s(/])(?:python[\d.]*|node(?:js)?|ruby|perl|den
 JS_LITERAL = re.compile(r"'[^'\\]*(?:\\.[^'\\]*)*'|\"[^\"\\]*(?:\\.[^\"\\]*)*\"|`[^`$]*`")
 JS_CONSOLE_METHOD = r"(?:log|dir|table|info|debug|warn|error|trace|group|assert)"
 JS_OUTPUT = re.compile(r"\b(?:console\s*(?:\.\s*" + JS_CONSOLE_METHOD + r"|\[\s*['\"]?" + JS_CONSOLE_METHOD + r"['\"]?\s*\])|process\s*\.\s*(?:stdout|stderr)\s*\.\s*write)\s*\(")
-JS_PAGE_STATE = re.compile(r"(?<![\w$])__(?:NEXT_DATA|NUXT|INITIAL_STATE|PRELOADED_STATE|APOLLO_STATE)__(?![\w$])")
+# EGO_* are stand-ins browser_state_problem writes over the credential-bearing reads below (api#1662).
+JS_PAGE_STATE = re.compile(r"(?<![\w$])__(?:NEXT_DATA|NUXT|INITIAL_STATE|PRELOADED_STATE|APOLLO_STATE|EGO_EVENTS|EGO_COOKIE)__(?![\w$])")
+# The event list (request/response headers with IAP and session tokens) and cookie reads.
+# ponytail: localStorage/sessionStorage and Network.getResponseBody are not covered; add when one leaks.
+JS_CREDENTIAL_READS = (
+    (re.compile(r"[\w$]+(?:\s*\.\s*[\w$]+|\(\s*\))*\s*\.\s*events\s*\(\s*\)"), "__EGO_EVENTS__"),
+    (re.compile(r"\bdocument\s*\.\s*cookie\b"), "__EGO_COOKIE__"),
+    (re.compile(r"\.\s*cookies\s*\([^()]*\)"), ".__EGO_COOKIE__"),
+    (re.compile(r"""[\w$]+(?:\s*\.\s*[\w$]+)*\s*\.\s*cdp\s*\(\s*(['"])(?:Network|Storage)\.get(?:All)?Cookies\1[^()]*\)"""), "__EGO_COOKIE__"),
+)
 JS_NAME = r"[A-Za-z_$][\w$]*"
 JS_MEMBER = JS_NAME + r"(?:\s*(?:\?\.|\.)\s*" + JS_NAME + r"|\s*\[\s*(?:\d+|" + JS_NAME + r")\s*\])*"
 
@@ -230,6 +239,8 @@ def browser_state_problem(script: str) -> str | None:
             return value.ljust(len(match[0]))
         return "0".ljust(len(match[0]))
 
+    for read, stand_in in JS_CREDENTIAL_READS:
+        script = read.sub(stand_in, script)  # before literals are masked: the CDP method is a string
     text = JS_LITERAL.sub(literal, script)
     text = re.sub(r"//[^\n]*|/\*.*?\*/", lambda m: " " * len(m[0]), text, flags=re.S)
     sources = set(JS_PAGE_STATE.findall(text))
@@ -306,7 +317,7 @@ def browser_state_problem(script: str) -> str | None:
                 tainted.update(targets)
         if tainted == previous:
             break
-    message = ("Browser page state may contain credentials. Do not print whole state or child objects; "
+    message = ("Browser page state, event lists and cookies may contain credentials. Do not print whole state or child objects; "
                "construct an explicit field projection, counts, presence or types instead.")
     checked_calls = []
     for call in JS_OUTPUT.finditer(text):
