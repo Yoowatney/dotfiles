@@ -96,7 +96,7 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full]
   --artifact: keep the Artifact tool in a Claude pane (a job that publishes a page); every Claude pane starts without it otherwise.
   --skills: keep the design (taste-skill), office-file (docx/pdf/pptx/xlsx) and Claude-API skills in a Claude pane (UI or office-file job).
   --analysis: keep the honeycomb and Amplitude connections and the stripe plugin in a Claude pane (an investigation or analysis job).
-  --opus: opt out of the main pane Claude work trial (Sonnet 5.5/high); use global model/effort defaults for heavy work.
+  --opus: opt out of the Claude work trial and auto-chosen Claude default (Sonnet 5.5/high); use global model/effort defaults for heavy work. It never pins --kind auto to Codex.
     Checks, Codex, dispatch, ambient and other callers keep their existing model policy. Explicit agent arguments win.'
 MIN_ROWS=${PANE_SPAWN_MIN_ROWS:-16} # a 46-row window holds 4 panes of 11-12 rows, which still show about 5 lines of work (2026-11-04); a fifth would leave 5-6
 die() { echo "pane-spawn: $*" >&2; exit 2; }
@@ -223,7 +223,9 @@ if [ -n "$request_child" ]; then
   kind=$request_kind auto_claude=$request_auto_claude
 elif [ "$asked" = auto ] && [ -z "$check" ]; then
   # All forwarded arguments belong to the historical auto runner, Codex: even shared short flags differ in meaning.
-  pinned=$opus
+  # --opus, --analysis, --artifact and --skills are launcher options about a Claude pane, not forwarded arguments: they never pin
+  # the runner. Pinning on --opus opened Codex panes that had hit their usage limit (2026-11-27).
+  pinned=
   [ $# -eq 0 ] || pinned=1
   [ "$(head -1 "$HOME/.config/munice/host-role" 2>/dev/null)" != ambient-runner ] || pinned=1
   quota_dir=$helper_dir
@@ -476,7 +478,8 @@ fi
 # --opus opts out only work panes. It does not alter the established check-pane policy.
 trial=
 if [ -n "$delegates" ] && [ "$kind" = claude ] && [ -z "$check${MUNICE_AUTO_DISPATCH:-}${MUNICE_AMBIENT:-}" ]; then trial=1; fi
-if [ "$kind" = claude ] && { [ -n "$check$auto_claude" ] || { [ -n "$trial" ] && [ -z "$opus" ]; }; }; then
+# An auto-chosen Claude worker is Sonnet/high too, but --opus keeps the global model and effort for heavy work.
+if [ "$kind" = claude ] && { [ -n "$check" ] || { [ -z "$opus" ] && [ -n "$auto_claude$trial" ]; }; }; then
   case " $* " in *" --effort "* | *" --effort="*) ;; *) set -- --effort high "$@" ;; esac
   case " $* " in *" --model "* | *" --model="*) ;; *) set -- --model claude-sonnet-5-5 "$@" ;; esac
 fi
