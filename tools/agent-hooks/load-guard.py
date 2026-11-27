@@ -43,7 +43,8 @@ FLAG_MSG = ("load-guard: jest를 --maxWorkers 없이 돌리려 합니다. jest�
             "시험 파일 하나만 지정해도 됩니다. 다른 칸이 시험을 돌리고 있으면 끝난 뒤에 하세요.")
 LOAD_MSG = ("load-guard: 지금 세션맥이 무겁습니다({why}). 새 시험·빌드를 시작하지 않습니다. 이 호출을 버리고 sleep 90 뒤에 같은 명령을 다시 "
             "실행하세요. 계속 막히면 python3 -I ~/.dotfiles/tools/agent-hooks/load-guard.py status 로 얼마나 돌고 있는지 확인하고, 다른 칸의 시험이 "
-            "끝나기를 기다립니다.")
+            "끝나기를 기다립니다. 기다려도 시험을 돌리지 못하면 우회하지 말고 PR의 CI 결과로 대신 확인하되, 완료 보고에 `직접 실행하지 못한 것:` 줄을 두어 "
+            "막힌 명령, 막힌 이유({why}), 대신 본 CI 실행 링크를 적으세요.")
 
 
 def _sysctl(name: str) -> int | None:
@@ -334,6 +335,7 @@ def selftest():
                     "npx vitest run", "npm run test:smoke"):
             assert "무겁습니다(메모리 압박 경고)" in (run(cmd, mem=warn) or ""), cmd
             assert "압박 위험" in (run(cmd, mem=crit) or ""), cmd
+            assert "직접 실행하지 못한 것:" in (run(cmd, mem=warn) or ""), f"a blocked run must be reported (api#1658): {cmd}"
             assert "3개가 이미" in (run(cmd, {"runs": 3, "workers": []}) or ""), cmd
             assert "워커 8개" in (run(cmd, {"runs": 0, "workers": [()] * 8}) or ""), cmd
             assert run(cmd) is None, f"idle Mac passes: {cmd}"
