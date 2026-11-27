@@ -20,6 +20,7 @@ WEEK = 604800
 MAX_AGE = 600
 CODEX_FALLBACK_MAX_AGE = 86400
 CODEX_FALLBACK_CEILING = 80  # 15 percentage points below the fresh weekly ceiling.
+CLAUDE_FALLBACK_CEILING = 65  # Likewise below Claude's fresh 80% reserve; the age limit is the Codex one.
 FUTURE_SLOP = 5  # A rollout can grow while the scan is in progress.
 DECISION_BYTES = 1048576
 
@@ -228,6 +229,24 @@ def normalize(at, short, week, now, short_key, week_key, ceiling, optional_short
             "short": five, "week": seven, "gap": gap, "observed_at": at, "resets_at": wr}
 
 
+def stale_quota(at, short, week, now, key, ceiling):
+    # Reuse an old reading of a weekly window that is still live (claude-first only; never for the ten-minute paths).
+    # Validate the original windows before discarding an expired short window.
+    # The same weekly window must still be live; never infer zero usage after a reset (api#1081, api#1217).
+    observed = normalize(at, short, week, at, key, key, ceiling, optional_short=True)
+    if "week" not in observed:
+        return observed
+    if now >= observed["resets_at"]:
+        return invalid("stale weekly window expired")
+    five = observed["short"]
+    if short is not None and now >= epoch(short.get("resets_at")):
+        five = None
+    eligible = (five is None or five < 80) and observed["week"] <= ceiling
+    return dict(observed, eligible=eligible, short=five,
+                gap=observed["week"] - 100 * (now - (observed["resets_at"] - WEEK)) / WEEK,
+                reason="stale same-week observation within reserve" if eligible else "stale observation reserve reached")
+
+
 def codex_quota(now, cwd, allow_stale=False):
     root, newest = latest_codex(now)
     auth_path = root / "auth.json"
@@ -254,24 +273,11 @@ def codex_quota(now, cwd, allow_stale=False):
     short = next((w for w in windows if isinstance(w, dict) and w.get("window_minutes") == 300), None)
     week = next((w for w in windows if isinstance(w, dict) and w.get("window_minutes") == 10080), None)
     if allow_stale and MAX_AGE < now - at <= CODEX_FALLBACK_MAX_AGE:
-        # Validate the original windows before discarding an expired short window.
-        # The same weekly window must still be live; never infer zero usage after a reset.
-        observed = normalize(at, short, week, at, "used_percent", "used_percent", CODEX_FALLBACK_CEILING, optional_short=True)
-        if "week" not in observed:
-            return observed
-        if now >= observed["resets_at"]:
-            return invalid("stale weekly window expired")
-        five = observed["short"]
-        if short is not None and now >= epoch(short.get("resets_at")):
-            five = None
-        eligible = (five is None or five < 80) and observed["week"] <= CODEX_FALLBACK_CEILING
-        return dict(observed, eligible=eligible, short=five,
-                    gap=observed["week"] - 100 * (now - (observed["resets_at"] - WEEK)) / WEEK,
-                    reason="stale same-week observation within reserve" if eligible else "stale observation reserve reached")
+        return stale_quota(at, short, week, now, "used_percent", CODEX_FALLBACK_CEILING)
     return normalize(at, short, week, now, "used_percent", "used_percent", 95, optional_short=True)
 
 
-def claude_quota(now, cwd, first=False):
+def claude_quota(now, cwd, first=False, allow_stale=False):
     # first: the claude-first policy. A known extra-usage setting (true or false) passes and a missing five-hour window
     # is accepted; every other guard and the 80% reserve still apply.
     snap = read_json(state_dir() / "claude.json")
@@ -287,7 +293,11 @@ def claude_quota(now, cwd, first=False):
     root = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
     if not subscription_settings("claude", root, cwd):
         return invalid("subscription settings unknown/overridden")
-    return normalize(epoch(snap.get("observed_at")), snap.get("five_hour"), snap.get("seven_day"), now, "used_percentage", "used_percentage", 80, optional_short=first)
+    at = epoch(snap.get("observed_at"))
+    if allow_stale and at is not None and MAX_AGE < now - at <= CODEX_FALLBACK_MAX_AGE:
+        # Overnight no Claude session answers for hours, so the reading ages out although usage is low (2026-11-27).
+        return stale_quota(at, snap.get("five_hour"), snap.get("seven_day"), now, "used_percentage", CLAUDE_FALLBACK_CEILING)
+    return normalize(at, snap.get("five_hour"), snap.get("seven_day"), now, "used_percentage", "used_percentage", 80, optional_short=first)
 
 
 def agy_quota(now, cwd):
@@ -402,12 +412,12 @@ def select(now, policy, cwd=None):
         return result
     cwd = Path(cwd or Path.cwd()).resolve()
     codex = codex_quota(now, cwd, allow_stale=policy == "claude-first")
-    claude = claude_quota(now, cwd, first=policy == "claude-first")
+    claude = claude_quota(now, cwd, first=policy == "claude-first", allow_stale=policy == "claude-first")
     result.update(codex=codex, claude=claude)
     if policy == "claude-first":
         # Claude while its measured usage is inside the reserve; otherwise Codex if it is too, else refuse.
         if claude["eligible"]:
-            return dict(result, kind="claude", reason="claude first: within reserve")
+            return dict(result, kind="claude", reason="claude first: " + claude["reason"])
         if codex["eligible"]:
             return dict(result, kind="codex", reason="claude first: Claude unavailable (" + claude["reason"] + "); Codex: " + codex["reason"])
         return dict(result, reason="claude first: neither subscription within reserve (Claude: " + claude["reason"] + "; Codex: " + codex["reason"] + ")")
