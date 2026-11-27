@@ -116,6 +116,27 @@ grep -q 'stale' "$SANDBOX/err" || fail "the stale Claude reading is disclosed"
 quota_fixture 99 70 true 0 28800
 if ps --kind auto "stale claude high" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "stale Claude needs extra weekly headroom"; fi
 [ ! -e "$SANDBOX/log" ] || fail "stale Claude refusal must not query herdr"
+# --opus and --analysis are Claude options, not a request for Codex: auto still reads the quota (2026-11-27: both opened a
+# Codex pane that had hit its usage limit).
+quota_fixture 99 40 true
+ps --kind auto --opus "opus exhausted" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "--opus with Codex exhausted must open Claude: $(cat "$SANDBOX/err")"
+has "--kind claude" "claude-first: --opus with Codex exhausted picks Claude"
+hasnt "--model claude-sonnet-5-5" "claude-first: --opus keeps the global model on auto Claude"
+hasnt "--effort high" "claude-first: --opus keeps the global effort on auto Claude"
+hasnt "--kind codex" "claude-first: --opus never opens the exhausted Codex"
+ps --kind auto --opus --analysis "opus analysis" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "--opus --analysis must open Claude"
+has "--kind claude" "claude-first: --opus --analysis picks Claude"
+has "--env CLAUDE_STARTUP_ANALYSIS=1" "claude-first: --analysis reaches the auto Claude pane"
+mv "$SANDBOX/home/.codex/sessions" "$SANDBOX/home/.codex/sessions.off"
+ps --kind auto --opus "opus unreadable" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "--opus with Codex usage unreadable must open Claude"
+has "--kind claude" "claude-first: --opus with unreadable Codex usage picks Claude"
+quota_fixture 10 85 true
+ps --kind auto --opus "opus claude over" "instruction" >/dev/null 2>"$SANDBOX/err"
+has "--kind codex" "claude-first: --opus still reaches Codex when Claude is past its reserve and Codex has room"
+quota_fixture 99 90 true
+if ps --kind auto --opus "opus both over" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "--opus must not bypass both reserves"; fi
+[ ! -e "$SANDBOX/log" ] || fail "--opus refusal must not query herdr"
+quota_fixture 99 40 true
 quota_fixture 10 85 true
 is_main
 # Lead decision 2026-11-19: past Claude's measured reserve, kept for the main pane on the same account, no check opens;
