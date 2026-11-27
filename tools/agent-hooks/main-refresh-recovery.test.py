@@ -42,6 +42,20 @@ class Recovery(unittest.TestCase):
         recovery.prepare(self.gate, self.memo, "w1:p1", time.time() + 30)
         self.assertTrue(recovery.blocked(self.gate, pane, "1"))
 
+    def test_hold_keeps_relays_back_at_most_ten_minutes_before_the_clear(self):
+        # 11/25 and 11/27: one hold after another kept every relay from the main pane for 1 h 45 min and for 8 h.
+        self.gate.write_text(json.dumps(dict(pid=os.getpid(), terminal="main", session="old")))
+        pane = lambda status: dict(agent_session=dict(value="old"), agent_status=status)
+        self.assertTrue(recovery.blocked(self.gate, pane("working")))
+        old = time.time() - 601
+        os.utime(self.gate, (old, old))
+        for status in ("working", "idle", "done"):
+            with self.subTest(status=status):
+                self.assertFalse(recovery.blocked(self.gate, pane(status)))
+        recovery.prepare(self.gate, self.memo, "w1:p1", time.time() + 30)
+        os.utime(self.gate, (old, old))
+        self.assertTrue(recovery.blocked(self.gate, pane("working")))  # never during the /clear itself
+
     def test_old_sender_two_argument_blocked_call_still_holds(self):
         row = json.dumps(dict(result=dict(pane=dict(agent_session=dict(value="old")))))
         with patch.object(recovery.sys, "argv", ["main-refresh-recovery.py", "blocked", str(self.gate), row]):

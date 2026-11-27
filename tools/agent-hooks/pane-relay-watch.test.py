@@ -44,6 +44,51 @@ class QueueWatchTest(unittest.TestCase):
         self.root.mkdir()
         watch.scan(self.env, 0)
 
+    def receiver(self, name, terminal, socket="/tmp/herdr.sock"):
+        path = self.root / "receivers" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(terminal + "\n" + socket + "\n")
+
+    def test_one_receiver_backlog_alerts_once_until_it_drains(self):
+        # 11/27: one held main pane made a separate alert for each relay behind it, up to 52 an hour, each waking it.
+        first, second, third = (self.payload("waiting/%d.x" % n, age) for n, age in ((1, 900), (2, 800), (3, 700)))
+        for path in (first, second, third):
+            self.receiver(path.name, "term_main")
+        watch.tick(self.env, 1000)
+        self.assertEqual(self.alert.call_count, 1)
+        self.assertIn(str(first), self.alert.call_args.args[-1])
+        first.unlink()  # delivered: the rest still wait behind the same hold
+        later = self.payload("waiting/4.x", 650)
+        self.receiver(later.name, "term_main")
+        watch.tick(self.env, 1100)
+        self.assertEqual(self.alert.call_count, 1)
+        self.assertTrue(second.exists() and third.exists() and later.exists())  # nothing is dropped
+        for path in (second, third, later):
+            path.unlink()
+        fresh = self.payload("waiting/5.x", 700)
+        self.receiver(fresh.name, "term_main")
+        watch.tick(self.env, 1200)
+        self.assertEqual(self.alert.call_count, 2)
+        self.assertIn(str(fresh), self.alert.call_args.args[-1])
+
+    def test_two_receivers_each_alert_once(self):
+        a1, a2, b1 = self.payload("waiting/1.a"), self.payload("waiting/2.a"), self.payload("waiting/3.b")
+        self.receiver(a1.name, "term_a")
+        self.receiver(a2.name, "term_a")
+        self.receiver(b1.name, "term_b")
+        watch.tick(self.env, 1000)
+        alerted = " ".join(call.args[-1] for call in self.alert.call_args_list)
+        self.assertEqual(self.alert.call_count, 2)
+        self.assertIn(str(a1), alerted)
+        self.assertIn(str(b1), alerted)
+        self.assertNotIn(str(a2), alerted)
+
+    def test_unreadable_receiver_alerts_each_payload(self):
+        self.payload("waiting/1.u")
+        self.payload("waiting/2.u")
+        watch.tick(self.env, 1000)
+        self.assertEqual(self.alert.call_count, 2)
+
     def test_young_queue_and_empty_lock_are_not_stalls(self):
         self.payload("waiting/new", 599)
         self.payload("sending/pane.lock")

@@ -17,7 +17,8 @@
 # Otherwise it prints "queued ...", exits 0, and a detached process tries again until the box is empty, which outlives the
 # sending pane and runs on the receiver's server. After PANE_TELL_WAIT seconds, or when the receiver is gone or holds another
 # session, the message stays in ~/.local/state/pane-tell/undelivered/; `log` beside it says what became of each one. A
-# message still waiting after 30 minutes is announced once by pane-relay-watch. Exhausting PANE_TELL_WAIT or entering that
+# message still waiting after 30 minutes is announced once by pane-relay-watch, which counts a receiver's whole backlog behind
+# it as that one announcement until none of it is past 30 minutes. Exhausting PANE_TELL_WAIT or entering that
 # folder is announced as a final failure, since a one-letter leftover
 # in a box once held a report back with nobody knowing (10/31): a durable terminal error alert for 요유, the only one who can
 # resolve a blocked editor, and a note to the sender on its own server, who would take it as delivered, unless the sender is an auto

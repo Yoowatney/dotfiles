@@ -205,6 +205,16 @@ sys.exit(10)
 PY
   [ "$?" -ne 10 ] # Only the explicit "absent" result authorizes another delivery.
 }
+# A request half an hour old has had a whole run's wait. With no saved answer and no copy still queued, nothing can
+# answer it any more (11/27: the session loaded, and so consumed, its own handoff, and 16 runs each held every relay
+# for 30 minutes on that request), so this run asks again under a new number.
+if [ -n "${req:-}" ] && [ -z "${acknowledged:-}" ] && ! memo_ready \
+  && /usr/bin/python3 -I -c 'import os, sys, time; sys.exit(time.time() - os.stat(sys.argv[1]).st_mtime < 1800)' "$request_file" 2>/dev/null \
+  && ! request_may_be_queued; then
+  rm -f "$request_file" "$ack_file"
+  req=
+  log "앞 인계 요청이 30분 넘게 답이 없어 인계를 다시 요청함"
+fi
 fresh() {
   memo_ready || return 1
   # Saving is the acknowledgment, even if the pane is still finishing its reply.
@@ -235,6 +245,9 @@ while :; do
 wait_for "$deadline" rested || skip "메인 칸이 $([ -n "$now" ] && echo '30분 동안' || echo '07:00까지') 쉬지 않아 건너뜀"
 late # the Mac may have slept through the first wait
 hold_delivery
+# A hold keeps relays back for ten minutes from its last write (main-refresh-recovery.py blocked). Renew it at each
+# rest, so the request that follows gets the whole ten minutes. The hold is already in place: no send lock is needed.
+touch -c "$gate"
 # Wait for empty input without letting ordinary relays take this idle turn.
 request_ready() { idle && "$TELL" --box-ready "$id" claude >/dev/null 2>&1 && idle; }
 handoff_ready() { rested && request_ready; }

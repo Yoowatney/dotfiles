@@ -23,6 +23,11 @@ if [ "\$1 \$2" = 'pane get' ] && [ -n "\${QUERY_START_DELAY:-}" ] && [ ! -f "$SA
   : > "$SANDBOX/query-started"
   sleep "\$QUERY_START_DELAY"
 fi
+# When the relay hold was last written, seen before the /clear preparation: a hold keeps relays back for ten minutes
+# from then.
+[ "\$1 \$2" != 'pane get' ] || [ ! -f "$SANDBOX/state/orchestrator/refresh-delivery.json" ] ||
+  grep -q clearing "$SANDBOX/state/orchestrator/refresh-delivery.json" ||
+  stat -f %m "$SANDBOX/state/orchestrator/refresh-delivery.json" >> "$SANDBOX/gates"
 case "\$1 \$2" in
   "pane list") cat "$SANDBOX/panes" ;;
   "pane get") [ ! -f "$SANDBOX/late-on-get" ] || echo 09 > "$SANDBOX/hour"
@@ -287,6 +292,36 @@ panes w5:p3 sid-new
 : > "$SANDBOX/sid-new.jsonl"; echo "$SANDBOX/sid-new.jsonl" > "$S/agent-handoff/w5:p3.md.transcript"
 MR_ARGS=--now mr MAIN_REFRESH_HOUR=09
 check "a changed session may receive its own request" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "1|1"
+# 11/27: the main pane loaded, and so consumed, its own saved handoff. Sixteen later runs each waited 30 minutes on that
+# request with every relay held, since a stored request was resumed for ever. Half an hour without an answer asks again.
+age_request() { python3 -I -c 'import os, sys, time; t = time.time() - 1860; os.utime(sys.argv[1], (t, t))' "$S/agent-handoff/main-refresh.refresh-request"; }
+rm_stamp; set_main
+MR_ARGS=--now mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+age_request
+MR_ARGS=--now mr MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+check "a request unanswered for 30 minutes is asked again" \
+  "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)|$(grep -c '30분 넘게 답이 없어' "$S/orchestrator/refresh.log")" "1|1|1"
+rm_stamp; set_main
+MR_ARGS=--now mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+late_answer=$(grep 'handoff save' "$SANDBOX/told")
+printf '%s\nsaved after the watcher ended\n' "${late_answer##* }" > "$S/agent-handoff/w5:p3.md"
+age_request
+MR_ARGS=--now mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+check "an old request whose answer was saved is not asked again" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "0|1"
+rm_stamp; set_main
+MR_ARGS=--now mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+queued_request=$(grep 'handoff save' "$SANDBOX/told")
+mkdir -p "$S/pane-tell/waiting"; printf '%s' "${queued_request##* }" > "$S/pane-tell/waiting/9.still-queued"
+age_request
+MR_ARGS=--now mr HANDOFF_AFTER=never MAIN_REFRESH_HOUR=09 MAIN_REFRESH_HANDOFF_WAIT=0.3
+check "an old request still queued for delivery is not sent twice" "$(grep -c 'handoff save' "$SANDBOX/told")|$(cleared)" "0|0"
+rm -f "$S/pane-tell/waiting/9.still-queued"
+# Those ten minutes start again when the pane rests and the request goes out, so a late rest still gets a whole hold.
+rm_stamp; set_main; rm -f "$SANDBOX/gates"; status working
+MR_ARGS=--now mr MAIN_REFRESH_HOUR=09 & renewing=$!
+until [ -f "$S/orchestrator/refresh-delivery.json" ]; do sleep 0.05; done
+sleep 1.1; status idle; wait "$renewing"
+check "the relay hold is written again when the pane rests" "$(sort -u "$SANDBOX/gates" | wc -l | tr -d ' ')|$(cleared)" "2|1"
 rm_stamp; set_main
 # Two watcher processes can overlap; the process lock still admits only the first sender.
 rm -f "$SANDBOX/request-n"
