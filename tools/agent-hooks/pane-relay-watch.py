@@ -183,6 +183,23 @@ def file_identity(info):
     return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
 
 
+def receiver(root, payload):
+    """The pane a queued relay waits for, from pane-tell's metadata (never the relay text); None when unreadable."""
+    try:
+        descriptor = os.open(os.path.join(root, "receivers", os.path.basename(payload)),
+                             os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(descriptor) as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return None
+            lines = stream.read(4096).splitlines()
+    except (OSError, ValueError):
+        return None
+    return (lines[0], lines[1].endswith("/sessions/workers/herdr.sock")) if len(lines) >= 2 and lines[0] else None
+
+
 def valid_identity(value):
     return isinstance(value, list) and len(value) == 4 and all(type(n) is int and n >= 0 for n in value)
 
@@ -308,7 +325,14 @@ def scan(env, now):
         baseline_applied = baseline is not None and summarize_baseline(env, baseline, baseline_path)
         baseline_identities = {tuple(entry["identity"]) for entry in baseline["entries"].values()} if baseline else set()
         accepted, alerts = {}, []
-        for payload, identity in candidates.items():
+        # A pane's relays go out in order, so those behind a stuck one wait for the same reason: one alert covers a pane's
+        # backlog until none of its relays is past the limit (11/27: one held main pane made up to 52 alerts an hour,
+        # each waking it). Covered relays stay queued; they are only not announced again.
+        waiting = {payload: receiver(root, payload) for payload in candidates
+                   if os.path.dirname(payload) == os.path.join(root, "waiting")}
+        announced = {waiting[payload] for payload, identity in candidates.items()
+                     if waiting.get(payload) and previous.get(payload) == identity}
+        for payload, identity in sorted(candidates.items()):
             # It may have drained since scanning. Never read or modify its text.
             try:
                 current = os.stat(payload, follow_symlinks=False)
@@ -316,6 +340,12 @@ def scan(env, now):
                 continue
             if [current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns] != identity:
                 continue
+            pane = waiting.get(payload)
+            if pane and previous.get(payload) != identity and pane in announced:
+                accepted[payload] = identity
+                continue
+            if pane:
+                announced.add(pane)
             title, body = "세션 사이의 글 전달이 지연됐습니다", f"전달 대기가 기준 시간을 넘었습니다. 보관 파일: {payload}"
             if os.path.dirname(payload) == os.path.join(root, "failed-reports"):
                 title, body = "세션 보고를 전달하지 못했습니다", f"전달 실패 기록: {payload}"

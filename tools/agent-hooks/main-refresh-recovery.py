@@ -98,6 +98,11 @@ def blocked(gate_path, pane, priority="0"):
     gate = json.loads(Path(gate_path).read_text())
     if priority == "1" and not gate.get("clearing"):
         return False
+    # Before the /clear preparation a hold keeps relays back for ten minutes at most. Past that the pane did not rest, or
+    # did not answer the request, and its relays matter more than the refresh (11/25: 1 h 45 min of holds, 11/27: 8 h).
+    # main-refresh renews the gate whenever the pane rests, so a request that goes out gets its own ten minutes.
+    if not gate.get("clearing") and time.time() - os.stat(gate_path).st_mtime >= 600:
+        return False
     try:
         os.kill(gate["pid"], 0)
         alive = True
