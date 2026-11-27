@@ -73,6 +73,9 @@
 연결로 열린다. 빼는 목록은 프로파일의 `roles.worker.analysisOff`다. 메인 세션은 전부터 셋 다
 꺼 두었고, Codex 세션과 손으로 연 세션은 영향이 없다.
 되돌리기: 프로파일에서 `roles.worker.analysisOff`를 지운다. 하네스를 v0.1.0으로 되돌려도 켜진다.
+honeycomb 연결은 Claude 설정에서 munice 루트 폴더의 프로젝트 범위에만 있어서, 다른 폴더(nightly_api,
+워크트리)에서 연 `--analysis` 칸에는 붙일 연결이 없었다(api#1672, 2026-11-27). `scripts/claude-online`이
+`CLAUDE_STARTUP_ANALYSIS`가 있으면 폴더와 무관하게 `--mcp-config`로 honeycomb을 직접 넘긴다.
 
 ## 하네스 v0.1.1: 회사·곰곰 설정은 프로젝트에
 

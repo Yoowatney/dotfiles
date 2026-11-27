@@ -79,6 +79,17 @@ mkdir -p "$box/home/.config/agent-harness"; echo v0.1.0 >"$box/home/.config/agen
 old=$(cd "$box/home/work/munice/sub" && ROLE=worker run)
 jq -e '([.deniedMcpServers[].serverName] | sort) == ["obsidian", "rea"] and (has("analysisOff") | not)' <<<"$(settings_json <<<"$old")" >/dev/null || fail 'harness v0.1.0 keeps the analysis connections off'
 rm "$box/home/.config/agent-harness/version"
+# api#1672: honeycomb lives in Claude's project settings of the munice root only, so a --analysis pane started in another folder
+# (nightly_api, a worktree) had no honeycomb to keep. --analysis must hand the connection over itself, whatever the folder and role.
+for dir in "$box/home/work/munice/sub" "$box/other"; do
+  for role in worker check; do
+    got=$(cd "$dir" && ROLE=$role ANALYSIS=1 run 'a prompt')
+    [ "$(grep -c -x -e '--mcp-config=.*' <<<"$got")" = 1 ] || fail "--analysis hands no honeycomb connection to a $role pane in $dir"
+    grep -x -e '--mcp-config=.*' <<<"$got" | sed 's/^--mcp-config=//' | jq -e '.mcpServers.honeycomb.type == "http" and .mcpServers.honeycomb.url == "https://mcp.honeycomb.io/mcp" and (.mcpServers | length) == 1' >/dev/null || fail "the honeycomb connection of a $role pane in $dir is wrong"
+    [[ "$(tail -1 <<<"$got")" == 'a prompt' ]] || fail 'a prompt after --mcp-config must stay a prompt'
+  done
+done
+! grep -q -e '--mcp-config' <<<"$(cd "$box/other" && ROLE=worker run)" || fail 'a pane without --analysis gets a connection'
 jq -e --arg g "$box/home/.codex/AGENTS.md" --arg l "$box/home/work/munice/CLAUDE.local.md" '.claudeMdExcludes == [$g, $l]' <<<"$settings" >/dev/null || fail 'worker excludes the full rule files it loads filtered'
 rules=$(arg_after --append-system-prompt-file <<<"$out")
 [ -f "$rules" ] || fail 'worker gets no filtered rule file'
