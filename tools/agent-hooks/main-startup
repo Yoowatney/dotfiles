@@ -21,7 +21,7 @@ inputs() { # <folder claude started in>
   for f in "$HOME/.claude/settings.json" "$cwd/.claude/settings.json" "$cwd/.claude/settings.local.json"; do
     printf '%s\n' "$f"
     # A file with none of them reads as a missing one: a settings.local.json made for a permission changes nothing.
-    jq -cS '{enabledPlugins, env, outputStyle, skillOverrides, enableAllProjectMcpServers, enabledMcpjsonServers,
+    jq -cS '{effortLevel, modelSettings, enabledPlugins, env, outputStyle, skillOverrides, enableAllProjectMcpServers, enabledMcpjsonServers,
       disabledMcpjsonServers, deniedMcpServers, allowedMcpServers} | with_entries(select(.value != null))' "$f" || echo '{}'
   done
   # Plugin versions. Not known_marketplaces.json: every marketplace refresh rewrites it, with no new plugin.
