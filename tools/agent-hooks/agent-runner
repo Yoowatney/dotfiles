@@ -1,5 +1,5 @@
 #!/bin/bash
-# agent-runner [show|claude|codex|auto|agy]: which agent opens work sessions first. Checks are always Claude (pane-spawn).
+# agent-runner [show|claude|codex|auto|agy]: which agent opens work sessions first. Checks are always Codex (pane-spawn).
 #   claude = Claude first, Codex once Claude's measured usage passes its reserve (policy claude-first)
 #   codex  = Codex only, the previous routing, no quota lookup (policy codex-only)
 #   auto   = pick by measured subscription usage and weekly pace (policy quota-aware)

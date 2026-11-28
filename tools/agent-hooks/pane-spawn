@@ -21,11 +21,11 @@
 # --check opens a check pane: a fresh pane, not the one that did the job, runs the test or command, or looks at the changed behavior
 # or data, and changes nothing (요유 2026-11-05, api#1002). The agent name carries `chk`, which a rename does not change, so its
 # report asks for no other check (auto-tab-close.py). Only a pane herdr_peers.delegates_checks says yes to may open one (the main
-# pane today); any other lead checks results itself, so there it is bad usage and opens nothing. Every check is Claude Sonnet,
-# with the checked folder protected by Seatbelt, whatever the runner policy says; explicit Codex or AGY checks are refused
-# (요유 2026-11-19: no Codex reviews; that day a quota lookup past its six seconds sent automatic checks to Codex).
-# Past Claude's measured usage reserve no check opens, and nothing waits for one (lead decision 2026-11-19, 요유 2026-11-20): the caller
-# looks again with one command or hands a read-only recheck to an ordinary worker; an unknown, stale or slow reading opens the check on Claude.
+# pane today); any other lead checks results itself, so there it is bad usage and opens nothing. Every check is Codex Sol/high,
+# with the checked folder protected by Seatbelt, whatever the runner policy says; explicit Claude or AGY checks are refused.
+# Ordinary code-review routing is separate and unchanged.
+# Past Codex's measured usage reserve no check opens, and nothing waits for one (lead decision 2026-11-19, 요유 2026-11-20): the caller
+# looks again with one command or hands a read-only recheck to an ordinary worker; an unknown, stale or slow reading opens the check on Codex.
 # A refusal for usage never means "wait for the reset" (요유 2026-11-20). For a work pane, USAGE_BLOCK_NOTE tells the main pane to ask 요유
 # to switch the account or spend a reset ticket and reopen at once, and a pane under a lead to report that this request is needed. A refused
 # check has the main pane ask in 요유's backend-bot DM, once per usage window (요유 2026-11-26).
@@ -68,7 +68,7 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full]
   --allow-duplicate: intentionally start another worker with the same instruction. Otherwise an open worker from the
     same caller and folder is reused for ten minutes. Checks always start fresh.
   Optional AGY-only policy: every normal worker uses AGY, including omitted/explicit kinds and ambient callers.
-    Unsupported forwarded options are refused; use --complexity for AGY model selection. Checks remain Claude.
+    Unsupported forwarded options are refused; use --complexity for AGY model selection. Checks remain Codex.
     On the session Mac, workers run without a terminal sandbox and retain native safety hooks.
     Other host roles retain the sandbox. Command hooks are not filesystem isolation for arbitrary code.
   --kind auto: choose a normal worker from subscription quota and weekly pace; unknown/paid usage is excluded.
@@ -83,8 +83,8 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full]
     reason mentioning Slack, 슬랙, GCP, gcloud, bq or BigQuery (any case), is refused there: Codex runs GCP commands too.
     GCP 작업과 재확인은 --kind auto로 여세요. AGY도 에이전트 계정으로 gcloud를 실행합니다.
     Slack 글은 메인 칸이 올립니다: 밑 칸은 결과를 보고하고 --kind auto로 여세요
-  --check: a fresh check (main pane only) on Claude, which cannot write the checked folder.
-    Always Claude, whatever the policy (요유 2026-11-19: no Codex reviews); --kind codex and --kind agy are refused. Past the measured Claude
+  --check: a fresh check (main pane only) on Codex, which cannot write the checked folder.
+    Always Codex gpt-6.1-sol/high, whatever the policy; --kind claude and --kind agy are refused. Past the measured Codex
     usage reserve it opens nothing and exits 2: look again with one command, or open an ordinary read-only recheck pane (no --check;
     name it "<work name> [rc-<ac id>]" so its report comes straight back). The first such refusal of a usage window also prints the
     command that asks 요유, in the backend-bot DM, to switch the account or spend a reset ticket; later ones say not to ask again.
@@ -96,7 +96,7 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full]
     With --check, figures gives the check pane the figures-only brief.
   --artifact: keep the Artifact tool in a Claude pane (a job that publishes a page); every Claude pane starts without it otherwise.
   --skills: keep the design (taste-skill), office-file (docx/pdf/pptx/xlsx) and Claude-API skills in a Claude pane (UI or office-file job).
-  --analysis: keep the honeycomb and Amplitude connections and the stripe plugin in a Claude pane (an investigation or analysis job).
+  --analysis: keep analytics access for investigation jobs: the Claude analysis connections/plugins, or configured Amplitude in a Codex check.
   --opus: opt out of the Claude work trial and auto-chosen Claude default (Sonnet 5.5/high); use global model/effort defaults for heavy work. It never pins --kind auto to Codex.
     Checks, Codex, dispatch, ambient and other callers keep their existing model policy. Explicit agent arguments win.'
 MIN_ROWS=${PANE_SPAWN_MIN_ROWS:-16} # a 46-row window holds 4 panes of 11-12 rows, which still show about 5 lines of work (2026-11-04); a fifth would leave 5-6
@@ -141,11 +141,10 @@ esac
 [ -z "$opener" ] || [ -z "$check$same$new_tab" ] || die "--opener opens a moved pane's own tab: no --check, --same-tab or --new-tab"
 asked=${kind:-claude} # what the caller chose, before auto resolves to Codex
 kind_arg=$kind runner_reason= # the receipt of an automatic check records the runner actually opened and why (api#1296)
-# 요유 2026-11-19 stopped Codex reviews: every check is Claude whatever the runner policy. auto-tab-close asks for
-# --kind auto, which is Claude here too.
+# Check sessions have their own runner policy, independent of ordinary code reviews and worker routing.
 if [ -n "$check" ]; then
-  case "$kind" in codex|agy) die "checks open only on Claude (요유 2026-11-19: no Codex reviews); omit --kind $kind" ;; esac
-  kind=claude runner_reason='checks open only on Claude'
+  case "$kind" in claude|agy) die "checks open only on Codex; omit --kind $kind" ;; esac
+  kind=codex runner_reason='checks open only on Codex'
 fi
 [ "$kind" != auto ] || kind=codex
 kind=${kind:-claude}
@@ -166,6 +165,7 @@ asked_job=$job_id
 job_id=${job_id:-job-$(date -u +%Y%m%dT%H%M%S)-$$-$RANDOM}
 # Installed PATH entries are symlinks; all sibling helpers belong to the source.
 helper_dir=$(dirname "$(readlink -f "$0")")
+if [ -n "$check" ] && [ ! -f "$helper_dir/codex-startup.py" ]; then die 'check protection helper is missing; refusing to start'; fi
 # A one-use parent marker avoids recursion without leaking a bypass to the worker.
 request_child= request_kind= request_auto_claude=
 if [ "${PANE_SPAWN_REQUEST_PARENT:-}" = "$PPID" ]; then
@@ -269,24 +269,24 @@ if [ "$kind" = agy ]; then
     die "AGY subscription admission refused: $reserve_reason"
   fi
 fi
-# Lead decision 2026-11-19: Claude's usage reserve keeps room for the main pane on the same account, so past a measured
+# Lead decision 2026-11-19: Codex's usage reserve keeps room for the main pane on the same account, so past a measured
 # reading over it no check opens; auto-tab-close then sends the report with the way to look again (UNOPENED_NOTE in
-# yoyoo-share-guard.py). An unknown, stale or slow reading is not past the reserve: the check opens on Claude.
+# yoyoo-share-guard.py). An unknown, stale or slow reading is not past the reserve: the check opens on Codex.
 # 요유 2026-11-26: the first such refusal of a usage window has the main pane ask 요유 in their backend-bot DM at once; later ones in
 # that window ask nothing. The marker holds the account and the blocking window's reset time; a reading within the reserve
 # removes it. auto-tab-close passes on only the first 1200 characters and tries twice, so the request leads the refusal.
 # ponytail: no lock, two checks refused in the same instant could both ask.
 if [ -n "$check" ] && [ -z "$request_child" ]; then
   asked_marker=$state/pane-spawn/check-usage-asked
-  reserve=$(bounded "$quota_limit" python3 -I "$helper_dir/agent-quota" claude-reserve "$cwd")
+  reserve=$(bounded "$quota_limit" python3 -I "$helper_dir/agent-quota" codex-reserve "$cwd")
   case $? in
     0) rm -f "$asked_marker" ;;
-    3) read -r week five window < <(printf '%s' "$reserve" | jq -r 'def p: if . == floor then floor else . end; "\(.week | p)% \(if .short == null then "none" else "\(.short | p)%" end) \(if .week > 80 then "seven_day" else "five_hour" end)"' 2>/dev/null)
+    3) read -r week five window < <(printf '%s' "$reserve" | jq -r 'def p: if . == floor then floor else . end; "\(.week | p)% \(if .short == null then "none" else "\(.short | p)%" end) \(.window)"' 2>/dev/null)
        # Only the main pane may open a check (refused further down for any other), so only its refusal asks and uses the marker.
        caller=$("$H" pane get "${HERDR_PANE_ID:-}" 2>/dev/null | jq -r '.result.pane.terminal_id // empty' 2>/dev/null)
        request=
        if python3 -I "$helper_dir/herdr_peers.py" --delegates-checks "$caller"; then
-         key=$(jq -r --arg w "${window:-seven_day}" '"\(.account) \($w) \(.[$w].resets_at)"' "$state/agent-quota/claude.json" 2>/dev/null)
+         key=$(printf '%s' "$reserve" | jq -r '"\(.account) \(.window) \(.window_reset)"' 2>/dev/null)
          if [ -n "$key" ] && [ "$(cat "$asked_marker" 2>/dev/null)" = "$key" ]; then
            request="Account switch or reset ticket: the first refusal of this usage window already carried the request, so do not ask a second time (a usage refusal of the recheck pane is the same request)."
          else
@@ -296,8 +296,8 @@ if [ -n "$check" ] && [ -z "$request_child" ]; then
            request="First usage refusal of this window: main pane, ask 요유 now, once, to switch the account or spend a reset ticket, in their backend-bot DM (not the work's thread or the main channel): python3 $board/main/main-channel.py post --channel ${dm:-<YOYOO_DM in $board/ambient/collect.py>} --new <file> (a usage refusal of the recheck pane is the same request)."
          fi
        fi
-       die "Claude is past its usage reserve (week ${week:-?}, five-hour ${five:-?}), kept for the main pane: no check opened, and nothing waits for one. $request Never put the work off until the usage reset (요유 2026-11-20); open the check again as soon as 요유 says it is done. If one command can show the claims again, run it yourself; otherwise open a read-only recheck pane that is no check: pane-spawn --kind auto \"<work name> [rc-<the [ac-] id of the report>]\" \"<what to re-read, the full report file>\". Its report comes straight back; post from it, citing its report entry time in the 확인: line as [재확인 HH:MM:SS]. Team threads, money and operations posts are the same. Other gates, such as production write approval, stay." ;;
-    *) echo 'pane-spawn: Claude usage unknown; the check opens on Claude' >&2 ;;
+       die "Codex is past its usage reserve (week ${week:-?}, five-hour ${five:-?}), kept for the main pane: no check opened, and nothing waits for one. $request Never put the work off until the usage reset (요유 2026-11-20); open the check again as soon as 요유 says it is done. If one command can show the claims again, run it yourself; otherwise open a read-only recheck pane that is no check: pane-spawn --kind auto \"<work name> [rc-<the [ac-] id of the report>]\" \"<what to re-read, the full report file>\". Its report comes straight back; post from it, citing its report entry time in the 확인: line as [재확인 HH:MM:SS]. Team threads, money and operations posts are the same. Other gates, such as production write approval, stay." ;;
+    *) echo 'pane-spawn: Codex usage unknown; the check opens on Codex' >&2 ;;
   esac
 fi
 if [ -z "$runner_reason" ]; then
@@ -333,6 +333,12 @@ case "$kind" in
   codex) ready='.result.agent.interactive_ready'
     own_sandbox= own_approval=
     for a in "$@"; do # each argument whole, so an option named inside a -c value is no option (Codex review)
+      if [ -n "$check" ]; then
+        case "$a" in
+          --full-auto | -s* | --sandbox | --sandbox=* | *sandbox_mode=*)
+            die 'check protection uses an outer process sandbox; native sandbox overrides are not supported' ;;
+        esac
+      fi
       case "$a" in
         --dangerously-bypass-approvals-and-sandbox | --yolo | --full-auto) own_sandbox=1 own_approval=1 ;;
         -s* | --sandbox | --sandbox=*) own_sandbox=1 ;; # -sread-only too; Codex has no other short option starting so
@@ -343,7 +349,11 @@ case "$kind" in
     # Caller config follows this default and still wins.
     set -- -c check_for_update_on_startup=false -c 'service_tier="fast"' "$@"
     [ -n "$own_approval" ] || set -- --ask-for-approval never "$@"
-    if [ -n "$own_sandbox" ]; then :
+    if [ -n "$check" ] && [ -z "$own_sandbox" ]; then
+      # Nested Seatbelt prevents all Codex shell commands. The startup wrapper
+      # protects the entire check process tree on every host instead.
+      set -- --sandbox danger-full-access "$@"
+    elif [ -n "$own_sandbox" ]; then :
     # The 집맥's global config is the 회사맥's copy, and its guard (host_guard.py) reads no shell write, so one there would
     # go through unsandboxed (check pane, 2026-11-08). There a work pane keeps workspace-write; --add-dir leaves the
     # config's own writable folders as they are. Codex keeps .git read-only even inside the folder, so the repo's git
@@ -402,8 +412,13 @@ else
   if [[ "$name" =~ \[rc-[0-9a-f]{16}\] ]]; then env_args+=(--env HERDR_TASK_RECHECK=1); fi
   # auto-tab-close reads it when this pane reports; full is the unmarked default, so only a narrower level is written
   [ -z "$check_level" ] || [ "$check_level" = full ] || env_args+=(--env "HERDR_CHECK_LEVEL=$check_level")
-  [ "$kind" != codex ] || env_args+=(--env HERDR_CODEX_STARTUP_ROLE=worker --env "HERDR_CODEX_TASK_TYPE=$task_type")
-  if [ "$kind" = codex ] && [ -f "$helper_dir/codex-startup.py" ]; then
+fi
+if [ "$kind" = codex ]; then
+  codex_role=worker
+  [ -z "$check" ] || codex_role=check
+  env_args+=(--env "HERDR_CODEX_STARTUP_ROLE=$codex_role" --env "HERDR_CODEX_TASK_TYPE=$task_type")
+  if [ -n "$analysis" ] && [ -n "$check" ]; then env_args+=(--env HERDR_CODEX_STARTUP_ANALYSIS=1); fi
+  if [ -f "$helper_dir/codex-startup.py" ]; then
     env_args+=(--env "HERDR_CODEX_STARTUP_HELPER=$helper_dir/codex-startup.py")
   fi
 fi
@@ -455,8 +470,8 @@ if [ -n "$check" ]; then
   [ "$check_level" = figures ] || prompt+=' Check whether the result answers the original question as asked, including the improvement the user is considering. Read the original request from its primary source; if unavailable, report that coverage is unverified. For investigative results, check the recommendation and next action, and whether available checks were executed for material unknowns. Do not mark an unanswered material question as passed merely because individual factual claims are correct. Report missing scope and follow-up evidence explicitly; do not implement the proposed changes.'
   permission_contract=$(python3 -I "$helper_dir/check-permissions.py" --contract) || die "cannot load check result contract"
   prompt+="$permission_contract"
-  env_args+=(--env "CLAUDE_CHECK_TARGET=$cwd")
-  prompt+=' 대상 폴더 쓰기는 Claude 프로세스와 그 하위 명령 전체에서 막힙니다. 프로세스 목록은 /bin/ps로 읽고, 네트워크는 읽기 확인에만 쓰세요. pgrep와 launchctl은 macOS 제한으로 목록을 읽지 못할 수 있습니다.'
+  env_args+=(--env "HERDR_CHECK_TARGET=$cwd")
+  prompt+=' 대상 폴더 쓰기는 Codex 프로세스와 그 하위 명령 전체에서 막힙니다. 프로세스 목록은 /bin/ps로 읽고, 네트워크는 읽기 확인에만 쓰세요. pgrep와 launchctl은 macOS 제한으로 목록을 읽지 못할 수 있습니다.'
 fi
 main= hidden= sock= addr=
 mainfile=$state/orchestrator/main
@@ -479,14 +494,20 @@ elif [ -n "$opener" ]; then # the 회사맥 main pane's pane, its report carried
 elif [[ "${label:-}" != *🫡* ]] && [ -z "${MUNICE_AUTO_DISPATCH:-}${MUNICE_AMBIENT:-}" ]; then
   case "${HERDR_SOCKET_PATH:-}" in */sessions/*) ;; *) hidden=1 ;; esac
 fi
-# Work trial and Claude checks share the existing Sonnet/high defaults; arguments after -- take precedence.
-# --opus opts out only work panes. It does not alter the established check-pane policy.
+# Ordinary Claude work keeps its existing defaults; check panes default to Codex Sol/high.
 trial=
 if [ -n "$delegates" ] && [ "$kind" = claude ] && [ -z "$check${MUNICE_AUTO_DISPATCH:-}${MUNICE_AMBIENT:-}" ]; then trial=1; fi
-# An auto-chosen Claude worker is Sonnet/high too, but --opus keeps the global model and effort for heavy work.
-if [ "$kind" = claude ] && { [ -n "$check" ] || { [ -z "$opus" ] && [ -n "$auto_claude$trial" ]; }; }; then
+if [ "$kind" = claude ] && [ -z "$opus" ] && [ -n "$auto_claude$trial" ]; then
   case " $* " in *" --effort "* | *" --effort="*) ;; *) set -- --effort high "$@" ;; esac
   case " $* " in *" --model "* | *" --model="*) ;; *) set -- --model claude-sonnet-5-5 "$@" ;; esac
+elif [ -n "$check" ]; then
+  own_model= own_effort=
+  for a in "$@"; do
+    case "$a" in -m| -m?* | --model | --model=*) own_model=1 ;; esac
+    case "$a" in *model_reasoning_effort=*) own_effort=1 ;; esac
+  done
+  [ -n "$own_model" ] || set -- --model gpt-6.1-sol "$@"
+  [ -n "$own_effort" ] || set -- -c 'model_reasoning_effort="high"' "$@"
 fi
 if [ -n "$trial" ]; then
   if [ -n "$opus" ]; then

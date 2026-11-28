@@ -136,7 +136,11 @@ codex() {
   local -x HERDR_CODEX_STARTUP_ROLE=${HERDR_CODEX_STARTUP_ROLE:-}
   [[ -n $HERDR_CODEX_STARTUP_ROLE || $PWD != $HOME/work/munice(|/*) ]] || HERDR_CODEX_STARTUP_ROLE=general
   local startup_helper=${HERDR_CODEX_STARTUP_HELPER:-$HOME/.dotfiles/tools/agent-hooks/codex-startup.py}
-  if [[ -n $HERDR_CODEX_STARTUP_ROLE && -f $startup_helper ]]; then
+  if [[ -n $HERDR_CHECK_TARGET && ! -f $startup_helper ]]; then
+    print -u2 "codex: check protection helper unavailable; refusing to start"
+    return 2
+  fi
+  if [[ -n $HERDR_CHECK_TARGET || -n $HERDR_CODEX_STARTUP_ROLE && -f $startup_helper ]]; then
     runner=(python3 "$startup_helper" "$bin")
   fi
   # `codex exec` with a prompt argument still reads "additional input" from a

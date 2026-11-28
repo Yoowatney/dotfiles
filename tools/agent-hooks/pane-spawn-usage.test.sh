@@ -19,8 +19,8 @@ for percent in 0 69 70 71 99 100; do
   for window in primary secondary; do
     usage "$percent" 3600 "$([ "$window" != secondary ] || echo secondary)"
     ps --check "로그인" "돌려 보세요" 2>"$SANDBOX/err" >/dev/null
-    has "--kind claude" "$percent ($window): a check is Claude whatever the usage (요유 2026-11-19)"
-    hasnt "--kind codex" "$percent ($window): no Codex check"
+    has "--kind codex" "$percent ($window): incomplete usage readings keep checks on Codex"
+    hasnt "--kind claude" "$percent ($window): no Claude check"
     SESSIONLESS=1 ps --kind auto "구현" "지시" 2>"$SANDBOX/err" >/dev/null
     has "--kind codex" "$percent ($window): an auto work pane runs Codex"
     hasnt "--sandbox workspace-write" "a work pane is no check pane"
@@ -81,7 +81,7 @@ hasnt "--kind claude" "ambiguous delivery never starts a duplicate Claude job"
 hasnt "pane close" "an accepted job may still be running"
 [ "$(grep -c 'agent prompt w1:new 지시' "$SANDBOX/log")" = 1 ] || fail "auto delivers only once"
 usage 71 3600
-if ps --check --kind codex "로그인" "돌려 보세요" >/dev/null 2>&1; then fail "a Codex check is refused (요유 2026-11-19)"; fi
+if ps --check --kind claude "로그인" "돌려 보세요" >/dev/null 2>&1; then fail "an explicit Claude check is refused"; fi
 # Automatic checks may be safely restarted only after the failed pane is closed.
 receipt="$SANDBOX/check-receipt.json"
 PANE_SPAWN_CHECK_RECEIPT="$receipt" ps --check "receipt" "instruction" >/dev/null
@@ -129,7 +129,7 @@ for reason in gcp GCP "gcloud로 배포 상태 확인" "bq 조회" "BigQuery 집
     hasnt "agent start" "a GCP reason starts no agent"
   done
 done
-ps --check --kind claude --why gcp "로그인" "돌려 보세요" >/dev/null; has "--kind claude" "a check pane skips the GCP reason check"
+ps --check --kind codex --why gcp "로그인" "돌려 보세요" >/dev/null; has "--kind codex" "a check pane skips the GCP reason check"
 # Slack posts belong to the main pane; mentioning Slack cannot justify a Claude work pane there.
 for reason in slack "Slack에 답글" "슬랙에 답글" "SLACK에 답글"; do
   for kind_args in default claude; do
@@ -149,8 +149,8 @@ SESSIONLESS=1 ps --kind codex "구현" "지시" >/dev/null; has "--kind codex" "
 SESSIONLESS=1 ps --kind auto "구현" "지시" >/dev/null; has "--kind codex" "auto needs no reason"
 usage 71 3600
 ps --kind auto "구현" "지시" 2>/dev/null >/dev/null; has "--kind codex" "auto at high usage still needs no reason"
-ps --check --kind claude "로그인" "돌려 보세요" >/dev/null; has "--kind claude" "a check pane needs no reason"
-ps --check --kind claude --why "Slack에 답글" "로그인" "돌려 보세요" >/dev/null; has "--kind claude" "a check pane skips the Slack reason check"
+ps --check --kind codex "로그인" "돌려 보세요" >/dev/null; has "--kind codex" "a check pane needs no reason"
+ps --check --kind codex --why "Slack에 답글" "로그인" "돌려 보세요" >/dev/null; has "--kind codex" "a check pane skips the Slack reason check"
 not_main
 CALLER_LABEL="🟢 👑 api#1 로그인" ps "설계" "할 일" >/dev/null; has "--kind claude" "a lead other than the main pane needs no reason"
 CALLER_LABEL="🟢 👑 api#1 로그인" ps --why slack "설계" "할 일" >/dev/null; has "--kind claude" "another lead's Slack reason is unchanged"

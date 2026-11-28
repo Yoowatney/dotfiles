@@ -2,6 +2,8 @@
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -12,6 +14,45 @@ spec.loader.exec_module(startup)
 
 
 class StartupTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'darwin', 'requires macOS Seatbelt')
+    def test_check_process_tree_is_read_only_even_with_yolo(self):
+        with tempfile.TemporaryDirectory() as box:
+            home = Path(box)
+            target = home / '한글 대상 "quoted"'
+            target.mkdir()
+            (target / 'existing').write_text('original')
+            link = home / 'target-link'
+            link.symlink_to(target, target_is_directory=True)
+            probe = home / 'probe.py'
+            probe.write_text('#!' + sys.executable + '\n' + """import os, pathlib, subprocess, socket
+p = pathlib.Path(os.environ['HERDR_CHECK_TARGET'])
+assert (p / 'existing').read_text() == 'original'
+for name in ['new', 'existing']:
+    try: (p / name).write_text('changed')
+    except PermissionError: pass
+    else: raise AssertionError('direct write escaped')
+for command in ['printf changed > "$HERDR_CHECK_TARGET/shell"', '/bin/ps -p 1 > "$HERDR_CHECK_TARGET/ps"']:
+    assert subprocess.run(['/bin/sh', '-c', command], stderr=subprocess.DEVNULL).returncode != 0
+assert subprocess.check_output(['/bin/ps', '-p', '1', '-o', 'pid=']).strip() == b'1'
+pathlib.Path(os.environ['CHECK_SCRATCH']).write_text('allowed')
+with socket.socket() as server: server.bind(('127.0.0.1', 0))
+print('protected')
+""")
+            probe.chmod(0o700)
+            env = {**os.environ, 'HOME': box, 'CODEX_HOME': str(home / '.codex'),
+                   'XDG_STATE_HOME': str(home / 'state'), 'HERDR_CHECK_TARGET': str(link),
+                   'CHECK_SCRATCH': str(home / 'scratch'), 'HERDR_CODEX_STARTUP_ROLE': 'check'}
+            for session in ('fresh', 'open'):
+                result = subprocess.run([sys.executable, str(Path(startup.__file__)), str(probe), '--yolo'], env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('protected', result.stdout)
+            self.assertEqual((target / 'existing').read_text(), 'original')
+            env['HERDR_CHECK_TARGET'] = str(home / 'missing')
+            result = subprocess.run([sys.executable, str(Path(startup.__file__)), sys.executable,
+                                     '-c', 'print("unsafe")'], env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('unsafe', result.stdout)
+
     def test_launch_transport_preserves_argv_and_consumes_environment(self):
         payload = ['--sandbox', 'workspace-write', '-c', 'value="with spaces"', '--model', 'example']
         env = {'HERDR_CODEX_LAUNCH_ARGS': json.dumps(payload)}
@@ -96,6 +137,23 @@ class StartupTest(unittest.TestCase):
                     self.assertIn('plugins.' + name + '@claude-plugins-official.enabled=false', plan['args'])
                 self.assertFalse(any('hooks' in arg or 'approval' in arg or 'sandbox' in arg for arg in plan['args']))
                 self.assertEqual(startup.prepare(dict(env, HERDR_CODEX_STARTUP_PROFILE='full'))['args'], [])
+
+    def test_analysis_checks_keep_configured_amplitude_without_changing_other_roles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / '.codex'
+            source.mkdir()
+            config = source / 'config.toml'
+            original = '\n'.join('[mcp_servers.' + name + ']\ncommand="fixture"' for name in ('rea', 'Amplitude', 'obsidian'))
+            config.write_text(original)
+            for session in ('fresh', 'open'):
+                env = {'HOME': tmp, 'HERDR_CODEX_STARTUP_ROLE': 'check', 'HERDR_CODEX_STARTUP_ANALYSIS': '1'}
+                plan = startup.prepare(env)
+                self.assertNotIn('mcp_servers.Amplitude.enabled=false', plan['args'])
+                self.assertIn('mcp_servers.rea.enabled=false', plan['args'])
+                self.assertIn('mcp_servers.obsidian.enabled=false', plan['args'])
+                self.assertEqual(config.read_text(), original)
+            for role in ('general', 'main'):
+                self.assertIn('mcp_servers.Amplitude.enabled=false', startup.prepare(dict(env, HERDR_CODEX_STARTUP_ROLE=role))['args'])
 
     def test_workers_preserve_pre_compaction_mcp_and_plugin_access(self):
         with tempfile.TemporaryDirectory() as tmp:
