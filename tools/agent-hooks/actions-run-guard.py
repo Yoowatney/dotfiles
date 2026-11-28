@@ -7,6 +7,7 @@ This prevents accidental starts, not arbitrary code hidden in scripts or aliases
 Release creation and git push deliberately remain outside this guard.
 It also protects the shared REST quota: no sub-minute REST polling loop, and a per-session hourly budget.
 A loop written in the calling script (one command per iteration) is only caught by the budget.
+Unfiltered project exports above one page also need a recorded reason: --jq filters only after fetching.
 It also refuses to rerun a pull_request run that is not of the PR's current head, reason or not:
 under cancel-in-progress the old run cancels the newer commit's checks.
 """
@@ -37,6 +38,14 @@ DENY = (
 # The REST core quota (5,000/h) is shared by every session of one account. Fetching hundreds of job logs
 # one call at a time, or polling every few seconds, can spend it and stop everyone else.
 REST_REASON = 'GH_REST_REASON'
+GRAPHQL_REASON = 'GH_GRAPHQL_REASON'
+PROJECT_DENY = (
+    'actions-run-guard: unfiltered gh project item-list above 100 items fetches multiple GraphQL pages; '
+    '--jq filters only after fetching them. Reuse a saved result, use --limit 100 or less, '
+    'use a nonempty --query server filter, or read a specific issue with gh issue view --json projectItems. '
+    f"For a necessary full export, prefix this command with {GRAPHQL_REASON}='specific reason for this export' "
+    '(at least 8 literal characters). This exception does not bypass REST or Actions guards.'
+)
 REST_BUDGET = 300  # per session per hour; ordinary work stays well below it
 REST_POLL = 60  # seconds, the same floor as CI watching
 POLLING = {'call', 'short'}  # a loop holding exactly these (no long sleep) polls too fast
@@ -257,6 +266,46 @@ def uses_rest(args: list[str]) -> bool:
     return False
 
 
+def broad_project_read(args: list[str]) -> bool:
+    """An explicit export beyond one page without a known, nonempty server filter."""
+    args = command_args(args)
+    if args[:2] != ['project', 'item-list']:
+        return False
+    limit = '30'  # gh's default
+    query = ''
+    i = 2
+    while i < len(args):
+        arg = args[i]
+        if arg in ('--help', '-h'):
+            return False
+        if arg in ('--limit', '-L', '--query'):
+            value = args[i + 1] if i + 1 < len(args) else ''
+            if arg == '--query':
+                query = value
+            else:
+                limit = value
+            i += 2
+            continue
+        if arg.startswith('--limit='):
+            limit = arg.split('=', 1)[1]
+        elif arg.startswith('-L'):
+            limit = arg[2:].removeprefix('=')
+        elif arg.startswith('--query='):
+            query = arg.split('=', 1)[1]
+        elif arg in ('--owner', '--format', '--jq', '-q', '--template', '-t'):
+            i += 2  # A formatting argument named --query is data, not a server filter.
+            continue
+        i += 1
+    if query.strip() and not any(c in query for c in '$`'):
+        return False
+    try:
+        digits = limit.lstrip('+-')
+        base = 8 if len(digits) > 1 and digits[0] == '0' and digits[1] not in 'xXoObB' else 0
+        return int(limit, base) > 100
+    except ValueError:
+        return True  # The hook cannot bound a limit supplied by expansion.
+
+
 def short_sleep(value: str) -> bool:
     match = re.fullmatch(r'(\d+(?:\.\d+)?)([smhd]?)', value)
     # An interval the hook cannot read (a variable) counts as short.
@@ -266,9 +315,9 @@ def short_sleep(value: str) -> bool:
 def command_denied(words: list[str], depth: int, watch_only: bool = False, seen: dict | None = None) -> bool:
     """Judge a simple command; reason assignments apply only to that command.
 
-    With seen, only collect REST calls and polling loops and deny nothing.
+    With seen, collect REST calls, polling loops and broad project reads and deny nothing.
     seen['blocks'] holds the open loops (what each one contains) and open cases (None)."""
-    reason = rest_reason = ''
+    reason = rest_reason = graphql_reason = ''
     i = 0
     while i < len(words):
         word = words[i]
@@ -279,6 +328,8 @@ def command_denied(words: list[str], depth: int, watch_only: bool = False, seen:
                 reason = value
             elif key == REST_REASON:
                 rest_reason = value
+            elif key == GRAPHQL_REASON:
+                graphql_reason = value
             i += 1
         elif name in ('timeout', 'gtimeout', 'nice', 'gnice', 'stdbuf', 'gstdbuf'):
             i += 1
@@ -336,6 +387,7 @@ def command_denied(words: list[str], depth: int, watch_only: bool = False, seen:
             name, args = 'gh', args[args.index('gh') + 1:]
             seen['poll'] |= uses_rest(args) and short_sleep(interval.lstrip('='))
         if name == 'gh':
+            seen['project'] |= broad_project_read(args) and not reason_ok(graphql_reason)
             if uses_rest(args):
                 seen['calls'].append(reason_ok(rest_reason))
                 for loop in loops:
@@ -467,8 +519,10 @@ def over_budget(session: str, calls: list[bool], env: dict) -> bool:
 
 
 def rest_problem(command: str, session: str, env: dict) -> str | None:
-    seen = {'calls': [], 'subs': [], 'blocks': [], 'poll': False}
+    seen = {'calls': [], 'subs': [], 'blocks': [], 'poll': False, 'project': False}
     denied(command, seen=seen)
+    if seen['project']:
+        return PROJECT_DENY
     if not seen['calls']:
         return None
     # An unclosed loop runs to the end of the command. A slow poll may still pause briefly before
@@ -495,6 +549,6 @@ def check(payload: dict, env: dict) -> str | None:
             return DENY
         if stale := stale_rerun(str(payload.get('cwd') or ''), env):
             return stale
-    if not re.search(r'\b(?:api|run|workflow)\b', command):
+    if not re.search(r'\b(?:api|run|workflow|project)\b', command):
         return None
     return rest_problem(command, str(payload.get('session_id') or ''), env)
