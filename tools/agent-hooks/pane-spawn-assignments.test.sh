@@ -47,6 +47,7 @@ cat > "$SANDBOX/herdr" <<EOF
 #!/bin/bash
 # Herdr can confirm work before its session watcher publishes the identity.
 if [ "\$1 \$2 \$3" = 'agent get w1:new' ] && [ -n "\${DELAY_ASSIGNMENT_SESSION:-}" ] && [ -e "$SANDBOX/waits" ]; then
+    [ "\${HERDR_SOCKET_PATH:-}" = "$SANDBOX/sessions/workers/herdr.sock" ] || exit 1
     n=\$(cat "$SANDBOX/session-reads" 2>/dev/null || echo 0)
     echo \$((n + 1)) > "$SANDBOX/session-reads"
     if [ "\$n" -lt 3 ]; then
@@ -77,6 +78,8 @@ assert json.loads(pathlib.Path(sys.argv[1]).read_text()) == [dict(
     agent_session_id='sid', issue_urls=[sys.argv[2]])]
 PY
 if grep -q 'assignment unavailable' "$SANDBOX/err"; then fail "delayed identity must be recorded"; fi
+[ "$(cat "$SANDBOX/session-reads")" -eq 4 ] || fail "missing identity must be read again"
+[ "$(grep -c '^\[workers\] agent prompt w1:new ' "$SANDBOX/log")" -eq 1 ] || fail "instructions must be sent exactly once"
 cp "$assignment" "$SANDBOX/assignments-before-failure.json"
 
 # Missing session identity cannot produce a binding for a reused pane.
