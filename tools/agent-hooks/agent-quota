@@ -247,8 +247,8 @@ def stale_quota(at, short, week, now, key, ceiling):
                 reason="stale same-week observation within reserve" if eligible else "stale observation reserve reached")
 
 
-def codex_quota(now, cwd, allow_stale=False):
-    root, newest = latest_codex(now)
+def codex_quota(now, cwd, allow_stale=False, observation=None):
+    root, newest = latest_codex(now) if observation is None else observation
     auth_path = root / "auth.json"
     auth = read_json(auth_path)
     tokens = auth.get("tokens", {})
@@ -482,9 +482,24 @@ def main():
         record_decision(result, now)
         print(json.dumps(result, allow_nan=False))
         return 0 if result["kind"] else 1
+    if command == "codex-reserve":
+        # Checks retain the existing measured 80% weekly / <80% short reserve.
+        # Unknown/stale readings return 1; the launcher preserves its unknown contract.
+        root, newest = latest_codex(now)
+        result = codex_quota(now, Path(sys.argv[2] if len(sys.argv) == 3 else Path.cwd()).resolve(), observation=(root, newest))
+        if "week" in result:
+            eligible = result["week"] <= 80 and (result["short"] is None or result["short"] < 80)
+            window = "seven_day" if result["week"] > 80 else "five_hour"
+            minutes = 10080 if window == "seven_day" else 300
+            windows = [newest[1].get("primary"), newest[1].get("secondary")]
+            reset = next((w.get("resets_at") for w in windows if isinstance(w, dict) and w.get("window_minutes") == minutes), result["resets_at"])
+            result.update(eligible=eligible, reason="within reserve" if eligible else "reserve reached",
+                          account=identity(read_json(root / "auth.json").get("tokens", {}).get("account_id")),
+                          window=window, window_reset=reset)
+        print(json.dumps(result, allow_nan=False))
+        return 0 if result["eligible"] else 3 if result["reason"] == "reserve reached" else 1
     if command == "claude-reserve":
-        # pane-spawn --check (lead decision 2026-11-19): only a measured Claude reading past the reserve, which keeps room
-        # for the main pane on the same account, stops a check (exit 3). An unknown reading (exit 1) opens it on Claude.
+        # Retain the Claude reserve interface for existing callers; checks use codex-reserve.
         result = claude_quota(now, Path(sys.argv[2] if len(sys.argv) == 3 else Path.cwd()).resolve(), first=True)
         print(json.dumps(result, allow_nan=False))
         return 0 if result["eligible"] else 3 if result["reason"] == "reserve reached" else 1
@@ -509,7 +524,7 @@ def main():
                         print(f"{0 if reset <= now else used:g}\t{int(reset)}\t{int(at)}")
                         return 0
         return 1
-    print("usage: agent-quota select|capture-claude|claude-reserve|agy-reserve|codex-week", file=sys.stderr)
+    print("usage: agent-quota select|capture-claude|claude-reserve|codex-reserve|agy-reserve|codex-week", file=sys.stderr)
     return 2
 
 

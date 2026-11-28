@@ -54,7 +54,7 @@ has "[workers] pane close w1:new" "a failed start removes the workers pane"
 hasnt "확인 칸입니다" "a pane that does the job is no check pane"
 
 # 요유 2026-11-05 (api#1002): a fresh pane checks a pane's report for the main pane. Its agent name says so; a rename cannot change that.
-# 요유 2026-11-19: no Codex reviews, so every check is a Claude pane whose checked folder is protected (CLAUDE_CHECK_TARGET).
+# Checks have an independent Codex policy and protect the entire process tree.
 out=$(ps --check "api#1 로그인" "npm test를 돌려 보세요")
 has 'Current KST time: 2026-11-12 01:09:00 KST' "checks receive the current KST date and time"
 hasnt 'first response line must be `끝날 예상: HH:MM KST`' "checks retain their command-and-result first line"
@@ -70,15 +70,17 @@ has "고치지 말고" "a check pane changes nothing"
 has "다른 칸의 보고를 다시 읽는 것은 확인이 아닙니다" "rereading a report is no check"
 has "보고 첫 줄에" "its first line is what the main pane reads"
 [ "$out" = "workers/w1:new" ] || fail "a check pane's address names its server: $out"
-has "--kind claude --pane w1:new --timeout 120000 -- --model claude-sonnet-5-5 --effort high" "a default check is Claude Sonnet at high effort"
-has "--env CLAUDE_CHECK_TARGET=$PWD" "its checked folder is protected"
-hasnt "--sandbox" "no Codex sandbox flag reaches it"
+has "--kind codex --pane w1:new --timeout 120000" "a default check runs Codex"
+has "--env HERDR_CHECK_TARGET=$PWD" "its checked folder is protected"
+has "--env HERDR_CODEX_STARTUP_ROLE=check" "checks activate the startup wrapper in existing shells too"
+has "--env HERDR_CODEX_STARTUP_HELPER=" "checks pin the protection helper beside the launcher"
+has "--sandbox danger-full-access" "outer process protection applies regardless of native sandbox"
 hasnt "Codex 샌드박스" "nor the Codex sandbox note"
 [ ! -d "$SANDBOX/home/.local/state/pane-spawn/check" ] || fail "no fixed Codex check folder is made"
 ps --cwd /work/repo --check "로그인" "돌려 보세요" >/dev/null
 has "확인 칸입니다" "options in any order"
 has "--cwd /work/repo " "a check starts in the folder it checks"
-has "--env CLAUDE_CHECK_TARGET=/work/repo" "and protects that folder"
+has "--env HERDR_CHECK_TARGET=/work/repo" "and protects that folder"
 SESSIONLESS=1 ps --kind codex --cwd /work/repo "조사" "지시" >/dev/null
 has "--cwd /work/repo " "a Codex pane that does the job starts where it is told"
 # 2026-11-05: Codex runs commands with mise's shims first on PATH. A test that swaps HOME then hid mise's config and installs from
@@ -92,22 +94,24 @@ hasnt "MISE_" "a Claude pane runs commands without the shims first, so it needs 
 ps --why skill "조사" "지시" >/dev/null
 has "--kind claude" "a pane that does the job is still Claude"
 hasnt "--sandbox" "and has no sandbox"
-# An explicit Claude check keeps process/network reads and protects the target.
-out=$(ps --check --kind claude "api#1 로그인" "npm test를 돌려 보세요")
-has 'Current KST time: 2026-11-12 01:09:00 KST' "Claude checks receive the current KST date and time"
-has "--env CLAUDE_CHECK_TARGET=$PWD" "a Claude check protects its checked folder for the whole process tree"
-has "[workers] tab create --workspace w2 --cwd $PWD --label 확인 api#1 로그인 --no-focus --env CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1" "a workers pane has no advisor"
-has "--kind claude --pane w1:new --timeout 120000 -- --model claude-sonnet-5-5 --effort high" "a Claude check pane runs Sonnet at high effort"
-hasnt "--sandbox" "a Claude check pane gets no Codex flag"
+# An explicit Codex check keeps process/network reads and protects the target.
+out=$(ps --check --kind codex "api#1 로그인" "npm test를 돌려 보세요")
+has 'Current KST time: 2026-11-12 01:09:00 KST' "Codex checks receive the current KST date and time"
+has "--env HERDR_CHECK_TARGET=$PWD" "a Codex check protects its checked folder for the whole process tree"
+hasnt "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" "Claude-only flags do not enter Codex checks"
+has "--kind codex --pane w1:new --timeout 120000" "a Codex check pane runs Codex"
+has "--sandbox danger-full-access" "a Codex check uses the protected startup wrapper"
 hasnt "Codex 샌드박스" "nor the sandbox note"
 has "--cwd $PWD " "and starts where it is told"
 has "확인 칸입니다" "it is still a check pane"
-ps --check --kind claude "로그인" "돌려 보세요" -- --model opus >/dev/null
-has "-- --effort high --model opus" "the caller's model wins"
-hasnt "claude-sonnet-5-5" "and no second model"
-ps --check --kind claude "로그인" "돌려 보세요" -- --model=opus --effort=xhigh >/dev/null
-hasnt "claude-sonnet-5-5" "the caller's --model= wins"
-hasnt "--effort high" "so does the caller's --effort="
-
-
+ps --check --kind codex "로그인" "돌려 보세요" -- --model example >/dev/null
+has "--model example" "the caller model wins"
+hasnt "gpt-6.1-sol" "no second model"
+ps --check --kind codex "로그인" "돌려 보세요" -- --model=example -c 'model_reasoning_effort="xhigh"' >/dev/null
+hasnt "gpt-6.1-sol" "equals-form model wins"
+hasnt 'model_reasoning_effort="high"' "explicit effort wins"
+for flag in '--sandbox workspace-write' '--sandbox=read-only' '-sread-only' '--full-auto' '-c sandbox_mode="workspace-write"'; do
+  if ps --check "읽기 확인" "확인" -- $flag 2>"$SANDBOX/err"; then fail "native check sandbox override must be refused: $flag"; fi
+  grep -q 'check protection' "$SANDBOX/err" || fail "explains outer boundary"
+done
 echo "ok: pane-spawn sandbox and checks"

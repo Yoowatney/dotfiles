@@ -122,6 +122,13 @@ mkdir -p "$SANDBOX/home/.config/munice"; echo ambient-runner > "$SANDBOX/home/.c
 SESSIONLESS=1 ps --kind codex --cwd "$SANDBOX" "조사" "지시" >/dev/null # no repo: no git folder to add
 has "-- --sandbox workspace-write --add-dir $SANDBOX/home/.config/gcloud -c sandbox_workspace_write.network_access=true --ask-for-approval never $NOUPDATE" "a 집맥 Codex work pane keeps its sandbox, with gcloud and the network"
 hasnt "danger-full-access" "no 집맥 Codex work pane runs unsandboxed"
+workers_up
+is_main
+ps --check "읽기 확인" "확인" >/dev/null
+has "--sandbox danger-full-access" "checks avoid nested Seatbelt on every host"
+hasnt "--sandbox workspace-write" "ambient check uses the outer process boundary"
+not_main
+workers_up false
 # Codex keeps .git read-only inside the folder, so a commit needs the repo's git folders (a worktree's own one too).
 git init -q "$SANDBOX/repo" && git -C "$SANDBOX/repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m i
 git -C "$SANDBOX/repo" worktree add -q -b feat/x "$SANDBOX/wt"
@@ -193,7 +200,7 @@ has "pane close w1:new" "the held pane goes"
 before "agent read w1:new" "pane close w1:new"
 grep -qF "Update available · 0.166.0 → 0.167.0 › 1. Update now 2. Skip" "$SANDBOX/err" || fail "quotes the dialog on one line: $(cat "$SANDBOX/err")"
 grep -q "trust" "$SANDBOX/err" || fail "still says how to answer a trust dialog: $(cat "$SANDBOX/err")"
-grep -q -- "--kind claude" "$SANDBOX/err" || fail "names the way around it: $(cat "$SANDBOX/err")"
+grep -q -- "retry with the same runtime; check sessions must remain on Codex" "$SANDBOX/err" || fail "keeps the same runtime and Codex checks: $(cat "$SANDBOX/err")"
 
 # Work that never shows fails loudly, with no resend and the pane left open: an instruction Codex dropped looks the same as a
 # wait that failed on an accepted one, and resending that would run the job twice.

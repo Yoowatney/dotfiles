@@ -1,5 +1,7 @@
 # AGY Worker I/O Implementation Plan
 
+> 2026-11-28 갱신: 아래 Claude 확인 세션 설명은 당시 계획이다. 현재 `--check`와 자동 확인은 Codex로 열고, `codex-reserve`와 `HERDR_CHECK_TARGET`을 쓴다. 일반 코드 리뷰 규칙은 유지한다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** AGY 작업 칸에서 개발용 네트워크와 후속 지시를 받고, 지정한 모델 정책을 따른다.

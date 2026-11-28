@@ -1,5 +1,7 @@
 # 확인 세션: Claude 사용량이 여유분을 넘으면 열지 않기
 
+> 2026-11-28 갱신: 아래 Claude 확인 세션 설명은 당시 계획이다. 현재 `--check`와 자동 확인은 Codex로 열고, `codex-reserve`와 `HERDR_CHECK_TARGET`을 쓴다. 일반 코드 리뷰 규칙은 유지한다.
+
 - 크기: M (`tools/agent-hooks/agent-quota`, `tools/agent-hooks/pane-spawn`, 시험 2개, 이 문서와 `docs/worker-quota-routing.md`)
 - 결정: 리드가 2026-11-19에 B안을 골랐다. 확인 세션은 늘 Claude로 열고 Codex는 대신 쓰지 않는다.
 

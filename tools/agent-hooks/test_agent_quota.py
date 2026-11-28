@@ -70,6 +70,18 @@ class RoutingTests(unittest.TestCase):
     def select(self, policy="quota-aware"):
         return self.q.select(self.now, policy)
 
+    def test_codex_check_reserve_matches_existing_check_thresholds(self):
+        for week, short, code in [(80, 79, 0), (80.01, 20, 3), (40, 80, 3), (96, 20, 3)]:
+            with self.subTest(week=week, short=short):
+                self.event(week, short=short)
+                with patch.object(sys, 'argv', [str(SCRIPT), 'codex-reserve', str(self.home)]), patch.object(self.q.time, 'time', return_value=self.now), patch('sys.stdout', new_callable=io.StringIO) as out:
+                    self.assertEqual(self.q.main(), code)
+                result = json.loads(out.getvalue())
+                self.assertIn('window_reset', result)
+        self.event(40, age=601)
+        with patch.object(sys, 'argv', [str(SCRIPT), 'codex-reserve']), patch.object(self.q.time, 'time', return_value=self.now), patch('sys.stdout', new_callable=io.StringIO):
+            self.assertEqual(self.q.main(), 1)
+
     def test_select_claude_when_codex_ahead(self):
         self.event(60)
         self.assertEqual(self.select()["kind"], "claude")

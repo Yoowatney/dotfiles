@@ -44,7 +44,7 @@ is_main
 ps --kind auto "quota" "instruction" >/dev/null 2>"$SANDBOX/err"
 has "--kind claude" "the main pane's auto Claude choice needs no explicit --why"
 ps --check "quota" "instruction" >/dev/null
-has "--kind claude" "checks ignore normal worker routing: always Claude"
+has "--kind codex" "checks ignore normal worker routing: always Codex"
 not_main
 for args in '--model=gpt-example' '--effort=high' '-m gpt-example' '-c model_reasoning_effort=xhigh' '-c model="gpt-example"'; do
   # Intentional splitting of this fixed list simulates the original argument tokens.
@@ -72,7 +72,7 @@ echo typo > "$SANDBOX/home/.local/state/agent-quota/policy"
 if ps --kind auto "bad policy" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "invalid policy must refuse"; fi
 [ ! -e "$SANDBOX/log" ] || fail "invalid policy opens no pane"
 
-# claude-first: one policy value makes Claude the first choice for work and check panes (paid-extra account included).
+# claude-first: one policy value makes Claude the first choice for ordinary work panes (paid-extra account included).
 echo claude-first > "$SANDBOX/home/.local/state/agent-quota/policy"
 quota_fixture 10 40 true
 not_main
@@ -84,15 +84,15 @@ is_main
 ps --kind auto "first" "instruction" >/dev/null 2>"$SANDBOX/err"
 has "--kind claude" "claude-first: the main pane's auto choice is Claude without --why"
 ps --check "first" "instruction" >/dev/null 2>"$SANDBOX/err"
-has "--kind claude" "claude-first: a default check is Claude"
-has "--env CLAUDE_CHECK_TARGET=$PWD" "claude-first: the Claude check still protects its checked folder"
-has "--model claude-sonnet-5-5 --effort high" "claude-first: a Claude check keeps Sonnet/high"
-hasnt "--sandbox" "claude-first: no Codex sandbox flags reach a Claude check"
+has "--kind codex" "claude-first does not change check routing"
+has "--env HERDR_CHECK_TARGET=$PWD" "the check protects its checked folder"
+has "--model gpt-6.1-sol" "a check keeps Sol"
+has 'model_reasoning_effort="high"' "a check keeps high effort"
 ps --check --kind auto "first" "instruction" >/dev/null 2>"$SANDBOX/err"
-has "--env CLAUDE_CHECK_TARGET=$PWD" "claude-first: an explicit --kind auto check is Claude too"
-if ps --check --kind codex "first" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "an explicit --kind codex check is refused"; fi
+has "--env HERDR_CHECK_TARGET=$PWD" "explicit auto checks remain protected"
+if ps --check --kind claude "first" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "an explicit Claude check is refused"; fi
 ps --check "first" "instruction" -- --model x >/dev/null 2>"$SANDBOX/err"
-has "--kind claude" "forwarded arguments go to a Claude check"
+has "--kind codex" "forwarded arguments go to a Codex check"
 quota_fixture 10 85 true
 not_main
 ps --kind auto "over" "instruction" >/dev/null 2>"$SANDBOX/err"
@@ -137,16 +137,16 @@ quota_fixture 99 90 true
 if ps --kind auto --opus "opus both over" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "--opus must not bypass both reserves"; fi
 [ ! -e "$SANDBOX/log" ] || fail "--opus refusal must not query herdr"
 quota_fixture 99 40 true
-quota_fixture 10 85 true
+quota_fixture 85 40 true
 is_main
-# Lead decision 2026-11-19: past Claude's measured reserve, kept for the main pane on the same account, no check opens;
-# nothing waits for one: the caller looks again or hands a read-only recheck out (요유 2026-11-20). Codex never stands in.
+# Check policy 2026-11-28: no check opens past Codex's measured usage reserve;
+# nothing waits for one: the caller looks again or hands a read-only recheck out (요유 2026-11-20). There is no runner fallback.
 board="$SANDBOX/home/work/munice/.agents/skills/agent-board"
 mkdir -p "$board/ambient"
 echo 'YOYOO_DM = "D0FIXTURE"' > "$board/ambient/collect.py"
 asked_file="$SANDBOX/home/.local/state/pane-spawn/check-usage-asked"
 refused() { # <label>: a check past the reserve; its refusal is left in $SANDBOX/err
-  if ps --check "$1" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "$1: a check past the Claude reserve must not open"; fi
+  if ps --check "$1" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "$1: a check past the Codex reserve must not open"; fi
 }
 # What auto-tab-close passes to the main pane is the first 1200 characters of the refusal (automatic-check-start.py).
 asks() {
@@ -158,7 +158,7 @@ asks_nothing() {
   ! grep -q 'main-channel.py post' "$SANDBOX/err" || fail "$1: no second request command"
 }
 if PANE_SPAWN_CHECK_RECEIPT="$SANDBOX/over-receipt.json" ps --check "over" "instruction" >/dev/null 2>"$SANDBOX/err"; then
-  fail "a check past the Claude reserve must not open"
+  fail "a check past the Codex reserve must not open"
 fi
 grep -q 'past its usage reserve (week 85%, five-hour 20%)' "$SANDBOX/err" || fail "the refusal names the reserve and the reading"
 grep -q 'nothing waits for one' "$SANDBOX/err" || fail "the refusal tells the caller nothing waits for a check"
@@ -175,19 +175,19 @@ grep -q 'backend-bot DM' "$SANDBOX/err" || fail "the request goes to the backend
 ! grep -q 'in #0' "$SANDBOX/err" || fail "the check refusal no longer sends the request to a thread or #0"
 refused "second"
 asks_nothing "second refusal in the window"
-quota_fixture 10 85 true # a new weekly reset time: a new window
+quota_fixture 85 40 true # a new weekly reset time: a new window
 refused "new window"
 asks "new window"
 quota_fixture 10 40 true
 ps --check "room again" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "a check within the reserve opens"
 [ ! -e "$asked_file" ] || fail "a reading within the reserve ends the window"
-quota_fixture 10 85 true
+quota_fixture 85 40 true
 refused "blocked again"
 asks "blocked again after room"
 # The five-hour window is its own window: a weekly reset time that moves meanwhile does not ask again.
-snap="$SANDBOX/home/.local/state/agent-quota/claude.json"
+snap="$SANDBOX/home/.codex/sessions/quota.jsonl"
 five_hour_over() { # <five-hour reset epoch> <weekly reset epoch>
-  jq --argjson f "$1" --argjson w "$2" '.five_hour = {used_percentage: 90, resets_at: $f} | .seven_day = {used_percentage: 40, resets_at: $w}' "$snap" >"$snap.new" && mv "$snap.new" "$snap"
+  jq -c --argjson f "$1" --argjson w "$2" '.payload.rate_limits.primary = {used_percent: 90, window_minutes: 300, resets_at: $f} | .payload.rate_limits.secondary = {used_percent: 40, window_minutes: 10080, resets_at: $w}' "$snap" >"$snap.new" && mv "$snap.new" "$snap"
 }
 now=$(date +%s)
 five_hour_over $((now + 1000)) $((now + 300000))
@@ -211,7 +211,7 @@ asks "main after another pane"
 rm -f "$board/ambient/collect.py" "$asked_file"
 refused "no board"
 grep -qF -- '--channel <YOYOO_DM in' "$SANDBOX/err" || fail "an unreadable DM id names where to read it"
-quota_fixture 10 85 true
+quota_fixture 85 40 true
 ! grep -q 'unchecked' "$SANDBOX/err" || fail "the refusal no longer sends the report on unchecked"
 ! grep -vF ' pane get ' "$SANDBOX/log" || fail "a check past the reserve only asks herdr which pane called it"
 rm -f "$SANDBOX/home/.local/state/agent-quota/claude.json"
@@ -221,21 +221,21 @@ grep -q 'no session opened for usage' "$SANDBOX/err" || fail "the auto refusal s
 grep -q 'switch the account or spend a reset ticket' "$SANDBOX/err" || fail "the auto refusal asks 요유 to switch the account or spend a reset ticket"
 grep -q "Never put the work off until the usage reset" "$SANDBOX/err" || fail "the auto refusal forbids waiting for the reset"
 [ ! -e "$SANDBOX/log" ] || fail "claude-first refusal opens no work pane"
-if ps --check "none" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "a check past the Claude reserve (week 90%) must not open"; fi
-grep -q 'week 90%' "$SANDBOX/err" || fail "the refusal names the reading"
+if ps --check "none" "instruction" >/dev/null 2>"$SANDBOX/err"; then fail "a check past the Codex reserve (week 99%) must not open"; fi
+grep -q 'week 99%' "$SANDBOX/err" || fail "the refusal names the reading"
 rm -rf "$SANDBOX/home/.codex/sessions" "$SANDBOX/home/.local/state/agent-quota/claude.json"
 ps --check "unknown" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "a check with unknown usage still opens"
-has "--kind claude" "unknown usage keeps a check on Claude"
+has "--kind codex" "unknown usage keeps a check on Codex"
 # api#1296: an automatic check's receipt names the runner actually opened and why, for each policy.
 quota_fixture 10 40 true
 receipt="$SANDBOX/runner-receipt.json"
 PANE_SPAWN_CHECK_RECEIPT="$receipt" ps --check "first" "instruction" >/dev/null 2>"$SANDBOX/err"
-[ "$(jq -r .runner "$receipt")" = claude ] || fail "claude-first: the receipt records Claude"
-[ "$(jq -r .runner_reason "$receipt")" = "checks open only on Claude" ] || fail "claude-first: the receipt records why"
+[ "$(jq -r .runner "$receipt")" = codex ] || fail "claude-first: the receipt records Codex"
+[ "$(jq -r .runner_reason "$receipt")" = "checks open only on Codex" ] || fail "claude-first: the receipt records why"
 echo codex-only > "$SANDBOX/home/.local/state/agent-quota/policy"
 PANE_SPAWN_CHECK_RECEIPT="$receipt" ps --check "first" "instruction" >/dev/null 2>"$SANDBOX/err"
-[ "$(jq -r .runner "$receipt")" = claude ] || fail "codex policy: the receipt records Claude too"
-[ "$(jq -r .runner_reason "$receipt")" = "checks open only on Claude" ] || fail "codex policy: the receipt records why"
+[ "$(jq -r .runner "$receipt")" = codex ] || fail "codex policy: the receipt records Codex too"
+[ "$(jq -r .runner_reason "$receipt")" = "checks open only on Codex" ] || fail "codex policy: the receipt records why"
 echo claude-first > "$SANDBOX/home/.local/state/agent-quota/policy"
 not_main
 echo quota-aware > "$SANDBOX/home/.local/state/agent-quota/policy"
@@ -244,7 +244,7 @@ if ps --kind auto "paid" "instruction" >/dev/null 2>"$SANDBOX/err"; then :; fi
 hasnt "--kind claude" "quota-aware still excludes a paid-extra Claude account"
 is_main
 ps --check "legacy" "instruction" >/dev/null 2>"$SANDBOX/err"
-has "--kind claude" "quota-aware checks are Claude too"
+has "--kind codex" "quota-aware checks are Codex too"
 not_main
 
 # Each regression runs independently so one broken contract does not hide the rest.
@@ -322,7 +322,7 @@ regression_check_usage_timeout() {
   SECONDS=0
   PATH="$SANDBOX/slow-python:$PATH" PANE_SPAWN_QUOTA_LIMIT=1 ps --check "slow" "instruction" >/dev/null 2>"$SANDBOX/err" || fail "a check whose usage lookup timed out still opens"
   [ "$SECONDS" -lt 30 ] || fail "the check's usage lookup is bounded"
-  has "--kind claude" "a timed-out lookup opens the check on Claude"
+  has "--kind codex" "a timed-out lookup opens the check on Codex"
   grep -q 'usage unknown' "$SANDBOX/err" || fail "the check says its usage reading was unknown"
 }
 regression regression_codex_arguments
