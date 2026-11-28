@@ -20,7 +20,7 @@ Codex도 조건을 만족하지 못하면 시작을 거부한다.
 이 차이는 Claude 상태가 불명확하면 전환하지 않고 기존 Codex를 유지한다는 설계를 따른다.
 Codex 자체의 사용량과 결제 상태는 확인되어야 한다.
 자동 선택한 Claude에는 Sonnet 5.5와 high를 기본으로 준다.
-확인 세션, 명시적 실행기, `--why`, 직접 지정한 모델·강도는 기존 경로를 유지한다. 확인 세션은 `claude-first` 정책에서만 Claude를 먼저 고른다(아래 절).
+명시적 실행기, `--why`, 직접 지정한 모델·강도는 기존 경로를 유지한다. 확인 세션은 작업 세션 정책과 무관하게 Codex로 연다(아래 절).
 `--kind`를 생략한 기존 Claude 경로도 그대로 둔다.
 `--` 뒤에 실행기 인자를 주면 기존 Codex를 유지한다. 같은 인자를 Claude가 다른 뜻으로 읽을 수 있기 때문이다.
 집맥의 `ambient-runner`도 기존 Codex를 유지한다. Claude에는 같은 sandbox 보호가 없기 때문이다.
@@ -88,9 +88,10 @@ Claude 상태줄은 공식 `rate_limits` 입력을 현재 계정과 기기에 �
 Codex 사용량이 부족하고 Claude에 여유가 있을 때 `agent-runner claude`로 켠다.
 
 - 작업 세션(`--kind auto`)은 Claude의 측정 사용량이 여유분(주간 80%, 5시간 창이 있으면 80%) 안이면 Claude로 열린다. 여유분을 넘기거나 측정이 오래됐으면 Codex로 돌아가고, Codex도 여유분을 넘기면 시작을 거부한다.
-- 확인 세션(`--check`, 자동 확인 포함)은 이 정책을 따르지 않고 늘 Claude로 연다. `--check --kind codex`는 거절한다(요유 2026-11-19, Codex 리뷰를 받지 않기로 함. 그날 자동 확인이 Codex로 열린 것은 사용량 조회가 6초를 넘겨서였다).
-- 확인 세션을 열기 전에 `agent-quota claude-reserve`로 Claude 사용량만 읽는다. 측정값이 여유분(주간 80%, 5시간 창이 있으면 80%)을 넘었으면 확인 세션을 열지 않고 exit 2로 끝난다. 여유분은 같은 계정을 쓰는 메인 세션이 쓸 몫이기 때문이다. 이때 auto-tab-close는 그 이유를 적어 보고를 확인 없이 메인 세션에 넘긴다(리드 결정 2026-11-19). 측정값이 없거나 오래됐거나 6초 안에 읽히지 않으면 확인 세션을 Claude로 연다.
-- Claude 확인 세션도 대상 폴더를 쓰지 못한다. `CLAUDE_CHECK_TARGET`을 넘기고 `claude-online`의 Seatbelt가 막는다. `pane-spawn-quota.test.sh`가 환경변수 전달을, `claude-online.test.sh`가 쓰기 거부를 확인한다.
+- 확인 세션(`--check`, 자동 확인 포함)은 이 정책과 무관하게 Codex로 연다(2026-11-28 결정). 기본 모델·강도는 `gpt-6.1-sol`/high이며, `--check --kind claude`와 `--check --kind agy`는 거절한다. 일반 코드 리뷰의 Claude 전용 규칙은 유지한다.
+- 확인 세션을 열기 전에 `agent-quota codex-reserve`로 Codex 사용량을 읽는다. 주간 사용량이 80%를 넘거나, 5시간 창 사용량이 80% 이상이면 확인 세션을 열지 않고 exit 2로 끝난다. 이는 Codex 사용량 여유분 검사다. 이때 auto-tab-close는 그 이유를 적어 보고를 확인 없이 메인 세션에 넘긴다. 측정값이 없거나 오래됐거나 6초 안에 읽히지 않으면 기존 계약대로 확인 세션을 Codex로 연다.
+- Codex 확인 세션은 대상 폴더를 쓰지 못한다. `HERDR_CHECK_TARGET`을 넘기고 `codex-startup.py`의 Seatbelt가 프로세스 트리 전체의 쓰기를 막는다. 중첩 sandbox를 피하려고 native sandbox는 끄며, 이를 바꾸는 인자는 거절한다. `pane-spawn-quota.test.sh`가 환경변수 전달을, `codex-startup.test.py`가 쓰기 거부를 확인한다.
+- Codex 확인 세션은 `--analysis`여도 Amplitude만 쓸 수 있다. Honeycomb·Stripe 수치를 확인해야 하는 보고는 일반 읽기 전용 재확인 세션으로 보낸다.
 - 작업 세션에서는 `--` 뒤 실행기 인자와 `ambient-runner`가 Codex를 유지한다.
 - 메인 세션의 `--why` 규칙(api#1036)은 `--kind claude`나 `--kind` 생략에만 걸린다. `--kind auto`는 `--why` 없이 정책을 따른다.
 - `quota-aware`와 달리 `hasExtraUsageEnabled`가 true인 계정도 Claude 후보로 둔다. 이 값이 true/false로 명시되지 않았거나, API 키·외부 공급자 설정이 있거나, 계정·기기가 관측과 다르면 여전히 제외한다. 5시간 창이 없는 관측도 받아들인다.

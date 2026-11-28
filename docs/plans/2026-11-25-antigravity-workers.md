@@ -1,5 +1,7 @@
 # Antigravity worker integration
 
+> 2026-11-28 갱신: 아래 Claude 확인 세션 설명은 당시 계획이다. 현재 `--check`와 자동 확인은 Codex로 열고, `codex-reserve`와 `HERDR_CHECK_TARGET`을 쓴다. 일반 코드 리뷰 규칙은 유지한다.
+
 ## Goal
 Use subscription-authenticated Antigravity CLI for worker sessions while preserving Claude review sessions and existing safeguards. Never select paid API credentials or enable credit overages implicitly.
 

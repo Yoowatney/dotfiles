@@ -296,7 +296,7 @@ if [ -n "$check" ] && [ -z "$request_child" ]; then
            request="First usage refusal of this window: main pane, ask 요유 now, once, to switch the account or spend a reset ticket, in their backend-bot DM (not the work's thread or the main channel): python3 $board/main/main-channel.py post --channel ${dm:-<YOYOO_DM in $board/ambient/collect.py>} --new <file> (a usage refusal of the recheck pane is the same request)."
          fi
        fi
-       die "Codex is past its usage reserve (week ${week:-?}, five-hour ${five:-?}), kept for the main pane: no check opened, and nothing waits for one. $request Never put the work off until the usage reset (요유 2026-11-20); open the check again as soon as 요유 says it is done. If one command can show the claims again, run it yourself; otherwise open a read-only recheck pane that is no check: pane-spawn --kind auto \"<work name> [rc-<the [ac-] id of the report>]\" \"<what to re-read, the full report file>\". Its report comes straight back; post from it, citing its report entry time in the 확인: line as [재확인 HH:MM:SS]. Team threads, money and operations posts are the same. Other gates, such as production write approval, stay." ;;
+       die "Codex is past its usage reserve (week ${week:-?}, five-hour ${five:-?}), reserved Codex capacity: no check opened, and nothing waits for one. $request Never put the work off until the usage reset (요유 2026-11-20); open the check again as soon as 요유 says it is done. If one command can show the claims again, run it yourself; otherwise open a read-only recheck pane that is no check: pane-spawn --kind auto \"<work name> [rc-<the [ac-] id of the report>]\" \"<what to re-read, the full report file>\". Its report comes straight back; post from it, citing its report entry time in the 확인: line as [재확인 HH:MM:SS]. Team threads, money and operations posts are the same. Other gates, such as production write approval, stay." ;;
     *) echo 'pane-spawn: Codex usage unknown; the check opens on Codex' >&2 ;;
   esac
 fi
@@ -671,7 +671,7 @@ for try in $(seq 1 15); do # direnv and shell startup can hold the foreground pr
   case "$out" in *"blocked during startup"*)
     screen=$("$H" agent read "$pane" --source visible 2>/dev/null | tr -s ' \n' '  ')
     refuse_hook_review "$screen"
-    give_up "$kind waits at a dialog as it starts, which nobody here answers. It shows: ${screen:0:400}. If it asks whether to trust $cwd, start $kind there by hand once and answer it; else open the pane with --kind claude. herdr: $out" ;;
+    give_up "$kind waits at a dialog as it starts, which nobody here answers. It shows: ${screen:0:400}. If it asks whether to trust $cwd, start $kind there by hand once and answer it; else resolve the startup dialog and retry with the same runtime; check sessions must remain on Codex. herdr: $out" ;;
   esac
   problem=$(startup_problem) && give_up "$problem"
   case "$out" in *agent_start_failed* | *invalid_agent_argument* | *agent_name_taken*) give_up "$kind did not start: $out" ;; esac
