@@ -69,9 +69,10 @@
 2026-11-26). 11/06에 Amplitude를 남긴 결정은 이 결정으로 바뀐다. 세 가지의 안내문과 설명은 합쳐
 약 6,500자이고, 최근 30일 대화 기록에서 honeycomb은 약 1%, Amplitude는 약 0.5%만 불렀으며 stripe를
 부른 기록은 찾지 못했다. 조사나 분석을 맡길 때는 `pane-spawn --analysis`로 연다. 이 옵션은
-`CLAUDE_STARTUP_ANALYSIS=1`을 넣고, `/clear` 뒤에도 유지된다. 그 세션의 자동 확인 세션도 같은
-연결로 열린다. 빼는 목록은 프로파일의 `roles.worker.analysisOff`다. 메인 세션은 전부터 셋 다
-꺼 두었고, Codex 세션과 손으로 연 세션은 영향이 없다.
+`CLAUDE_STARTUP_ANALYSIS=1`을 넣고, `/clear` 뒤에도 유지된다. 자동 확인은 Codex로 열며,
+`--analysis`여도 Amplitude만 쓴다. Honeycomb·Stripe 수치는 일반 읽기 전용 재확인 세션에서 확인한다.
+빼는 목록은 Claude 프로파일의 `roles.worker.analysisOff`다. 메인 세션은 전부터 셋 다 꺼 두었고,
+손으로 연 Claude 세션은 이 프로파일의 영향을 받지 않는다.
 되돌리기: 프로파일에서 `roles.worker.analysisOff`를 지운다. 하네스를 v0.1.0으로 되돌려도 켜진다.
 honeycomb 연결은 Claude 설정에서 munice 루트 폴더의 프로젝트 범위에만 있어서, 다른 폴더(nightly_api,
 워크트리)에서 연 `--analysis` 칸에는 붙일 연결이 없었다(api#1672, 2026-11-27). `scripts/claude-online`이
