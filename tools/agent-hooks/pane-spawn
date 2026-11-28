@@ -90,7 +90,8 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full]
     command that asks 요유, in the backend-bot DM, to switch the account or spend a reset ticket; later ones say not to ask again.
     An unknown usage reading still opens it.
   --check-level: how far the automatic check of this pane result goes, chosen by the main pane. none: no check session; the report goes
-    to the main pane, which posts it headed 끝남(확인 안 함): and opens a check only when asked. figures: the check re-runs only the commands
+    to the main pane. With reply-format.json main_session=v2 it posts headless prose with 확인: 하지 않았어요.;
+    v1 keeps the 끝남(확인 안 함): head. It opens a check only when asked. figures: the check re-runs only the commands
     that gave the numbers of the report. full (also what no level means): the whole report is checked, as before levels existed.
     With --check, figures gives the check pane the figures-only brief.
   --artifact: keep the Artifact tool in a Claude pane (a job that publishes a page); every Claude pane starts without it otherwise.

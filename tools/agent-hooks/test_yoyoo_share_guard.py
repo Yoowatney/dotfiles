@@ -32,6 +32,14 @@ def result(text="1794000002.000300\n", error=False, ident="post"):
 
 
 class EarlyAnswerHeadTests(unittest.TestCase):
+    def test_format_guidance_keeps_v2_headless_and_v1_compatible(self):
+        for text in (guard.PRECHECK_NOTE, guard.PRECHECK_REASON, guard.UNOPENED_NOTE):
+            self.assertIn("main_session", text)
+            self.assertIn("v2", text)
+            self.assertIn("확인: 진행 중", text)
+            self.assertIn("상태 머리 없이", text)
+            self.assertIn("v1", text)
+
     def test_the_precheck_hint_names_the_state_head_main_channel_takes(self):
         # 요유 2026-11-20: a #0 post starts with its state; main-channel refuses the old 확인 중: head
         for text in (guard.PRECHECK_NOTE, guard.PRECHECK_REASON, guard.UNOPENED_NOTE):
