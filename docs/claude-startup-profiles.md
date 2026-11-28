@@ -69,14 +69,52 @@
 2026-11-26). 11/06에 Amplitude를 남긴 결정은 이 결정으로 바뀐다. 세 가지의 안내문과 설명은 합쳐
 약 6,500자이고, 최근 30일 대화 기록에서 honeycomb은 약 1%, Amplitude는 약 0.5%만 불렀으며 stripe를
 부른 기록은 찾지 못했다. 조사나 분석을 맡길 때는 `pane-spawn --analysis`로 연다. 이 옵션은
-`CLAUDE_STARTUP_ANALYSIS=1`을 넣고, `/clear` 뒤에도 유지된다. 자동 확인은 Codex로 열며,
-`--analysis`여도 Amplitude만 쓴다. Honeycomb·Stripe 수치는 일반 읽기 전용 재확인 세션에서 확인한다.
+`CLAUDE_STARTUP_ANALYSIS=1`을 넣고, `/clear` 뒤에도 유지된다. Codex 확인 세션은
+`--check --analysis`로 열면 설정된 Amplitude와 Honeycomb·Stripe의 읽기 도구를 쓴다.
+두 MCP의 Codex 인증은 아래 절차로 따로 준비한다.
 빼는 목록은 Claude 프로파일의 `roles.worker.analysisOff`다. 메인 세션은 전부터 셋 다 꺼 두었고,
 손으로 연 Claude 세션은 이 프로파일의 영향을 받지 않는다.
 되돌리기: 프로파일에서 `roles.worker.analysisOff`를 지운다. 하네스를 v0.1.0으로 되돌려도 켜진다.
 honeycomb 연결은 Claude 설정에서 munice 루트 폴더의 프로젝트 범위에만 있어서, 다른 폴더(nightly_api,
 워크트리)에서 연 `--analysis` 칸에는 붙일 연결이 없었다(api#1672, 2026-11-27). `scripts/claude-online`이
 `CLAUDE_STARTUP_ANALYSIS`가 있으면 폴더와 무관하게 `--mcp-config`로 honeycomb을 직접 넘긴다.
+
+### Codex 확인 세션의 Honeycomb·Stripe 인증
+
+Codex는 Claude의 프로젝트 MCP, 플러그인과 OAuth 인증을 가져오지 않는다.
+두 연결은 [codex-startup.py](../tools/agent-hooks/codex-startup.py)가 확인 세션에만
+임시 CLI 설정으로 넣는다. Codex 전역 설정 파일에는 연결을 추가하지 않는다.
+설정된 MCP가 없던 환경에서도 작동하며, 문맥을 줄이지 않는 `full` 모드에서도
+같은 도구 제한을 적용한다. `--analysis` 없는 확인 세션에서는 둘 다 꺼진다.
+
+인증은 설정을 관리하는 맥에서 한 번씩 준비한다. 다음 명령은 브라우저에서
+각 서비스의 OAuth 동의를 받으므로, 계정 소유자가 승인할 때 실행한다.
+
+```sh
+codex -c 'mcp_servers.honeycomb.url="https://mcp.honeycomb.io/mcp"' mcp login honeycomb
+codex -c 'mcp_servers.stripe.url="https://mcp.stripe.com"' mcp login stripe
+```
+
+Honeycomb 동의 화면에서는 필요한 환경의 읽기 권한만 고른다. Stripe도 필요한
+계정·환경의 읽기 권한만 승인한다. Claude 인증이나 Stripe CLI 키를 복사하지 않는다.
+인증 저장 위치는 Codex의 MCP 자격 증명 저장소
+설정에 따른다. 인증을 마친 뒤 `pane-spawn --check --analysis`로 새 확인 세션을 연다.
+이미 실행 중인 프로세스에는 새 연결 설정이 추가되지 않는다.
+
+Codex의 `enabled_tools`에는 공식 문서에서 읽기로 정의한 도구만 적는다.
+Honeycomb은 조회·추적·보드와 알림 설정 읽기를, Stripe는 API 검색·GET 호출과
+문서 검색을 허용한다. 생성·수정·삭제·송금 도구와 새로 생긴 도구는 허용하지 않는다.
+전체 허용 목록은 위 시작 래퍼를 기준으로 한다. 설정을 합칠 때 호환되지 않는
+같은 이름의 stdio MCP가 있으면 Codex가 시작을 거부한다. 그 경우 기존 연결의
+용도를 확인하고 이름을 바꾼 뒤 공식 HTTP 연결로 인증한다.
+
+대상 폴더의 쓰기 차단은 기존 macOS 샌드박스가 전체 프로세스 트리에 적용한다.
+OAuth나 원격 MCP를 쓰려고 샌드박스와 안전 훅을 해제할 필요는 없다.
+변경을 되돌리려면 이 기능의 커밋을 되돌리고 확인 세션을 새로 연다.
+
+근거: [Codex MCP 설정](https://developers.openai.com/codex/mcp/),
+[Honeycomb 도구 권한](https://docs.honeycomb.io/integrations/mcp/tools),
+[Stripe MCP 도구](https://docs.stripe.com/mcp).
 
 ## 하네스 v0.1.1: 회사·곰곰 설정은 프로젝트에
 
