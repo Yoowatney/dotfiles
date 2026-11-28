@@ -285,6 +285,67 @@ class ActionsGuardTest(unittest.TestCase):
         with unittest.mock.patch.dict(os.environ, {'HOME': home}):
             return COMMON.riders({'tool_name': 'Bash', 'session_id': session, 'tool_input': {'command': command}})
 
+    def test_unfiltered_multi_page_project_reads_are_refused_before_execution(self):
+        for command in [
+            'gh project item-list 3 --owner example --limit 1000 --format json',
+            'gh project item-list 3 --limit=101',
+            'gh project item-list 3 -L1000',
+            'gh project item-list 3 -L 1000 --query=""',
+            'gh project item-list 3 --limit "$LIMIT"',
+            'gh project item-list 3 --limit 1000 --query "$FILTER"',
+            'gh project item-list 3 --limit 1000 --jq "--query"',
+            'timeout 30 gh project item-list 3 --limit 1000',
+            'bash -lc "gh project item-list 3 --limit 1000"',
+            'x=$(gh project item-list 3 --limit 1000)',
+            'watch -n 60 gh project item-list 3 --limit 1000',
+            "GH_GRAPHQL_REASON=x gh project item-list 3 --limit 1000",
+            "GH_GRAPHQL_REASON='$REASON' gh project item-list 3 --limit 1000",
+        ]:
+            with self.subTest(command=command):
+                reason = self.verdict(command) or ''
+                self.assertIn('GraphQL', reason, command)
+                self.assertIn('--query', reason)
+                self.assertIn('GH_GRAPHQL_REASON', reason)
+
+    def test_bounded_filtered_and_reasoned_project_reads_still_pass(self):
+        for command in [
+            'gh project item-list 3',
+            'gh project item-list 3 --limit 100',
+            'gh project item-list 3 -L100',
+            'gh project item-list 3 --limit 1000 --query "is:open"',
+            'gh project item-list 3 --limit 1000 --query=is:open',
+            "GH_GRAPHQL_REASON='inventory snapshot needed' gh project item-list 3 --limit 1000",
+            'gh project item-list --help --limit 1000',
+            "echo 'gh project item-list 3 --limit 1000'",
+            "cat <<'EOF'\ngh project item-list 3 --limit 1000\nEOF",
+            'gh issue view 3 --json projectItems',
+            'gh api rate_limit',
+        ]:
+            with self.subTest(command=command):
+                self.assertIsNone(self.verdict(command), command)
+
+    def test_command_substitutions_are_not_literal_project_exceptions(self):
+        for command in [
+            'gh project item-list 3 --limit 1000 --query "$(echo)"',
+            'gh project item-list 3 --limit 1000 --query "`printf \'\'`"',
+            'GH_GRAPHQL_REASON="$(echo x)" gh project item-list 3 --limit 1000',
+            'GH_GRAPHQL_REASON=`date` gh project item-list 3 --limit 1000',
+        ]:
+            with self.subTest(command=command):
+                self.assertIn('GraphQL', self.verdict(command) or '', command)
+
+    def test_shared_reason_validation_rejects_masked_substitutions(self):
+        for command in [
+            'GH_REST_REASON="$(echo x)" while :; do gh api repos/o/r; sleep 5; done',
+            'ACTIONS_RUN_REASON=`date` gh workflow run build.yml',
+        ]:
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.verdict(command), command)
+
+    def test_graphql_reason_does_not_disable_other_quota_or_actions_guards(self):
+        self.assertIn('Actions', self.verdict("GH_GRAPHQL_REASON='inventory snapshot needed' gh workflow run x") or '')
+        self.assertTrue(self.verdict("GH_GRAPHQL_REASON='inventory snapshot needed' while :; do gh api repos/o/r; sleep 5; done"))
+
     def test_one_session_cannot_spend_the_shared_rest_quota(self):
         """Hundreds of one-call-per-command log downloads must stop before they spend the whole quota."""
         read = 'gh api repos/o/r/actions/jobs/1/logs'
@@ -369,6 +430,7 @@ class ActionsGuardTest(unittest.TestCase):
     def test_both_runtime_payloads_receive_native_deny_and_allow(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith(('HERDR_', 'MUNICE_'))}
         env.pop('ACTIONS_RUN_REASON', None)
+        env.pop('GH_GRAPHQL_REASON', None)
         for runtime in ('claude', 'codex'):
             for command, denied in [('gh workflow run build.yml', True),
                                     ("ACTIONS_RUN_REASON='required recovery' gh workflow run build.yml", False),
@@ -380,6 +442,12 @@ class ActionsGuardTest(unittest.TestCase):
                                     ('gh pr checks 12 --watch --interval 0x3c', False),
                                     ('uv run --no-project python3 ~/.dotfiles/tools/agent-hooks/ci-watch.py --repo owner/repo 123', False),
                                     ('while :; do gh api repos/o/r; sleep 5; done', True),
+                                    ('gh project item-list 1 --owner owner --limit 1000 --format json', True),
+                                    ('gh project item-list 1 --limit 1000 --query "$(echo)"', True),
+                                    ('GH_GRAPHQL_REASON=`date` gh project item-list 1 --limit 1000', True),
+                                    ('gh project item-list 1 --owner owner --limit 100', False),
+                                    ("gh project item-list 1 --owner owner --limit 1000 --query 'is:open'", False),
+                                    ("GH_GRAPHQL_REASON='required full export' gh project item-list 1 --owner owner --limit 1000", False),
                                     ('git push origin feature', False)]:
                 with self.subTest(runtime=runtime, command=command):
                     payload = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash',
