@@ -595,7 +595,8 @@ def relay_reason(payload: dict, text: str, env) -> str | None:
         return None
     refused = {i for kind, _, _, i in after if kind == "refused"}
     stated = [v for v in (m.group(1).strip(" \t*_.,;") for m in CHECK_LINE.finditer(prose(text)))
-              if v and not NONE.match(v) and not re.fullmatch(r"진행 중(?:\s+\[ac-[0-9a-f]{16}\])?", v)]
+              if v and not NONE.match(v) and not re.fullmatch(
+                  r"진행\s+중(?:이에요|입니다)?[.!]?(?:\s+\[ac-[0-9a-f]{16}\])?(?:\s+\(\d+\s*(?:초|분|시간)\))?[.!]?", v)]
     if delegates_checks(payload, env):
         if kind == "이" and unopened_heads(lines[start]):
             # its check could not open: look again here (a command ran and a `확인:` line says what it saw), or hand a read-only recheck out
