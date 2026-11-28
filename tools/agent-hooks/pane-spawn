@@ -719,5 +719,9 @@ if [ "$delivered" != 0 ] || { [ "$status" != working ] && [ "$status" != done ];
   echo "pane-spawn: $addr$pane shows no confirmed work (${status:-unknown}); inspect it with herdr agent read before using pane-tell." >&2
   exit 1
 fi
+# Keep only issue URLs and the delivered pane's identity; never its instruction.
+session_id=$("$H" agent get "$pane" 2>/dev/null | jq -r '.result.agent.agent_session.value // empty')
+python3 -I "$helper_dir/pane-spawn-request.py" --record-assignment "$addr$pane" "$session_id" "$name" "$request_prompt" >/dev/null 2>&1 \
+  || echo 'pane-spawn: issue assignment unavailable; launch continues' >&2
 echo "$addr$pane"
 check_receipt started
