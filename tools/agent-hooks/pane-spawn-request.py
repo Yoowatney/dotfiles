@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Serialize repeated worker requests without persisting their instruction text."""
+"""Track worker requests and issue assignments without persisting instructions."""
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
 import time
 
 WINDOW_SECONDS = 600
+ISSUE_URL = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[0-9]+")
 
 
 def inventory(socket):
@@ -37,7 +39,44 @@ def save(path, record):
     temporary.replace(path)
 
 
+def record_assignment(address, session_id, name, prompt):
+    urls = sorted(set(ISSUE_URL.findall(name + "\n" + prompt)))
+    if not urls:
+        return
+    if not session_id:
+        raise RuntimeError("missing agent session identity")
+    socket = os.environ.get("HERDR_SOCKET_PATH", "")
+    pane_id = address.rsplit("/", 1)[-1]
+    panes = inventory(socket)
+    pane = next((p for p in panes if p.get("pane_id") == pane_id), None)
+    if not pane or not pane.get("terminal_id"):
+        raise RuntimeError("missing terminal identity")
+    # Launcher output is caller-relative. Durable bindings use server-qualified
+    # addresses even when a worker launches another pane on its own server.
+    socket_path = Path(socket)
+    server = socket_path.parent.name if socket_path.parent.parent.name == "sessions" else "default"
+    address = f"{server}/{pane_id}" if server != "default" else pane_id
+    root = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "pane-spawn"
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root.chmod(0o700)
+    with (root / "assignments.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        path = root / "assignments.json"
+        rows = json.loads(path.read_text()) if path.exists() else []
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError("invalid assignment inventory")
+        rows = [row for row in rows if row.get("session_id") != address
+                and row.get("terminal_id") != pane["terminal_id"]]
+        rows.append(dict(session_id=address, terminal_id=pane["terminal_id"],
+                         agent_session_id=session_id, issue_urls=urls))
+        save(path, rows)
+        path.chmod(0o600)
+
+
 def run():
+    if sys.argv[1:2] == ["--record-assignment"]:
+        record_assignment(*sys.argv[2:])
+        return 0
     shell, launcher, caller, cwd, prompt, kind, auto_claude, *arguments = sys.argv[1:]
     socket = os.environ.get("HERDR_SOCKET_PATH", "")
     # Label, job id and startup-generated prompt text do not change the assignment.
@@ -116,5 +155,6 @@ if __name__ == "__main__":
     try:
         sys.exit(run())
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
-        print(f"pane-spawn: duplicate protection: {error}", file=sys.stderr)
+        operation = "assignment recording" if sys.argv[1:2] == ["--record-assignment"] else "duplicate protection"
+        print(f"pane-spawn: {operation}: {error}", file=sys.stderr)
         sys.exit(1)
