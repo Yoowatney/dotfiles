@@ -139,7 +139,7 @@ if ps --kind auto --opus "opus both over" "instruction" >/dev/null 2>"$SANDBOX/e
 quota_fixture 99 40 true
 quota_fixture 85 40 true
 is_main
-# Lead decision 2026-11-19: past Codex's measured reserve, kept for the main pane on the same account, no check opens;
+# Check policy 2026-11-28: no check opens past Codex's measured usage reserve;
 # nothing waits for one: the caller looks again or hands a read-only recheck out (요유 2026-11-20). There is no runner fallback.
 board="$SANDBOX/home/work/munice/.agents/skills/agent-board"
 mkdir -p "$board/ambient"

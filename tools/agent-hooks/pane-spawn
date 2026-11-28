@@ -269,8 +269,8 @@ if [ "$kind" = agy ]; then
     die "AGY subscription admission refused: $reserve_reason"
   fi
 fi
-# Lead decision 2026-11-19: Codex's usage reserve keeps room for the main pane on the same account, so past a measured
-# reading over it no check opens; auto-tab-close then sends the report with the way to look again (UNOPENED_NOTE in
+# Check policy 2026-11-28: Codex checks keep a usage reserve, so a measured reading past it refuses the check.
+# auto-tab-close then sends the report with the way to look again (UNOPENED_NOTE in
 # yoyoo-share-guard.py). An unknown, stale or slow reading is not past the reserve: the check opens on Codex.
 # 요유 2026-11-26: the first such refusal of a usage window has the main pane ask 요유 in their backend-bot DM at once; later ones in
 # that window ask nothing. The marker holds the account and the blocking window's reset time; a reading within the reserve

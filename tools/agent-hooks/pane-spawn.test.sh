@@ -200,7 +200,7 @@ has "pane close w1:new" "the held pane goes"
 before "agent read w1:new" "pane close w1:new"
 grep -qF "Update available · 0.166.0 → 0.167.0 › 1. Update now 2. Skip" "$SANDBOX/err" || fail "quotes the dialog on one line: $(cat "$SANDBOX/err")"
 grep -q "trust" "$SANDBOX/err" || fail "still says how to answer a trust dialog: $(cat "$SANDBOX/err")"
-grep -q -- "--kind claude" "$SANDBOX/err" || fail "names the way around it: $(cat "$SANDBOX/err")"
+grep -q -- "retry with the same runtime; check sessions must remain on Codex" "$SANDBOX/err" || fail "keeps the same runtime and Codex checks: $(cat "$SANDBOX/err")"
 
 # Work that never shows fails loudly, with no resend and the pane left open: an instruction Codex dropped looks the same as a
 # wait that failed on an accepted one, and resending that would run the job twice.
