@@ -96,7 +96,7 @@ USAGE='usage: pane-spawn [--new-tab] [--check] [--check-level none|figures|full]
     With --check, figures gives the check pane the figures-only brief.
   --artifact: keep the Artifact tool in a Claude pane (a job that publishes a page); every Claude pane starts without it otherwise.
   --skills: keep the design (taste-skill), office-file (docx/pdf/pptx/xlsx) and Claude-API skills in a Claude pane (UI or office-file job).
-  --analysis: keep analytics access for investigation jobs: the Claude analysis connections/plugins, or configured Amplitude in a Codex check.
+  --analysis: keep analytics access: Claude analysis connections/plugins, or configured Amplitude and read-only Honeycomb/Stripe MCP tools in a Codex check (separate Codex OAuth required).
   --opus: opt out of the Claude work trial and auto-chosen Claude default (Sonnet 5.5/high); use global model/effort defaults for heavy work. It never pins --kind auto to Codex.
     Checks, Codex, dispatch, ambient and other callers keep their existing model policy. Explicit agent arguments win.'
 MIN_ROWS=${PANE_SPAWN_MIN_ROWS:-16} # a 46-row window holds 4 panes of 11-12 rows, which still show about 5 lines of work (2026-11-04); a fifth would leave 5-6

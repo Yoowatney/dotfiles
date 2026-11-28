@@ -2,15 +2,139 @@
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 import tempfile
+import tomllib
 import unittest
 
 spec = importlib.util.spec_from_file_location('startup', Path(__file__).with_name('codex-startup.py'))
 startup = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(startup)
+
+
+class AnalysisCheckTest(unittest.TestCase):
+    def plan(self, home, **overrides):
+        env = {**os.environ, 'HOME': str(home), 'CODEX_HOME': str(home / '.codex'),
+               'XDG_STATE_HOME': str(home / 'state'), 'HERDR_CODEX_WORKDIR': str(home),
+               'HERDR_CODEX_STARTUP_ROLE': 'check', 'HERDR_CODEX_STARTUP_ANALYSIS': '1', **overrides}
+        result = subprocess.run([sys.executable, startup.__file__, '--plan'],
+                                env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def connections(self, plan):
+        config = {}
+        for arg in plan['args']:
+            if arg.startswith('mcp_servers.'):
+                parsed = tomllib.loads(arg)['mcp_servers']
+                for name, value in parsed.items():
+                    config.setdefault(name, {}).update(value)
+        return config
+
+    def test_analysis_connections_are_read_only_in_fresh_open_and_full_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            for mode in ('fresh', 'open', 'full'):
+                with self.subTest(mode=mode):
+                    plan = self.plan(home, HERDR_CODEX_STARTUP_PROFILE='full' if mode == 'full' else '')
+                    connections = self.connections(plan)
+                    honeycomb, stripe = connections['honeycomb'], connections['stripe']
+                    self.assertEqual(honeycomb['url'], 'https://mcp.honeycomb.io/mcp')
+                    self.assertEqual(stripe['url'], 'https://mcp.stripe.com')
+                    for server in (honeycomb, stripe):
+                        self.assertTrue(server['enabled'])
+                        self.assertEqual(set(server), {'url', 'enabled', 'enabled_tools'})
+                        self.assertTrue(server['enabled_tools'])
+                    self.assertIn('run_query', honeycomb['enabled_tools'])
+                    self.assertIn('get_query_results', honeycomb['enabled_tools'])
+                    self.assertIn('stripe_api_read', stripe['enabled_tools'])
+                    self.assertIn('stripe_api_details', stripe['enabled_tools'])
+                    for write in ('create_board', 'update_trigger', 'canvas_agent_invoke', 'feedback'):
+                        self.assertNotIn(write, honeycomb['enabled_tools'])
+                    for write in ('stripe_api_write', 'send_money', 'send_stripe_feedback', 'atlas_company_formation'):
+                        self.assertNotIn(write, stripe['enabled_tools'])
+            self.assertFalse((home / '.codex').exists())
+
+    def test_bad_context_config_retains_read_only_policy_and_original_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = home / '.codex/config.toml'
+            config.parent.mkdir()
+            original = '[invalid'
+            config.write_text(original)
+            connections = self.connections(self.plan(home))
+            self.assertEqual(connections['stripe']['enabled_tools'].count('stripe_api_read'), 1)
+            self.assertEqual(config.read_text(), original)
+
+    @unittest.skipUnless(shutil.which('codex'), 'requires the Codex CLI')
+    def test_real_cli_restricts_existing_http_and_rejects_stdio_transport(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = home / '.codex/config.toml'
+            config.parent.mkdir()
+            original = ('[mcp_servers.stripe]\nurl="https://example.invalid/mcp"\n'
+                        'enabled=false\nenabled_tools=["stripe_api_write"]\n')
+            config.write_text(original)
+            env = {**os.environ, 'HOME': tmp, 'CODEX_HOME': str(home / '.codex'),
+                   'XDG_STATE_HOME': str(home / 'state'), 'HERDR_CODEX_WORKDIR': tmp,
+                   'HERDR_CODEX_STARTUP_ROLE': 'check', 'HERDR_CODEX_STARTUP_ANALYSIS': '1'}
+            for name in ('honeycomb', 'stripe'):
+                result = subprocess.run([sys.executable, startup.__file__, shutil.which('codex'),
+                                         'mcp', 'get', name, '--json'],
+                                        cwd=tmp, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                server = json.loads(result.stdout)
+                self.assertEqual(server['transport']['type'], 'streamable_http')
+                self.assertEqual(server['transport']['url'], startup.CHECK_ANALYSIS_SERVERS[name][0])
+                self.assertEqual(server['enabled_tools'], list(startup.CHECK_ANALYSIS_SERVERS[name][1]))
+                self.assertTrue(server['enabled'])
+                self.assertNotIn('command', server['transport'])
+            self.assertEqual(config.read_text(), original)
+            stdio = '[mcp_servers.stripe]\ncommand="fixture-command"\n'
+            config.write_text(stdio)
+            result = subprocess.run([sys.executable, startup.__file__, shutil.which('codex'),
+                                     'mcp', 'get', 'stripe', '--json'],
+                                    cwd=tmp, env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('url is not supported for stdio', result.stderr)
+            self.assertEqual(config.read_text(), stdio)
+
+    def test_non_analysis_checks_disable_connections_and_other_roles_are_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            for profile in ('', 'full'):
+                connections = self.connections(self.plan(home, HERDR_CODEX_STARTUP_ANALYSIS='',
+                                                          HERDR_CODEX_STARTUP_PROFILE=profile))
+                self.assertFalse(connections['honeycomb']['enabled'])
+                self.assertFalse(connections['stripe']['enabled'])
+            for role in ('main', 'general', 'worker', ''):
+                connections = self.connections(self.plan(home, HERDR_CODEX_STARTUP_ROLE=role))
+                self.assertNotIn('honeycomb', connections)
+                self.assertNotIn('stripe', connections)
+
+    def test_policy_follows_caller_overrides_and_precedes_argument_separator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            probe = home / 'probe'
+            probe.write_text('#!' + sys.executable + '\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n')
+            probe.chmod(0o700)
+            env = {**os.environ, 'HOME': tmp, 'CODEX_HOME': str(home / '.codex'),
+                   'XDG_STATE_HOME': str(home / 'state'), 'HERDR_CODEX_WORKDIR': tmp,
+                   'HERDR_CODEX_STARTUP_ROLE': 'check', 'HERDR_CODEX_STARTUP_ANALYSIS': '1'}
+            caller = 'mcp_servers.stripe.enabled_tools=["stripe_api_write"]'
+            for tail in ([], ['--', 'literal prompt']):
+                result = subprocess.run([sys.executable, startup.__file__, str(probe), '-c', caller, *tail],
+                                        env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                args = json.loads(result.stdout)
+                policy = next(a for a in args if a.startswith('mcp_servers.stripe={'))
+                self.assertGreater(args.index(policy), args.index(caller))
+                if tail:
+                    self.assertLess(args.index(policy), args.index('--'))
+                    self.assertEqual(args[-2:], ['--', 'literal prompt'])
 
 
 class StartupTest(unittest.TestCase):
@@ -42,10 +166,12 @@ print('protected')
             env = {**os.environ, 'HOME': box, 'CODEX_HOME': str(home / '.codex'),
                    'XDG_STATE_HOME': str(home / 'state'), 'HERDR_CHECK_TARGET': str(link),
                    'CHECK_SCRATCH': str(home / 'scratch'), 'HERDR_CODEX_STARTUP_ROLE': 'check'}
-            for session in ('fresh', 'open'):
-                result = subprocess.run([sys.executable, str(Path(startup.__file__)), str(probe), '--yolo'], env=env, capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn('protected', result.stdout)
+            for analysis in ('', '1'):
+                env['HERDR_CODEX_STARTUP_ANALYSIS'] = analysis
+                for session in ('fresh', 'open'):
+                    result = subprocess.run([sys.executable, str(Path(startup.__file__)), str(probe), '--yolo'], env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('protected', result.stdout)
             self.assertEqual((target / 'existing').read_text(), 'original')
             env['HERDR_CHECK_TARGET'] = str(home / 'missing')
             result = subprocess.run([sys.executable, str(Path(startup.__file__)), sys.executable,

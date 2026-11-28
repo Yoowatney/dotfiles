@@ -21,6 +21,45 @@ MEDIA = {'imagegen', 'asciinema-subtitles', 'media-use', 'youtube-summary', 'you
 OFFICE = {'documents', 'pdf', 'presentations', 'spreadsheets', 'google-docs', 'google-drive',
           'google-drive-comments', 'google-sheets', 'google-slides', 'template-creator'}
 PERSONAL = {'closing-household-ledger', 'create-pet', 'pets', 'update-pet', 'main-orchestrator'}
+# Explicit vendor-documented read tools, not name prefixes or readOnlyHint.
+# New upstream tools stay unavailable until this list is reviewed.
+# https://docs.honeycomb.io/integrations/mcp/tools
+# https://docs.stripe.com/mcp#tools
+CHECK_ANALYSIS_SERVERS = {
+    'honeycomb': ('https://mcp.honeycomb.io/mcp', (
+        'get_workspace_context', 'get_environment', 'get_dataset', 'get_dataset_columns',
+        'run_query', 'get_query_results', 'find_queries', 'find_columns', 'run_bubbleup',
+        'get_trace', 'list_spans', 'get_span_details', 'get_service_map',
+        'get_anomaly_service_profiles', 'list_boards', 'get_triggers', 'get_slos',
+    )),
+    'stripe': ('https://mcp.stripe.com', (
+        'stripe_api_search', 'stripe_api_details', 'stripe_api_read',
+        'get_stripe_account_info', 'search_stripe_documentation',
+    )),
+}
+
+
+def check_analysis_args(env):
+    """Check policy is independent of catalog compaction and its fallback.
+
+    Pin the HTTP endpoint and read tools, keeping authentication in Codex's
+    own store. Never import Claude credentials or Stripe CLI keys. Codex merges
+    tables: an incompatible existing stdio transport fails configuration load.
+    """
+    if env.get('HERDR_CODEX_STARTUP_ROLE') != 'check':
+        return []
+    args = []
+    for name, (url, tools) in CHECK_ANALYSIS_SERVERS.items():
+        config = {'url': url, 'enabled': env.get('HERDR_CODEX_STARTUP_ANALYSIS') == '1',
+                  'enabled_tools': list(tools)}
+        args += ['-c', 'mcp_servers.' + name + '=' + inline_toml(config)]
+    return args
+
+
+def append_policy(args, policy):
+    """Last CLI overrides win; put policy before a literal argument separator."""
+    index = args.index('--') if '--' in args else len(args)
+    return [*args[:index], *policy, *args[index:]]
 
 
 def keep_skill(kind, path):
@@ -229,10 +268,12 @@ def main():
     except (OSError, ValueError) as error:
         print('codex-startup: retaining full context: ' + str(error), file=sys.stderr)
         plan = {'active': False, 'env': env, 'args': []}
+    check_args = check_analysis_args(env)
     if sys.argv[1] == '--plan':
+        plan['args'] += check_args
         print(json.dumps(dict({k: v for k, v in plan.items() if k != 'env'}, codex_home=plan['env'].get('CODEX_HOME')), indent=2))
         return
-    argv = [sys.argv[1], *plan['args'], *args]
+    argv = [sys.argv[1], *plan['args'], *append_policy(args, check_args)]
     if env.get('HERDR_CHECK_TARGET'):
         # Apply outside Codex: file tools and every shell child inherit the same
         # protection as legacy Claude checks, regardless of --sandbox/--yolo.
