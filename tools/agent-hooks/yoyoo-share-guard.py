@@ -155,9 +155,12 @@ CHECK_REPORT_REASON = ("yoyoo-share-guard: 확인 칸의 보고를 받은 뒤 �
 # auto-tab-close sends a pane's result to the main pane as soon as its automatic check opens, so an early answer need not wait
 # for the check. It is the pane's claim alone: no `확인:` line may rest on it, and the combined report still comes after the check.
 PRECHECK_HEAD = "확인 전 보고입니다(확인 칸이 아직 확인하고 있으며, 끝나면 합친 보고가 따로 옵니다). "
+EARLY_FORMAT = ("reply-format.json의 main_session이 v2이면 상태 머리 없이 해요체 문단과 '확인: 진행 중 [ac-번호]', "
+                "'끝날 예상: HH:MM' 줄로 먼저 올리세요. 합친 보고가 오면 같은 글의 대기 줄을 확인 근거와 [ac-번호]가 든 '확인:' 줄로 바꾸세요. "
+                "v1이면 '작업 중(확인 중):'(요유에게 할 일을 부탁하면 '요유 차례(확인 중):')으로 시작하고, "
+                "합친 보고 뒤 '끝남:'이나 '요유 차례:'로 고치세요. ")
 PRECHECK_NOTE = ("아래는 일 칸의 주장이며 아직 확인되지 않았습니다. 확인 칸이 이미 돌고 있으니 새 확인 칸을 열지 마세요. "
-                 "#0에서 요유에게만 하는 답은 '작업 중(확인 중):'으로 시작해(요유에게 할 일을 부탁하면 '요유 차례(확인 중):') 먼저 올리고, "
-                 "합친 보고가 오면 같은 글을 '끝남:'이나 '요유 차례:'로 고치세요. "
+                 "#0·DM에서 요유에게만 하는 답은 " + EARLY_FORMAT +
                  "요유 이름의 초안(--yoyoo-draft), reply, 팀 전달, decide, 운영·돈·보안 글은 이 예외가 아니니 합친 보고를 기다리세요. "
                  "이 보고는 '확인:' 줄의 근거가 아닙니다")
 # 요유 2026-11-20: a deliverable whose check could not open (usage reserve, workers down) waited two days: nothing here said what to do
@@ -174,11 +177,11 @@ UNOPENED_NOTE = ("확인 칸이 열리지 않았으니 결과를 묶어 두지 �
                  "팀 스레드·돈·운영 글과 요유 이름의 초안도 같습니다. 운영 쓰기 승인 같은 다른 관문은 그대로 둡니다. "
                  "사용량 때문에 확인 칸이나 재확인 세션이 열리지 않으면 리셋 뒤로 미루지 마세요. 거절문이 알려 주는 대로 요유에게 계정 전환이나 리셋권 사용을 요청하고, 바꾸면 바로 다시 여세요. "
                  "Slack 글의 '확인:' 줄에는 누가 무엇을 보고 어땠는지만 적고(직접 본 뒤에는 [ac-번호]를, 재확인 세션의 끝난 보고에 기대면 그 보고 항목 시각을 [재확인 HH:MM:SS]로 붙입니다), 확인 칸을 열지 못했다는 말은 쓰지 마세요. "
-                 "재확인이 도는 동안 요유에게만 하는 답이면 '작업 중(확인 중):'으로 먼저 올려도 됩니다")
+                 "재확인이 도는 동안 요유에게만 하는 답이면 먼저 올려도 됩니다. " + EARLY_FORMAT)
 UNOPENED_REASON = ("yoyoo-share-guard: 확인 칸이 열리지 않은 보고를 받은 뒤 처음 쓰는 보고인데, 이 칸이 다시 본 흔적도 재확인을 맡긴 흔적도 없습니다. "
                    f"{UNOPENED_NOTE}. 직접 봤다면 무엇을 보고 어땠는지 '확인:' 줄에 적어 보고를 다시 쓰세요.")
 PRECHECK_REASON = ("yoyoo-share-guard: 확인 전 보고를 받은 뒤 쓰는 보고인데, 아직 끝나지 않은 확인 칸을 '확인:' 줄의 근거로 적었습니다. "
-                   "합친 보고가 오기 전에는 '확인:' 줄을 빼고, 먼저 올린 답은 '작업 중(확인 중):'으로 두세요.")
+                   "합친 보고가 오기 전에는 확인했다는 근거를 빼세요. " + EARLY_FORMAT)
 # 요유 2026-11-05: dispatch tabs run on the hidden workers server, and only what needs 요유 reaches the main pane. It is no claim of work
 # done, so it asks for no check pane: this head stays out of RELAYED, and it keeps the main pane's turn short, since 요유's next
 # words wait behind it. Nothing can be typed into that pane, and it has closed by then, so the board and a new pane carry the rest.
@@ -591,7 +594,9 @@ def relay_reason(payload: dict, text: str, env) -> str | None:
     if reports and any(kind == "in" for kind, _, _, _ in after[reports[0] + 1:]):
         return None
     refused = {i for kind, _, _, i in after if kind == "refused"}
-    stated = [v for v in (m.group(1).strip(" \t*_.,;") for m in CHECK_LINE.finditer(prose(text))) if v and not NONE.match(v)]
+    stated = [v for v in (m.group(1).strip(" \t*_.,;") for m in CHECK_LINE.finditer(prose(text)))
+              if v and not NONE.match(v) and not re.fullmatch(
+                  r"진행\s+중(?:이에요|입니다)?[.!]?(?:\s+\[ac-[0-9a-f]{16}\])?(?:\s+\(\d+\s*(?:초|분|시간)\))?[.!]?", v)]
     if delegates_checks(payload, env):
         if kind == "이" and unopened_heads(lines[start]):
             # its check could not open: look again here (a command ran and a `확인:` line says what it saw), or hand a read-only recheck out

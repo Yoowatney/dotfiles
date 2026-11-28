@@ -513,6 +513,12 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(self.main_blocks(message, claim), auto.share.PRECHECK_REASON)
         own = "확인: 테스트 통과를 봤습니다.\n남은 것: 요유 몫: 없음 · 세션: 닫아도 됨"  # Codex review: no pane named
         self.assertEqual(self.main_blocks(message, own), auto.share.PRECHECK_REASON)
+        for pending in ("확인: 진행 중", "확인: 진행 중 [ac-0123456789abcdef]", "확인: 진행 중이에요",
+                        "확인: 진행 중입니다.", "확인: 진행 중 [ac-0123456789abcdef] (5분)"):
+            self.assertIsNone(self.main_blocks(message, f"값을 고쳤어요.\n{pending}\n남은 것: 요유 몫: 없음 · 세션: 열어 둠"))
+        for claimed in ("확인: 진행 중은 아니고 확인 칸이 시험 통과를 봤어요.",
+                        "확인: 진행 중 (확인 칸이 시험 통과를 봤어요)"):
+            self.assertEqual(self.main_blocks(message, claimed + "\n남은 것: 없음"), auto.share.PRECHECK_REASON)
         self.assertIsNone(self.main_blocks(message, "확인: 없음\n남은 것: 요유 몫: 없음 · 세션: 열어 둠"))
         self.assertIsNone(self.main_blocks(message, "먼저 올릴 답을 '작업 중(확인 중):'으로 올렸습니다.\n남은 것: 요유 몫: 없음 · 세션: 열어 둠"))
         self.finish()
@@ -522,6 +528,41 @@ class RelayTests(unittest.TestCase):
         self.assertTrue(self.tells[0][1].startswith("확인 칸의 마지막 보고입니다("))
         self.assertIsNone(self.main_blocks(self.tells[0][1], claim), "after the check, the same line is accepted")
         self.assertEqual(len(self.prechecks), 1)
+
+    def test_unchecked_result_guidance_respects_both_format_versions(self):
+        for word in ("main_session", "v2", "상태 머리 없이", "확인: 하지 않았어요.", "v1", "끝남(확인 안 함):"):
+            self.assertIn(word, auto.NONE_NOTE)
+        with patch.object(subprocess, "Popen", REAL_POPEN):
+            help_text = REAL_RUN(["bash", str(Path(__file__).with_name("pane-spawn")), "--help"],
+                                 check=True, capture_output=True, text=True).stdout
+        for word in ("main_session", "v2", "headless", "확인: 하지 않았어요.", "v1", "끝남(확인 안 함):"):
+            self.assertIn(word, help_text)
+
+    def test_v2_pending_then_verified_answer_in_new_and_open_runtime_sessions(self):
+        self.finish()
+        early = self.prechecks[0][1]
+        checked = "값을 고쳤어요.\n확인: 확인 칸이 시험 통과를 봤어요. [ac-0123456789abcdef]\n남은 것: 요유 몫: 없음 · 세션: 열어 둠"
+        self.finish(CHECKED, check=True)
+        combined = self.tells[0][1]
+        for codex in (False, True):
+            def record(role, text):
+                return ({"type": "response_item", "payload": {"type": "message", "role": role,
+                        "content": [{"type": "input_text" if role == "user" else "output_text", "text": text}]}}
+                        if codex else {"type": role, "message": {"role": role,
+                            "content": text if role == "user" else [{"type": "text", "text": text}]}})
+            for open_session in (False, True):
+                for line in ("확인: 진행 중 [ac-0123456789abcdef]", "확인: 진행 중이에요",
+                             "확인: 진행 중입니다.", "확인: 진행 중 [ac-0123456789abcdef] (5분)"):
+                    with self.subTest(codex=codex, open_session=open_session, line=line):
+                        pending = f"값을 고쳤어요.\n{line}\n남은 것: 요유 몫: 없음 · 세션: 열어 둠"
+                        history = ([record("user", "Earlier request"), record("assistant", "Earlier answer")]
+                                   if open_session else [])
+                        history.append(record("user", early))
+                        self.assertIsNone(self.main_blocks(None, pending, history))
+                        self.assertEqual(self.main_blocks(None, checked, history), auto.share.PRECHECK_REASON)
+                        history += [record("assistant", pending), record("user", combined)]
+                        self.assertIsNone(self.main_blocks(None, checked, history))
+                        self.assertEqual(self.main_blocks(None, pending, history), auto.share.CHECK_REPORT_REASON)
 
     def test_precheck_report_keeps_an_unanswered_check_report_rule(self):
         # #69 review: PANE_TELL_BATCH=0 puts a 확인 전 보고 into a running turn (queued_command) or the next prompt while another
