@@ -43,10 +43,25 @@ def record_assignment(address, session_id, name, prompt):
     urls = sorted(set(ISSUE_URL.findall(name + "\n" + prompt)))
     if not urls:
         return
-    if not session_id:
-        raise RuntimeError("missing agent session identity")
-    socket = os.environ.get("HERDR_SOCKET_PATH", "")
     pane_id = address.rsplit("/", 1)[-1]
+    # Work can start before the runtime watcher publishes its session identity.
+    # Re-read only that identity; never resend an already delivered instruction.
+    deadline = time.monotonic() + 5
+    while not session_id:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("missing agent session identity after waiting")
+        result = subprocess.run(
+            [os.environ.get("HERDR_BIN_PATH", "herdr"), "agent", "get", pane_id],
+            capture_output=True, text=True, timeout=remaining,
+        )
+        if result.returncode:
+            raise RuntimeError("cannot read agent session identity")
+        agent = json.loads(result.stdout).get("result", {}).get("agent", {})
+        session_id = (agent.get("agent_session") or {}).get("value", "")
+        if not session_id:
+            time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+    socket = os.environ.get("HERDR_SOCKET_PATH", "")
     panes = inventory(socket)
     pane = next((p for p in panes if p.get("pane_id") == pane_id), None)
     if not pane or not pane.get("terminal_id"):
