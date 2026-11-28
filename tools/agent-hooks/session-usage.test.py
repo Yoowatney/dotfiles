@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Behavior tests for bounded, privacy-preserving usage observations."""
 import importlib.util
+import datetime
 import json
 import os
 from pathlib import Path
@@ -370,6 +371,55 @@ class UsageTest(unittest.TestCase):
         self.assertIn('관측', messages[0])
         usage.quota_tick(self.env, 1600, fetch=lambda: self.response(reset=10000), send=send, sources=[])
         self.assertEqual(len(messages), 2)
+
+    def graphql_responses(self, rows):
+        path = self.root / 'state/github/graphql-responses.jsonl'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('\n'.join(json.dumps(row) for row in rows) + '\n')
+        return path
+
+    def actual(self, remaining=0, reset=2000, at=950):
+        iso = lambda value: datetime.datetime.fromtimestamp(value, datetime.timezone.utc).isoformat()
+        return dict(at=iso(at), cost=None, remaining=None, resetAt=None,
+                    header=dict(resource='graphql', limit=5000, remaining=remaining, resetAt=iso(reset)))
+
+    def test_actual_graphql_zero_alerts_when_rest_has_a_different_healthy_window(self):
+        self.graphql_responses([self.actual()])
+        sent = []
+        usage.quota_tick(self.env, 1000, fetch=lambda: self.response(4000, 3000),
+                         send=lambda text: sent.append(text) or True, sources=[])
+        self.assertEqual(len(sent), 1)
+        self.assertIn('graphql 0/5000', sent[0])
+        self.assertIn('실제 GraphQL 응답', sent[0])
+        resource = usage.read_json(self.state / 'github-quota.json')['resources']['graphql']
+        self.assertEqual(resource['reset'], 2000)
+
+    def test_live_exhausted_window_survives_a_later_healthy_response_window(self):
+        self.graphql_responses([self.actual(), self.actual(4500, 3000, 990)])
+        value = usage.actual_graphql(self.env, 1000)
+        self.assertEqual((value['remaining'], value['reset']), (0, 2000))
+
+    def test_actual_graphql_records_are_bounded_and_invalid_expired_records_are_ignored(self):
+        path = self.graphql_responses([self.actual(reset=999), self.actual(at=-3000),
+                                       self.actual(at=2000), {'header': {'remaining': 0}}])
+        self.assertIsNone(usage.actual_graphql(self.env, 1000))
+        path.write_text('x' * (2 * 1024 * 1024) + '\n' + json.dumps(self.actual()) + '\npartial')
+        self.assertEqual(usage.actual_graphql(self.env, 1000)['remaining'], 0)
+
+    def test_actual_graphql_still_alerts_if_rest_sampling_fails(self):
+        self.graphql_responses([self.actual()])
+        def fail():
+            raise RuntimeError('DO_NOT_LOG_SECRET')
+        sent = []
+        usage.quota_tick(self.env, 1000, fetch=fail, send=lambda text: sent.append(text) or True, sources=[])
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn('DO_NOT_LOG', (self.state / 'github-quota.json').read_text())
+
+    def test_no_actual_graphql_record_does_not_claim_rest_estimate_as_actual(self):
+        usage.quota_tick(self.env, 1000, fetch=lambda: self.response(4000), send=lambda _: True, sources=[])
+        state = usage.read_json(self.state / 'github-quota.json')
+        self.assertNotIn('graphql', state['resources'])
+        self.assertEqual(state['rest_graphql_estimate']['remaining'], 4000)
 
     def test_failure_consumes_interval_and_does_not_report_zero(self):
         calls, messages = [], []
