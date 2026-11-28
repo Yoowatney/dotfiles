@@ -96,9 +96,14 @@ COMMENT = re.compile(rf'({QUOTED}|\\.)|{COMMENT_START}', re.S)
 CONTINUED = re.compile(rf'({QUOTED}|{COMMENT_START}|\\[^\n])|\\\n', re.S)
 
 
+def literal(value: str) -> bool:
+    # Command substitutions are masked before shlex parses their surrounding command.
+    return not any(c in value for c in '$`') and not re.search(r'__SUB\d+__', value)
+
+
 def reason_ok(value: str) -> bool:
     # An inherited variable or "$REASON" is not a reason recorded on this call.
-    return len(value.strip()) >= 8 and not any(c in value for c in '$`')
+    return len(value.strip()) >= 8 and literal(value)
 
 
 def command_args(args: list[str]) -> list[str]:
@@ -296,7 +301,7 @@ def broad_project_read(args: list[str]) -> bool:
             i += 2  # A formatting argument named --query is data, not a server filter.
             continue
         i += 1
-    if query.strip() and not any(c in query for c in '$`'):
+    if query.strip() and literal(query):
         return False
     try:
         digits = limit.lstrip('+-')
@@ -476,6 +481,8 @@ def denied(command: str, depth: int = 0, watch_only: bool = False, seen: dict | 
     if seen is None:
         if any([denied(m[1] or m[2] or '', depth + 1, watch_only) for m in found]):
             return True
+        for number, m in reversed(list(enumerate(found))):
+            command = f'{command[:m.start()]}__SUB{number}__{command[m.end():]}'
     else:  # leave a placeholder; command_denied judges the inner command when it reaches it
         for number, m in reversed(list(enumerate(found, len(seen['subs'])))):
             command = f'{command[:m.start()]}__SUB{number}__{command[m.end():]}'

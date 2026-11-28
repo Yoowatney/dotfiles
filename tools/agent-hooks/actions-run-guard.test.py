@@ -324,6 +324,24 @@ class ActionsGuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNone(self.verdict(command), command)
 
+    def test_command_substitutions_are_not_literal_project_exceptions(self):
+        for command in [
+            'gh project item-list 3 --limit 1000 --query "$(echo)"',
+            'gh project item-list 3 --limit 1000 --query "`printf \'\'`"',
+            'GH_GRAPHQL_REASON="$(echo x)" gh project item-list 3 --limit 1000',
+            'GH_GRAPHQL_REASON=`date` gh project item-list 3 --limit 1000',
+        ]:
+            with self.subTest(command=command):
+                self.assertIn('GraphQL', self.verdict(command) or '', command)
+
+    def test_shared_reason_validation_rejects_masked_substitutions(self):
+        for command in [
+            'GH_REST_REASON="$(echo x)" while :; do gh api repos/o/r; sleep 5; done',
+            'ACTIONS_RUN_REASON=`date` gh workflow run build.yml',
+        ]:
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.verdict(command), command)
+
     def test_graphql_reason_does_not_disable_other_quota_or_actions_guards(self):
         self.assertIn('Actions', self.verdict("GH_GRAPHQL_REASON='inventory snapshot needed' gh workflow run x") or '')
         self.assertTrue(self.verdict("GH_GRAPHQL_REASON='inventory snapshot needed' while :; do gh api repos/o/r; sleep 5; done"))
@@ -425,6 +443,8 @@ class ActionsGuardTest(unittest.TestCase):
                                     ('uv run --no-project python3 ~/.dotfiles/tools/agent-hooks/ci-watch.py --repo owner/repo 123', False),
                                     ('while :; do gh api repos/o/r; sleep 5; done', True),
                                     ('gh project item-list 1 --owner owner --limit 1000 --format json', True),
+                                    ('gh project item-list 1 --limit 1000 --query "$(echo)"', True),
+                                    ('GH_GRAPHQL_REASON=`date` gh project item-list 1 --limit 1000', True),
                                     ('gh project item-list 1 --owner owner --limit 100', False),
                                     ("gh project item-list 1 --owner owner --limit 1000 --query 'is:open'", False),
                                     ("GH_GRAPHQL_REASON='required full export' gh project item-list 1 --owner owner --limit 1000", False),
