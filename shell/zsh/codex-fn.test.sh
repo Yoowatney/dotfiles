@@ -3,11 +3,12 @@
 # non-TTY stdin (an agent's background shell leaves one open and the run hangs
 # before it starts), while `codex exec -` and the TUI keep their stdin.
 set -euo pipefail
-unset HERDR_CODEX_STARTUP_ROLE HERDR_CODEX_STARTUP_HELPER
+unset HERDR_CODEX_STARTUP_ROLE HERDR_CODEX_STARTUP_HELPER HERDR_CHECK_TARGET
 
 ZSHRC="$(cd "$(dirname "$0")" && pwd)/zshrc"
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
+mkdir -p "$SANDBOX/home"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -30,7 +31,7 @@ EOF
 chmod +x "$SANDBOX/mise"
 
 run() { # codex args... -> what the fake codex printed, with an open pipe on stdin; HERDR=1 means inside herdr
-    sleep 2 | env PATH="$SANDBOX:$PATH" HERDR_ENV="${HERDR:-}" \
+    sleep 2 | env HOME="$SANDBOX/home" PATH="$SANDBOX:$PATH" HERDR_ENV="${HERDR:-}" \
         zsh -c "source <(sed -n '/^codex() {/,/^}/p' '$ZSHRC'); codex \"\$@\"" zsh "$@"
 }
 
@@ -53,6 +54,12 @@ out=$(HERDR_CODEX_STARTUP_ROLE=worker HERDR_CODEX_STARTUP_HELPER="$SANDBOX/start
 [[ $out == 'STDIN=NULL ARGS=-c skills.config=[{path="demo",enabled=false}] --approve-for-me -c service_tier="ultrafast" --no-daemon exec say ok' ]] || fail "worker expands startup flags after launch: $out"
 out=$(HERDR_CODEX_STARTUP_ROLE=check HERDR_CODEX_STARTUP_HELPER="$SANDBOX/startup.py" HERDR=1 run exec "say ok")
 [[ $out == 'STDIN=NULL ARGS=-c skills.config=[{path="demo",enabled=false}] --approve-for-me -c service_tier="ultrafast" --no-daemon exec say ok' ]] || fail "check expands the common startup profile: $out"
+# A missing helper must never start an unprotected check.
+if HERDR_CHECK_TARGET="$SANDBOX" HERDR_CODEX_STARTUP_HELPER="$SANDBOX/missing.py" run exec "say ok" >"$SANDBOX/out" 2>"$SANDBOX/err"; then
+    fail "a check without its protection helper must be refused"
+fi
+[[ ! -s "$SANDBOX/out" ]] || fail "the underlying runtime must not execute"
+grep -q 'check protection helper unavailable' "$SANDBOX/err" || fail "missing protection is explained"
 # A temporary HOME provides the default helper without changing the real one.
 mkdir -p "$SANDBOX/home/.dotfiles/tools/agent-hooks" "$SANDBOX/home/work/munice/project" "$SANDBOX/home/outside"
 cat > "$SANDBOX/home/.dotfiles/tools/agent-hooks/codex-startup.py" <<'EOF'

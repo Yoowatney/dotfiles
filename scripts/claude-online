@@ -144,7 +144,7 @@ fi
 # another folder (nightly_api, a worktree) had nothing to keep (api#1672). Hand the connection over here, whatever the folder.
 # The `=` form: --mcp-config takes a list, and with a space it would swallow the prompt that follows.
 [ -z "${CLAUDE_STARTUP_ANALYSIS:-}" ] || profile_args+=('--mcp-config={"mcpServers":{"honeycomb":{"type":"http","url":"https://mcp.honeycomb.io/mcp"}}}')
-# A Claude check needs process and network inspection too. Protect the checked
+# A legacy Claude check needs process and network inspection too. Protect the checked
 # folder in the whole process tree, including Edit/Write and shell children;
 # Claude's Bash-only sandbox would leave its file tools outside that boundary.
 # Resolve symlinks before building the Seatbelt literal, and fail closed.

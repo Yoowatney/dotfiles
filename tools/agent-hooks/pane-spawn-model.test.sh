@@ -35,33 +35,35 @@ model_case '' '' --opus --why skill "Model defaults" "Run the task"
 grep -q -- '--opus' "$SANDBOX/model-err" || fail "the opt-out reports the global default on stderr"
 model_case '' '' --kind claude --why skill --opus "Model defaults" "Run the task"
 model_case opus xhigh --why skill "Model defaults" "Run the task" -- --model opus --effort xhigh
-# The same caller-supplied overrides supported by Claude checks remain supported for work panes.
+# The same caller-supplied overrides supported by checks remain supported for work panes.
 ps --why skill "Model defaults" "Run the task" -- --model=opus --effort=xhigh >/dev/null 2>"$SANDBOX/model-err"
 has "--model=opus --effort=xhigh" "explicit equals-form overrides pass through"
 hasnt "claude-sonnet-5-5" "no second model after an explicit override"
 hasnt "--effort high" "no second effort after an explicit override"
-# api#1065: the main pane's Claude work and check panes start without the Artifact tool, and --artifact brings it back.
+# api#1065: the main pane's Claude work panes start without the Artifact tool, and --artifact brings it back.
 ps --why skill "Artifact off" "Run the task" >/dev/null 2>&1
 hasnt "CLAUDE_STARTUP_ARTIFACT" "a main-pane work pane starts without the Artifact tool"
-ps --check --kind claude "Artifact off" "Run the check" >/dev/null 2>&1
-hasnt "CLAUDE_STARTUP_ARTIFACT" "a Claude check pane starts without the Artifact tool"
-ps --check --kind claude --artifact "Artifact on" "Run the check" >/dev/null 2>&1
-has "--env CLAUDE_STARTUP_ARTIFACT=1" "a Claude check pane can opt back in"
+ps --check --kind codex "Artifact off" "Run the check" >/dev/null 2>&1
+hasnt "CLAUDE_STARTUP_ARTIFACT" "a Codex check pane starts without the Artifact tool"
+ps --check --kind codex --artifact "Artifact on" "Run the check" >/dev/null 2>&1
+hasnt "CLAUDE_STARTUP_ARTIFACT" "Claude-only tools do not enter Codex checks"
 ps --why skill --artifact "Artifact on" "Publish the page" >/dev/null 2>&1
 has "--env CLAUDE_STARTUP_ARTIFACT=1" "a main-pane work pane can opt back in"
-# api#1066: the main pane's Claude work and check panes start without the unrelated skills, and --skills brings them back.
+# api#1066: the main pane's Claude work panes start without the unrelated skills, and --skills brings them back.
 ps --why skill "Skills off" "Run the task" >/dev/null 2>&1
 hasnt "CLAUDE_STARTUP_SKILLS" "a main-pane work pane starts without the unrelated skills"
-ps --check --kind claude "Skills off" "Run the check" >/dev/null 2>&1
-hasnt "CLAUDE_STARTUP_SKILLS" "a Claude check pane starts without the unrelated skills"
-ps --check --kind claude --skills "Skills on" "Run the check" >/dev/null 2>&1
-has "--env CLAUDE_STARTUP_SKILLS=1" "a Claude check pane can opt back in"
+ps --check --kind codex "Skills off" "Run the check" >/dev/null 2>&1
+hasnt "CLAUDE_STARTUP_SKILLS" "a Codex check pane starts without the unrelated skills"
+ps --check --kind codex --skills "Skills on" "Run the check" >/dev/null 2>&1
+hasnt "CLAUDE_STARTUP_SKILLS" "Claude-only skill flags do not enter Codex checks"
 ps --why skill --skills "Skills on" "Build the page" >/dev/null 2>&1
 has "--env CLAUDE_STARTUP_SKILLS=1" "a main-pane work pane can opt back in"
 model_cases=$((model_cases + 1))
-model_case claude-sonnet-5-5 high --check --kind claude "Model defaults" "Run the task"
-model_case claude-sonnet-5-5 high --opus --check --kind claude "Model defaults" "Run the task"
-model_case claude-sonnet-5-5 high --check "Model defaults" "Run the task"
+for args in '--check --kind codex' '--check --opus' '--check'; do
+  ps $args "Check defaults" "Run the check" >/dev/null 2>"$SANDBOX/model-err"
+  has "--model gpt-6.1-sol" "check model is Sol"
+  has 'model_reasoning_effort="high"' "check effort is high"
+done
 model_case '' '' --kind codex "Model defaults" "Run the task"
 model_case '' '' --kind codex --opus "Model defaults" "Run the task"
 model_case '' '' --kind auto "Model defaults" "Run the task"

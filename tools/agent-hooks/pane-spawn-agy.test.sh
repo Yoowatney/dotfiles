@@ -52,7 +52,7 @@ for level in simple normal complex; do
   no_herdr 'conflicting model options open nothing'
 done
 is_main
-if ps --carbon --check "Carbon check" "Synthetic task" >/dev/null 2>"$SANDBOX/err"; then fail 'Carbon never overrides Claude checks'; fi
+if ps --carbon --check "Carbon check" "Synthetic task" >/dev/null 2>"$SANDBOX/err"; then fail 'Carbon never overrides Codex checks'; fi
 no_herdr 'Carbon check opens nothing'
 not_main
 for option in '--model alternate' '--settings {}' '--no-sandbox'; do
@@ -77,8 +77,8 @@ jq -e '.env.GOOGLE_APPLICATION_CREDENTIALS == ""' "$SANDBOX/launch.json" >/dev/n
 echo agy-only > "$SANDBOX/home/.local/state/agent-quota/policy"
 workers_up
 is_main
-ps --check --kind auto "AGY policy check" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'AGY policy keeps checks on Claude'
-has '--kind claude' 'AGY policy never changes check runtime'
+ps --check --kind auto "AGY policy check" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'AGY policy keeps checks on Codex'
+has '--kind codex' 'AGY policy never changes check runtime'
 not_main
 ps --kind auto "AGY policy" "Synthetic task" >/dev/null 2>"$SANDBOX/err" || fail 'explicit AGY policy chooses AGY'
 has '--kind agy' 'auto honors explicit AGY policy'

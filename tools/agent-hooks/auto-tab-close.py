@@ -541,7 +541,7 @@ def unchecked_head(reply: str, why: str) -> str:
 def check_kind(reply: str, cwd=None):
     """Preflight known restrictions without running the check or weakening either boundary."""
     route = check_permissions.classify(reply, cwd or os.getcwd())
-    return route["kind"], route["reason"]
+    return "codex", "Codex check policy; " + route["reason"]
 
 
 def direct_reason(reply: str) -> str:
@@ -751,8 +751,8 @@ def permission_retry(context, context_path, reply, me, lead, to, path, entry, en
     if not retry and (not finished or share.leaves_yoyoo_work(plain(reply)) or question_request(reply) or
             context.get("kind") not in ("auto", "codex") or blocked.get("retry_target") != "claude"):
         return "none", None
-    # Runtime sandbox limitations can move to another runtime; shared security,
-    # account and credential boundaries cannot. They still go to the lead.
+    # Retry a scoped runtime restriction once under the current Codex check policy.
+    # Shared security, account and credential boundaries still go to the lead.
     if not retry and re.search(r"hook|trust|guard|\bIAM\b|credential|account|비밀|보안|계정", blocked["blocked_command"], re.I):
         return "none", None
     if not retry:
@@ -792,7 +792,7 @@ def permission_retry(context, context_path, reply, me, lead, to, path, entry, en
     for inherited in ("MUNICE_AUTO_DISPATCH", "MUNICE_AMBIENT", "HERDR_WORKSPACE_ID"):
         receiver_env.pop(inherited, None)
     spawn = env.get("AUTO_TAB_CLOSE_PANE_SPAWN") or os.path.join(HERE, "pane-spawn")
-    args = [spawn, "--check", "--kind", "claude", "--why", "permission-blocked check portion",
+    args = [spawn, "--check", "--kind", "codex", "--why", "permission-blocked check portion",
             "--cwd", context["cwd"], "--", f"{context['job']} [ac-{key}] [permission-retry]", prompt]
     if context.get("analysis"):
         args.insert(1, "--analysis")
@@ -888,7 +888,7 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
                             else "unknown")
                 message += "\n" + original + f"Combined TASK_CHECK: {combined}\n"
                 if retry_status == "failed":
-                    message += f"Claude permission retry could not start: {retry['spawn_error']}"
+                    message += f"Codex permission retry could not start: {retry['spawn_error']}"
             # The final report goes now, not in a batch: its receipt waits for the main pane to have it.
             sent = (send if interim else send_immediate or send)(message)
             if sent:
@@ -995,7 +995,7 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
         for inherited in ("MUNICE_AUTO_DISPATCH", "MUNICE_AMBIENT", "HERDR_WORKSPACE_ID"):
             receiver_env.pop(inherited, None)
         spawn = env.get("AUTO_TAB_CLOSE_PANE_SPAWN") or os.path.join(HERE, "pane-spawn")
-        args = [spawn, "--check", *(["--check-level", "figures"] if figures else []), "--kind", context["kind"], "--cwd", context["cwd"], "--", f"{context['job']} [ac-{key}]", prompt]
+        args = [spawn, "--check", *(["--check-level", "figures"] if figures else []), "--kind", "codex", "--cwd", context["cwd"], "--", f"{context['job']} [ac-{key}]", prompt]
         if context.get("analysis"):
             args.insert(1, "--analysis")
         if context.get("task_id"):
@@ -1009,7 +1009,7 @@ def route_main_report(reply, me, name, lead, to, path, now, env, send, send_imme
                 checked = herdr(env, "pane", "get", pid, socket=herdr_peers.socket_of(env, server)).get("pane") or {}
                 context.update(handed=True, checker_terminal=checked.get("terminal_id"), checker_address=address,
                                check_started_at=time.time())
-                # pane-spawn may pick another runner than check_kind guessed (claude-first quota); record the real one.
+                # Keep the actual launcher receipt, including legacy checks already running on Claude.
                 context.update({k: v for k, v in context["start_attempts"][-1].items() if k in ("runner", "runner_reason")})
                 write_context(context_path, context)
                 # The result reaches the main pane now, so an early answer need not wait for the check. It sets no

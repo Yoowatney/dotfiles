@@ -184,6 +184,8 @@ def prepare(env):
     # integrations. Before compaction they applied no MCP or plugin overrides.
     if env.get('HERDR_CODEX_STARTUP_ROLE') != 'worker':
         for name in ('rea', 'Amplitude', 'notion-token', 'obsidian'):
+            if name == 'Amplitude' and env.get('HERDR_CODEX_STARTUP_ROLE') == 'check' and env.get('HERDR_CODEX_STARTUP_ANALYSIS') == '1':
+                continue
             if name in configured_servers:
                 # Codex CLI override paths split on dots; quotes become literal names.
                 args += ['-c', 'mcp_servers.' + name + '.enabled=false']
@@ -230,7 +232,18 @@ def main():
     if sys.argv[1] == '--plan':
         print(json.dumps(dict({k: v for k, v in plan.items() if k != 'env'}, codex_home=plan['env'].get('CODEX_HOME')), indent=2))
         return
-    os.execvpe(sys.argv[1], [sys.argv[1], *plan['args'], *args], plan['env'])
+    argv = [sys.argv[1], *plan['args'], *args]
+    if env.get('HERDR_CHECK_TARGET'):
+        # Apply outside Codex: file tools and every shell child inherit the same
+        # protection as legacy Claude checks, regardless of --sandbox/--yolo.
+        target = Path(env['HERDR_CHECK_TARGET']).resolve(strict=True)
+        sandbox = Path('/usr/bin/sandbox-exec')
+        if sys.platform != 'darwin' or not sandbox.is_file() or not target.is_dir():
+            raise SystemExit('codex-startup: check protection requires macOS sandbox-exec and an existing folder')
+        policy = '(version 1)(allow default)(deny file-write* (subpath ' + json.dumps(str(target), ensure_ascii=False) + '))'
+        policy += '(allow process-exec (literal "/bin/ps") (with no-sandbox))'
+        os.execvpe(str(sandbox), [str(sandbox), '-p', policy, *argv], plan['env'])
+    os.execvpe(sys.argv[1], argv, plan['env'])
 
 
 if __name__ == '__main__':

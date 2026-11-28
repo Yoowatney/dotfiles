@@ -451,7 +451,7 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(len(self.spawns), 1)
         args, env = self.spawns[0]
         self.assertIn("--check", args)
-        self.assertEqual(args[args.index("--kind") + 1], "auto")
+        self.assertEqual(args[args.index("--kind") + 1], "codex")
         self.assertEqual(args[args.index("--cwd") + 1], "/repo with spaces")
         self.assertEqual(env["HERDR_PANE_ID"], "w5:p3")
         self.assertEqual(env["HERDR_SOCKET_PATH"], "/default/herdr.sock")
@@ -470,7 +470,7 @@ class RelayTests(unittest.TestCase):
         self.assertIn(f"전체 보고: {self.root / 'reports'}", message)
         self.assertIn(f"확인 전체 보고: {self.root / 'reports'}", message)
         self.assertIn("일 칸: workers/w1:p2", message)
-        self.assertIn("확인 종류: auto (", message)
+        self.assertIn("확인 종류: codex (", message)
         self.assertTrue(any(DONE in f.read_text() for f in (self.root / "reports").glob("*.md")))
         self.assertIn("w1:p9", self.closed, "independent checks still close after their report")
         self.finish(CHECKED, check=True)
@@ -479,7 +479,7 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(len(self.spawns), 1)
 
     def test_combined_report_names_the_runner_pane_spawn_opened_not_the_classifier_guess(self):
-        # api#1296: the classifier says auto (Codex), but claude-first routing opens Claude. The record and the line follow the receipt.
+        # Persisted legacy receipts remain authoritative; new check requests always use Codex.
         for runner, reason in (("claude", "claude first: within reserve"), ("codex", "claude first: Claude past reserve; Codex within reserve")):
             with self.subTest(runner=runner):
                 self.setUp()
@@ -491,7 +491,7 @@ class RelayTests(unittest.TestCase):
                 (context_path,) = [p for p in (self.state / "automatic-checks").glob("*.json") if p.name.count(".") == 1]
                 context = json.loads(context_path.read_text())
                 self.assertEqual((context["runner"], context["runner_reason"]), (runner, reason))
-                self.assertEqual(context["kind"], "auto", "the requested kind stays what the classifier chose")
+                self.assertEqual(context["kind"], "codex", "new checks use their own runtime policy")
 
     def test_check_start_sends_main_a_precheck_report_that_is_not_check_evidence(self):
         self.finish()
@@ -749,7 +749,7 @@ class RelayTests(unittest.TestCase):
             self.assertIn(item, message)
         self.assertNotIn("세부 근거는 보존됩니다", message)
         self.assertIn("일 칸: workers/w2:p7", message)
-        self.assertIn("확인 종류: auto (", message)
+        self.assertIn("확인 종류: codex (", message)
 
     def test_combined_report_caps_both_default_summaries(self):
         worker = "W" * 600 + "\nTest passed.\n" + DONE.splitlines()[-1]
@@ -861,42 +861,42 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(json.loads(inbox_path.read_text()), inbox,
                          "report retry must not duplicate, claim or consume the main alert")
 
-    def test_slack_not_posted_report_selects_auto(self):
+    def test_slack_not_posted_report_keeps_codex(self):
         for word in ("Slack", "슬랙"):
             with self.subTest(word=word):
                 self.finish(DONE + f"\n{word}에는 게시하지 않았습니다")
                 self.assertTrue(self.spawns, "a result must open a check")
                 args = self.spawns[-1][0]
-                self.assertEqual(args[args.index("--kind") + 1], "auto")
+                self.assertEqual(args[args.index("--kind") + 1], "codex")
 
-    def test_network_or_process_evidence_selects_auto(self):
+    def test_network_or_process_evidence_keeps_codex(self):
         # 요유 2026-11-07: a Codex check pane has the network, gcloud and process reads, so no word sends it to Claude.
         for word in ("gcloud", "bq", "pgrep", "curl", "launchctl", "소켓", "네트워크"):
             with self.subTest(word=word):
                 self.finish(DONE.replace("pytest", word) + f"\n{word}을 실행해 확인했습니다.")
                 self.assertTrue(self.spawns, "a result must open a check")
                 args = self.spawns[-1][0]
-                self.assertEqual(args[args.index("--kind") + 1], "auto")
+                self.assertEqual(args[args.index("--kind") + 1], "codex")
 
-    def test_browser_requirement_selects_claude_before_opening(self):
+    def test_browser_requirement_keeps_codex_before_opening(self):
         self.finish(DONE + "\nego-browser skill로 실제 화면을 확인했습니다.")
         args = self.spawns[0][0]
-        self.assertEqual(args[args.index("--kind") + 1], "claude")
+        self.assertEqual(args[args.index("--kind") + 1], "codex")
 
-    def test_named_process_test_selects_claude_before_opening(self):
+    def test_named_process_test_keeps_codex_before_opening(self):
         self.worker['cwd'] = str(self.root)
         (self.root / 'process.test.py').write_text("import subprocess\nsubprocess.run(['ps', '-A'])\n")
         self.finish(DONE + "\npython3 process.test.py를 실행했습니다.")
         args = self.spawns[0][0]
-        self.assertEqual(args[args.index("--kind") + 1], "claude")
+        self.assertEqual(args[args.index("--kind") + 1], "codex")
 
-    def test_variable_process_probe_selects_claude_before_opening(self):
+    def test_variable_process_probe_keeps_codex_before_opening(self):
         path = self.root / '.local/state/codex-fast-probe.py'
         path.parent.mkdir(parents=True)
         path.write_text("import subprocess\ncommand = ['codex', 'app-server']\nsubprocess.Popen(command)\n")
         self.finish(DONE + f"\npython3 -B {path}\n")
         args = self.spawns[0][0]
-        self.assertEqual(args[args.index('--kind') + 1], 'claude')
+        self.assertEqual(args[args.index('--kind') + 1], 'codex')
 
     BLOCKED = ("Process check is blocked.\nTASK_CHECK: unknown\n"
                "blocked_reason: SIGNAL_DENIED\nblocked_command: python3 process.test.py -> ps -A\n"
@@ -958,7 +958,7 @@ class RelayTests(unittest.TestCase):
             launches = self.spawns[before:]
             self.assertEqual(len(launches), 2)
             self.assertEqual({args[args.index('--kind') + 1] for args, _ in launches},
-                             {'auto', 'claude'})
+                             {'codex'})
             for args, _ in launches:
                 with self.subTest(codex=codex, launcher=args[-2]):
                     prompt = args[-1]
@@ -968,14 +968,14 @@ class RelayTests(unittest.TestCase):
                         'tool_name': 'Bash', 'tool_input': {'command': shlex.join(args)}}, {}))
             path.unlink()
 
-    def test_permission_unknown_opens_scoped_claude_retry(self):
+    def test_permission_unknown_opens_scoped_codex_retry(self):
         self.env['HERDR_TASK_ID'] = 'job-test-retry'
         self.finish()
         self.finish(self.BLOCKED, check=True)
         self.assertEqual(len(self.spawns), 2)
         self.assertEqual(self.tells, [])
         args, env = self.spawns[-1]
-        self.assertEqual(args[args.index('--kind') + 1], 'claude')
+        self.assertEqual(args[args.index('--kind') + 1], 'codex')
         self.assertEqual(args[args.index('--job-id') + 1], 'job-test-retry')
         self.assertEqual(env['HERDR_PANE_ID'], self.main['pane_id'])
         self.assertIn('only the permission-blocked portion', args[-1])
@@ -1018,8 +1018,12 @@ class RelayTests(unittest.TestCase):
             self.assertEqual(len(self.spawns), before)
 
     def test_existing_claude_check_does_not_start_another_runtime_retry(self):
-        self.finish(DONE + '\nego-browser skill로 실제 화면을 확인했습니다.')
-        self.assertEqual(self.spawns[0][0][self.spawns[0][0].index('--kind') + 1], 'claude')
+        self.finish()
+        path = next((self.state / 'automatic-checks').glob('*.json'))
+        context = json.loads(path.read_text())
+        context['kind'] = 'claude'  # A check already running before this policy change.
+        context['actual_runner'] = 'claude'
+        path.write_text(json.dumps(context))
         self.finish(self.BLOCKED, check=True)
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(len(self.tells), 1)
