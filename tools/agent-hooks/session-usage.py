@@ -412,6 +412,42 @@ def validate_quota(value):
     return result
 
 
+def actual_graphql(env, now):
+    """Read bounded response metadata, retaining separate live reset windows."""
+    root = Path(env.get('XDG_STATE_HOME') or str(Path(env.get('HOME', str(Path.home()))) / '.local/state'))
+    path = Path(env.get('GH_GRAPHQL_RESPONSE_LOG', str(root / 'github/graphql-responses.jsonl')))
+    try:
+        with path.open('rb') as stream:
+            start = max(0, stream.seek(0, os.SEEK_END) - 1024 * 1024)
+            stream.seek(start)
+            lines = stream.read(1024 * 1024).splitlines()
+        if start:
+            lines = lines[1:]
+    except OSError:
+        return None
+    windows = {}
+    for line in lines:
+        try:
+            row = json.loads(line)
+            at = datetime.datetime.fromisoformat(row['at'].replace('Z', '+00:00')).timestamp()
+            if not now - 3600 <= at <= now + 60:
+                continue
+            header = row.get('header') or {}
+            if header.get('resource') == 'graphql':
+                remaining, limit, reset_at = (header.get(k) for k in ('remaining', 'limit', 'resetAt'))
+            else:
+                remaining, limit, reset_at = (row.get(k) for k in ('remaining', 'limit', 'resetAt'))
+            reset = int(datetime.datetime.fromisoformat(reset_at.replace('Z', '+00:00')).timestamp())
+            if (type(remaining) is not int or type(limit) is not int or
+                    not 0 <= remaining <= limit or limit <= 0 or reset <= now):
+                continue
+            if reset not in windows or at >= windows[reset]['observed_at']:
+                windows[reset] = dict(limit=limit, remaining=remaining, reset=reset, observed_at=at)
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            continue
+    return min(windows.values(), key=lambda q: q['remaining'] / q['limit'], default=None)
+
+
 def quota_tick(env, now, where=None, *, fetch=None, send=None, sources=None):
     folder = state_dir(env)
     folder.mkdir(parents=True, exist_ok=True)
@@ -457,14 +493,26 @@ def quota_tick(env, now, where=None, *, fetch=None, send=None, sources=None):
         state['attempt_at'] = now
         write_json(folder / 'github-quota.json', state)  # failures consume the interval too
         try:
-            if fetch is None:
-                child_env = {k: v for k, v in env.items() if k != 'GH_DEBUG'}
-                response = subprocess.run(['gh', 'api', '--hostname', 'github.com', 'rate_limit'],
-                    env=child_env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=12, check=True)
-                value = json.loads(response.stdout)
-            else:
-                value = fetch()
-            quotas = validate_quota(value)
+            observed = actual_graphql(env, now)
+            quotas = {}
+            state.pop('rest_error', None)
+            try:
+                if fetch is None:
+                    child_env = {k: v for k, v in env.items() if k != 'GH_DEBUG'}
+                    response = subprocess.run(['gh', 'api', '--hostname', 'github.com', 'rate_limit'],
+                        env=child_env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=12, check=True)
+                    value = json.loads(response.stdout)
+                else:
+                    value = fetch()
+                quotas = validate_quota(value)
+                state['rest_graphql_estimate'] = quotas.pop('graphql')
+            except Exception as error:
+                if observed is None:
+                    raise
+                state['rest_error'] = type(error).__name__
+            if observed is not None:
+                quotas['graphql'] = observed
+            state['graphql_observation'] = 'actual_response' if observed else 'unknown'
             scan, counts = {}, []
             state.pop('source_error', None)
             try:
@@ -476,7 +524,7 @@ def quota_tick(env, now, where=None, *, fetch=None, send=None, sources=None):
                 counts = attribution(sources, now - 3600, diagnostics=scan)
             except Exception as error:
                 state['source_error'] = type(error).__name__
-            state.update(status='ok', sampled_at=now, resources=quotas, sources=counts, source_scan=scan,
+            state.update(status='partial' if state.get('rest_error') else 'ok', sampled_at=now, resources=quotas, sources=counts, source_scan=scan,
                          attribution='visible gh commands in last hour; opaque Codex exec / Claude REPL, HTTP requests, jobs and other hosts not attributable')
             state.pop('error', None)
             low = {k: v for k, v in quotas.items() if v['limit'] and v['remaining'] < v['limit'] * .2 and v['reset'] > now}
@@ -489,7 +537,9 @@ def quota_tick(env, now, where=None, *, fetch=None, send=None, sources=None):
                             f'기록 {scan["scanned_files"]}/{scan["candidate_files"]}개 읽음(일부 {scan["partial_files"]}개). '
                             f'미계측 스크립트 호출 {scan["unparsed_script_calls"]}회. ')
                 state['pending'] = dict(keys=keys, expires=min(q['reset'] for q in low.values()), message=(
-                    f'[GitHub 한도] 잔여량 20% 미만: {numbers}. 최근 1시간 관측 gh 명령: {busiest}. '
+                    f'[GitHub 한도] 잔여량 20% 미만: {numbers}. '
+                    + ('GraphQL은 실제 GraphQL 응답 기준입니다. ' if observed else '실제 GraphQL 응답 기록은 없습니다. ')
+                    + f'최근 1시간 관측 gh 명령: {busiest}. '
                     + coverage + 'Codex exec·Claude REPL 안의 gh는 세지 않았습니다. '
                     '한정된 로컬 기록의 추정치이며 HTTP 요청 수가 아닙니다. 잡·다른 호스트 등 관측 밖 출처는 알 수 없습니다.'))
             elif not low:
